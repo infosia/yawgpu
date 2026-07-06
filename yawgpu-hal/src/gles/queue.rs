@@ -15,9 +15,10 @@ use crate::{
     HalBufferBindingKind, HalBufferClear, HalBufferCopy, HalBufferTextureCopy, HalColorTargetState,
     HalCompareFunction, HalComputeDispatch, HalComputePass, HalComputePipeline, HalCopy,
     HalCullMode, HalDepthStencilState, HalDescriptorBinding, HalDescriptorBindingKind, HalDraw,
-    HalError, HalFrontFace, HalIndexFormat, HalRenderLoadOp, HalRenderPass, HalRenderPipeline,
-    HalSampler, HalStencilFaceState, HalStencilOperation, HalStorageTextureAccess, HalTexture,
-    HalTextureAspect, HalTextureClear, HalTextureCopy, HalTextureViewDimension, HalVertexStepMode,
+    HalError, HalFrontFace, HalGlesBindingClass, HalGlesBindingRemap, HalIndexFormat,
+    HalRenderLoadOp, HalRenderPass, HalRenderPipeline, HalSampler, HalStencilFaceState,
+    HalStencilOperation, HalStorageTextureAccess, HalTexture, HalTextureAspect, HalTextureClear,
+    HalTextureCopy, HalTextureViewDimension, HalVertexStepMode,
 };
 
 /// Stores GLES queue data used by validation and backend submission.
@@ -253,19 +254,18 @@ fn submit_compute_pass(
         .bind_buffers
         .iter()
         .map(|bound| {
-            if bound.group != 0 {
-                return Err(HalError::BufferOperationFailed {
-                    backend: BACKEND,
-                    message: "GLES compute supports only bind group 0",
-                });
-            }
             let HalBuffer::Gles(buffer) = &bound.buffer else {
                 return Err(HalError::BufferOperationFailed {
                     backend: BACKEND,
                     message: "compute pass binding is not a GLES buffer",
                 });
             };
-            let target = binding_target(pipeline.bindings(), bound.binding)?;
+            let (target, class) = binding_target(pipeline.bindings(), bound.group, bound.binding)?;
+            let Some(flat_binding) =
+                flat_binding(pipeline.binding_remaps(), bound.group, bound.binding, class)
+            else {
+                return Ok(None);
+            };
             let buffer = buffer.raw_or_err()?;
             let offset =
                 i32::try_from(bound.offset).map_err(|_| HalError::BufferOperationFailed {
@@ -276,9 +276,12 @@ fn submit_compute_pass(
                 backend: BACKEND,
                 message: "compute buffer binding size exceeds GLES limit",
             })?;
-            Ok((target, bound.binding, buffer, offset, size))
+            Ok(Some((target, flat_binding, buffer, offset, size)))
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
     unsafe {
         gl.use_program(Some(program));
         for (target, binding, buffer, offset, size) in bindings {
@@ -298,7 +301,12 @@ fn submit_compute_pass(
             pipeline.combined_samplers(),
             &pass.bind_textures,
         )?;
-        bind_storage_textures(gl, pipeline.bindings(), &pass.bind_textures)?;
+        bind_storage_textures(
+            gl,
+            pipeline.bindings(),
+            pipeline.binding_remaps(),
+            &pass.bind_textures,
+        )?;
         match &pass.dispatch {
             HalComputeDispatch::Direct { workgroups } => {
                 // WebGPU: a dispatch with any zero workgroup count does
@@ -335,19 +343,26 @@ fn submit_compute_pass(
     Ok(())
 }
 
-fn binding_target(bindings: &[HalDescriptorBinding], binding: u32) -> Result<u32, HalError> {
+fn binding_target(
+    bindings: &[HalDescriptorBinding],
+    group: u32,
+    binding: u32,
+) -> Result<(u32, HalGlesBindingClass), HalError> {
     let descriptor = bindings
         .iter()
-        .find(|descriptor| descriptor.group == 0 && descriptor.binding == binding)
+        .find(|descriptor| descriptor.group == group && descriptor.binding == binding)
         .ok_or(HalError::BufferOperationFailed {
             backend: BACKEND,
             message: "buffer binding is missing from pipeline layout",
         })?;
     match descriptor.kind {
-        HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Uniform) => Ok(glow::UNIFORM_BUFFER),
-        HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Storage) => {
-            Ok(glow::SHADER_STORAGE_BUFFER)
+        HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Uniform) => {
+            Ok((glow::UNIFORM_BUFFER, HalGlesBindingClass::UniformBuffer))
         }
+        HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Storage) => Ok((
+            glow::SHADER_STORAGE_BUFFER,
+            HalGlesBindingClass::StorageBuffer,
+        )),
         HalDescriptorBindingKind::Texture
         | HalDescriptorBindingKind::StorageTexture { .. }
         | HalDescriptorBindingKind::Sampler
@@ -358,6 +373,18 @@ fn binding_target(bindings: &[HalDescriptorBinding], binding: u32) -> Result<u32
             })
         }
     }
+}
+
+fn flat_binding(
+    remaps: &[HalGlesBindingRemap],
+    group: u32,
+    binding: u32,
+    class: HalGlesBindingClass,
+) -> Option<u32> {
+    remaps
+        .iter()
+        .find(|remap| remap.group == group && remap.binding == binding && remap.class == class)
+        .map(|remap| remap.flat_binding)
 }
 
 fn reject_external_texture_bindings(count: usize) -> Result<(), HalError> {
@@ -379,14 +406,6 @@ fn bind_combined_samplers(
 ) -> Result<Vec<u32>, HalError> {
     let mut units = Vec::with_capacity(combined_samplers.len());
     for combined in combined_samplers {
-        if combined.texture_group != 0
-            || (!combined.uses_placeholder_sampler && combined.sampler_group != 0)
-        {
-            return Err(HalError::BufferOperationFailed {
-                backend: BACKEND,
-                message: "GLES texture/sampler bindings support only bind group 0",
-            });
-        }
         let texture = textures
             .iter()
             .find(|texture| {
@@ -472,18 +491,13 @@ fn bind_combined_samplers(
 fn bind_storage_textures(
     gl: &glow::Context,
     descriptors: &[HalDescriptorBinding],
+    remaps: &[HalGlesBindingRemap],
     textures: &[HalBoundTexture],
 ) -> Result<(), HalError> {
     for texture in textures
         .iter()
         .filter(|texture| texture.storage_access.is_some())
     {
-        if texture.group != 0 {
-            return Err(HalError::BufferOperationFailed {
-                backend: BACKEND,
-                message: "GLES storage texture bindings support only bind group 0",
-            });
-        }
         let descriptor = descriptors
             .iter()
             .find(|descriptor| {
@@ -502,6 +516,14 @@ fn bind_storage_textures(
                 message: "storage texture binding is not a storage texture descriptor",
             });
         }
+        let Some(flat_binding) = flat_binding(
+            remaps,
+            texture.group,
+            texture.binding,
+            HalGlesBindingClass::StorageTexture,
+        ) else {
+            continue;
+        };
         let HalTexture::Gles(gles_texture) = &texture.texture else {
             return Err(HalError::BufferOperationFailed {
                 backend: BACKEND,
@@ -537,7 +559,7 @@ fn bind_storage_textures(
         )?;
         unsafe {
             gl.bind_image_texture(
-                texture.binding,
+                flat_binding,
                 raw_texture,
                 base_level,
                 layered,
@@ -1282,7 +1304,12 @@ fn run_render_draw(
         pipeline.combined_samplers(),
         &pass.bind_textures,
     )?;
-    bind_storage_textures(gl, pipeline.bindings(), &pass.bind_textures)?;
+    bind_storage_textures(
+        gl,
+        pipeline.bindings(),
+        pipeline.binding_remaps(),
+        &pass.bind_textures,
+    )?;
     let first_instance = pass.draw.map(draw_first_instance).unwrap_or(0);
     bind_vertex_buffers(
         gl,
@@ -1803,19 +1830,18 @@ fn bind_render_buffers(
     pipeline: &super::pipeline::GlesRenderPipeline,
 ) -> Result<(), HalError> {
     for bound in &pass.bind_buffers {
-        if bound.group != 0 {
-            return Err(HalError::BufferOperationFailed {
-                backend: BACKEND,
-                message: "GLES render supports only bind group 0",
-            });
-        }
         let HalBuffer::Gles(buffer) = &bound.buffer else {
             return Err(HalError::BufferOperationFailed {
                 backend: BACKEND,
                 message: "render pass binding is not a GLES buffer",
             });
         };
-        let target = binding_target(pipeline.bindings(), bound.binding)?;
+        let (target, class) = binding_target(pipeline.bindings(), bound.group, bound.binding)?;
+        let Some(flat_binding) =
+            flat_binding(pipeline.binding_remaps(), bound.group, bound.binding, class)
+        else {
+            continue;
+        };
         let buffer = buffer.raw_or_err()?;
         let offset = i32::try_from(bound.offset).map_err(|_| HalError::BufferOperationFailed {
             backend: BACKEND,
@@ -1826,7 +1852,7 @@ fn bind_render_buffers(
             message: "render buffer binding size exceeds GLES limit",
         })?;
         unsafe {
-            gl.bind_buffer_range(target, bound.binding, Some(buffer), offset, size);
+            gl.bind_buffer_range(target, flat_binding, Some(buffer), offset, size);
         }
     }
     Ok(())
@@ -3402,6 +3428,7 @@ mod tests {
                             .to_owned(),
                     ),
                     combined_samplers: Vec::new(),
+                    binding_remaps: Vec::new(),
                     texture_metadata_ubo_binding: None,
                 },
                 "main",
@@ -3506,6 +3533,7 @@ mod tests {
                             .to_owned(),
                     ),
                     combined_samplers: Vec::new(),
+                    binding_remaps: Vec::new(),
                     texture_metadata_ubo_binding: None,
                 },
                 "main",
@@ -4609,6 +4637,7 @@ mod tests {
                         sampler_binding: 2,
                         uses_placeholder_sampler: false,
                     }],
+                    binding_remaps: Vec::new(),
                     texture_metadata_ubo_binding: None,
                 },
                 "main",
@@ -4692,6 +4721,196 @@ mod tests {
     }
 
     #[test]
+    fn submit_render_pass_binds_uniform_and_sampler_texture_across_groups() {
+        let Some(device) = gles_device_or_skip("GLES multi-group render binding test") else {
+            return;
+        };
+        let sampled = sampled_rgba8_texture(
+            &device,
+            &[
+                10, 20, 30, 255, 10, 20, 30, 255, 10, 20, 30, 255, 10, 20, 30, 255,
+            ],
+        );
+        let target = device
+            .create_texture(&crate::HalTextureDescriptor {
+                dimension: crate::HalTextureDimension::D2,
+                format: crate::HalTextureFormat::Rgba8Unorm,
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 1,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: crate::HalTextureUsage {
+                    copy_src: true,
+                    copy_dst: false,
+                    texture_binding: false,
+                    storage_binding: false,
+                    render_attachment: true,
+                    transient: false,
+                },
+            })
+            .expect("GLES multi-group render target creation must succeed");
+        let readback = device
+            .create_buffer(
+                16,
+                crate::HalBufferUsage {
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES multi-group render readback buffer creation must succeed");
+        let uniform = device
+            .create_buffer(
+                16,
+                crate::HalBufferUsage {
+                    uniform: true,
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES multi-group render uniform buffer creation must succeed");
+        let uniform_bytes = [2.0_f32, 3.0, 4.0, 1.0]
+            .into_iter()
+            .flat_map(f32::to_ne_bytes)
+            .collect::<Vec<_>>();
+        uniform
+            .write(0, &uniform_bytes)
+            .expect("writing GLES multi-group render uniform data must succeed");
+
+        let pipeline = device
+            .create_render_pipeline(
+                crate::HalShaderSource::GlslStages {
+                    vertex: "#version 310 es\n\
+                             void main() {\n\
+                                 vec2 pos = vec2(float((gl_VertexID & 1) << 2) - 1.0,\n\
+                                                 float((gl_VertexID & 2) << 1) - 1.0);\n\
+                                 gl_Position = vec4(pos, 0.0, 1.0);\n\
+                             }\n"
+                    .to_owned(),
+                    fragment: Some(
+                        "#version 310 es\n\
+                         precision mediump float;\n\
+                         layout(std140, binding = 0) uniform Params { vec4 scale; } params;\n\
+                         uniform sampler2D u_tex;\n\
+                         layout(location = 0) out vec4 frag_color;\n\
+                         void main() { frag_color = texture(u_tex, vec2(0.25)) * params.scale; }\n"
+                            .to_owned(),
+                    ),
+                    combined_samplers: vec![crate::HalCombinedSampler {
+                        glsl_uniform_name: "u_tex".to_owned(),
+                        texture_group: 1,
+                        texture_binding: 1,
+                        sampler_group: 1,
+                        sampler_binding: 2,
+                        uses_placeholder_sampler: false,
+                    }],
+                    binding_remaps: vec![crate::HalGlesBindingRemap::new(
+                        0,
+                        0,
+                        crate::HalGlesBindingClass::UniformBuffer,
+                        0,
+                    )],
+                    texture_metadata_ubo_binding: None,
+                },
+                "main",
+                Some("main"),
+                &crate::HalRenderPipelineDescriptor {
+                    sample_count: 1,
+                    sample_mask: u32::MAX,
+                    alpha_to_coverage_enabled: false,
+                    color_targets: vec![Some(HalColorTargetState {
+                        format: crate::HalTextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: 0xf,
+                    })],
+                    depth_stencil: None,
+                    vertex_buffers: Vec::new(),
+                    primitive_topology: crate::HalPrimitiveTopology::TriangleList,
+                    front_face: HalFrontFace::Ccw,
+                    cull_mode: HalCullMode::None,
+                    unclipped_depth: false,
+                    needs_frag_depth_range_push_constant: false,
+                    user_immediate_size: 0,
+                },
+                &[
+                    HalDescriptorBinding {
+                        group: 0,
+                        binding: 0,
+                        kind: HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Uniform),
+                    },
+                    HalDescriptorBinding {
+                        group: 1,
+                        binding: 1,
+                        kind: HalDescriptorBindingKind::Texture,
+                    },
+                    HalDescriptorBinding {
+                        group: 1,
+                        binding: 2,
+                        kind: HalDescriptorBindingKind::Sampler,
+                    },
+                ],
+            )
+            .expect("GLES multi-group render pipeline creation must succeed");
+
+        let mut texture_binding = bound_sampled_texture(sampled, 1);
+        texture_binding.group = 1;
+        let mut sampler_binding = nearest_sampler_binding(&device, 2);
+        sampler_binding.group = 1;
+        let mut pass = render_pass(vec![Some(color_target_for(
+            target.clone(),
+            crate::HalTextureFormat::Rgba8Unorm,
+            [0.0, 0.0, 0.0, 0.0],
+        ))]);
+        pass.pipeline = Some(HalRenderPipeline::Gles(pipeline));
+        pass.bind_buffers = vec![crate::HalBoundBuffer {
+            group: 0,
+            binding: 0,
+            metal_index: 0,
+            vertex_metal_index: None,
+            fragment_metal_index: None,
+            buffer: HalBuffer::Gles(uniform),
+            offset: 0,
+            size: 16,
+        }];
+        pass.bind_textures = vec![texture_binding];
+        pass.bind_samplers = vec![sampler_binding];
+        pass.draw = Some(HalDraw::Direct {
+            vertex_count: 3,
+            instance_count: 1,
+            first_vertex: 0,
+            first_instance: 0,
+        });
+
+        device
+            .queue()
+            .submit_copies(&[
+                HalCopy::RenderPass(pass),
+                HalCopy::TextureToBuffer(HalBufferTextureCopy {
+                    buffer: HalBuffer::Gles(readback.clone()),
+                    buffer_layout: rgba8_slice_layout(0),
+                    texture: HalTexture::Gles(target),
+                    format: crate::HalTextureFormat::Rgba8Unorm,
+                    aspect: crate::HalTextureAspect::All,
+                    mip_level: 0,
+                    origin: crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+                    extent: crate::HalExtent3d {
+                        width: 2,
+                        height: 2,
+                        depth_or_array_layers: 1,
+                    },
+                }),
+            ])
+            .expect("GLES multi-group render submit plus readback must succeed");
+
+        assert_eq!(
+            readback
+                .read(0, 16)
+                .expect("reading GLES multi-group render output must succeed"),
+            [20, 60, 120, 255].repeat(4)
+        );
+    }
+
+    #[test]
     fn submit_compute_pass_samples_texture_with_placeholder_sampler() {
         let Some(device) = gles_device_or_skip("GLES compute sampled-texture test") else {
             return;
@@ -4734,6 +4953,7 @@ mod tests {
                         sampler_binding: u32::MAX,
                         uses_placeholder_sampler: true,
                     }],
+                    binding_remaps: Vec::new(),
                     texture_metadata_ubo_binding: None,
                 },
                 "main",
@@ -4786,6 +5006,150 @@ mod tests {
             .collect();
         let expected: Vec<u32> = pixels.iter().map(|value| u32::from(*value)).collect();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn submit_compute_pass_binds_buffers_and_textures_across_groups() {
+        let Some(device) = gles_device_or_skip("GLES multi-group compute binding test") else {
+            return;
+        };
+        let sampled = sampled_rgba8_texture(
+            &device,
+            &[10, 0, 0, 255, 10, 0, 0, 255, 10, 0, 0, 255, 10, 0, 0, 255],
+        );
+        let output = device
+            .create_buffer(
+                16,
+                crate::HalBufferUsage {
+                    storage: true,
+                    copy_src: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES multi-group output buffer creation must succeed");
+        let uniform = device
+            .create_buffer(
+                16,
+                crate::HalBufferUsage {
+                    uniform: true,
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES multi-group uniform buffer creation must succeed");
+        let mut uniform_bytes = vec![0_u8; 16];
+        uniform_bytes[..4].copy_from_slice(&7_u32.to_ne_bytes());
+        uniform
+            .write(0, &uniform_bytes)
+            .expect("writing GLES multi-group uniform data must succeed");
+
+        let pipeline = device
+            .create_compute_pipeline(
+                crate::HalShaderSource::Glsl {
+                    source: "#version 310 es\n\
+                             precision highp float;\n\
+                             precision highp int;\n\
+                             layout(local_size_x = 1) in;\n\
+                             layout(std430, binding = 0) buffer Out { uint value; } out_buf;\n\
+                             layout(std140, binding = 0) uniform Params { uint addend; } params;\n\
+                             uniform sampler2D u_tex;\n\
+                             void main() {\n\
+                                 uint texel = uint(texelFetch(u_tex, ivec2(0, 0), 0).r * 255.0 + 0.5);\n\
+                                 out_buf.value = params.addend + texel;\n\
+                             }\n"
+                    .to_owned(),
+                    stage: crate::HalShaderStage::Compute,
+                    combined_samplers: vec![crate::HalCombinedSampler {
+                        glsl_uniform_name: "u_tex".to_owned(),
+                        texture_group: 1,
+                        texture_binding: 2,
+                        sampler_group: u32::MAX,
+                        sampler_binding: u32::MAX,
+                        uses_placeholder_sampler: true,
+                    }],
+                    binding_remaps: vec![
+                        crate::HalGlesBindingRemap::new(
+                            1,
+                            1,
+                            crate::HalGlesBindingClass::UniformBuffer,
+                            0,
+                        ),
+                        crate::HalGlesBindingRemap::new(
+                            0,
+                            0,
+                            crate::HalGlesBindingClass::StorageBuffer,
+                            0,
+                        ),
+                    ],
+                    texture_metadata_ubo_binding: None,
+                },
+                "main",
+                (1, 1, 1),
+                &[
+                    HalDescriptorBinding {
+                        group: 0,
+                        binding: 0,
+                        kind: HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Storage),
+                    },
+                    HalDescriptorBinding {
+                        group: 1,
+                        binding: 1,
+                        kind: HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Uniform),
+                    },
+                    HalDescriptorBinding {
+                        group: 1,
+                        binding: 2,
+                        kind: HalDescriptorBindingKind::Texture,
+                    },
+                ],
+            )
+            .expect("GLES multi-group compute pipeline creation must succeed");
+        let mut texture_binding = bound_sampled_texture(sampled, 2);
+        texture_binding.group = 1;
+
+        device
+            .queue()
+            .submit_copies(&[HalCopy::ComputePass(crate::HalComputePass {
+                pipeline: HalComputePipeline::Gles(pipeline),
+                bind_buffers: vec![
+                    crate::HalBoundBuffer {
+                        group: 0,
+                        binding: 0,
+                        metal_index: 0,
+                        vertex_metal_index: None,
+                        fragment_metal_index: None,
+                        buffer: HalBuffer::Gles(output.clone()),
+                        offset: 0,
+                        size: 16,
+                    },
+                    crate::HalBoundBuffer {
+                        group: 1,
+                        binding: 1,
+                        metal_index: 0,
+                        vertex_metal_index: None,
+                        fragment_metal_index: None,
+                        buffer: HalBuffer::Gles(uniform),
+                        offset: 0,
+                        size: 16,
+                    },
+                ],
+                bind_textures: vec![texture_binding],
+                bind_samplers: Vec::new(),
+                bind_external_textures: Vec::new(),
+                immediate_data: Vec::new(),
+                dispatch: HalComputeDispatch::Direct {
+                    workgroups: (1, 1, 1),
+                },
+            })])
+            .expect("GLES multi-group compute submit must succeed");
+
+        let bytes = output
+            .read(0, 4)
+            .expect("reading GLES multi-group compute output must succeed");
+        let bytes: [u8; 4] = bytes
+            .try_into()
+            .expect("GLES multi-group compute output must be one u32");
+        assert_eq!(u32::from_ne_bytes(bytes), 17);
     }
 
     #[test]
@@ -5637,6 +6001,7 @@ mod tests {
                         sampler_binding: 2,
                         uses_placeholder_sampler: false,
                     }],
+                    binding_remaps: Vec::new(),
                     texture_metadata_ubo_binding: None,
                 },
                 "main",
@@ -5811,6 +6176,7 @@ mod tests {
                     .to_owned(),
                     stage: crate::HalShaderStage::Compute,
                     combined_samplers: Vec::new(),
+                    binding_remaps: Vec::new(),
                     texture_metadata_ubo_binding: None,
                 },
                 "main",
@@ -5927,6 +6293,7 @@ mod tests {
                     .to_owned(),
                     stage: crate::HalShaderStage::Compute,
                     combined_samplers: Vec::new(),
+                    binding_remaps: Vec::new(),
                     texture_metadata_ubo_binding: None,
                 },
                 "main",
@@ -5997,6 +6364,7 @@ mod tests {
                         .to_owned(),
                     stage: crate::HalShaderStage::Compute,
                     combined_samplers: Vec::new(),
+                    binding_remaps: Vec::new(),
                     texture_metadata_ubo_binding: None,
                 },
                 "main",
@@ -6197,6 +6565,7 @@ mod tests {
                             .to_owned(),
                     ),
                     combined_samplers: Vec::new(),
+                    binding_remaps: Vec::new(),
                     texture_metadata_ubo_binding: None,
                 },
                 "main",
@@ -6528,6 +6897,7 @@ mod tests {
                         .to_owned(),
                     ),
                     combined_samplers: Vec::new(),
+                    binding_remaps: Vec::new(),
                     texture_metadata_ubo_binding: None,
                 },
                 "main",
@@ -6755,6 +7125,7 @@ mod tests {
                             .to_owned(),
                     ),
                     combined_samplers: Vec::new(),
+                    binding_remaps: Vec::new(),
                     texture_metadata_ubo_binding: None,
                 },
                 "main",
@@ -6889,6 +7260,7 @@ mod tests {
                             .to_owned(),
                     ),
                     combined_samplers: Vec::new(),
+                    binding_remaps: Vec::new(),
                     texture_metadata_ubo_binding: None,
                 },
                 "main",
@@ -7095,14 +7467,17 @@ mod tests {
         ];
 
         assert_eq!(
-            binding_target(&bindings, 0).expect("uniform binding"),
-            glow::UNIFORM_BUFFER
+            binding_target(&bindings, 0, 0).expect("uniform binding"),
+            (glow::UNIFORM_BUFFER, HalGlesBindingClass::UniformBuffer)
         );
         assert_eq!(
-            binding_target(&bindings, 1).expect("storage binding"),
-            glow::SHADER_STORAGE_BUFFER
+            binding_target(&bindings, 0, 1).expect("storage binding"),
+            (
+                glow::SHADER_STORAGE_BUFFER,
+                HalGlesBindingClass::StorageBuffer
+            )
         );
-        let missing = binding_target(&bindings, 2).expect_err("missing binding");
+        let missing = binding_target(&bindings, 0, 2).expect_err("missing binding");
         assert!(matches!(
             missing,
             HalError::BufferOperationFailed {

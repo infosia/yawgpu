@@ -8,7 +8,7 @@ use super::texture::validate_sample_count;
 use super::{rebuild_hal_error, BACKEND};
 use crate::{
     HalColorTargetState, HalCombinedSampler, HalCullMode, HalDepthStencilState,
-    HalDescriptorBinding, HalError, HalFrontFace, HalPrimitiveTopology,
+    HalDescriptorBinding, HalError, HalFrontFace, HalGlesBindingRemap, HalPrimitiveTopology,
     HalRenderPipelineDescriptor, HalVertexBufferLayout,
 };
 
@@ -34,12 +34,19 @@ pub(super) struct GlesResolvedCombinedSampler {
     pub(super) uses_placeholder_sampler: bool,
 }
 
+pub(super) struct GlesPipelineResourceBindings {
+    pub(super) combined_samplers: Vec<HalCombinedSampler>,
+    pub(super) binding_remaps: Vec<HalGlesBindingRemap>,
+    pub(super) texture_metadata_ubo_binding: Option<u32>,
+}
+
 struct GlesComputePipelineInner {
     device: Arc<GlesDeviceInner>,
     program: Result<glow::Program, HalError>,
     workgroup_size: (u32, u32, u32),
     bindings: Vec<HalDescriptorBinding>,
     combined_samplers: Vec<GlesResolvedCombinedSampler>,
+    binding_remaps: Vec<HalGlesBindingRemap>,
     texture_metadata_ubo_binding: Option<u32>,
 }
 
@@ -82,11 +89,11 @@ impl GlesComputePipeline {
         source: String,
         workgroup_size: (u32, u32, u32),
         bindings: &[HalDescriptorBinding],
-        combined_samplers: Vec<HalCombinedSampler>,
-        texture_metadata_ubo_binding: Option<u32>,
+        resource_bindings: GlesPipelineResourceBindings,
     ) -> Result<Self, HalError> {
         let program = build_compute_program(&device, &source)?;
-        let combined_samplers = resolve_combined_samplers(&device, program, &combined_samplers)?;
+        let combined_samplers =
+            resolve_combined_samplers(&device, program, &resource_bindings.combined_samplers)?;
         Ok(Self {
             inner: Arc::new(GlesComputePipelineInner {
                 device,
@@ -94,7 +101,8 @@ impl GlesComputePipeline {
                 workgroup_size,
                 bindings: bindings.to_vec(),
                 combined_samplers,
-                texture_metadata_ubo_binding,
+                binding_remaps: resource_bindings.binding_remaps,
+                texture_metadata_ubo_binding: resource_bindings.texture_metadata_ubo_binding,
             }),
         })
     }
@@ -118,6 +126,11 @@ impl GlesComputePipeline {
     }
 
     #[must_use]
+    pub(super) fn binding_remaps(&self) -> &[HalGlesBindingRemap] {
+        &self.inner.binding_remaps
+    }
+
+    #[must_use]
     pub(super) fn texture_metadata_ubo_binding(&self) -> Option<u32> {
         self.inner.texture_metadata_ubo_binding
     }
@@ -136,6 +149,7 @@ struct GlesRenderPipelineInner {
     alpha_to_coverage_enabled: bool,
     bindings: Vec<HalDescriptorBinding>,
     combined_samplers: Vec<GlesResolvedCombinedSampler>,
+    binding_remaps: Vec<HalGlesBindingRemap>,
     texture_metadata_ubo_binding: Option<u32>,
     first_instance_location: Option<glow::UniformLocation>,
 }
@@ -181,8 +195,7 @@ impl GlesRenderPipeline {
         fragment_source: Option<String>,
         descriptor: HalRenderPipelineDescriptor,
         bindings: &[HalDescriptorBinding],
-        combined_samplers: Vec<HalCombinedSampler>,
-        texture_metadata_ubo_binding: Option<u32>,
+        resource_bindings: GlesPipelineResourceBindings,
     ) -> Result<Self, HalError> {
         validate_render_pipeline_descriptor(
             &descriptor,
@@ -191,7 +204,8 @@ impl GlesRenderPipeline {
         )?;
         let (program, first_instance_location) =
             build_render_program(&device, &vertex_source, fragment_source.as_deref())?;
-        let combined_samplers = resolve_combined_samplers(&device, program, &combined_samplers)?;
+        let combined_samplers =
+            resolve_combined_samplers(&device, program, &resource_bindings.combined_samplers)?;
         Ok(Self {
             inner: Arc::new(GlesRenderPipelineInner {
                 device,
@@ -210,7 +224,8 @@ impl GlesRenderPipeline {
                 alpha_to_coverage_enabled: descriptor.alpha_to_coverage_enabled,
                 bindings: bindings.to_vec(),
                 combined_samplers,
-                texture_metadata_ubo_binding,
+                binding_remaps: resource_bindings.binding_remaps,
+                texture_metadata_ubo_binding: resource_bindings.texture_metadata_ubo_binding,
                 first_instance_location,
             }),
         })
@@ -281,6 +296,11 @@ impl GlesRenderPipeline {
     #[must_use]
     pub(super) fn combined_samplers(&self) -> &[GlesResolvedCombinedSampler] {
         &self.inner.combined_samplers
+    }
+
+    #[must_use]
+    pub(super) fn binding_remaps(&self) -> &[HalGlesBindingRemap] {
+        &self.inner.binding_remaps
     }
 
     #[must_use]
@@ -892,6 +912,7 @@ mod tests {
                         .to_owned(),
                     fragment: None,
                     combined_samplers: Vec::new(),
+                    binding_remaps: Vec::new(),
                     texture_metadata_ubo_binding: None,
                 },
                 "main",
@@ -988,6 +1009,7 @@ mod tests {
                     .to_owned(),
             ),
             combined_samplers: Vec::new(),
+            binding_remaps: Vec::new(),
             texture_metadata_ubo_binding: None,
         };
 

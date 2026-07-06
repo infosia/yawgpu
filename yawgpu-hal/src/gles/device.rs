@@ -9,7 +9,7 @@ use super::buffer::GlesBuffer;
 use super::egl::{EglContext, EglSurface};
 use super::format::GlesColorRenderCaps;
 use super::instance::{EglInstanceState, GlesInstanceInner};
-use super::pipeline::{GlesComputePipeline, GlesRenderPipeline};
+use super::pipeline::{GlesComputePipeline, GlesPipelineResourceBindings, GlesRenderPipeline};
 use super::queue::GlesQueue;
 use super::sampler::{create_nearest_placeholder_sampler, GlesSampler};
 use super::texture::GlesTexture;
@@ -347,6 +347,7 @@ impl GlesDevice {
             source,
             stage: HalShaderStage::Compute,
             combined_samplers,
+            binding_remaps,
             texture_metadata_ubo_binding,
         } = shader
         else {
@@ -360,8 +361,11 @@ impl GlesDevice {
             source,
             workgroup_size,
             bindings,
-            combined_samplers,
-            texture_metadata_ubo_binding,
+            GlesPipelineResourceBindings {
+                combined_samplers,
+                binding_remaps,
+                texture_metadata_ubo_binding,
+            },
         )
     }
 
@@ -378,6 +382,7 @@ impl GlesDevice {
             vertex,
             fragment,
             combined_samplers,
+            binding_remaps,
             texture_metadata_ubo_binding,
         } = shader
         else {
@@ -392,8 +397,11 @@ impl GlesDevice {
             fragment,
             descriptor.clone(),
             bindings,
-            combined_samplers,
-            texture_metadata_ubo_binding,
+            GlesPipelineResourceBindings {
+                combined_samplers,
+                binding_remaps,
+                texture_metadata_ubo_binding,
+            },
         )
     }
 }

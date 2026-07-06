@@ -81,6 +81,8 @@ pub enum HalShaderSource {
         fragment: Option<String>,
         /// Combined texture/sampler uniforms emitted by Tint's GLSL writer.
         combined_samplers: Vec<HalCombinedSampler>,
+        /// GLES flat resource binding remaps emitted alongside the GLSL.
+        binding_remaps: Vec<HalGlesBindingRemap>,
         /// Uniform-buffer binding carrying GLSL texture metadata, if emitted.
         texture_metadata_ubo_binding: Option<u32>,
     },
@@ -92,6 +94,8 @@ pub enum HalShaderSource {
         stage: HalShaderStage,
         /// Combined texture/sampler uniforms emitted by Tint's GLSL writer.
         combined_samplers: Vec<HalCombinedSampler>,
+        /// GLES flat resource binding remaps emitted alongside the GLSL.
+        binding_remaps: Vec<HalGlesBindingRemap>,
         /// Uniform-buffer binding carrying GLSL texture metadata, if emitted.
         texture_metadata_ubo_binding: Option<u32>,
     },
@@ -112,6 +116,45 @@ pub struct HalCombinedSampler {
     pub sampler_binding: u32,
     /// Whether this record uses Tint's placeholder sampler for a texture-only use.
     pub uses_placeholder_sampler: bool,
+}
+
+/// GLES resource classes whose GLSL layout binding is consumed by the HAL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum HalGlesBindingClass {
+    /// Uniform-buffer binding.
+    UniformBuffer,
+    /// Storage-buffer binding.
+    StorageBuffer,
+    /// Storage-texture image binding.
+    StorageTexture,
+}
+
+/// Maps one WGSL binding point to its flat GLES binding number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct HalGlesBindingRemap {
+    /// WGSL bind group.
+    pub group: u32,
+    /// WGSL binding number.
+    pub binding: u32,
+    /// Resource class.
+    pub class: HalGlesBindingClass,
+    /// Flat GLES binding number used in GLSL and GL bind calls.
+    pub flat_binding: u32,
+}
+
+impl HalGlesBindingRemap {
+    /// Creates a new GLES binding remap entry.
+    #[must_use]
+    pub fn new(group: u32, binding: u32, class: HalGlesBindingClass, flat_binding: u32) -> Self {
+        Self {
+            group,
+            binding,
+            class,
+            flat_binding,
+        }
+    }
 }
 
 /// Stores one MSL buffer-size entry binding.

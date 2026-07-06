@@ -463,6 +463,7 @@ pub(crate) fn select_compute_shader_source(
                     source: generated.source,
                     stage: yawgpu_hal::HalShaderStage::Compute,
                     combined_samplers: generated.combined_samplers,
+                    binding_remaps: generated.binding_remaps,
                     texture_metadata_ubo_binding: generated.texture_metadata_ubo_binding,
                 },
                 generated.entry_point,
@@ -2478,6 +2479,7 @@ fn cs() {
             source,
             stage: yawgpu_hal::HalShaderStage::Compute,
             combined_samplers,
+            binding_remaps,
             texture_metadata_ubo_binding,
         } = source
         else {
@@ -2486,6 +2488,7 @@ fn cs() {
         assert_eq!(entry, "cs");
         assert!(bindings.is_empty());
         assert!(combined_samplers.is_empty());
+        assert!(binding_remaps.is_empty());
         assert_eq!(texture_metadata_ubo_binding, None);
         assert!(source.contains("#version 310 es"));
         assert!(source.contains("local_size_x = 2"));

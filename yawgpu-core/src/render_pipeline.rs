@@ -1778,22 +1778,40 @@ pub(crate) fn select_render_shader_source(
             let vertex_module = descriptor.vertex.shader.module.reflected().ok_or_else(|| {
                 "render pipeline requires a reflected vertex shader module".to_owned()
             })?;
-            let vertex_glsl = vertex_module.generate_glsl(
-                vertex_entry_name,
-                frontend::ShaderStage::Vertex,
-                &vertex_pipeline_constants,
-            )?;
-            let fragment_glsl = match (fragment, fragment_entry_name) {
+            let mut glsl_resource_bindings =
+                vertex_module.resource_bindings_for_entry(vertex_entry_name)?;
+            let fragment_module = match (fragment, fragment_entry_name) {
                 (Some(fragment), Some(fragment_entry_name)) => {
                     let fragment_module = fragment.shader.module.reflected().ok_or_else(|| {
                         "render pipeline requires a reflected fragment shader module".to_owned()
                     })?;
-                    Some(fragment_module.generate_glsl(
+                    glsl_resource_bindings
+                        .extend(fragment_module.resource_bindings_for_entry(fragment_entry_name)?);
+                    Some(fragment_module)
+                }
+                (None, None) => None,
+                _ => {
+                    return Err(
+                        "real render pipeline fragment state and entry point must match".to_owned(),
+                    );
+                }
+            };
+            let glsl_bindings = frontend::glsl_binding_info(&glsl_resource_bindings)?;
+            let vertex_glsl = vertex_module.generate_glsl_with_bindings(
+                vertex_entry_name,
+                frontend::ShaderStage::Vertex,
+                &vertex_pipeline_constants,
+                &glsl_bindings,
+            )?;
+            let fragment_glsl = match (fragment_module, fragment_entry_name) {
+                (Some(fragment_module), Some(fragment_entry_name)) => {
+                    Some(fragment_module.generate_glsl_with_bindings(
                         fragment_entry_name,
                         frontend::ShaderStage::Fragment,
                         fragment_pipeline_constants.as_ref().ok_or_else(|| {
                             "render pipeline fragment constants were not resolved".to_owned()
                         })?,
+                        &glsl_bindings,
                     )?)
                 }
                 (None, None) => None,
@@ -1818,6 +1836,7 @@ pub(crate) fn select_render_shader_source(
                     vertex: vertex_glsl.source,
                     fragment: fragment_glsl.map(|glsl| glsl.source),
                     combined_samplers,
+                    binding_remaps: vertex_glsl.binding_remaps,
                     texture_metadata_ubo_binding,
                 },
                 vertex_entry_name.to_owned(),
@@ -5949,12 +5968,13 @@ fn fs() -> @builtin(frag_depth) f32 {
         .expect("WGSL should generate GLES GLSL stages");
 
         assert!(
-            matches!(source, HalShaderSource::GlslStages { vertex, fragment, combined_samplers, texture_metadata_ubo_binding }
+            matches!(source, HalShaderSource::GlslStages { vertex, fragment, combined_samplers, binding_remaps, texture_metadata_ubo_binding }
                 if vertex.contains("#version 310 es")
                     && fragment.as_ref().is_some_and(|fragment| fragment.contains("#version 310 es"))
                     && vertex.contains("void main()")
                     && fragment.as_ref().is_some_and(|fragment| fragment.contains("void main()"))
                     && combined_samplers.is_empty()
+                    && binding_remaps.is_empty()
                     && texture_metadata_ubo_binding.is_none())
         );
         assert_eq!(vertex_entry, "vs");

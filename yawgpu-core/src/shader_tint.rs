@@ -3,6 +3,8 @@
 //! the sole shader frontend (the `crate::frontend` alias points here), and the
 //! render path emits per-stage shader sources for pipeline creation.
 
+#[cfg(feature = "gles")]
+use std::collections::BTreeSet;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -56,6 +58,34 @@ struct GlslCodegenKey {
     entry_point: String,
     stage: ShaderStage,
     constants: CanonicalConstants,
+    bindings: Vec<GlslBindingKeyEntry>,
+}
+
+#[cfg(feature = "gles")]
+#[derive(Debug, Clone)]
+pub(crate) struct GlslBindingInfo {
+    tint: yawgpu_tint::Bindings,
+    hal_remaps: Vec<yawgpu_hal::HalGlesBindingRemap>,
+    key: Vec<GlslBindingKeyEntry>,
+}
+
+#[cfg(feature = "gles")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct GlslBindingKeyEntry {
+    class: GlslBindingClass,
+    group: u32,
+    binding: u32,
+    dst_binding: u32,
+}
+
+#[cfg(feature = "gles")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum GlslBindingClass {
+    Uniform,
+    Storage,
+    Texture,
+    StorageTexture,
+    Sampler,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -322,12 +352,10 @@ impl ReflectedModule {
     /// specs/tracking/tint-integration-refactor.md slice R6). Non-vertex
     /// stages never read `instance_index`, so they skip it.
     ///
-    /// Buffer bindings get an explicit identity remap (see
-    /// `tint_bindings_for_glsl`) so the GLSL `layout(binding = N)` always
-    /// matches the raw WGSL binding number that `yawgpu-hal`'s GLES backend
-    /// binds with `glBindBufferRange` -- Tint's default `GenerateBindings`
-    /// only coincides with that when bindings happen to already be dense
-    /// and sequential from 0.
+    /// GLES receives an explicit flat binding remap (see
+    /// `glsl_binding_info`) so GLSL `layout(binding = N)` values are
+    /// collision-free across WebGPU bind groups and match the binding numbers
+    /// carried to `yawgpu-hal` for `glBindBufferRange` / `glBindImageTexture`.
     #[cfg(feature = "gles")]
     pub(crate) fn generate_glsl(
         &self,
@@ -335,10 +363,24 @@ impl ReflectedModule {
         stage: ShaderStage,
         pipeline_constants: &PipelineConstants,
     ) -> Result<GeneratedGlsl, String> {
+        let bindings = glsl_binding_info(&self.resource_bindings_for_entry(entry_name)?)?;
+        self.generate_glsl_with_bindings(entry_name, stage, pipeline_constants, &bindings)
+    }
+
+    /// Generates GLSL ES using the supplied GLES flat binding map.
+    #[cfg(feature = "gles")]
+    pub(crate) fn generate_glsl_with_bindings(
+        &self,
+        entry_name: &str,
+        stage: ShaderStage,
+        pipeline_constants: &PipelineConstants,
+        bindings: &GlslBindingInfo,
+    ) -> Result<GeneratedGlsl, String> {
         let key = GlslCodegenKey {
             entry_point: entry_name.to_owned(),
             stage,
             constants: CanonicalConstants::from(pipeline_constants),
+            bindings: bindings.key.clone(),
         };
         let mut cache = self
             .glsl_codegen_cache
@@ -350,12 +392,11 @@ impl ReflectedModule {
         self.codegen_misses.fetch_add(1, Ordering::Relaxed);
         let generated = (|| {
             let first_instance_offset = matches!(stage, ShaderStage::Vertex).then_some(0);
-            let bindings = tint_bindings_for_glsl(&self.resource_bindings_for_entry(entry_name)?);
             let source = self
                 .program
                 .generate_glsl(
                     entry_name,
-                    &bindings,
+                    &bindings.tint,
                     &override_values(pipeline_constants),
                     first_instance_offset,
                 )
@@ -368,6 +409,7 @@ impl ReflectedModule {
                     .into_iter()
                     .map(hal_combined_sampler)
                     .collect(),
+                binding_remaps: bindings.hal_remaps.clone(),
                 texture_metadata_ubo_binding: source.texture_metadata_ubo_binding,
             })
         })();
@@ -1220,58 +1262,137 @@ fn tint_bindings_for_msl(
     Ok(bindings)
 }
 
-/// Returns identity Tint binding remaps for the GLES GLSL writer.
+/// Returns flat GLES binding remaps for Tint and the HAL.
 ///
-/// GLES only supports plain uniform/storage buffers at bind group 0
-/// (`yawgpu-hal/src/gles/queue.rs` rejects textures/samplers and non-zero
-/// groups at runtime). Left as `Bindings::default()`, Tint's own
-/// `GenerateBindings` auto-numbers GLSL `layout(binding = N)` sequentially
-/// in shader declaration order, which only coincides with the WGSL
-/// `@binding` number when bindings already happen to be dense and
-/// sequential starting at 0 -- e.g. `@binding(0)` + `@binding(3)` gets
-/// renumbered to `layout(binding = 0)` + `layout(binding = 1)`. Since
-/// `yawgpu-hal`'s GLES backend always binds buffers with
-/// `glBindBufferRange` at the raw WGSL binding number
-/// (`HalDescriptorBinding::binding`), the GLSL text and the HAL's runtime
-/// bind calls would silently disagree for any non-sequential binding
-/// layout. An explicit group/binding -> same group/binding remap pins Tint's
-/// output to the WGSL numbers directly (F2,
-/// specs/tracking/tint-integration-refactor.md slice R6). Texture and sampler
-/// resources are included so Tint's GLSL combined-sampler lowering uses the
-/// same deterministic binding map that the returned combined-sampler metadata
-/// describes.
+/// GLES has a flat binding namespace per resource class, while WGSL uses
+/// `(group, binding)`. Assign each resource class a deterministic dense
+/// sequence sorted by `(group, binding)` and force `dst_group = 0`. UBO,
+/// SSBO, and image remaps are also returned for the HAL because those GL calls
+/// consume the binding number directly. Sampled textures and samplers still
+/// bind through Tint's linked uniform names, but they participate in the Tint
+/// remap so combined-sampler lowering stays deterministic across groups.
+///
+/// Tint's GLES texture-metadata UBO is placed by the shim at the next free
+/// uniform-buffer binding after `bindings.uniform`, so dense user UBOs
+/// naturally reserve that following binding for the internal block.
 #[cfg(feature = "gles")]
-fn tint_bindings_for_glsl(resource_bindings: &[ReflectedResourceBinding]) -> yawgpu_tint::Bindings {
-    let mut bindings = yawgpu_tint::Bindings::default();
+pub(crate) fn glsl_binding_info(
+    resource_bindings: &[ReflectedResourceBinding],
+) -> Result<GlslBindingInfo, String> {
+    let mut uniforms = BTreeSet::new();
+    let mut storages = BTreeSet::new();
+    let mut textures = BTreeSet::new();
+    let mut storage_textures = BTreeSet::new();
+    let mut samplers = BTreeSet::new();
     for binding in resource_bindings {
-        let remap = yawgpu_tint::BindingRemap {
-            group: binding.group,
-            binding: binding.binding,
-            dst_group: binding.group,
-            dst_binding: binding.binding,
-        };
+        let point = (binding.group, binding.binding);
         match binding.kind {
             ReflectedResourceBindingKind::Buffer(ReflectedBufferType::Uniform) => {
-                bindings.uniform.push(remap);
+                uniforms.insert(point);
             }
             ReflectedResourceBindingKind::Buffer(
                 ReflectedBufferType::Storage | ReflectedBufferType::ReadOnlyStorage,
             ) => {
-                bindings.storage.push(remap);
+                storages.insert(point);
             }
             ReflectedResourceBindingKind::Texture { .. } => {
-                bindings.texture.push(remap);
+                textures.insert(point);
             }
             ReflectedResourceBindingKind::StorageTexture { .. } => {
-                bindings.storage_texture.push(remap);
+                storage_textures.insert(point);
             }
             ReflectedResourceBindingKind::Sampler { .. } => {
-                bindings.sampler.push(remap);
+                samplers.insert(point);
             }
             _ => {}
         }
     }
-    bindings
+
+    let mut bindings = yawgpu_tint::Bindings::default();
+    let mut hal_remaps = Vec::new();
+    let mut key = Vec::new();
+    append_glsl_remaps(
+        &mut bindings.uniform,
+        &uniforms,
+        GlslBindingClass::Uniform,
+        Some(yawgpu_hal::HalGlesBindingClass::UniformBuffer),
+        &mut hal_remaps,
+        &mut key,
+    )?;
+    append_glsl_remaps(
+        &mut bindings.storage,
+        &storages,
+        GlslBindingClass::Storage,
+        Some(yawgpu_hal::HalGlesBindingClass::StorageBuffer),
+        &mut hal_remaps,
+        &mut key,
+    )?;
+    append_glsl_remaps(
+        &mut bindings.texture,
+        &textures,
+        GlslBindingClass::Texture,
+        None,
+        &mut hal_remaps,
+        &mut key,
+    )?;
+    append_glsl_remaps(
+        &mut bindings.storage_texture,
+        &storage_textures,
+        GlslBindingClass::StorageTexture,
+        Some(yawgpu_hal::HalGlesBindingClass::StorageTexture),
+        &mut hal_remaps,
+        &mut key,
+    )?;
+    append_glsl_remaps(
+        &mut bindings.sampler,
+        &samplers,
+        GlslBindingClass::Sampler,
+        None,
+        &mut hal_remaps,
+        &mut key,
+    )?;
+
+    Ok(GlslBindingInfo {
+        tint: bindings,
+        hal_remaps,
+        key,
+    })
+}
+
+#[cfg(feature = "gles")]
+fn append_glsl_remaps(
+    tint_remaps: &mut Vec<yawgpu_tint::BindingRemap>,
+    points: &BTreeSet<(u32, u32)>,
+    class: GlslBindingClass,
+    hal_class: Option<yawgpu_hal::HalGlesBindingClass>,
+    hal_remaps: &mut Vec<yawgpu_hal::HalGlesBindingRemap>,
+    key: &mut Vec<GlslBindingKeyEntry>,
+) -> Result<(), String> {
+    for (flat_binding, &(group, binding)) in points.iter().enumerate() {
+        let flat_binding = u32::try_from(flat_binding)
+            .map_err(|_| "GLES flat binding number exceeds u32 range".to_owned())?;
+        tint_remaps.push(yawgpu_tint::BindingRemap {
+            group,
+            binding,
+            dst_group: 0,
+            dst_binding: flat_binding,
+        });
+        if let Some(class) = hal_class {
+            hal_remaps.push(yawgpu_hal::HalGlesBindingRemap::new(
+                group,
+                binding,
+                class,
+                flat_binding,
+            ));
+        }
+        key.push(GlslBindingKeyEntry {
+            class,
+            group,
+            binding,
+            dst_binding: flat_binding,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(feature = "gles")]
@@ -2940,7 +3061,7 @@ fn fs() -> @location(0) vec4f {
     /// binds GLES buffer/image units at the raw WGSL binding number.
     #[cfg(feature = "gles")]
     #[test]
-    fn generate_glsl_pins_non_sequential_wgsl_binding_numbers() {
+    fn generate_glsl_flattens_non_sequential_wgsl_binding_numbers() {
         let generated = parse_and_validate_wgsl(
             r#"
 struct Uniforms {
@@ -2970,16 +3091,108 @@ fn cs() {
         assert!(
             generated
                 .source
-                .contains("layout(binding = 3, std430)\nbuffer"),
+                .contains("layout(binding = 0, std430)\nbuffer"),
             "GLSL:\n{}",
             generated.source
         );
         assert!(
             generated
                 .source
-                .contains("layout(binding = 7, rgba8) uniform highp writeonly image2D"),
+                .contains("layout(binding = 0, rgba8) uniform highp writeonly image2D"),
             "GLSL:\n{}",
             generated.source
+        );
+        assert_eq!(
+            generated.binding_remaps,
+            vec![
+                yawgpu_hal::HalGlesBindingRemap::new(
+                    0,
+                    0,
+                    yawgpu_hal::HalGlesBindingClass::UniformBuffer,
+                    0,
+                ),
+                yawgpu_hal::HalGlesBindingRemap::new(
+                    0,
+                    3,
+                    yawgpu_hal::HalGlesBindingClass::StorageBuffer,
+                    0,
+                ),
+                yawgpu_hal::HalGlesBindingRemap::new(
+                    0,
+                    7,
+                    yawgpu_hal::HalGlesBindingClass::StorageTexture,
+                    0,
+                ),
+            ]
+        );
+    }
+
+    #[cfg(feature = "gles")]
+    #[test]
+    fn generate_glsl_flattens_colliding_bindings_across_groups() {
+        let generated = parse_and_validate_wgsl(
+            r#"
+struct U {
+  x: u32,
+}
+@group(0) @binding(0) var<uniform> u0: U;
+@group(1) @binding(0) var<uniform> u1: U;
+@group(0) @binding(1) var<storage, read_write> s0: array<u32>;
+@group(1) @binding(1) var<storage, read_write> s1: array<u32>;
+
+@compute @workgroup_size(1)
+fn cs() {
+  s0[0] = u0.x;
+  s1[0] = u1.x;
+}
+"#,
+        )
+        .unwrap()
+        .generate_glsl("cs", ShaderStage::Compute, &PipelineConstants::default())
+        .unwrap();
+
+        assert!(
+            generated
+                .source
+                .contains("layout(binding = 0, std140)\nuniform"),
+            "GLSL:\n{}",
+            generated.source
+        );
+        assert!(
+            generated
+                .source
+                .contains("layout(binding = 1, std140)\nuniform"),
+            "GLSL:\n{}",
+            generated.source
+        );
+        assert_eq!(
+            generated.binding_remaps,
+            vec![
+                yawgpu_hal::HalGlesBindingRemap::new(
+                    0,
+                    0,
+                    yawgpu_hal::HalGlesBindingClass::UniformBuffer,
+                    0,
+                ),
+                yawgpu_hal::HalGlesBindingRemap::new(
+                    1,
+                    0,
+                    yawgpu_hal::HalGlesBindingClass::UniformBuffer,
+                    1,
+                ),
+                yawgpu_hal::HalGlesBindingRemap::new(
+                    0,
+                    1,
+                    yawgpu_hal::HalGlesBindingClass::StorageBuffer,
+                    0,
+                ),
+                yawgpu_hal::HalGlesBindingRemap::new(
+                    1,
+                    1,
+                    yawgpu_hal::HalGlesBindingClass::StorageBuffer,
+                    1,
+                ),
+            ]
         );
     }
 
