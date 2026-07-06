@@ -8,6 +8,7 @@ use super::{rebuild_hal_error, BACKEND};
 use crate::{HalError, HalTextureDescriptor, HalTextureDimension, HalTextureFormat};
 
 pub(super) struct GlesTextureMeta {
+    pub(super) hal_format: HalTextureFormat,
     pub(super) format: GlesFormat,
     pub(super) dimension: HalTextureDimension,
     pub(super) target: u32,
@@ -96,6 +97,7 @@ fn derive_meta(descriptor: &HalTextureDescriptor) -> GlesTextureMeta {
         Err(_) => fallback_format(),
     };
     GlesTextureMeta {
+        hal_format: descriptor.format,
         format,
         dimension: descriptor.dimension,
         target: texture_target(descriptor),

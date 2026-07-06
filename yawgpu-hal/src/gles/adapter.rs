@@ -3,7 +3,7 @@ use std::sync::Arc;
 use glow::HasContext;
 use khronos_egl as egl;
 
-use super::device::{GlesDevice, GlesDeviceCaps, GlesSampleMaskIFn};
+use super::device::{GlesDevice, GlesDeviceCaps, GlesSampleMaskIFn, GlesTextureViewFn};
 use super::egl::{EglConfig, EglContext, EglSurface};
 use super::format::GlesColorRenderCaps;
 use super::instance::{EglInstanceState, GlesInstanceInner};
@@ -363,12 +363,18 @@ fn create_egl_device(
         return Err(HalError::DeviceCreationFailed { backend: BACKEND });
     }
 
+    let extensions = gl.supported_extensions();
+    let texture_view = load_egl_proc::<GlesTextureViewFn>(egl_state, "glTextureView");
     let caps = GlesDeviceCaps {
-        supports_base_vertex: detect_base_vertex_support((major, minor), gl.supported_extensions()),
-        color_render_caps: detect_color_render_caps(gl.supported_extensions()),
-        supports_vertex_array_bgra: detect_vertex_array_bgra_support(gl.supported_extensions()),
+        supports_base_vertex: detect_base_vertex_support((major, minor), extensions),
+        color_render_caps: detect_color_render_caps(extensions),
+        supports_vertex_array_bgra: detect_vertex_array_bgra_support(extensions),
         max_samples: unsafe { gl.get_parameter_i32(glow::MAX_SAMPLES) },
         sample_mask_i: load_egl_proc::<GlesSampleMaskIFn>(egl_state, "glSampleMaski"),
+        supports_texture_view: detect_texture_view_support((major, minor), extensions)
+            && texture_view.is_some(),
+        supports_cube_map_array: detect_cube_map_array_support((major, minor), extensions),
+        texture_view,
     };
 
     Ok(GlesDevice::from_egl(
@@ -486,6 +492,27 @@ pub(super) fn query_gles_adapter_caps(
         color_render_caps: detect_color_render_caps(extensions),
         supports_float32_filterable: detect_float32_filterable_support(extensions),
     }
+}
+
+pub(super) fn detect_texture_view_support(
+    version: (u32, u32),
+    extensions: &std::collections::HashSet<String>,
+) -> bool {
+    version >= (3, 2)
+        || extensions.contains("GL_OES_texture_view")
+        || extensions.contains("GL_EXT_texture_view")
+        || extensions.contains("texture_view")
+}
+
+pub(super) fn detect_cube_map_array_support(
+    version: (u32, u32),
+    extensions: &std::collections::HashSet<String>,
+) -> bool {
+    version >= (3, 2)
+        || extensions.contains("GL_OES_texture_cube_map_array")
+        || extensions.contains("GL_EXT_texture_cube_map_array")
+        || extensions.contains("texture_cube_map_array")
+        || extensions.contains("cube_map_array")
 }
 
 pub(super) fn query_gles_limits(gl: &glow::Context) -> HalLimits {

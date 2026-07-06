@@ -20,6 +20,8 @@ use crate::{
 };
 
 pub(super) type GlesSampleMaskIFn = unsafe extern "system" fn(u32, u32);
+pub(super) type GlesTextureViewFn =
+    unsafe extern "system" fn(u32, u32, u32, u32, u32, u32, u32, u32);
 
 pub(super) struct GlesDeviceCaps {
     pub(super) supports_base_vertex: bool,
@@ -27,6 +29,9 @@ pub(super) struct GlesDeviceCaps {
     pub(super) supports_vertex_array_bgra: bool,
     pub(super) max_samples: i32,
     pub(super) sample_mask_i: Option<GlesSampleMaskIFn>,
+    pub(super) supports_texture_view: bool,
+    pub(super) supports_cube_map_array: bool,
+    pub(super) texture_view: Option<GlesTextureViewFn>,
 }
 
 pub(super) enum GlesDeviceInner {
@@ -58,6 +63,15 @@ pub(super) struct EglDeviceState {
     /// GLES 3.1 core `glSampleMaski`; cached because glow 0.14 does not expose
     /// a public wrapper on `HasContext`.
     pub(super) sample_mask_i: Option<GlesSampleMaskIFn>,
+    /// Whether `glTextureView` is supported by GLES 3.2 or
+    /// `GL_OES/EXT_texture_view`, and the entry point loaded successfully.
+    pub(super) supports_texture_view: bool,
+    /// Whether cube-array texture targets are supported by GLES 3.2 or the
+    /// cube-map-array extension.
+    pub(super) supports_cube_map_array: bool,
+    /// Manually loaded `glTextureView`; glow 0.14 has no `HasContext` wrapper
+    /// for it.
+    pub(super) texture_view: Option<GlesTextureViewFn>,
     /// Internal NEAREST sampler used for Tint placeholder combined samplers
     /// emitted for samplerless textureLoad. Integer/stencil textures are
     /// incomplete with the texture object's default LINEAR filtering.
@@ -173,6 +187,30 @@ impl GlesDeviceInner {
         }
     }
 
+    pub(super) fn supports_texture_view(&self) -> bool {
+        match self {
+            Self::Egl(state) => state.supports_texture_view,
+            #[cfg(windows)]
+            Self::Wgl(state) => state.supports_texture_view,
+        }
+    }
+
+    pub(super) fn supports_cube_map_array(&self) -> bool {
+        match self {
+            Self::Egl(state) => state.supports_cube_map_array,
+            #[cfg(windows)]
+            Self::Wgl(state) => state.supports_cube_map_array,
+        }
+    }
+
+    pub(super) fn texture_view(&self) -> Option<GlesTextureViewFn> {
+        match self {
+            Self::Egl(state) => state.texture_view,
+            #[cfg(windows)]
+            Self::Wgl(state) => state.texture_view,
+        }
+    }
+
     pub(super) fn placeholder_sampler(&self) -> Result<glow::Sampler, HalError> {
         match self {
             Self::Egl(state) => state
@@ -282,6 +320,9 @@ impl GlesDevice {
             supports_vertex_array_bgra: caps.supports_vertex_array_bgra,
             max_samples: caps.max_samples,
             sample_mask_i: caps.sample_mask_i,
+            supports_texture_view: caps.supports_texture_view,
+            supports_cube_map_array: caps.supports_cube_map_array,
+            texture_view: caps.texture_view,
             placeholder_sampler,
         }));
         let queue = GlesQueue::new(Arc::clone(&inner));

@@ -318,3 +318,28 @@ per case.
   the working texelFetch path. Suspected Mesa driver defect (a
   hand-written GL repro would upgrade suspected->confirmed, per the
   F-126 / zero-dim precedent). 2 CTS cases; documented, not code-guarded.
+
+- **Flexible texture views via `glTextureView`** (2026-07-06, DONE) —
+  cube / cube-array / array-layer subrange / stencil-only / color-format
+  reinterpret views. Mirrors Dawn's opengl backend (`TextureGL.cpp`
+  `TargetForTextureViewDimension` / `RequiresCreatingNewTextureView` /
+  `CreateView`): the WebGPU texture keeps its base GL storage
+  (`TEXTURE_2D_ARRAY` for a 2d/6-layer texture) and, when a binding needs
+  a different view target/subrange/aspect/format, the bind path creates a
+  transient GL texture object aliasing the base storage with
+  `glTextureView(view, target, src, internalFormat, minLevel, numLevels,
+  minLayer, numLayers)` and binds that. No `textureBindingViewDimension`
+  hint is required — this matches the CTS oracle (Dawn uses flexible views,
+  so CTS never sets the hint). The capability is detected at adapter time
+  (`supports_texture_view` from ES 3.2 / `GL_OES_texture_view` /
+  `GL_EXT_texture_view`; `supports_cube_map_array` for cube-array); the
+  proc is loaded manually (EGL + WGL paths). glTextureView requires an
+  **immutable-format** source, which yawgpu already satisfies (all GLES
+  textures are `glTexStorage*`-allocated). Verified on Mesa crocus (Intel
+  Haswell, reports ES 3.2): `submit_compute_pass_samples_cube_view_from_2d_array_texture_view`
+  samples all 6 faces correctly; array-layer-subrange view verified too.
+  **Fallback:** if `glTextureView` is unavailable, the previous
+  `HalError` rejection for these view shapes is retained (true ES-3.1
+  Tier-2 gap). Supersedes the earlier "cube is a Tier-2 gap" catalogue
+  entry and the reverted `textureBindingViewDimension` approach
+  (`webgpu-native-cts/transcripts/cube-wip-reverted.patch`).

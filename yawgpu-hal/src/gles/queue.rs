@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use glow::HasContext;
 
-use super::device::GlesDeviceInner;
+use super::device::{GlesDeviceInner, GlesTextureViewFn};
 use super::format::{
     color_clear_kind, map_primitive_topology, map_vertex_format, storage_image_format,
     GlesClearKind,
@@ -18,7 +18,7 @@ use crate::{
     HalError, HalFrontFace, HalGlesBindingClass, HalGlesBindingRemap, HalIndexFormat,
     HalRenderLoadOp, HalRenderPass, HalRenderPipeline, HalSampler, HalStencilFaceState,
     HalStencilOperation, HalStorageTextureAccess, HalTexture, HalTextureAspect, HalTextureClear,
-    HalTextureCopy, HalTextureViewDimension, HalVertexStepMode,
+    HalTextureCopy, HalTextureFormat, HalTextureViewDimension, HalVertexStepMode,
 };
 
 /// Stores GLES queue data used by validation and backend submission.
@@ -68,6 +68,9 @@ impl GlesQueue {
         let supports_base_vertex = self.inner.supports_base_vertex();
         let supports_vertex_array_bgra = self.inner.supports_vertex_array_bgra();
         let sample_mask_i = self.inner.sample_mask_i();
+        let supports_texture_view = self.inner.supports_texture_view();
+        let supports_cube_map_array = self.inner.supports_cube_map_array();
+        let texture_view = self.inner.texture_view();
         let placeholder_sampler = self.inner.placeholder_sampler()?;
         self.inner
             .with_current_context(|gl| -> Result<(), HalError> {
@@ -102,7 +105,16 @@ impl GlesQueue {
                         HalCopy::TextureToBuffer(copy) => submit_texture_to_buffer(gl, copy)?,
                         HalCopy::TextureToTexture(copy) => submit_texture_to_texture(gl, copy)?,
                         HalCopy::ComputePass(pass) => {
-                            submit_compute_pass(gl, pass, placeholder_sampler)?;
+                            submit_compute_pass(
+                                gl,
+                                pass,
+                                placeholder_sampler,
+                                TextureViewCaps {
+                                    supports_texture_view,
+                                    supports_cube_map_array,
+                                    texture_view,
+                                },
+                            )?;
                         }
                         HalCopy::RenderPass(pass) => {
                             let render_caps = RenderDrawCaps {
@@ -110,7 +122,17 @@ impl GlesQueue {
                                 supports_vertex_array_bgra,
                                 sample_mask_i,
                             };
-                            submit_render_pass(gl, pass, render_caps, placeholder_sampler)?;
+                            submit_render_pass(
+                                gl,
+                                pass,
+                                render_caps,
+                                placeholder_sampler,
+                                TextureViewCaps {
+                                    supports_texture_view,
+                                    supports_cube_map_array,
+                                    texture_view,
+                                },
+                            )?;
                         }
                         #[cfg(feature = "tiled")]
                         HalCopy::SubpassRenderPass(_) => {
@@ -241,6 +263,7 @@ fn submit_compute_pass(
     gl: &glow::Context,
     pass: &HalComputePass,
     placeholder_sampler: glow::Sampler,
+    texture_view_caps: TextureViewCaps,
 ) -> Result<(), HalError> {
     let HalComputePipeline::Gles(pipeline) = &pass.pipeline else {
         return Err(HalError::BufferOperationFailed {
@@ -293,8 +316,13 @@ fn submit_compute_pass(
             &pass.bind_textures,
             &pass.bind_samplers,
             placeholder_sampler,
+            texture_view_caps,
         )?;
-        let _texture_cleanup = TextureUnitCleanup { gl, texture_units };
+        let _texture_cleanup = TextureUnitCleanup {
+            gl,
+            texture_units: texture_units.units,
+            texture_views: texture_units.texture_views,
+        };
         let _texture_metadata_cleanup = bind_texture_metadata_ubo(
             gl,
             pipeline.texture_metadata_ubo_binding(),
@@ -397,14 +425,34 @@ fn reject_external_texture_bindings(count: usize) -> Result<(), HalError> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct TextureViewCaps {
+    supports_texture_view: bool,
+    supports_cube_map_array: bool,
+    texture_view: Option<GlesTextureViewFn>,
+}
+
+struct BoundCombinedSamplers {
+    units: Vec<u32>,
+    texture_views: Vec<TransientTextureView>,
+}
+
+struct TransientTextureView {
+    unit: u32,
+    target: u32,
+    texture: glow::Texture,
+}
+
 fn bind_combined_samplers(
     gl: &glow::Context,
     combined_samplers: &[super::pipeline::GlesResolvedCombinedSampler],
     textures: &[HalBoundTexture],
     samplers: &[HalBoundSampler],
     placeholder_sampler: glow::Sampler,
-) -> Result<Vec<u32>, HalError> {
+    texture_view_caps: TextureViewCaps,
+) -> Result<BoundCombinedSamplers, HalError> {
     let mut units = Vec::with_capacity(combined_samplers.len());
+    let mut texture_views = Vec::new();
     for combined in combined_samplers {
         let texture = textures
             .iter()
@@ -426,8 +474,11 @@ fn bind_combined_samplers(
                 message: "sampled texture binding is not a GLES texture",
             });
         };
-        let target = texture_view_target(texture.dimension, gles_texture.meta().target)?;
-        validate_texture_view_layers(texture, gles_texture.meta().depth_or_array_layers)?;
+        let target = texture_view_target(
+            texture.dimension,
+            gles_texture.meta().target,
+            texture_view_caps.supports_cube_map_array,
+        )?;
         let raw_texture = gles_texture.raw_or_err()?;
         let base_level = i32_from_u32(
             texture.base_mip_level,
@@ -443,17 +494,44 @@ fn bind_combined_samplers(
             })?;
         let max_level = i32_from_u32(max_level, "texture max mip level exceeds GLES limit")?;
         let unit = combined.unit;
+        let (bound_texture, owns_bound_texture) = texture_handle_for_sampled_view(
+            gl,
+            raw_texture,
+            target,
+            gles_texture.meta(),
+            texture,
+            texture_view_caps,
+        )?;
         unsafe {
             gl.active_texture(glow::TEXTURE0 + unit);
-            gl.bind_texture(target, Some(raw_texture));
+            gl.bind_texture(target, Some(bound_texture));
             apply_depth_stencil_texture_mode(gl, target, gles_texture.meta(), texture.aspect);
             if target != glow::TEXTURE_2D_MULTISAMPLE {
                 // This mutates texture-object state. GLES queue submission is
                 // single-context serialized, so restoring per-view mip bounds
                 // at each bind is deterministic for this backend.
-                gl.tex_parameter_i32(target, glow::TEXTURE_BASE_LEVEL, base_level);
-                gl.tex_parameter_i32(target, glow::TEXTURE_MAX_LEVEL, max_level);
+                if owns_bound_texture {
+                    gl.tex_parameter_i32(target, glow::TEXTURE_BASE_LEVEL, 0);
+                    gl.tex_parameter_i32(
+                        target,
+                        glow::TEXTURE_MAX_LEVEL,
+                        i32_from_u32(
+                            texture.mip_level_count.saturating_sub(1),
+                            "texture view mip level count exceeds GLES limit",
+                        )?,
+                    );
+                } else {
+                    gl.tex_parameter_i32(target, glow::TEXTURE_BASE_LEVEL, base_level);
+                    gl.tex_parameter_i32(target, glow::TEXTURE_MAX_LEVEL, max_level);
+                }
             }
+        }
+        if owns_bound_texture {
+            texture_views.push(TransientTextureView {
+                unit,
+                target,
+                texture: bound_texture,
+            });
         }
         if combined.uses_placeholder_sampler {
             unsafe {
@@ -485,7 +563,149 @@ fn bind_combined_samplers(
         }
         units.push(unit);
     }
-    Ok(units)
+    Ok(BoundCombinedSamplers {
+        units,
+        texture_views,
+    })
+}
+
+fn texture_handle_for_sampled_view(
+    gl: &glow::Context,
+    raw_texture: glow::Texture,
+    target: u32,
+    meta: &GlesTextureMeta,
+    texture: &HalBoundTexture,
+    caps: TextureViewCaps,
+) -> Result<(glow::Texture, bool), HalError> {
+    if !requires_texture_view(meta, texture, target) {
+        return Ok((raw_texture, false));
+    }
+    if !caps.supports_texture_view {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES cannot bind this texture view without glTextureView",
+        });
+    }
+    let Some(texture_view) = caps.texture_view else {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES texture-view support was reported but glTextureView is unavailable",
+        });
+    };
+    create_transient_texture_view(gl, raw_texture, target, meta, texture, texture_view)
+        .map(|view| (view, true))
+}
+
+fn requires_texture_view(
+    meta: &GlesTextureMeta,
+    texture: &HalBoundTexture,
+    view_target: u32,
+) -> bool {
+    requires_texture_view_for(
+        meta,
+        view_target,
+        texture.format,
+        texture.aspect,
+        texture.base_array_layer,
+        texture.array_layer_count,
+    )
+}
+
+fn requires_texture_view_for(
+    meta: &GlesTextureMeta,
+    view_target: u32,
+    view_format: HalTextureFormat,
+    aspect: HalTextureAspect,
+    base_array_layer: u32,
+    array_layer_count: u32,
+) -> bool {
+    view_target != meta.target
+        || base_array_layer != 0
+        || array_layer_count < meta.depth_or_array_layers
+        || (view_format != meta.hal_format && !is_depth_or_stencil_hal_format(meta.hal_format))
+        || (matches!(aspect, HalTextureAspect::StencilOnly)
+            && is_packed_depth_stencil_format(meta.format.internal))
+}
+
+fn is_depth_or_stencil_hal_format(format: HalTextureFormat) -> bool {
+    format_has_depth_aspect(format) || format_has_stencil_aspect(format)
+}
+
+fn create_transient_texture_view(
+    gl: &glow::Context,
+    raw_texture: glow::Texture,
+    target: u32,
+    meta: &GlesTextureMeta,
+    texture: &HalBoundTexture,
+    texture_view: GlesTextureViewFn,
+) -> Result<glow::Texture, HalError> {
+    let internal_format = texture_view_internal_format(meta, texture)?;
+    let min_level = texture.base_mip_level;
+    let num_levels = texture.mip_level_count;
+    let min_layer = texture.base_array_layer;
+    let num_layers = texture_view_layer_count(texture);
+    unsafe {
+        let view = gl
+            .create_texture()
+            .map_err(|_| HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "glCreateTexture failed for GLES texture view",
+            })?;
+        // Simple and correct first: create a transient GL view for this submit
+        // and delete it in `TextureUnitCleanup`. A later cache can move this
+        // onto the texture/view object without changing binding semantics.
+        texture_view(
+            gl_texture_name(view),
+            target,
+            gl_texture_name(raw_texture),
+            internal_format,
+            min_level,
+            num_levels,
+            min_layer,
+            num_layers,
+        );
+        let error = gl.get_error();
+        if error != glow::NO_ERROR {
+            gl.delete_texture(view);
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "glTextureView failed for GLES sampled texture view",
+            });
+        }
+        Ok(view)
+    }
+}
+
+fn texture_view_internal_format(
+    meta: &GlesTextureMeta,
+    texture: &HalBoundTexture,
+) -> Result<u32, HalError> {
+    if is_packed_depth_stencil_format(meta.format.internal) {
+        return Ok(meta.format.internal);
+    }
+    Ok(super::format::map_texture_format(texture.format)?.internal)
+}
+
+fn texture_view_layer_count(texture: &HalBoundTexture) -> u32 {
+    match texture.dimension {
+        HalTextureViewDimension::D1 | HalTextureViewDimension::D2 | HalTextureViewDimension::D3 => {
+            1
+        }
+        HalTextureViewDimension::D2Array
+        | HalTextureViewDimension::Cube
+        | HalTextureViewDimension::CubeArray => texture.array_layer_count,
+    }
+}
+
+fn is_packed_depth_stencil_format(internal_format: u32) -> bool {
+    matches!(
+        internal_format,
+        glow::DEPTH24_STENCIL8 | glow::DEPTH32F_STENCIL8
+    )
+}
+
+fn gl_texture_name(texture: glow::Texture) -> u32 {
+    texture.0.get()
 }
 
 fn bind_storage_textures(
@@ -735,6 +955,7 @@ impl Drop for TextureMetadataUboCleanup<'_> {
 fn texture_view_target(
     dimension: HalTextureViewDimension,
     texture_target: u32,
+    supports_cube_map_array: bool,
 ) -> Result<u32, HalError> {
     match dimension {
         HalTextureViewDimension::D1 => Ok(glow::TEXTURE_2D),
@@ -744,41 +965,31 @@ fn texture_view_target(
         HalTextureViewDimension::D2 => Ok(glow::TEXTURE_2D),
         HalTextureViewDimension::D2Array => Ok(glow::TEXTURE_2D_ARRAY),
         HalTextureViewDimension::Cube => Ok(glow::TEXTURE_CUBE_MAP),
+        HalTextureViewDimension::CubeArray if supports_cube_map_array => {
+            Ok(glow::TEXTURE_CUBE_MAP_ARRAY)
+        }
         HalTextureViewDimension::CubeArray => Err(HalError::BufferOperationFailed {
             backend: BACKEND,
-            message: "GLES 3.1 lacks cube-array textures",
+            message: "GLES lacks cube-array textures",
         }),
         HalTextureViewDimension::D3 => Ok(glow::TEXTURE_3D),
     }
 }
 
-fn validate_texture_view_layers(
-    texture: &HalBoundTexture,
-    full_layer_count: u32,
-) -> Result<(), HalError> {
-    let layered = matches!(
-        texture.dimension,
-        HalTextureViewDimension::D2Array
-            | HalTextureViewDimension::Cube
-            | HalTextureViewDimension::CubeArray
-    );
-    if texture.base_array_layer != 0 || (layered && texture.array_layer_count != full_layer_count) {
-        return Err(HalError::BufferOperationFailed {
-            backend: BACKEND,
-            message: "GLES cannot bind array-layer subrange views",
-        });
-    }
-    Ok(())
-}
-
 struct TextureUnitCleanup<'a> {
     gl: &'a glow::Context,
     texture_units: Vec<u32>,
+    texture_views: Vec<TransientTextureView>,
 }
 
 impl Drop for TextureUnitCleanup<'_> {
     fn drop(&mut self) {
         unsafe {
+            for view in &self.texture_views {
+                self.gl.active_texture(glow::TEXTURE0 + view.unit);
+                self.gl.bind_texture(view.target, None);
+                self.gl.delete_texture(view.texture);
+            }
             for unit in &self.texture_units {
                 self.gl.bind_sampler(*unit, None);
             }
@@ -799,6 +1010,7 @@ fn submit_render_pass(
     pass: &HalRenderPass,
     caps: RenderDrawCaps,
     placeholder_sampler: glow::Sampler,
+    texture_view_caps: TextureViewCaps,
 ) -> Result<(), HalError> {
     reject_external_texture_bindings(pass.bind_external_textures.len())?;
     let fbo = create_render_fbo(gl, pass)?;
@@ -835,7 +1047,15 @@ fn submit_render_pass(
         fbo,
         vao: Some(vao),
     };
-    run_render_draw(gl, pass, pipeline, vao, caps, placeholder_sampler)?;
+    run_render_draw(
+        gl,
+        pass,
+        pipeline,
+        vao,
+        caps,
+        placeholder_sampler,
+        texture_view_caps,
+    )?;
     resolve_render_pass(gl, pass, fbo)
 }
 
@@ -1324,6 +1544,7 @@ fn run_render_draw(
     vao: glow::VertexArray,
     caps: RenderDrawCaps,
     placeholder_sampler: glow::Sampler,
+    texture_view_caps: TextureViewCaps,
 ) -> Result<(), HalError> {
     let program = pipeline.raw_or_err()?;
     unsafe {
@@ -1336,8 +1557,13 @@ fn run_render_draw(
         &pass.bind_textures,
         &pass.bind_samplers,
         placeholder_sampler,
+        texture_view_caps,
     )?;
-    let _texture_cleanup = TextureUnitCleanup { gl, texture_units };
+    let _texture_cleanup = TextureUnitCleanup {
+        gl,
+        texture_units: texture_units.units,
+        texture_views: texture_units.texture_views,
+    };
     let _texture_metadata_cleanup = bind_texture_metadata_ubo(
         gl,
         pipeline.texture_metadata_ubo_binding(),
@@ -4642,6 +4868,67 @@ mod tests {
         texture
     }
 
+    fn sampled_rgba8_array_texture(
+        device: &super::super::device::GlesDevice,
+        layer_colors: &[[u8; 4]],
+    ) -> super::super::texture::GlesTexture {
+        let texture = device
+            .create_texture(&crate::HalTextureDescriptor {
+                dimension: crate::HalTextureDimension::D2,
+                format: crate::HalTextureFormat::Rgba8Unorm,
+                width: 2,
+                height: 2,
+                depth_or_array_layers: layer_colors.len() as u32,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: crate::HalTextureUsage {
+                    copy_src: false,
+                    copy_dst: true,
+                    texture_binding: true,
+                    storage_binding: false,
+                    render_attachment: false,
+                    transient: false,
+                },
+            })
+            .expect("GLES sampled array texture creation must succeed");
+        let mut pixels = Vec::with_capacity(layer_colors.len() * RGBA8_SLICE_BYTES as usize);
+        for color in layer_colors {
+            for _ in 0..4 {
+                pixels.extend_from_slice(color);
+            }
+        }
+        let upload = device
+            .create_buffer(
+                pixels.len() as u64,
+                crate::HalBufferUsage {
+                    copy_src: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES sampled array texture upload buffer creation must succeed");
+        upload
+            .write(0, &pixels)
+            .expect("writing sampled array texture pixels must succeed");
+        device
+            .queue()
+            .submit_copies(&[HalCopy::BufferToTexture(HalBufferTextureCopy {
+                buffer: HalBuffer::Gles(upload),
+                buffer_layout: rgba8_slice_layout(0),
+                texture: HalTexture::Gles(texture.clone()),
+                format: crate::HalTextureFormat::Rgba8Unorm,
+                aspect: crate::HalTextureAspect::All,
+                mip_level: 0,
+                origin: crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+                extent: crate::HalExtent3d {
+                    width: 2,
+                    height: 2,
+                    depth_or_array_layers: layer_colors.len() as u32,
+                },
+            })])
+            .expect("uploading sampled array texture pixels must succeed");
+        texture
+    }
+
     fn bound_sampled_texture(
         texture: super::super::texture::GlesTexture,
         binding: u32,
@@ -4659,6 +4946,32 @@ mod tests {
             mip_level_count: 1,
             base_array_layer: 0,
             array_layer_count: 1,
+            aspect: crate::HalTextureAspect::All,
+            swizzle: crate::HalTextureComponentSwizzle::default(),
+            storage_access: None,
+        }
+    }
+
+    fn bound_sampled_texture_view(
+        texture: super::super::texture::GlesTexture,
+        binding: u32,
+        dimension: HalTextureViewDimension,
+        base_array_layer: u32,
+        array_layer_count: u32,
+    ) -> HalBoundTexture {
+        HalBoundTexture {
+            group: 0,
+            binding,
+            metal_index: 0,
+            vertex_metal_index: None,
+            fragment_metal_index: Some(0),
+            texture: HalTexture::Gles(texture),
+            format: crate::HalTextureFormat::Rgba8Unorm,
+            dimension,
+            base_mip_level: 0,
+            mip_level_count: 1,
+            base_array_layer,
+            array_layer_count,
             aspect: crate::HalTextureAspect::All,
             swizzle: crate::HalTextureComponentSwizzle::default(),
             storage_access: None,
@@ -5073,7 +5386,12 @@ mod tests {
                         sampler_binding: u32::MAX,
                         uses_placeholder_sampler: true,
                     }],
-                    binding_remaps: Vec::new(),
+                    binding_remaps: vec![crate::HalGlesBindingRemap::new(
+                        0,
+                        0,
+                        crate::HalGlesBindingClass::StorageBuffer,
+                        0,
+                    )],
                     texture_metadata_ubo_binding: None,
                 },
                 "main",
@@ -5125,6 +5443,260 @@ mod tests {
             .map(|chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
             .collect();
         let expected: Vec<u32> = pixels.iter().map(|value| u32::from(*value)).collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn submit_compute_pass_samples_cube_view_from_2d_array_texture_view() {
+        let Some(device) = gles_device_or_skip("GLES cube texture-view sampling test") else {
+            return;
+        };
+        if !device.inner_clone().supports_texture_view() {
+            eprintln!("skipping GLES cube texture-view sampling test; glTextureView unavailable");
+            return;
+        }
+        let face_colors = [
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [255, 255, 0, 255],
+            [255, 0, 255, 255],
+            [0, 255, 255, 255],
+        ];
+        let sampled = sampled_rgba8_array_texture(&device, &face_colors);
+        let output = device
+            .create_buffer(
+                6 * 16,
+                crate::HalBufferUsage {
+                    storage: true,
+                    copy_src: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES cube-view output buffer creation must succeed");
+        let pipeline = device
+            .create_compute_pipeline(
+                crate::HalShaderSource::Glsl {
+                    source: "#version 310 es\n\
+                             precision highp float;\n\
+                             precision highp int;\n\
+                             layout(local_size_x = 6) in;\n\
+                             uniform samplerCube u_tex;\n\
+                             layout(std430, binding = 0) buffer Out { uvec4 values[6]; } out_buf;\n\
+                             const vec3 dirs[6] = vec3[6](\n\
+                                 vec3(1.0, 0.0, 0.0), vec3(-1.0, 0.0, 0.0),\n\
+                                 vec3(0.0, 1.0, 0.0), vec3(0.0, -1.0, 0.0),\n\
+                                 vec3(0.0, 0.0, 1.0), vec3(0.0, 0.0, -1.0));\n\
+                             void main() {\n\
+                                 uint i = gl_GlobalInvocationID.x;\n\
+                                 out_buf.values[i] = uvec4(textureLod(u_tex, dirs[i], 0.0) * 255.0 + 0.5);\n\
+                             }\n"
+                    .to_owned(),
+                    stage: crate::HalShaderStage::Compute,
+                    combined_samplers: vec![crate::HalCombinedSampler {
+                        glsl_uniform_name: "u_tex".to_owned(),
+                        texture_group: 0,
+                        texture_binding: 1,
+                        sampler_group: u32::MAX,
+                        sampler_binding: u32::MAX,
+                        uses_placeholder_sampler: true,
+                    }],
+                    binding_remaps: vec![crate::HalGlesBindingRemap::new(
+                        0,
+                        0,
+                        crate::HalGlesBindingClass::StorageBuffer,
+                        0,
+                    )],
+                    texture_metadata_ubo_binding: None,
+                },
+                "main",
+                (6, 1, 1),
+                &[
+                    HalDescriptorBinding {
+                        group: 0,
+                        binding: 0,
+                        kind: HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Storage),
+                    },
+                    HalDescriptorBinding {
+                        group: 0,
+                        binding: 1,
+                        kind: HalDescriptorBindingKind::Texture,
+                    },
+                ],
+            )
+            .expect("GLES cube-view compute pipeline creation must succeed");
+
+        device
+            .queue()
+            .submit_copies(&[HalCopy::ComputePass(crate::HalComputePass {
+                pipeline: HalComputePipeline::Gles(pipeline),
+                bind_buffers: vec![crate::HalBoundBuffer {
+                    group: 0,
+                    binding: 0,
+                    metal_index: 0,
+                    vertex_metal_index: None,
+                    fragment_metal_index: None,
+                    buffer: HalBuffer::Gles(output.clone()),
+                    offset: 0,
+                    size: 6 * 16,
+                }],
+                bind_textures: vec![bound_sampled_texture_view(
+                    sampled,
+                    1,
+                    HalTextureViewDimension::Cube,
+                    0,
+                    6,
+                )],
+                bind_samplers: Vec::new(),
+                bind_external_textures: Vec::new(),
+                immediate_data: Vec::new(),
+                dispatch: HalComputeDispatch::Direct {
+                    workgroups: (1, 1, 1),
+                },
+            })])
+            .expect("compute pass sampling a cube texture view must succeed");
+
+        let bytes = output
+            .read(0, 6 * 16)
+            .expect("reading cube-view compute output must succeed");
+        let actual: Vec<[u32; 4]> = bytes
+            .chunks_exact(16)
+            .map(|chunk| {
+                [
+                    u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
+                    u32::from_ne_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]),
+                    u32::from_ne_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]),
+                    u32::from_ne_bytes([chunk[12], chunk[13], chunk[14], chunk[15]]),
+                ]
+            })
+            .collect();
+        let expected: Vec<[u32; 4]> = face_colors
+            .iter()
+            .map(|color| color.map(u32::from))
+            .collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn submit_compute_pass_samples_array_layer_subrange_texture_view() {
+        let Some(device) = gles_device_or_skip("GLES array-layer texture-view sampling test")
+        else {
+            return;
+        };
+        if !device.inner_clone().supports_texture_view() {
+            eprintln!(
+                "skipping GLES array-layer texture-view sampling test; glTextureView unavailable"
+            );
+            return;
+        }
+        let layer_colors = [[10, 20, 30, 255], [40, 50, 60, 255], [70, 80, 90, 255]];
+        let sampled = sampled_rgba8_array_texture(&device, &layer_colors);
+        let output = device
+            .create_buffer(
+                2 * 16,
+                crate::HalBufferUsage {
+                    storage: true,
+                    copy_src: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES array-view output buffer creation must succeed");
+        let pipeline = device
+            .create_compute_pipeline(
+                crate::HalShaderSource::Glsl {
+                    source: "#version 310 es\n\
+                             precision highp float;\n\
+                             precision highp int;\n\
+                             layout(local_size_x = 2) in;\n\
+                             uniform highp sampler2DArray u_tex;\n\
+                             layout(std430, binding = 0) buffer Out { uvec4 values[2]; } out_buf;\n\
+                             void main() {\n\
+                                 uint i = gl_GlobalInvocationID.x;\n\
+                                 out_buf.values[i] = uvec4(texelFetch(u_tex, ivec3(0, 0, int(i)), 0) * 255.0 + 0.5);\n\
+                             }\n"
+                    .to_owned(),
+                    stage: crate::HalShaderStage::Compute,
+                    combined_samplers: vec![crate::HalCombinedSampler {
+                        glsl_uniform_name: "u_tex".to_owned(),
+                        texture_group: 0,
+                        texture_binding: 1,
+                        sampler_group: u32::MAX,
+                        sampler_binding: u32::MAX,
+                        uses_placeholder_sampler: true,
+                    }],
+                    binding_remaps: vec![crate::HalGlesBindingRemap::new(
+                        0,
+                        0,
+                        crate::HalGlesBindingClass::StorageBuffer,
+                        0,
+                    )],
+                    texture_metadata_ubo_binding: None,
+                },
+                "main",
+                (2, 1, 1),
+                &[
+                    HalDescriptorBinding {
+                        group: 0,
+                        binding: 0,
+                        kind: HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Storage),
+                    },
+                    HalDescriptorBinding {
+                        group: 0,
+                        binding: 1,
+                        kind: HalDescriptorBindingKind::Texture,
+                    },
+                ],
+            )
+            .expect("GLES array-view compute pipeline creation must succeed");
+
+        device
+            .queue()
+            .submit_copies(&[HalCopy::ComputePass(crate::HalComputePass {
+                pipeline: HalComputePipeline::Gles(pipeline),
+                bind_buffers: vec![crate::HalBoundBuffer {
+                    group: 0,
+                    binding: 0,
+                    metal_index: 0,
+                    vertex_metal_index: None,
+                    fragment_metal_index: None,
+                    buffer: HalBuffer::Gles(output.clone()),
+                    offset: 0,
+                    size: 2 * 16,
+                }],
+                bind_textures: vec![bound_sampled_texture_view(
+                    sampled,
+                    1,
+                    HalTextureViewDimension::D2Array,
+                    1,
+                    2,
+                )],
+                bind_samplers: Vec::new(),
+                bind_external_textures: Vec::new(),
+                immediate_data: Vec::new(),
+                dispatch: HalComputeDispatch::Direct {
+                    workgroups: (1, 1, 1),
+                },
+            })])
+            .expect("compute pass sampling an array-layer texture view must succeed");
+
+        let bytes = output
+            .read(0, 2 * 16)
+            .expect("reading array-view compute output must succeed");
+        let actual: Vec<[u32; 4]> = bytes
+            .chunks_exact(16)
+            .map(|chunk| {
+                [
+                    u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
+                    u32::from_ne_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]),
+                    u32::from_ne_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]),
+                    u32::from_ne_bytes([chunk[12], chunk[13], chunk[14], chunk[15]]),
+                ]
+            })
+            .collect();
+        let expected = vec![
+            layer_colors[1].map(u32::from),
+            layer_colors[2].map(u32::from),
+        ];
         assert_eq!(actual, expected);
     }
 
@@ -6296,7 +6868,12 @@ mod tests {
                     .to_owned(),
                     stage: crate::HalShaderStage::Compute,
                     combined_samplers: Vec::new(),
-                    binding_remaps: Vec::new(),
+                    binding_remaps: vec![crate::HalGlesBindingRemap::new(
+                        0,
+                        0,
+                        crate::HalGlesBindingClass::StorageTexture,
+                        0,
+                    )],
                     texture_metadata_ubo_binding: None,
                 },
                 "main",
@@ -6413,7 +6990,12 @@ mod tests {
                     .to_owned(),
                     stage: crate::HalShaderStage::Compute,
                     combined_samplers: Vec::new(),
-                    binding_remaps: Vec::new(),
+                    binding_remaps: vec![crate::HalGlesBindingRemap::new(
+                        0,
+                        0,
+                        crate::HalGlesBindingClass::StorageTexture,
+                        0,
+                    )],
                     texture_metadata_ubo_binding: None,
                 },
                 "main",
@@ -6484,7 +7066,12 @@ mod tests {
                         .to_owned(),
                     stage: crate::HalShaderStage::Compute,
                     combined_samplers: Vec::new(),
-                    binding_remaps: Vec::new(),
+                    binding_remaps: vec![crate::HalGlesBindingRemap::new(
+                        0,
+                        0,
+                        crate::HalGlesBindingClass::StorageTexture,
+                        0,
+                    )],
                     texture_metadata_ubo_binding: None,
                 },
                 "main",
@@ -7608,42 +8195,122 @@ mod tests {
     }
 
     #[test]
-    fn texture_view_target_maps_supported_dimensions_and_rejects_cube_array() {
+    fn texture_view_target_maps_supported_dimensions_and_gates_cube_array() {
         assert_eq!(
-            texture_view_target(HalTextureViewDimension::D1, glow::TEXTURE_2D).expect("D1 target"),
+            texture_view_target(HalTextureViewDimension::D1, glow::TEXTURE_2D, false)
+                .expect("D1 target"),
             glow::TEXTURE_2D
         );
         assert_eq!(
-            texture_view_target(HalTextureViewDimension::D2, glow::TEXTURE_2D).expect("D2 target"),
+            texture_view_target(HalTextureViewDimension::D2, glow::TEXTURE_2D, false)
+                .expect("D2 target"),
             glow::TEXTURE_2D
         );
         assert_eq!(
-            texture_view_target(HalTextureViewDimension::D2, glow::TEXTURE_2D_MULTISAMPLE)
-                .expect("multisample D2 target"),
+            texture_view_target(
+                HalTextureViewDimension::D2,
+                glow::TEXTURE_2D_MULTISAMPLE,
+                false,
+            )
+            .expect("multisample D2 target"),
             glow::TEXTURE_2D_MULTISAMPLE
         );
         assert_eq!(
-            texture_view_target(HalTextureViewDimension::D2Array, glow::TEXTURE_2D_ARRAY)
-                .expect("D2Array target"),
+            texture_view_target(
+                HalTextureViewDimension::D2Array,
+                glow::TEXTURE_2D_ARRAY,
+                false
+            )
+            .expect("D2Array target"),
             glow::TEXTURE_2D_ARRAY
         );
         assert_eq!(
-            texture_view_target(HalTextureViewDimension::D3, glow::TEXTURE_3D).expect("D3 target"),
+            texture_view_target(HalTextureViewDimension::D3, glow::TEXTURE_3D, false)
+                .expect("D3 target"),
             glow::TEXTURE_3D
         );
         assert_eq!(
-            texture_view_target(HalTextureViewDimension::Cube, glow::TEXTURE_CUBE_MAP)
+            texture_view_target(HalTextureViewDimension::Cube, glow::TEXTURE_CUBE_MAP, false)
                 .expect("cube target"),
             glow::TEXTURE_CUBE_MAP
         );
-        let cube_array = texture_view_target(HalTextureViewDimension::CubeArray, glow::TEXTURE_2D)
-            .expect_err("cube array");
+        assert_eq!(
+            texture_view_target(HalTextureViewDimension::CubeArray, glow::TEXTURE_2D, true)
+                .expect("cube-array target"),
+            glow::TEXTURE_CUBE_MAP_ARRAY
+        );
+        let cube_array =
+            texture_view_target(HalTextureViewDimension::CubeArray, glow::TEXTURE_2D, false)
+                .expect_err("cube array");
         assert!(matches!(
             cube_array,
             HalError::BufferOperationFailed {
                 backend: "gles",
-                message: "GLES 3.1 lacks cube-array textures",
+                message: "GLES lacks cube-array textures",
             }
+        ));
+    }
+
+    #[test]
+    fn sampled_texture_view_predicate_matches_reinterpretation_cases() {
+        let meta = GlesTextureMeta {
+            hal_format: crate::HalTextureFormat::Rgba8Unorm,
+            format: super::super::format::map_texture_format(crate::HalTextureFormat::Rgba8Unorm)
+                .expect("rgba8unorm format"),
+            dimension: crate::HalTextureDimension::D2,
+            target: glow::TEXTURE_2D_ARRAY,
+            width: 2,
+            height: 2,
+            depth_or_array_layers: 6,
+            mip_level_count: 1,
+            sample_count: 1,
+        };
+        assert!(!requires_texture_view_for(
+            &meta,
+            glow::TEXTURE_2D_ARRAY,
+            crate::HalTextureFormat::Rgba8Unorm,
+            crate::HalTextureAspect::All,
+            0,
+            6,
+        ));
+        assert!(requires_texture_view_for(
+            &meta,
+            glow::TEXTURE_CUBE_MAP,
+            crate::HalTextureFormat::Rgba8Unorm,
+            crate::HalTextureAspect::All,
+            0,
+            6,
+        ));
+        assert!(requires_texture_view_for(
+            &meta,
+            glow::TEXTURE_2D_ARRAY,
+            crate::HalTextureFormat::Rgba8Unorm,
+            crate::HalTextureAspect::All,
+            1,
+            2,
+        ));
+
+        let stencil_meta = GlesTextureMeta {
+            hal_format: crate::HalTextureFormat::Depth24PlusStencil8,
+            format: super::super::format::map_texture_format(
+                crate::HalTextureFormat::Depth24PlusStencil8,
+            )
+            .expect("packed depth-stencil format"),
+            dimension: crate::HalTextureDimension::D2,
+            target: glow::TEXTURE_2D,
+            width: 2,
+            height: 2,
+            depth_or_array_layers: 1,
+            mip_level_count: 1,
+            sample_count: 1,
+        };
+        assert!(requires_texture_view_for(
+            &stencil_meta,
+            glow::TEXTURE_2D,
+            crate::HalTextureFormat::Stencil8,
+            crate::HalTextureAspect::StencilOnly,
+            0,
+            1,
         ));
     }
 

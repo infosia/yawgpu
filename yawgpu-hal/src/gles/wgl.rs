@@ -26,10 +26,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::adapter::{
-    detect_base_vertex_support, detect_color_render_caps, detect_vertex_array_bgra_support,
-    parse_gles_version, query_gles_adapter_caps,
+    detect_base_vertex_support, detect_color_render_caps, detect_cube_map_array_support,
+    detect_texture_view_support, detect_vertex_array_bgra_support, parse_gles_version,
+    query_gles_adapter_caps,
 };
-use super::device::GlesSampleMaskIFn;
+use super::device::{GlesSampleMaskIFn, GlesTextureViewFn};
 use super::format::GlesColorRenderCaps;
 use super::sampler::create_nearest_placeholder_sampler;
 use super::BACKEND;
@@ -178,6 +179,12 @@ pub(super) struct WglDeviceState {
     /// GLES 3.1 core `glSampleMaski`; cached because glow 0.14 does not expose
     /// a public wrapper on `HasContext`.
     pub(super) sample_mask_i: Option<GlesSampleMaskIFn>,
+    /// Whether `glTextureView` is supported and the entry point loaded.
+    pub(super) supports_texture_view: bool,
+    /// Whether `GL_TEXTURE_CUBE_MAP_ARRAY` is supported.
+    pub(super) supports_cube_map_array: bool,
+    /// Manually loaded `glTextureView`; glow 0.14 has no wrapper for it.
+    pub(super) texture_view: Option<GlesTextureViewFn>,
     pub(super) placeholder_sampler: Result<glow::Sampler, HalError>,
 }
 
@@ -342,13 +349,16 @@ impl WglDeviceState {
             return Err(HalError::DeviceCreationFailed { backend: BACKEND });
         }
 
-        let supports_base_vertex =
-            detect_base_vertex_support((major, minor), gl.supported_extensions());
-        let color_render_caps = detect_color_render_caps(gl.supported_extensions());
-        let supports_vertex_array_bgra =
-            detect_vertex_array_bgra_support(gl.supported_extensions());
+        let extensions = gl.supported_extensions();
+        let supports_base_vertex = detect_base_vertex_support((major, minor), extensions);
+        let color_render_caps = detect_color_render_caps(extensions);
+        let supports_vertex_array_bgra = detect_vertex_array_bgra_support(extensions);
         let max_samples = unsafe { gl.get_parameter_i32(glow::MAX_SAMPLES) };
         let sample_mask_i = load_wgl_proc::<GlesSampleMaskIFn>("glSampleMaski");
+        let texture_view = load_wgl_proc::<GlesTextureViewFn>("glTextureView");
+        let supports_texture_view =
+            detect_texture_view_support((major, minor), extensions) && texture_view.is_some();
+        let supports_cube_map_array = detect_cube_map_array_support((major, minor), extensions);
         let placeholder_sampler = unsafe { create_nearest_placeholder_sampler(&gl) };
 
         Ok(Self {
@@ -363,6 +373,9 @@ impl WglDeviceState {
             supports_vertex_array_bgra,
             max_samples,
             sample_mask_i,
+            supports_texture_view,
+            supports_cube_map_array,
+            texture_view,
             placeholder_sampler,
         })
     }

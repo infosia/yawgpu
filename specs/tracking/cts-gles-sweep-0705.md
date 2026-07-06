@@ -631,3 +631,44 @@ failing values and verifies) with uncertain per-round yield, NOT the
 clean structural wins of the earlier campaign (bind-groups, MSAA,
 storage, copies, feature/limit truthfulness). This is the genuine
 long tail of Tier-2 GLES conformance.
+
+## glTextureView flexible views DONE (2026-07-06) — cube solved the Dawn way
+
+Per user directive ("how dawn solves them? ... same thing on cubes"),
+studied Dawn's opengl backend (`TextureGL.cpp`) and matched its
+flexible-views strategy instead of cataloguing cube as a gap.
+
+**Key discovery:** the crocus target actually reports **OpenGL ES 3.2**
+with `glTextureView` + `texture_cube_map_array` available (an EGL+GLES
+probe confirmed `GL_VERSION="OpenGL ES 3.2 Mesa 23.2.1"`,
+texture_view=YES). The earlier "ES 3.1 has no glTextureView" assumption
+was wrong; the reverted `textureBindingViewDimension` approach was
+unnecessary.
+
+Implementation (Codex, HAL-only): adapter caps `supports_texture_view` /
+`supports_cube_map_array`; manually-loaded `glTextureView` proc (EGL +
+WGL); bind path creates a transient GL texture view aliasing the base
+`TEXTURE_2D_ARRAY` storage for cube / cube-array / array-layer subrange /
+stencil-only / color-format-reinterpret bindings, matching Dawn's
+`RequiresCreatingNewTextureView` / `CreateView`. No
+`textureBindingViewDimension` hint needed (CTS never sets it — its Dawn
+oracle uses flexible views). Fallback: retain the prior `HalError` when
+glTextureView is unavailable (true ES-3.1 Tier-2 gap). block-67 updated.
+
+**Stale-test discovery (root cause of the "cube returns 0" symptom):**
+6 GLES HAL compute-pass unit tests were passing `binding_remaps:
+Vec::new()`. Since the multi-bind-group commit 85b4880, an empty remap
+means `flat_binding()` returns None → the SSBO/storage-texture binding is
+silently skipped → the shader writes nothing → the test reads stale
+garbage. They passed in no-GPU CI (device skip) but had been **failing
+silently on hardware since 85b4880**. Fixed all 6 with correct
+`HalGlesBindingRemap` entries (test-only). This harness bug — not the
+cube code — produced the misleading `[1,0,0,...]` / all-zero readbacks.
+
+Verified on crocus (ES 3.2): `cargo test -p yawgpu-hal --features gles`
+= **172/172 pass** (was 166/172 with the 6 stale failures);
+`submit_compute_pass_samples_cube_view_from_2d_array_texture_view`
+samples all 6 cube faces correctly. Workspace Noop green, gles clippy
+clean. **CTS shader,execution cube delta (~13.7k target) measurement:
+PENDING** (next: targeted textureSample/textureSampleGrad dim="cube"
+run).
