@@ -427,3 +427,32 @@ api,validation residual 595: storage textures ~204 (T-G14, NEXT),
 maxBindingsPerBindGroup off-by-one ~100 (follow-up), indexed-indirect
 54, depth-stencil copy bytes_per_row 57, single-bind-group 32,
 cube-array 50, stencil 7. crash 0.
+
+## T-G14 storage textures done (d0ef874)
+
+Tint emits storage textures as image uniforms with layout(binding=N) =>
+glBindImageTexture(unit=N). GLES image-loadstore required format set
+mapped; others HalError. Real-EGL compute write/read_write tests pass.
+api,operation,storage_texture 6 -> 0 fail. api,validation UNCHANGED at
+595 — its storage residual is NOT a storage-execution gap.
+
+### FINDING (Tier-independent, needs a decision): core error-routing
+The 204 api,validation "StorageBinding texture format must support"
+(102) + "cannot create a view from an error texture" (102) are in
+state,device_lost,destroy:{createTexture,createView} iterating
+format="r8unorm";usageType="storage" — an invalid combo (r8unorm is
+not storage-capable in WebGPU, any tier). CTS marks our rejection
+"unexpected validation error", i.e. Dawn produces an error-texture the
+scope catches while yawgpu routes it to the uncaptured device-error
+sink. This is a CORE error-routing divergence, Tier-independent (should
+reproduce on Vulkan) — NOT GLES-specific. Candidate to verify against
+the Vulkan sweep and fix in core (would help Vulkan conformance too).
+
+## api,validation residual 595 (post T-G14) — disposition
+- 204 core error-routing (above) — cross-backend, verify + core fix.
+- 122 cube-array — catalogued (block-67).
+- 106 single-bind-group (>group 0) — deferred GLES impl.
+- 57 depth32float-stencil8 copy bytes_per_row — investigate (over-strict?).
+- 54 indexed-indirect draw restriction — investigate/impl.
+- ~50 residual incl. maxBindings off-by-one follow-up.
+crash 0 throughout. Campaign api,validation arc: 24,553 -> 595.
