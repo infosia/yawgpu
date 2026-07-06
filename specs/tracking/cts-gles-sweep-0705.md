@@ -350,3 +350,11 @@ client-row readback rewrite likely regressed cases the matrix does not
 cover (3D, mips, T2T interactions) — next attempt should change ONE
 path at a time and re-run CTS per change. Checkpoint stands at
 command_buffer fail=22,739 (commit 5736aea/661991a).
+
+## Slice 4b pieces (2026-07-06 night, one-at-a-time discipline)
+
+- Piece 1 (eb9f172): rgb9e5 compute fallback + copy matrix test — 22,739 -> 22,503.
+- Piece 2 (a602bc7): GL_OES_copy_image detection — -> 22,434.
+- Piece 3 (7f08953): non-attachable lazy-init clear via zero upload — -> **19,331** (fb-incomplete family eliminated).
+- Piece 4 REVERTED (patch: webgpu-native-cts/transcripts/slice4b-piece4-3d-b2t-reverted.patch): 3D B2T row-by-row upload regressed CTS to 20,968 despite green matrix incl. the new 4x4x3 partial-B2T case. The "byte 48 expected 0 got 1" family (~3.5k, r8snorm/3d origins_and_extents) remains UNSOLVED — the failing shape differs from all matrix cases; next attempt should extract the exact CTS subcase parameters (--list-cases on that test) and replicate one verbatim before changing production code.
+- Remaining command_buffer: 19,331 = unsolved padding family (~3.5k) + stencil readback catalogue (908) + long tail to re-cluster.
