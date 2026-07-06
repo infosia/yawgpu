@@ -812,3 +812,27 @@ FAIL->PASS). 12 files; hal 172/172, core 455, workspace green.
 Net after this session: no single large lever remains; the tail is the
 catalogued Tint depth gap + GLES hardware limits + ~160 scattered per-format
 value bugs.
+
+## FINAL shader,execution re-sweep (2026-07-06, yawgpu 15a9ddb) — aggregate
+
+Full `shader,execution` re-sweep on crocus (workers=2, raw, one process at
+a time) on the fully-fixed library. Aggregated from all gles-crocus-se-*.jsonl:
+
+| metric | a94ab06 (pre) | 15a9ddb (post) | delta |
+|---|---:|---:|---:|
+| pass  | 217,273 | **308,373** | +91,100 |
+| skip  | 516,424 | 516,424 | 0 |
+| fail  | 100,965 | **10,129** | **−90,836 (~90%)** |
+| crash | 2 | **0** | −2 |
+
+The −90,836 comes from the texture-builtin batches expr-call-5 (48,428 →
+7,022) and expr-call-6 (52,261 → 2,835): cube (glTextureView flexible
+views), cube-array (GLSL ES 3.2), and texture-metadata UBO. crash 2 → 0
+(the textureDimensions stencil-only cases no longer segfault in this
+re-sweep). webgpu-native-cts README GLES table updated to these numbers
+(shader/execution row swept on 15a9ddb; other three areas still a94ab06).
+
+Residual 10,129 = catalogued Tier-2 boundaries: raw depth read ~6.8k (Tint
+sampler2DShadow modelling), GLES hardware/spec limits (vertex-stage storage
+images, rg32 formats, no 1D), ~100 multisampled textureLoad. No clean
+large lever remains.
