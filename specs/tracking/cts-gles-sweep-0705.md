@@ -564,3 +564,43 @@ Published in webgpu-native-cts/README.md (commit 466ec89). shader/execution
 100,965 (down from 151,140 first-sweep, via multi-bind-group + layered DS
 attachments); remaining is texture-sampling correctness (textureGather
 family biggest). api/operation 19,932 (command_buffer copy correctness).
+
+## Tier-1 sampling: CUBE investigation — HARD, reverted to decision point (2026-07-06)
+
+shader,execution sampling mismatches split: dim="cube" ~13.7k (single
+root cause) + non-cube ~85k (gather/compare/sample, heterogeneous).
+Started with cube. Root cause: GLES creates a 2d/6-layer cube-viewable
+texture as TEXTURE_2D_ARRAY; a Cube view binds samplerCube which needs
+TEXTURE_CUBE_MAP => incomplete => samples 0.
+
+Attempted fix (Codex, 25 files, saved as
+webgpu-native-cts/transcripts/cube-wip-reverted.patch): plumb
+textureBindingViewDimension from the C descriptor chain through core to
+HalTextureDescriptor; GLES creates TEXTURE_CUBE_MAP + per-face
+glTexSubImage2D upload + cube bind. REVERTED because it does not fix CTS
+and left a failing test:
+1. **CTS does not set textureBindingViewDimension** (grep: only in
+   reflection.spec.cpp, NOT the texture-builtin harness) — the CTS
+   oracle is Dawn on Metal/Vulkan, which cube-views any 6-layer 2d
+   texture without the hint. So CTS-created cube textures arrive with no
+   signal => created as 2D_ARRAY => cube view returns HalError
+   "cube texture views require a cube-compatible texture".
+2. **Even WITH the hint** (the hand-written test set it): creation =
+   CUBE_MAP, all 6 faces upload GL-clean (verified with probes:
+   face_target 0x8515-0x851a, err=0), bind CUBE_MAP err=0 — but sampling
+   still returns ~0. A residual cube-completeness/sampling issue remains
+   unsolved.
+
+### DECISION NEEDED — cube strategy on GLES
+GL coples storage+view and ES 3.1 has no glTextureView, so a 2d-array
+texture cannot be aliased as cube. Options:
+- (A) CTS-port fix: set textureBindingViewDimension=cube for cube tests
+  (like the device_lost storage-skip fix — legitimate, matches what a
+  GL-targeting app must do) + debug the residual completeness issue.
+  Full cube support (~13.7k) but two problems to finish.
+- (B) Heuristic: create every cube-compatible 6-layer 2d texture as
+  CUBE_MAP. Risks 2d-array views of the same texture (WebGPU default
+  binding view for 6-layer 2d is 2d-array, not cube).
+- (C) Catalogue cube as a permanent-ish Tier-2 GLES gap and pivot to the
+  larger non-cube sampling clusters (~85k: gather/compare/sample), which
+  are independent of the GL cube limitation and may be more tractable.
