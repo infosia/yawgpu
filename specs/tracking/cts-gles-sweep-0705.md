@@ -1112,5 +1112,16 @@ machinery.
   compare/mixed), yawgpu-hal gles 174/174 (new real-EGL raw-depth sample
   test on crocus), Noop workspace green, clippy clean.
 
-Full shader,execution re-measure due for the net (was 10,129; expect
-~3,500). Then P3 (command_buffer copy tail).
+**Full shader,execution re-measure (commit 234b7a7, crocus, workers=2):**
+pass 308,373 -> **314,971**, fail **10,129 -> 3,531** (−6,598), crash 0.
+The −6,598 is the depth raw-read win. One flaky crash in
+`memory_model,atomicity:atomic_workgroup;intra_workgroup` appeared under
+concurrent load but did NOT reproduce (passed in isolation, se-nonexpr
+re-run crash 0) — a probabilistic weak-memory-model test artifact, not a
+deterministic library crash or a P2 regression. Residual 3,531 top
+clusters: poisoned-CB secondaries 1,888 (storage/other encode rejections),
+storage-texture 678, textureLoad value 400 (incl. depth24plus precision),
+framebuffer-incomplete 145, texture-contents 86, textureStore 84, memory-
+model 38, metadata 18. README GLES table updated: shader/execution
+10,129 -> 3,531, total fail 30,388 -> **23,790**. Next: P3 (command_buffer
+copy tail, 16,724 = 15,081 image_copy padding).
