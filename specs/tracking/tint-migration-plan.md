@@ -371,7 +371,7 @@ all reflection + codegen from Tint, naga still default & untouched.
   Tint's and naga's SPIR-V (naga applies a Vulkan position adjustment); under Tint
   the emitted winding is opposite, so the test's front_face/cull setup culls the
   triangle. **ROOT CAUSE CONFIRMED:** naga's SPIR-V default `WriterFlags` includes
-  `ADJUST_COORDINATE_SPACE` (`../wgpu/naga/src/back/spv/mod.rs:1123`) → naga flips Y
+  `ADJUST_COORDINATE_SPACE` (`<wgpu-fork>/naga/src/back/spv/mod.rs:1123`) → naga flips Y
   **in the shader** for Vulkan; yawgpu's Vulkan HAL viewport uses **positive height**
   (`yawgpu-hal/src/vulkan/encode.rs:1050-1053`, no flip), relying on naga's shader
   flip. Tint does NOT flip in-shader (Dawn uses a negative-height viewport) and the
@@ -455,7 +455,7 @@ every shader_tint slice now verifies `grep naga` is empty.)
 - **P4a — DONE** (`64fe785`): deleted `shader_naga.rs` (−3528 lines); collapsed the
   `crate::frontend` facade to `shader_tint` unconditionally; repointed all
   `shader_naga::` → `crate::frontend::`; dropped the naga dep (yawgpu-core), the naga
-  dev-dep (yawgpu), and the `../wgpu` fork pin (workspace + Cargo.lock); removed the
+  dev-dep (yawgpu), and the `<wgpu-fork>` fork pin (workspace + Cargo.lock); removed the
   `tint` feature + `default=["tint"]` (yawgpu-tint is now a non-optional dep, the sole
   frontend); `gles` uses Tint's GLSL writer. `grep naga` across yawgpu-core/yawgpu
   (.rs/.toml) + Cargo.lock = none. **naga is GONE — Tint is the only frontend.**

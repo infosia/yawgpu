@@ -427,7 +427,7 @@ defined when a real backend implementation lands.
 - **Reference example (`examples/tiled_deferred`) — deferred-shading demo.**
   yawgpu's flagship tiled-rendering demo mirrors the wgpu reference example
   `wgpu-tiled/examples/features/src/deferred_rendering` (in
-  `../wgpu/examples/features/src/deferred_rendering` for this fork).
+  `<wgpu-fork>/examples/features/src/deferred_rendering` for this fork).
   Target shape:
   - **Three subpasses** in one render pass:
     1. **G-Buffer** — instanced 5×5 cube grid, writes `albedo` (`Rgba8Unorm`)

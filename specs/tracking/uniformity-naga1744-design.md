@@ -7,10 +7,10 @@
 > doc uses "naga#1744" and "wgpu#4369" interchangeably.
 
 Implementing the WGSL-spec uniformity analysis (graph-reachability, as Tint does)
-in yawgpu's naga fork (`../wgpu` `feature/tiled`), to replace naga's coarse
+in yawgpu's naga fork (`<wgpu-fork>` `feature/tiled`), to replace naga's coarse
 **value-insensitive** analysis and close F-120 uniformity (~22467 CTS cases). See
 [[uniformity-naga1744]] for the investigation that motivated this; canonical Tint
-source `../../C/dawn/src/tint/lang/wgsl/resolver/uniformity.cc`.
+source `src/tint/lang/wgsl/resolver/uniformity.cc` (in the `third_party/dawn` submodule).
 
 **STATUS 2026-06-20: slices 1-4 DONE — F-120 uniformity RESOLVED on Metal.** The
 whole `shader,validation` tree is fail=0 (minus subgroup feature-skips): uniformity
@@ -133,7 +133,7 @@ existing dependency order (callees first) so summaries are ready at call sites.
    (58/0 green)**, function_variables/binary_expressions stay 0. **⚠ STALE-NAGA
    GOTCHA**: cargo did NOT always recompile the [patch] path-dep naga on yawgpu
    rebuild — a slice looked like it "didn't work" (pointers stuck at 53) until
-   `find ../wgpu/naga/src -name '*.rs' -exec touch {} +` forced recompile. ALWAYS
+   `find <wgpu-fork>/naga/src -name '*.rs' -exec touch {} +` forced recompile. ALWAYS
    touch naga src before the yawgpu build when verifying a fork edit, and confirm
    `grep -c "Compiling naga"` in the build log. Also: naga-cli `--validate 27` omits
    CONTROL_FLOW_UNIFORMITY (0x4) — use `--validate 31` to exercise uniformity.

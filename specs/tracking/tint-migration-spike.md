@@ -9,7 +9,7 @@ frontend? This spike de-risks the *feasibility* unknowns. It does NOT commit to
 the migration — that's a separate A-vs-B decision (below).
 
 Spike lives OUTSIDE the yawgpu repo at `../tint-spike/` (throwaway, not committed).
-Dawn/Tint source: `../../C/dawn`. Built on this M2.
+Dawn/Tint source: a full Dawn checkout. Built on this M2.
 
 ## What the spike proved (all measured)
 
@@ -53,10 +53,10 @@ deps vendored, both mobile targets cross-compile without hacks.
 
 ## CORRECTION — yawgpu's naga is the TBDR FORK, not vanilla naga + validation fixes
 
-(Added after re-reading `README.md` + `../wgpu/README.md`.) The spike framed naga
+(Added after re-reading `README.md` + `<wgpu-fork>/README.md`.) The spike framed naga
 as "just a WGSL→MSL/SPIRV compiler" and claimed migrating to Tint "drops the
 naga-fork maintenance tax." **That benefit was overstated.** yawgpu's naga fork
-(`../wgpu` `feature/tiled`) carries a **custom WGSL language extension** that is
+(`<wgpu-fork>` `feature/tiled`) carries a **custom WGSL language extension** that is
 load-bearing for the flagship `tiled`/`mobile` vendor extensions:
 - `subpass_input<T>` / `subpass_input_multisampled<T>` WGSL types + the
   `subpassLoad` builtin, lowered by naga to SPIR-V `OpTypeImage Dim=SubpassData`
@@ -133,7 +133,7 @@ User decided to **keep the current direction (A): stay on naga** for now. Tint
 migration is shelved (NOT cancelled — the spike proved it viable and the findings
 above remain valid if revisited). Consequence: `uniformity` (F-120) stays a
 documented upstream-naga limitation pending naga#1744 ([[uniformity-naga1744]]);
-the naga fork (`../wgpu` `feature/tiled`, incl. the TBDR `subpass_input` extension)
+the naga fork (`<wgpu-fork>` `feature/tiled`, incl. the TBDR `subpass_input` extension)
 continues as the shader frontend. Revisit B only if the naga divergence cost grows
 materially (e.g. uniformity/correctness findings start blocking real users) or the
 pure-Rust/mobile-simplicity priority changes.

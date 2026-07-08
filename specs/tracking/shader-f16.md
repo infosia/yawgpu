@@ -108,7 +108,7 @@ with internal-only f16 and require no `shader-f16` feature).
   reports them) so naga-emitted f16-in-buffer / f16-IO SPIR-V is loadable.
   Query via `get_physical_device_features2` pNext chain + extension presence
   (robustness2 pattern); enable only the sub-features the device reports.
-  Mirror the equivalent wgpu-hal/vulkan path in `../wgpu`.
+  Mirror the equivalent wgpu-hal/vulkan path in `<wgpu-fork>`.
 - **F16-6 (Metal).** Advertise unconditionally; naga MSL already emits
   `half`/`half2` and compiles (F-119). No device flag. (If a GPU-family gate
   proves necessary on older HW, add it; M-series is fine.)
