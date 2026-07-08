@@ -1174,3 +1174,45 @@ README GLES table: api,operation 19,934 -> 4,549, total fail 23,790 ->
 api,operation residual 4,549: render_pipeline 2,699 (MSAA sample_mask = P4),
 memory_sync 234 (P6 binding-size), rendering 173, command_buffer 1,359
 (stencil/B2B/MRT), render_pass 55, texture_view 20.
+
+## P4 part 1 DONE (2026-07-08) — whole-size buffer bindings (~1.4k FAIL->PASS)
+
+**Characterization reframed P4.** The `render_pipeline,sample_mask` cluster
+(2,682) was NOT MSAA behaviour — every fail was `render buffer binding size
+exceeds GLES limit`, firing even at `sampleCount=1`. Root cause: a bind-group
+buffer entry with unspecified size ("whole buffer from offset") reaches the HAL
+as `bound.size == u64::MAX`; Metal resolves it (`metal/encode.rs:709`) but GLES
+did not — both bind paths called `i32::try_from(u64::MAX)` -> overflow. Same
+root cause as the `memory_sync` "binding size exceeds GLES limit" cluster (234).
+
+**Fix (`gles/queue.rs`):** `resolve_bound_buffer_size` /
+`gles_bound_buffer_size` mirror Metal — resolve `u64::MAX` to
+`buffer.size() - offset` (with an offset>size guard) in both
+`bind_render_buffers` and the compute-pass binding closure, before the
+`i32::try_from`. No core change (core validates binding size against the
+truthful adapter limit). Real-EGL render + compute whole-size-at-offset tests;
+Noop unit tests for the pure resolver.
+
+**Verified crocus (workers=2):**
+- `memory_sync` 234 -> **4**.
+- `render_pipeline,sample_mask` 2,682 -> **1,510** (the binding rejection is
+  gone; 1,172 now pass). render_pipeline dir 2,699 -> **1,527**.
+- Full `api,operation`: pass 148,214 -> **149,624**, fail 4,549 -> **3,139**
+  (−1,410). crash 0, no regression.
+- yawgpu-hal gles 180/180, Noop green, clippy clean.
+- README GLES table: api,operation 4,549 -> 3,139, total fail 8,405 ->
+  **6,995**.
+
+### P4 part 2 — the REAL MSAA per-sample behaviour (residual 1,510, NEXT)
+Now that whole-size bindings execute, the sample_mask residual is the genuine
+per-sample behaviour the original P4 targeted:
+- `fragment_output_mask` sc=4 **1,258** + sc=1 **162** — "color index N: got N,
+  expected N" (741) + "depth index N: ..." (679): the pipeline
+  `multisample.mask` (rasterizationMask) and the shader `@builtin(sample_mask)`
+  output are not correctly gating per-sample color/depth writes (fails even at
+  sc=1, so the mask is not applied to the single sample). Investigate the GLES
+  `glSampleMaski` wiring + shader `gl_SampleMask` emission + per-sample resolve.
+- `alpha_to_coverage_mask` sc=4 **90** — "alpha >= N result did not match full
+  coverage": alpha-to-coverage sample derivation.
+This is a deep behavioural debug (hypothesis -> hardware loop), the true
+long-tail P4 slice.

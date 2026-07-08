@@ -290,13 +290,14 @@ fn submit_compute_pass(
             else {
                 return Ok(None);
             };
+            let bound_size = gles_bound_buffer_size(buffer, bound)?;
             let buffer = buffer.raw_or_err()?;
             let offset =
                 i32::try_from(bound.offset).map_err(|_| HalError::BufferOperationFailed {
                     backend: BACKEND,
                     message: "compute buffer binding offset exceeds GLES limit",
                 })?;
-            let size = i32::try_from(bound.size).map_err(|_| HalError::BufferOperationFailed {
+            let size = i32::try_from(bound_size).map_err(|_| HalError::BufferOperationFailed {
                 backend: BACKEND,
                 message: "compute buffer binding size exceeds GLES limit",
             })?;
@@ -2106,6 +2107,47 @@ fn gles_index_type(format: HalIndexFormat) -> u32 {
     }
 }
 
+/// Resolves the effective byte size of a buffer binding.
+///
+/// A WebGPU bind-group entry with an unspecified size means "whole buffer from
+/// `offset`", carried to the HAL as the sentinel `bound.size == u64::MAX`. This
+/// mirrors the Metal backend's `bound_buffer_size`: it resolves the sentinel to
+/// `buffer.size() - offset` and rejects an out-of-range offset/range.
+fn gles_bound_buffer_size(
+    buffer: &super::buffer::GlesBuffer,
+    bound: &crate::HalBoundBuffer,
+) -> Result<u64, HalError> {
+    resolve_bound_buffer_size(buffer.size(), bound.offset, bound.size)
+}
+
+/// Pure resolution of a buffer binding's byte size against a known buffer size.
+///
+/// Split from [`gles_bound_buffer_size`] so the whole-size sentinel logic can be
+/// unit-tested without a GL context. `bound_size == u64::MAX` means "whole
+/// buffer from `offset`".
+fn resolve_bound_buffer_size(
+    buffer_size: u64,
+    offset: u64,
+    bound_size: u64,
+) -> Result<u64, HalError> {
+    if offset > buffer_size {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "buffer binding offset exceeds buffer size",
+        });
+    }
+    if bound_size == u64::MAX {
+        buffer_size
+            .checked_sub(offset)
+            .ok_or(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "buffer binding range exceeds buffer size",
+            })
+    } else {
+        Ok(bound_size)
+    }
+}
+
 fn bind_render_buffers(
     gl: &glow::Context,
     pass: &HalRenderPass,
@@ -2124,12 +2166,13 @@ fn bind_render_buffers(
         else {
             continue;
         };
+        let bound_size = gles_bound_buffer_size(buffer, bound)?;
         let buffer = buffer.raw_or_err()?;
         let offset = i32::try_from(bound.offset).map_err(|_| HalError::BufferOperationFailed {
             backend: BACKEND,
             message: "render buffer binding offset exceeds GLES limit",
         })?;
-        let size = i32::try_from(bound.size).map_err(|_| HalError::BufferOperationFailed {
+        let size = i32::try_from(bound_size).map_err(|_| HalError::BufferOperationFailed {
             backend: BACKEND,
             message: "render buffer binding size exceeds GLES limit",
         })?;
@@ -8843,5 +8886,303 @@ mod tests {
                 message: "vertex buffer firstInstance offset exceeds GLES limit",
             }
         ));
+    }
+
+    #[test]
+    fn resolve_bound_buffer_size_resolves_whole_size_sentinel() {
+        // Whole-size (`u64::MAX`) resolves to `buffer_size - offset`.
+        assert_eq!(
+            resolve_bound_buffer_size(256, 0, u64::MAX).expect("whole size from zero offset"),
+            256
+        );
+        assert_eq!(
+            resolve_bound_buffer_size(272, 256, u64::MAX).expect("whole size from nonzero offset"),
+            16
+        );
+        // `offset == buffer_size` is allowed and yields an empty range.
+        assert_eq!(
+            resolve_bound_buffer_size(256, 256, u64::MAX).expect("empty whole-size range"),
+            0
+        );
+    }
+
+    #[test]
+    fn resolve_bound_buffer_size_passes_through_explicit_size() {
+        assert_eq!(
+            resolve_bound_buffer_size(256, 0, 16).expect("explicit size"),
+            16
+        );
+        assert_eq!(
+            resolve_bound_buffer_size(256, 64, 32).expect("explicit size at offset"),
+            32
+        );
+    }
+
+    #[test]
+    fn resolve_bound_buffer_size_rejects_offset_past_buffer() {
+        let error = resolve_bound_buffer_size(256, 257, u64::MAX)
+            .expect_err("offset past buffer size must error");
+        assert!(matches!(
+            error,
+            HalError::BufferOperationFailed {
+                backend: "gles",
+                message: "buffer binding offset exceeds buffer size",
+            }
+        ));
+    }
+
+    #[test]
+    fn submit_compute_pass_binds_whole_size_storage_buffer_at_offset() {
+        let Some(device) = gles_device_or_skip("GLES compute whole-size storage-buffer test")
+        else {
+            return;
+        };
+        // Buffer of 256 (a universally safe SSBO offset alignment) + 16 bytes
+        // for a 4-element `uint` payload bound whole-size from offset 256.
+        let buffer = device
+            .create_buffer(
+                256 + 16,
+                crate::HalBufferUsage {
+                    storage: true,
+                    copy_src: true,
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES whole-size storage buffer creation must succeed");
+        // Prefill the whole buffer so the pre-offset region is a known sentinel.
+        buffer
+            .write(0, &[0x11_u8; 256 + 16])
+            .expect("prefilling GLES whole-size storage buffer must succeed");
+        let pipeline = device
+            .create_compute_pipeline(
+                crate::HalShaderSource::Glsl {
+                    source: "#version 310 es\n\
+                             layout(local_size_x = 4) in;\n\
+                             layout(std430, binding = 0) buffer Out { uint values[4]; } out_buf;\n\
+                             void main() {\n\
+                                 uint i = gl_GlobalInvocationID.x;\n\
+                                 out_buf.values[i] = i + 1u;\n\
+                             }\n"
+                    .to_owned(),
+                    stage: crate::HalShaderStage::Compute,
+                    combined_samplers: Vec::new(),
+                    texture_metadata_slots: Vec::new(),
+                    binding_remaps: vec![crate::HalGlesBindingRemap::new(
+                        0,
+                        0,
+                        crate::HalGlesBindingClass::StorageBuffer,
+                        0,
+                    )],
+                    texture_metadata_ubo_binding: None,
+                },
+                "main",
+                (4, 1, 1),
+                &[HalDescriptorBinding {
+                    group: 0,
+                    binding: 0,
+                    kind: HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Storage),
+                }],
+            )
+            .expect("GLES whole-size storage compute pipeline creation must succeed");
+
+        device
+            .queue()
+            .submit_copies(&[HalCopy::ComputePass(crate::HalComputePass {
+                pipeline: HalComputePipeline::Gles(pipeline),
+                bind_buffers: vec![crate::HalBoundBuffer {
+                    group: 0,
+                    binding: 0,
+                    metal_index: 0,
+                    vertex_metal_index: None,
+                    fragment_metal_index: None,
+                    buffer: HalBuffer::Gles(buffer.clone()),
+                    offset: 256,
+                    // Whole-buffer-from-offset sentinel (previously rejected on
+                    // GLES with "binding size exceeds GLES limit").
+                    size: u64::MAX,
+                }],
+                bind_textures: Vec::new(),
+                bind_samplers: Vec::new(),
+                bind_external_textures: Vec::new(),
+                immediate_data: Vec::new(),
+                dispatch: HalComputeDispatch::Direct {
+                    workgroups: (1, 1, 1),
+                },
+            })])
+            .expect("GLES whole-size storage buffer dispatch must succeed");
+
+        let bytes = buffer
+            .read(0, 256 + 16)
+            .expect("reading GLES whole-size storage buffer must succeed");
+        // The pre-offset region is untouched; the shader wrote the payload at
+        // byte 256, proving the whole-size binding resolved to offset 256.
+        assert_eq!(&bytes[0..256], &[0x11_u8; 256]);
+        let payload: Vec<u32> = bytes[256..272]
+            .chunks_exact(4)
+            .map(|chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect();
+        assert_eq!(payload, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn submit_render_pass_binds_whole_size_uniform_buffer_at_offset() {
+        let Some(device) = gles_device_or_skip("GLES render whole-size uniform-buffer test") else {
+            return;
+        };
+        let target = device
+            .create_texture(&crate::HalTextureDescriptor {
+                dimension: crate::HalTextureDimension::D2,
+                format: crate::HalTextureFormat::Rgba8Unorm,
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 1,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: crate::HalTextureUsage {
+                    copy_src: true,
+                    copy_dst: false,
+                    texture_binding: false,
+                    storage_binding: false,
+                    render_attachment: true,
+                    transient: false,
+                },
+            })
+            .expect("GLES whole-size uniform render target creation must succeed");
+        let readback = device
+            .create_buffer(
+                16,
+                crate::HalBufferUsage {
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES whole-size uniform readback buffer creation must succeed");
+        // 256 (safe UBO offset alignment) + one `vec4` bound whole-size from 256.
+        let uniform = device
+            .create_buffer(
+                256 + 16,
+                crate::HalBufferUsage {
+                    uniform: true,
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES whole-size uniform buffer creation must succeed");
+        let color_bytes = [0.25_f32, 0.5, 0.75, 1.0]
+            .into_iter()
+            .flat_map(f32::to_ne_bytes)
+            .collect::<Vec<_>>();
+        uniform
+            .write(256, &color_bytes)
+            .expect("writing GLES whole-size uniform color must succeed");
+
+        let pipeline = device
+            .create_render_pipeline(
+                crate::HalShaderSource::GlslStages {
+                    vertex: "#version 310 es\n\
+                             void main() {\n\
+                                 vec2 pos = vec2(float((gl_VertexID & 1) << 2) - 1.0,\n\
+                                                 float((gl_VertexID & 2) << 1) - 1.0);\n\
+                                 gl_Position = vec4(pos, 0.0, 1.0);\n\
+                             }\n"
+                    .to_owned(),
+                    fragment: Some(
+                        "#version 310 es\n\
+                         precision mediump float;\n\
+                         layout(std140, binding = 0) uniform Params { vec4 color; } params;\n\
+                         layout(location = 0) out vec4 frag_color;\n\
+                         void main() { frag_color = params.color; }\n"
+                            .to_owned(),
+                    ),
+                    combined_samplers: Vec::new(),
+                    texture_metadata_slots: Vec::new(),
+                    binding_remaps: vec![crate::HalGlesBindingRemap::new(
+                        0,
+                        0,
+                        crate::HalGlesBindingClass::UniformBuffer,
+                        0,
+                    )],
+                    texture_metadata_ubo_binding: None,
+                },
+                "main",
+                Some("main"),
+                &crate::HalRenderPipelineDescriptor {
+                    sample_count: 1,
+                    sample_mask: u32::MAX,
+                    alpha_to_coverage_enabled: false,
+                    color_targets: vec![Some(HalColorTargetState {
+                        format: crate::HalTextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: 0xf,
+                    })],
+                    depth_stencil: None,
+                    vertex_buffers: Vec::new(),
+                    primitive_topology: crate::HalPrimitiveTopology::TriangleList,
+                    front_face: HalFrontFace::Ccw,
+                    cull_mode: HalCullMode::None,
+                    unclipped_depth: false,
+                    needs_frag_depth_range_push_constant: false,
+                    user_immediate_size: 0,
+                },
+                &[HalDescriptorBinding {
+                    group: 0,
+                    binding: 0,
+                    kind: HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Uniform),
+                }],
+            )
+            .expect("GLES whole-size uniform render pipeline creation must succeed");
+
+        let mut pass = render_pass(vec![Some(color_target_for(
+            target.clone(),
+            crate::HalTextureFormat::Rgba8Unorm,
+            [0.0, 0.0, 0.0, 0.0],
+        ))]);
+        pass.pipeline = Some(HalRenderPipeline::Gles(pipeline));
+        pass.bind_buffers = vec![crate::HalBoundBuffer {
+            group: 0,
+            binding: 0,
+            metal_index: 0,
+            vertex_metal_index: None,
+            fragment_metal_index: None,
+            buffer: HalBuffer::Gles(uniform),
+            offset: 256,
+            // Whole-buffer-from-offset sentinel (previously rejected on GLES).
+            size: u64::MAX,
+        }];
+        pass.draw = Some(HalDraw::Direct {
+            vertex_count: 3,
+            instance_count: 1,
+            first_vertex: 0,
+            first_instance: 0,
+        });
+
+        device
+            .queue()
+            .submit_copies(&[
+                HalCopy::RenderPass(pass),
+                HalCopy::TextureToBuffer(HalBufferTextureCopy {
+                    buffer: HalBuffer::Gles(readback.clone()),
+                    buffer_layout: rgba8_slice_layout(0),
+                    texture: HalTexture::Gles(target),
+                    format: crate::HalTextureFormat::Rgba8Unorm,
+                    aspect: crate::HalTextureAspect::All,
+                    mip_level: 0,
+                    origin: crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+                    extent: crate::HalExtent3d {
+                        width: 2,
+                        height: 2,
+                        depth_or_array_layers: 1,
+                    },
+                }),
+            ])
+            .expect("GLES whole-size uniform render submit plus readback must succeed");
+
+        assert_eq!(
+            readback
+                .read(0, 16)
+                .expect("reading GLES whole-size uniform output must succeed"),
+            [64, 128, 191, 255].repeat(4)
+        );
     }
 }
