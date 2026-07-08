@@ -977,3 +977,69 @@ checklist for our r8snorm/3d rows_per_image>height family:
   (unpack side exists in ES 3.0) with a single glTexSubImage3D
   (`CommandBufferGL.cpp:1851-1896`); row-by-row is reserved for the
   WriteTexture-only case `bytesPerRow % texelByteSize != 0`.
+
+## P1 DONE (2026-07-08, yawgpu 9c6d94c == c06e516 code) — api re-baseline
+
+Re-swept `api,validation` + `api,operation` on crocus (workers=2, one
+process at a time, 2 F-126 files quarantined) on the fully-fixed library
+(post glTextureView flexible views 2ba7e96, cube-array GLSL ES 3.2
+64151a9, texture-metadata UBO c06e516). Script:
+`webgpu-native-cts/transcripts/gles-p1-resweep.sh`; JSONL
+`gles-p1-av-*.jsonl` + `gles-p1-apiop-*.jsonl`.
+
+| area | a94ab06 pass/skip/fail | 9c6d94c pass/skip/fail | Δfail |
+|---|---|---|---|
+| api,validation (124) | 194,805 / 157,163 / 347 | 194,763 / 157,163 / **389** | **+42** |
+| api,operation (67) | 132,831 / 76,698 / 19,932 | 132,829 / 76,698 / **19,934** | +2 |
+
+crash 0 in both. **Headline: the cube / cube-array / metadata-UBO wins
+were shader,execution-only — they did NOT move the two api areas** (op
+essentially flat; val +42 is a single new regression, below). README
+GLES table updated to these numbers (both api rows now at 9c6d94c;
+shader rows unchanged at 15a9ddb — same code, so the table is now one
+baseline). New total: pass 1,005,718 / skip 1,047,674 / fail 30,452 /
+crash 0.
+
+### NEW REGRESSION surfaced by P1 — metadata-UBO slot conflict (c06e516)
+The +42 in api,validation is **64 new `unexpected internal error: GLES
+render stages use conflicting texture metadata slot N: group N, binding
+X vs group N, binding Y`** (offset by ~22 cases the metadata UBO also
+fixed). ALL 64 are in
+`api,validation,capability_checks,limits,maxSampledTexturesPerShaderStage:createPipeline,at_over`
+with `bindingCombination="vertexAndFragmentWithPossibleVertexStageOverflow"`.
+Root cause (to confirm at fix time): `bind_texture_metadata_ubo` /
+the c06e516 slot-assignment assigns a SINGLE metadata slot per
+(group,binding) but the vertex and fragment stages disagree on which
+binding maps to slot 0 when the vertex stage overflows its sampled-texture
+limit — the two stages compute conflicting slot→binding maps and the HAL
+raises an internal error instead of a clean rejection (or, more likely,
+instead of handling both stages' slots independently as Dawn does).
+This is `unexpected internal error` (worse than a HalError) and is a
+**fix candidate** — fold into P7 hygiene or handle before P2 (same
+metadata-UBO code area). Net campaign effect of c06e516 stays positive
+(+135 shader,execution, −64 here), but the internal error must not ship.
+
+### command_buffer re-cluster (16,724 fail — feeds P3)
+`command_buffer` is essentially unchanged vs a94ab06 (16,722 → 16,724;
+cube/metadata did not touch copies). Fresh clusters from
+`gles-p1-apiop-command_buffer.jsonl`:
+- **15,081 "texture padding mismatch at byte N" — ALL in `image_copy`.**
+  Split: **got 0 = 5,291** (padding bytes zeroed by readback — Dawn P3a
+  padding-protection issue, the compute-T2B fallback must pre-copy the
+  dst region / RMW-mask padding words) + **got nonzero = 9,790** (value
+  mismatch — the r8snorm/3d `rows_per_image>height` piece-5 family, but
+  ~2.8× the earlier ~3.5k estimate). This ONE family is 90% of
+  command_buffer and the whole P3 target.
+- 908 stencil-format readback (catalogued Tier-2, `GLES cannot read back
+  stencil formats`).
+- 567 `GPU buffer mismatch` (copyBufferToBuffer / B2B — real copy bugs,
+  smaller P3 sub-family).
+- 160 `GLES render pass supports only ND color attachments` (T2B via a
+  color-attachment path on a >N-attachment or non-2D case — investigate).
+- 5 `glTextureView failed for GLES sampled texture view`; 3 misc.
+
+### api,operation non-command_buffer fails (3,210 — largely catalogued)
+render_pipeline 2,699 (MSAA per-sample `sample_mask` — P4), memory_sync
+234 (`binding size exceeds GLES limit` — P6), rendering 187, render_pass
+55, texture_view 20 (was 210 pre-cube — the view work landed here),
+buffers 8, resource_init 5, limits/sampling 1 each.
