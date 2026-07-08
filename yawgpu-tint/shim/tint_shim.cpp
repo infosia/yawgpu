@@ -23,11 +23,24 @@
 #include "src/tint/api/helpers/generate_bindings.h"
 #include "src/tint/api/tint.h"
 #include "src/tint/lang/core/constant/value.h"
+#include "src/tint/lang/core/enums.h"
+#include "src/tint/lang/core/ir/access.h"
+#include "src/tint/lang/core/ir/builder.h"
+#include "src/tint/lang/core/ir/core_builtin_call.h"
+#include "src/tint/lang/core/ir/load.h"
+#include "src/tint/lang/core/ir/module.h"
 #include "src/tint/lang/core/ir/reflection.h"
 #include "src/tint/lang/core/ir/referenced_module_vars.h"
+#include "src/tint/lang/core/ir/swizzle.h"
 #include "src/tint/lang/core/ir/transform/single_entry_point.h"
 #include "src/tint/lang/core/ir/transform/substitute_overrides.h"
+#include "src/tint/lang/core/ir/var.h"
+#include "src/tint/lang/core/type/array_count.h"
+#include "src/tint/lang/core/type/binding_array.h"
+#include "src/tint/lang/core/type/depth_texture.h"
+#include "src/tint/lang/core/type/manager.h"
 #include "src/tint/lang/core/type/pointer.h"
+#include "src/tint/lang/core/type/sampled_texture.h"
 #include "src/tint/lang/core/type/texture.h"
 #include "src/tint/lang/glsl/writer/helpers/generate_bindings.h"
 #include "src/tint/lang/glsl/writer/writer.h"
@@ -730,6 +743,199 @@ bool uses_cube_array_texture(const tint::core::ir::Module& ir) {
         }
     }
     return false;
+}
+
+// Shim-level Core-IR transform: rewrite each `texture_depth_*` that is used
+// ONLY by non-comparison builtins into a sampled `texture_*<f32>` so the
+// GLSL-ES backend emits `sampler2D` (a raw depth read) instead of
+// `sampler2DShadow` (a ref-0 shadow compare, which returns 0/1 rather than the
+// stored depth value).
+//
+// Tint's GLSL printer emits the `Shadow` sampler suffix for any
+// `core::type::DepthTexture` (printer.cc:993) and its TexturePolyfill injects a
+// comparison reference of 0.0 for depth samples/gathers. Dawn cannot express a
+// raw depth read on GL (it is forbidden in Compat mode), so there is no upstream
+// pass to port; this transform reuses Tint's own machinery (the f32-sampled
+// replacement type from texture_polyfill.cc:345-347 and the in-place
+// SetType/recurse-through-Load model of bgra8unorm_polyfill.cc) run BEFORE the
+// GLSL writer's raise. Once the IR var is a `SampledTexture`, TexturePolyfill's
+// `is_depth` branches go dormant (no refz) and the printer's `Shadow` suffix is
+// skipped, yielding an ordinary `texture()`/`textureGather()`.
+//
+// Out of scope (left unmodified -> current shadow behaviour): any depth var with
+// a comparison use (`textureSampleCompare*` / `textureGatherCompare`), a mix of
+// comparison and non-comparison uses on one texture, multisampled depth
+// (`DepthMultisampledTexture`), and depth handles reached through an unexpected
+// use chain (e.g. passed to a user function before DirectVariableAccess runs).
+struct DepthRawReadTransform {
+    tint::core::ir::Module& ir;
+    tint::core::ir::Builder b{ir};
+    tint::core::type::Manager& ty{ir.Types()};
+
+    static bool is_comparison_texture_builtin(tint::core::BuiltinFn fn) {
+        switch (fn) {
+            case tint::core::BuiltinFn::kTextureSampleCompare:
+            case tint::core::BuiltinFn::kTextureSampleCompareLevel:
+            case tint::core::BuiltinFn::kTextureGatherCompare:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    // Walk the transitive uses of a depth handle value (through `Load` and, for
+    // binding_array handles, `Access`) to determine eligibility. A depth var is
+    // eligible iff it has at least one builtin use and NONE of its builtin uses
+    // is a comparison. Any unexpected use shape marks it ineligible so the
+    // rewrite never has to handle a chain it cannot express.
+    void CollectEligibility(tint::core::ir::Value* value,
+                            bool& eligible,
+                            bool& has_builtin_use) {
+        value->ForEachUseUnsorted([&](tint::core::ir::Usage use) {
+            tint::Switch(
+                use.instruction,
+                [&](tint::core::ir::Load* load) {
+                    CollectEligibility(load->Result(), eligible, has_builtin_use);
+                },
+                [&](tint::core::ir::Access* access) {
+                    CollectEligibility(access->Result(), eligible, has_builtin_use);
+                },
+                [&](tint::core::ir::CoreBuiltinCall* call) {
+                    has_builtin_use = true;
+                    if (is_comparison_texture_builtin(call->Func())) {
+                        eligible = false;
+                    }
+                },
+                [&](tint::core::ir::Instruction*) {
+                    // Unknown use shape: be conservative and leave unmodified.
+                    eligible = false;
+                });
+        });
+    }
+
+    // Recursively retype the uses of an already-retyped handle value.
+    void UpdateUses(tint::core::ir::Value* value) {
+        value->ForEachUseUnsorted([&](tint::core::ir::Usage use) {
+            tint::Switch(
+                use.instruction,
+                [&](tint::core::ir::Load* load) {
+                    load->Result()->SetType(value->Type()->UnwrapPtr());
+                    UpdateUses(load->Result());
+                },
+                [&](tint::core::ir::Access* access) {
+                    // The access indexes a binding_array; recompute its result
+                    // type from the (already updated) object type.
+                    const tint::core::type::Type* obj_ty = value->Type();
+                    const tint::core::type::Type* new_res_ty = nullptr;
+                    if (auto* p = obj_ty->As<tint::core::type::Pointer>()) {
+                        if (auto* ba = p->StoreType()->As<tint::core::type::BindingArray>()) {
+                            new_res_ty = ty.ptr(p->AddressSpace(), ba->ElemType(), p->Access());
+                        }
+                    } else if (auto* ba = obj_ty->As<tint::core::type::BindingArray>()) {
+                        new_res_ty = ba->ElemType();
+                    }
+                    if (new_res_ty != nullptr) {
+                        access->Result()->SetType(new_res_ty);
+                        UpdateUses(access->Result());
+                    }
+                },
+                [&](tint::core::ir::CoreBuiltinCall* call) { FixBuiltinCall(call); },
+                [&](tint::core::ir::Instruction*) {
+                    // Unreachable: eligibility already excluded unknown shapes.
+                });
+        });
+    }
+
+    // A depth sample/level/bias/grad/load returns a scalar `f32`; the sampled
+    // replacement returns `vec4<f32>`. Retype the call result to `vec4<f32>` and
+    // route its downstream `f32` consumers through a `.x` swizzle. (Mirrors
+    // texture_polyfill.cc:661-676 and the swizzle-after idiom of
+    // bgra8unorm_polyfill.cc:130-134.)
+    void SwizzleResultToScalar(tint::core::ir::CoreBuiltinCall* call) {
+        auto* res = call->Result();
+        if (!res->Type()->Is<tint::core::type::F32>()) {
+            // Unexpected result shape; leave it untouched.
+            return;
+        }
+        auto* swizzle = b.Swizzle(ty.f32(), nullptr, tint::Vector<uint32_t, 1>{0u});
+        res->ReplaceAllUsesWith(swizzle->Result());
+        swizzle->InsertAfter(call);
+        swizzle->SetOperand(tint::core::ir::Swizzle::kObjectOperandOffset, res);
+        res->SetType(ty.vec4f());
+    }
+
+    void FixBuiltinCall(tint::core::ir::CoreBuiltinCall* call) {
+        switch (call->Func()) {
+            case tint::core::BuiltinFn::kTextureSample:
+            case tint::core::BuiltinFn::kTextureSampleLevel:
+            case tint::core::BuiltinFn::kTextureSampleBias:
+            case tint::core::BuiltinFn::kTextureSampleGrad:
+            case tint::core::BuiltinFn::kTextureLoad:
+                SwizzleResultToScalar(call);
+                break;
+            case tint::core::BuiltinFn::kTextureGather:
+                // WGSL depth-gather takes no component arg and already returns
+                // `vec4<f32>`; a sampled gather is also `vec4<f32>`. Leave it
+                // unchanged: once the var is sampled, TexturePolyfill stops
+                // adding the `refz` and emits a plain `textureGather`.
+                break;
+            default:
+                // kTextureDimensions / kTextureNumLevels / kTextureNumSamples /
+                // kTextureNumLayers return integers regardless; no result fix.
+                break;
+        }
+    }
+
+    void Process() {
+        for (auto* inst : *ir.root_block) {
+            auto* var = inst->As<tint::core::ir::Var>();
+            if (var == nullptr) {
+                continue;
+            }
+            auto* ptr = var->Result()->Type()->As<tint::core::type::Pointer>();
+            if (ptr == nullptr) {
+                continue;
+            }
+            const tint::core::type::Type* store = ptr->StoreType();
+            auto* ba = store->As<tint::core::type::BindingArray>();
+            const tint::core::type::Type* elem = ba != nullptr ? ba->ElemType() : store;
+            // Handle only `DepthTexture`; `DepthMultisampledTexture` (a distinct
+            // type) is out of scope and returns nullptr here.
+            auto* depth = elem->As<tint::core::type::DepthTexture>();
+            if (depth == nullptr) {
+                continue;
+            }
+
+            // Build the f32-sampled replacement store type; bail if a
+            // binding_array count is not a compile-time constant.
+            const tint::core::type::Type* new_tex = ty.sampled_texture(depth->Dim(), ty.f32());
+            const tint::core::type::Type* new_store = new_tex;
+            if (ba != nullptr) {
+                auto* cnt = ba->Count()->As<tint::core::type::ConstantArrayCount>();
+                if (cnt == nullptr) {
+                    continue;
+                }
+                new_store = ty.binding_array(new_tex, cnt->value);
+            }
+
+            bool eligible = true;
+            bool has_builtin_use = false;
+            CollectEligibility(var->Result(), eligible, has_builtin_use);
+            if (!eligible || !has_builtin_use) {
+                continue;
+            }
+
+            const tint::core::type::Type* new_ptr =
+                ty.ptr(ptr->AddressSpace(), new_store, ptr->Access());
+            var->Result()->SetType(new_ptr);
+            UpdateUses(var->Result());
+        }
+    }
+};
+
+// Rewrite non-comparison depth-texture reads to raw f32 sampled reads for GLSL.
+void depth_raw_read_transform(tint::core::ir::Module& ir) {
+    DepthRawReadTransform{ir}.Process();
 }
 
 bool all_remaps_empty(const YawgpuTintBindings* bindings) {
@@ -2254,6 +2460,11 @@ bool yawgpu_tint_generate_glsl(const YawgpuTintProgram* program,
             set_error(err, ir.Failure());
             return false;
         }
+        // Rewrite non-comparison depth-texture reads to raw f32 sampled reads so
+        // the GLSL-ES backend emits `sampler2D` instead of `sampler2DShadow`.
+        // Must run before GenerateBindings / make_combined_samplers / Generate,
+        // which key on the (now sampled) IR type.
+        depth_raw_read_transform(ir.Get());
         tint::glsl::writer::Options options;
         options.entry_point_name = entry_point;
         options.version = uses_cube_array_texture(ir.Get())

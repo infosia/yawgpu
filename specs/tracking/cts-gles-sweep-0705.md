@@ -1077,3 +1077,40 @@ risk).
 
 README GLES table: api,validation 389 -> 325, total fail 30,452 ->
 30,388.
+
+## P2 DONE (2026-07-08) — depth raw-read shim IR transform (~6.6k FAIL->PASS)
+
+Depth textures read by non-comparison builtins were emitted as
+`sampler2DShadow` (shadow-compare vs ref 0.0 -> 0/1) instead of raw depth.
+Fixed shim-side (handoff `specs/handoff-p2-depth-raw-read.md`; block-67
+depth entry rewritten RESOLVED): a Core-IR transform `DepthRawReadTransform`
+(`yawgpu-tint/shim/tint_shim.cpp`), run on the lowered IR right before
+`glsl::writer::Generate`, rewrites each depth var used ONLY by
+non-comparison builtins to `texture_*<f32>` (`ty.sampled_texture(dim,
+ty.f32())`). Once the IR type is `SampledTexture`, TexturePolyfill's
+`is_depth` refz injection goes dormant and the printer emits `sampler2D`;
+sample/level/load results retyped f32->vec4f + `.x` swizzle, gather left
+unchanged. Template: Tint's own `texture_polyfill.cc:345,661-676` +
+`bgra8unorm_polyfill.cc`. NO `third_party/dawn` edit, shim-only rebuild
+(~20 s, no Tint recompile, no host-hang risk). Dawn cannot express this on
+GL (Compat-forbidden) — the shim pass goes beyond Dawn using Tint's own
+machinery.
+
+**Verified on crocus (workers=2):**
+- textureSample depth 885 (660 2d/array + 225 cube/cube-array),
+  textureSampleLevel 2,610, textureGather 3,105 (2,700 2d/array + 405
+  cube/cube-array) = **6,600 FAIL->PASS**. textureLoad depth: 72 pass
+  (depth16unorm / depth32float / depth32float-stencil8).
+- Comparison regression guard 0-fail: textureSampleCompare 16,560,
+  textureSampleCompareLevel 49,680, textureGatherCompare 46,800.
+- **Residual (catalogued):** textureLoad depth24plus / depth24plus-stencil8
+  48 (implementation-defined depth precision — Mesa storage bits != CTS
+  expected bits; NOT the shadow modelling); depth handles via user-function
+  param (eligibility-skipped); mixed compare+non-compare on one texture
+  (skipped); multisampled depth (out of scope).
+- Unit gates: yawgpu-tint 65/65 (4 new GLSL-assertion tests incl. negative
+  compare/mixed), yawgpu-hal gles 174/174 (new real-EGL raw-depth sample
+  test on crocus), Noop workspace green, clippy clean.
+
+Full shader,execution re-measure due for the net (was 10,129; expect
+~3,500). Then P3 (command_buffer copy tail).

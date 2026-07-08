@@ -5422,6 +5422,181 @@ mod tests {
         );
     }
 
+    // P2 depth raw-read (hardware verification for the shim IR transform). A
+    // `texture_depth_2d` sampled by a non-comparison builtin now lowers to a
+    // plain `sampler2D` + `textureLod(...).x` (see the yawgpu-tint
+    // generate_glsl_depth_* tests). This test proves the hardware side of that
+    // contract on crocus: a depth texture bound to a `sampler2D` through a
+    // non-comparison sampler returns the RAW stored depth, not a 0/1
+    // shadow-compare result. We clear a depth texture to 0.5, sample it, and
+    // assert the output is mid-range (~128) rather than 0 or 255.
+    #[test]
+    fn submit_render_pass_samples_depth_texture_raw_not_shadow() {
+        let Some(device) = gles_device_or_skip("GLES depth raw-sample test") else {
+            return;
+        };
+
+        let depth = device
+            .create_texture(&crate::HalTextureDescriptor {
+                dimension: crate::HalTextureDimension::D2,
+                format: crate::HalTextureFormat::Depth32Float,
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: crate::HalTextureUsage {
+                    copy_src: false,
+                    copy_dst: false,
+                    texture_binding: true,
+                    storage_binding: false,
+                    render_attachment: true,
+                    transient: false,
+                },
+            })
+            .expect("GLES depth texture creation must succeed");
+        let scratch_color = render_attachment_texture(&device, crate::HalTextureFormat::Rgba8Unorm);
+        let output = render_attachment_texture(&device, crate::HalTextureFormat::Rgba8Unorm);
+
+        // Pass 1: clear the depth texture to 0.5 and store it.
+        let mut clear_pass = render_pass(vec![Some(color_target_for(
+            scratch_color,
+            crate::HalTextureFormat::Rgba8Unorm,
+            [0.0, 0.0, 0.0, 1.0],
+        ))]);
+        clear_pass.depth_stencil_attachment = Some(crate::HalRenderDepthStencilAttachment {
+            texture: HalTexture::Gles(depth.clone()),
+            format: crate::HalTextureFormat::Depth32Float,
+            mip_level: 0,
+            array_layer: 0,
+            depth_load_op: HalRenderLoadOp::Clear,
+            depth_store: true,
+            depth_clear_value: 0.5,
+            depth_read_only: false,
+            stencil_load_op: HalRenderLoadOp::Load,
+            stencil_store: false,
+            stencil_clear_value: 0,
+            stencil_read_only: true,
+        });
+        device
+            .queue()
+            .submit_copies(&[HalCopy::RenderPass(clear_pass)])
+            .expect("clearing the depth texture to 0.5 must succeed");
+
+        // Pass 2: sample the depth texture as a plain `sampler2D` (the shim's
+        // lowering) and write the raw depth into the color output.
+        let pipeline = device
+            .create_render_pipeline(
+                crate::HalShaderSource::GlslStages {
+                    vertex: "#version 310 es\n\
+                             void main() {\n\
+                                 vec2 pos = vec2(float((gl_VertexID & 1) << 2) - 1.0,\n\
+                                                 float((gl_VertexID & 2) << 1) - 1.0);\n\
+                                 gl_Position = vec4(pos, 0.0, 1.0);\n\
+                             }\n"
+                    .to_owned(),
+                    fragment: Some(
+                        "#version 310 es\n\
+                         precision highp float;\n\
+                         uniform highp sampler2D u_depth;\n\
+                         layout(location = 0) out vec4 frag_color;\n\
+                         void main() {\n\
+                             float d = textureLod(u_depth, vec2(0.5), 0.0).x;\n\
+                             frag_color = vec4(d, d, d, 1.0);\n\
+                         }\n"
+                        .to_owned(),
+                    ),
+                    combined_samplers: vec![crate::HalCombinedSampler {
+                        glsl_uniform_name: "u_depth".to_owned(),
+                        texture_group: 0,
+                        texture_binding: 1,
+                        sampler_group: 0,
+                        sampler_binding: 2,
+                        uses_placeholder_sampler: false,
+                    }],
+                    texture_metadata_slots: Vec::new(),
+                    binding_remaps: Vec::new(),
+                    texture_metadata_ubo_binding: None,
+                },
+                "main",
+                Some("main"),
+                &crate::HalRenderPipelineDescriptor {
+                    sample_count: 1,
+                    sample_mask: u32::MAX,
+                    alpha_to_coverage_enabled: false,
+                    color_targets: vec![Some(HalColorTargetState {
+                        format: crate::HalTextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: 0xf,
+                    })],
+                    depth_stencil: None,
+                    vertex_buffers: Vec::new(),
+                    primitive_topology: crate::HalPrimitiveTopology::TriangleList,
+                    front_face: HalFrontFace::Ccw,
+                    cull_mode: HalCullMode::None,
+                    unclipped_depth: false,
+                    needs_frag_depth_range_push_constant: false,
+                    user_immediate_size: 0,
+                },
+                &[
+                    HalDescriptorBinding {
+                        group: 0,
+                        binding: 1,
+                        kind: HalDescriptorBindingKind::Texture,
+                    },
+                    HalDescriptorBinding {
+                        group: 0,
+                        binding: 2,
+                        kind: HalDescriptorBindingKind::Sampler,
+                    },
+                ],
+            )
+            .expect("GLES depth raw-sample render pipeline creation must succeed");
+
+        let depth_binding = HalBoundTexture {
+            group: 0,
+            binding: 1,
+            metal_index: 0,
+            vertex_metal_index: None,
+            fragment_metal_index: Some(0),
+            texture: HalTexture::Gles(depth),
+            format: crate::HalTextureFormat::Depth32Float,
+            dimension: HalTextureViewDimension::D2,
+            base_mip_level: 0,
+            mip_level_count: 1,
+            base_array_layer: 0,
+            array_layer_count: 1,
+            aspect: crate::HalTextureAspect::DepthOnly,
+            swizzle: crate::HalTextureComponentSwizzle::default(),
+            storage_access: None,
+        };
+
+        let mut pass = render_pass(vec![Some(color_target_for(
+            output.clone(),
+            crate::HalTextureFormat::Rgba8Unorm,
+            [0.0, 0.0, 0.0, 0.0],
+        ))]);
+        pass.pipeline = Some(HalRenderPipeline::Gles(pipeline));
+        pass.bind_textures = vec![depth_binding];
+        pass.bind_samplers = vec![nearest_sampler_binding(&device, 2)];
+        pass.draw = Some(HalDraw::Direct {
+            vertex_count: 3,
+            instance_count: 1,
+            first_vertex: 0,
+            first_instance: 0,
+        });
+        device
+            .queue()
+            .submit_copies(&[HalCopy::RenderPass(pass)])
+            .expect("sampling the depth texture as a raw sampler2D must succeed");
+
+        let out = read_rgba8_1x1(&device, output);
+        assert!(
+            (100..=155).contains(&out[0]),
+            "raw depth sample must be ~0.5 (got {out:?}); a ref-0 shadow compare would read 0 or 255"
+        );
+    }
+
     #[test]
     fn submit_render_pass_binds_uniform_and_sampler_texture_across_groups() {
         let Some(device) = gles_device_or_skip("GLES multi-group render binding test") else {

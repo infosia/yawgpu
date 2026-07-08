@@ -2896,6 +2896,124 @@ fn fs(@builtin(sample_index) sample_index: u32) -> @location(0) vec4f {
         assert!(glsl.contains("gl_SampleID"), "GLSL:\n{glsl}");
     }
 
+    // P2 depth raw-read: a `texture_depth_2d` sampled by a NON-comparison
+    // builtin must lower to a plain `sampler2D` (raw depth read), NOT
+    // `sampler2DShadow` (a ref-0 shadow compare that returns 0/1). The
+    // shim-level Core-IR transform retypes the depth var to a sampled
+    // `texture_2d<f32>` before the GLSL writer's raise runs.
+    #[test]
+    fn generate_glsl_depth_sample_level_reads_raw_not_shadow() {
+        let wgsl = r#"
+@group(0) @binding(0) var t: texture_depth_2d;
+@group(0) @binding(1) var s: sampler;
+
+@fragment
+fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  let d = textureSampleLevel(t, s, uv, 0u);
+  return vec4f(d, d, d, 1.0);
+}
+"#;
+        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let glsl = program
+            .generate_glsl("fs", &Bindings::default(), &[], None)
+            .unwrap()
+            .source;
+        assert!(glsl.contains("sampler2D "), "expected sampler2D: {glsl}");
+        assert!(
+            !glsl.contains("sampler2DShadow"),
+            "must not shadow-compare: {glsl}"
+        );
+        // Raw sample -> `textureLod(...)`, scalar depth extracted via `.x`.
+        assert!(
+            glsl.contains("textureLod("),
+            "expected textureLod(): {glsl}"
+        );
+        assert!(glsl.contains(").x"), "expected an .x swizzle: {glsl}");
+    }
+
+    // Depth `textureGather` (no component arg, returns vec4f) must lower to a
+    // plain `textureGather` on a `sampler2D` with no `refz` comparison arg.
+    #[test]
+    fn generate_glsl_depth_gather_reads_raw_not_shadow() {
+        let wgsl = r#"
+@group(0) @binding(0) var t: texture_depth_2d;
+@group(0) @binding(1) var s: sampler;
+
+@fragment
+fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  return textureGather(t, s, uv);
+}
+"#;
+        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let glsl = program
+            .generate_glsl("fs", &Bindings::default(), &[], None)
+            .unwrap()
+            .source;
+        assert!(glsl.contains("sampler2D "), "expected sampler2D: {glsl}");
+        assert!(
+            !glsl.contains("sampler2DShadow"),
+            "must not shadow-compare: {glsl}"
+        );
+        assert!(
+            glsl.contains("textureGather("),
+            "expected textureGather(): {glsl}"
+        );
+    }
+
+    // A depth texture used by a COMPARISON builtin (`textureSampleCompare`) is
+    // out of scope for the raw-read rewrite and must keep the shadow lowering:
+    // `sampler2DShadow`. Eligibility skips any var with a comparison use.
+    #[test]
+    fn generate_glsl_depth_sample_compare_stays_shadow() {
+        let wgsl = r#"
+@group(0) @binding(0) var t: texture_depth_2d;
+@group(0) @binding(1) var s: sampler_comparison;
+
+@fragment
+fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  let d = textureSampleCompare(t, s, uv, 0.5);
+  return vec4f(d, d, d, 1.0);
+}
+"#;
+        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let glsl = program
+            .generate_glsl("fs", &Bindings::default(), &[], None)
+            .unwrap()
+            .source;
+        assert!(
+            glsl.contains("sampler2DShadow"),
+            "comparison must stay shadow: {glsl}"
+        );
+    }
+
+    // A single depth texture used by BOTH a comparison and a non-comparison
+    // builtin is out of scope (mixed use). Eligibility skips it, so it keeps
+    // the shadow lowering unchanged (documents the residual).
+    #[test]
+    fn generate_glsl_depth_mixed_compare_and_sample_stays_shadow() {
+        let wgsl = r#"
+@group(0) @binding(0) var t: texture_depth_2d;
+@group(0) @binding(1) var s: sampler;
+@group(0) @binding(2) var sc: sampler_comparison;
+
+@fragment
+fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  let raw = textureSampleLevel(t, s, uv, 0u);
+  let cmp = textureSampleCompareLevel(t, sc, uv, 0.5);
+  return vec4f(raw, cmp, 0.0, 1.0);
+}
+"#;
+        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let glsl = program
+            .generate_glsl("fs", &Bindings::default(), &[], None)
+            .unwrap()
+            .source;
+        assert!(
+            glsl.contains("sampler2DShadow"),
+            "mixed use must stay shadow (out of scope): {glsl}"
+        );
+    }
+
     #[test]
     fn generate_glsl_cts_readback_compute_variants_with_explicit_remaps() {
         for (texture_type, value_type, sample_count) in [

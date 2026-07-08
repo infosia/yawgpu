@@ -344,31 +344,43 @@ per case.
   entry and the reverted `textureBindingViewDimension` approach
   (`webgpu-native-cts/transcripts/cube-wip-reverted.patch`).
 
-- **Raw (non-comparison) depth-texture sampling returns 0** — Tier-2
-  Tint-GLSL-backend gap (2026-07-06, catalogued not fixed). Tint's GLSL
-  printer unconditionally appends "Shadow" to any `DepthTexture` sampler
-  (`third_party/dawn/src/tint/lang/glsl/writer/printer/printer.cc:993-994`),
-  so a `texture_depth_*` sampled by a **non-comparison** builtin
-  (`textureSample` / `textureSampleLevel` / `textureGather` on a depth
-  format) is emitted as `sampler2DShadow` and the sample becomes a shadow
-  COMPARE against a dummy reference of `0.0` — e.g.
-  `textureLod(sampler2DShadow, vec3(uv, 0.0))` — instead of a raw depth
-  read. With the bound sampler's `TEXTURE_COMPARE_MODE = GL_NONE` (correct
-  for a non-comparison sampler) this is a shader/sampler mismatch and the
-  driver returns 0, so CTS reports `expected 0.125, got 0` for every depth
-  format (depth16unorm / depth24plus(-stencil8) / depth32float(-stencil8)).
-  The **comparison** path is unaffected and fully passes
-  (`textureSampleCompare` 2,880 + `textureSampleCompareLevel` 8,640 on 2d,
-  0 fail) — depth data upload and binding are correct; only the raw-read
-  modelling is wrong. Affected clusters (crocus): textureSampleLevel
-  depth_2d 360 / depth_3d(cube) 810, textureSample depth_2d 180,
-  textureGather depth_3d 135 / depth_array_3d 270. Proper fix requires a
-  Tint GLSL-backend change (emit a non-shadow `sampler2D` for depth
-  textures used only in non-comparison reads, likely via an IR transform
-  that splits the type per use) — deferred: it edits the shared
-  `third_party/dawn` submodule (GLSL backend is out of scope for the TBDR
-  fork there) and a Tint rebuild is a hard-hang risk on this host. Not a
-  yawgpu HAL/core bug.
+- **Raw (non-comparison) depth-texture reads** — RESOLVED (P2, 2026-07-08,
+  shim-side, no Tint edit). Tint's GLSL printer appends "Shadow" to any
+  `core::type::DepthTexture` sampler
+  (`third_party/dawn/src/tint/lang/glsl/writer/printer/printer.cc:993`), so a
+  `texture_depth_*` read by a **non-comparison** builtin (`textureSample` /
+  `textureSampleLevel` / `textureGather` / `textureLoad`) was emitted as a
+  `sampler2DShadow` shadow-COMPARE against a dummy ref `0.0` (returns 0/1)
+  instead of a raw depth read. Fix: a shim-level Core-IR transform
+  (`DepthRawReadTransform` in `yawgpu-tint/shim/tint_shim.cpp`, run on the
+  lowered IR right before `glsl::writer::Generate`) rewrites each depth var
+  used ONLY by non-comparison builtins to `texture_*<f32>`
+  (`ty.sampled_texture(dim, ty.f32())`) — once the IR type is a
+  `SampledTexture`, TexturePolyfill's `is_depth` refz injection goes dormant
+  and the printer emits `sampler2D`; sample/level/load results are retyped
+  `f32`→`vec4<f32>` + `.x` swizzle, gather is left unchanged (already
+  `vec4<f32>`). Uses Tint's own machinery as the template
+  (`texture_polyfill.cc:345,661-676` + `bgra8unorm_polyfill.cc`); no
+  `third_party/dawn` edit and shim-only rebuild (no Tint recompile, no
+  host-hang risk). Verified on crocus: **textureSample 885, textureSampleLevel
+  2,610, textureGather 3,105 = ~6,600 FAIL→PASS** (incl. cube via the
+  glTextureView path), textureLoad depth16unorm/depth32float(-stencil8) pass;
+  comparison clusters unchanged (`textureSampleCompare` 16,560 /
+  `textureSampleCompareLevel` 49,680 / `textureGatherCompare` 46,800, all
+  0-fail).
+  - **RESIDUAL (still catalogued Tier-2):** (a) `textureLoad` on
+    **depth24plus / depth24plus-stencil8** — 48 fails "expected bits …, got …":
+    depth24plus has implementation-defined precision (WebGPU allows ≥24 bits),
+    and Mesa/crocus's internal storage bit-count differs from the CTS's
+    expected bits; depth16unorm / depth32float / depth32float-stencil8 all
+    pass, so this is a format-precision boundary, not the shadow modelling.
+    (b) depth handles reached through a **user-function parameter** (a
+    `UserCall` before DirectVariableAccess inlines the handle) — the
+    eligibility scan marks these ineligible and leaves them as `sampler2DShadow`
+    (conservative). (c) Mixed comparison + non-comparison use of ONE depth
+    texture — skipped by construction (a comparison use makes the var
+    ineligible). (d) Multisampled depth (`DepthMultisampledTexture`) — out of
+    scope for this slice.
 
 - **Storage images: vertex-stage + non-required formats (GLES limits)** —
   Tier-2 hardware/spec gaps (2026-07-06, catalogued). (a) GLES 3.1 does not
