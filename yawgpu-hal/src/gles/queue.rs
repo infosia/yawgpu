@@ -1125,13 +1125,23 @@ fn create_render_fbo(
                     message: "render pass color target is not a GLES texture",
                 });
             };
+            // 2D / 2D-multisample attach via glFramebufferTexture2D; 2D-array
+            // and 3D attach the selected layer / z-slice via
+            // glFramebufferTextureLayer (see attach_color_texture_to_framebuffer,
+            // the color analogue of the layered depth-stencil attach). Cube /
+            // cube-array color targets are not yet mapped and are rejected here
+            // before FBO creation to keep the error path FBO-cleanup-free.
             if !matches!(
                 texture.meta().target,
-                glow::TEXTURE_2D | glow::TEXTURE_2D_MULTISAMPLE
+                glow::TEXTURE_2D
+                    | glow::TEXTURE_2D_MULTISAMPLE
+                    | glow::TEXTURE_2D_ARRAY
+                    | glow::TEXTURE_3D
             ) {
                 return Err(HalError::BufferOperationFailed {
                     backend: BACKEND,
-                    message: "GLES render pass supports only 2D color attachments",
+                    message: "GLES render pass color attachment target is unsupported \
+                              (only 2D, 2D-array, and 3D)",
                 });
             }
             Ok(Some((target, texture, texture.raw_or_err()?)))
@@ -1203,14 +1213,22 @@ fn create_render_fbo(
                 continue;
             };
             let attachment = glow::COLOR_ATTACHMENT0 + index as u32;
-            attach_2d_texture_to_framebuffer(
+            // 3D color targets select a z-slice (WebGPU depthSlice); 2D-array
+            // targets select an array layer. 2D targets ignore the value.
+            let layer = if texture.meta().target == glow::TEXTURE_3D {
+                target.depth_slice
+            } else {
+                target.array_layer
+            };
+            attach_color_texture_to_framebuffer(
                 gl,
                 glow::DRAW_FRAMEBUFFER,
                 attachment,
                 texture.meta(),
                 *color_texture,
                 target.mip_level,
-            );
+                layer,
+            )?;
             draw_buffer_list.push(attachment);
         }
         gl.draw_buffers(&draw_buffer_list);
@@ -1364,6 +1382,59 @@ unsafe fn attach_2d_texture_to_framebuffer(
             },
         );
     }
+}
+
+/// Attaches a color texture to the render FBO, selecting the target's layer.
+///
+/// Plain `TEXTURE_2D` / `TEXTURE_2D_MULTISAMPLE` keep `glFramebufferTexture2D`;
+/// `TEXTURE_2D_ARRAY` / `TEXTURE_3D` bind the pre-selected `layer` via
+/// `glFramebufferTextureLayer` -- the caller passes the array layer for a
+/// 2D-array target and the z-slice (WebGPU `depthSlice`) for a 3D target. This
+/// is the color analogue of `attach_depth_stencil_texture_to_framebuffer`.
+/// `create_render_fbo` already rejects any other target before FBO creation, so
+/// the fallback arm here is defensive only. (Cube / cube-array color targets are
+/// deferred; MSAA resolve to a layer is handled separately in
+/// `attach_resolve_texture_to_framebuffer` -- WebGPU requires a 2D resolve
+/// target, so no 3D-resolve path is needed.)
+unsafe fn attach_color_texture_to_framebuffer(
+    gl: &glow::Context,
+    framebuffer_target: u32,
+    attachment: u32,
+    meta: &GlesTextureMeta,
+    texture: glow::Texture,
+    mip_level: u32,
+    layer: u32,
+) -> Result<(), HalError> {
+    unsafe {
+        match meta.target {
+            glow::TEXTURE_2D | glow::TEXTURE_2D_MULTISAMPLE => {
+                attach_2d_texture_to_framebuffer(
+                    gl,
+                    framebuffer_target,
+                    attachment,
+                    meta,
+                    texture,
+                    mip_level,
+                );
+            }
+            glow::TEXTURE_2D_ARRAY | glow::TEXTURE_3D => {
+                gl.framebuffer_texture_layer(
+                    framebuffer_target,
+                    attachment,
+                    Some(texture),
+                    i32_from_u32(mip_level, "color attachment mip level exceeds GLES limit")?,
+                    i32_from_u32(layer, "color attachment layer exceeds GLES limit")?,
+                );
+            }
+            _ => {
+                return Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "GLES render pass color attachment target is unsupported",
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 unsafe fn attach_depth_stencil_texture_to_framebuffer(
@@ -3828,6 +3899,124 @@ mod tests {
             .queue()
             .submit_copies(&[HalCopy::RenderPass(pass)])
             .expect("submit must ignore a vertex buffer bound at an undeclared slot");
+    }
+
+    /// Creates a 2x2 RGBA8 texture (2D-array or 3D) usable as both a copy
+    /// endpoint and a render attachment, with `depth_or_array_layers` layers.
+    fn rgba8_layered_render_attachment(
+        device: &super::super::device::GlesDevice,
+        dimension: crate::HalTextureDimension,
+        depth_or_array_layers: u32,
+    ) -> super::super::texture::GlesTexture {
+        device
+            .create_texture(&crate::HalTextureDescriptor {
+                dimension,
+                format: crate::HalTextureFormat::Rgba8Unorm,
+                width: 2,
+                height: 2,
+                depth_or_array_layers,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: crate::HalTextureUsage {
+                    copy_src: true,
+                    copy_dst: true,
+                    texture_binding: false,
+                    storage_binding: false,
+                    render_attachment: true,
+                    transient: false,
+                },
+            })
+            .expect("GLES layered render-attachment texture creation must succeed")
+    }
+
+    #[test]
+    fn submit_render_pass_clears_color_2d_array_layer() {
+        // P5: a color attachment targeting a specific 2D-array layer used to
+        // fail with "GLES render pass supports only 2D color attachments".
+        // Clearing layer 1 must land only on layer 1 and leave 0/2 untouched.
+        let Some(device) = gles_device_or_skip("GLES 2D-array color attachment test") else {
+            return;
+        };
+
+        let layer_count = 3u32;
+        let texture =
+            rgba8_layered_render_attachment(&device, crate::HalTextureDimension::D2, layer_count);
+        // Seed every layer with distinct bytes so we can prove the render pass
+        // touches only the selected layer.
+        let seeded = upload_rgba8_slices(&device, &texture, layer_count);
+
+        let target_layer = 1u32;
+        let mut target = color_target_for(
+            texture.clone(),
+            crate::HalTextureFormat::Rgba8Unorm,
+            [0.0, 1.0, 0.0, 1.0],
+        );
+        target.array_layer = target_layer;
+        let pass = render_pass(vec![Some(target)]);
+        device
+            .queue()
+            .submit_copies(&[HalCopy::RenderPass(pass)])
+            .expect("render pass must clear 2D-array color layer 1");
+
+        let bytes = read_back_rgba8_slices(&device, &texture, 0, layer_count);
+        let green = [0u8, 255, 0, 255];
+        for layer in 0..layer_count {
+            let slice = &bytes[(layer * RGBA8_SLICE_BYTES) as usize
+                ..((layer + 1) * RGBA8_SLICE_BYTES) as usize];
+            if layer == target_layer {
+                for pixel in slice.chunks_exact(4) {
+                    assert_eq!(pixel, green, "cleared layer {layer} must be opaque green");
+                }
+            } else {
+                let expected = &seeded[(layer * RGBA8_SLICE_BYTES) as usize
+                    ..((layer + 1) * RGBA8_SLICE_BYTES) as usize];
+                assert_eq!(slice, expected, "layer {layer} must be untouched");
+            }
+        }
+    }
+
+    #[test]
+    fn submit_render_pass_clears_color_3d_depth_slice() {
+        // P5: a color attachment targeting a specific 3D z-slice (WebGPU
+        // depthSlice) used to be rejected. Clearing slice 2 must land only on
+        // slice 2 and leave 0/1 untouched.
+        let Some(device) = gles_device_or_skip("GLES 3D color attachment test") else {
+            return;
+        };
+
+        let depth = 3u32;
+        let texture =
+            rgba8_layered_render_attachment(&device, crate::HalTextureDimension::D3, depth);
+        let seeded = upload_rgba8_slices(&device, &texture, depth);
+
+        let target_slice = 2u32;
+        let mut target = color_target_for(
+            texture.clone(),
+            crate::HalTextureFormat::Rgba8Unorm,
+            [0.0, 0.0, 1.0, 1.0],
+        );
+        target.depth_slice = target_slice;
+        let pass = render_pass(vec![Some(target)]);
+        device
+            .queue()
+            .submit_copies(&[HalCopy::RenderPass(pass)])
+            .expect("render pass must clear 3D color z-slice 2");
+
+        let bytes = read_back_rgba8_slices(&device, &texture, 0, depth);
+        let blue = [0u8, 0, 255, 255];
+        for slice in 0..depth {
+            let bytes_slice = &bytes[(slice * RGBA8_SLICE_BYTES) as usize
+                ..((slice + 1) * RGBA8_SLICE_BYTES) as usize];
+            if slice == target_slice {
+                for pixel in bytes_slice.chunks_exact(4) {
+                    assert_eq!(pixel, blue, "cleared z-slice {slice} must be opaque blue");
+                }
+            } else {
+                let expected = &seeded[(slice * RGBA8_SLICE_BYTES) as usize
+                    ..((slice + 1) * RGBA8_SLICE_BYTES) as usize];
+                assert_eq!(bytes_slice, expected, "z-slice {slice} must be untouched");
+            }
+        }
     }
 
     #[test]

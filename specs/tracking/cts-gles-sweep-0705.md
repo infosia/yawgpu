@@ -1216,3 +1216,40 @@ per-sample behaviour the original P4 targeted:
   coverage": alpha-to-coverage sample derivation.
 This is a deep behavioural debug (hypothesis -> hardware loop), the true
 long-tail P4 slice.
+
+## Layered color attachments DONE (2026-07-08) — non-2D color render targets
+
+User chose "structural slices" over the deep MSAA tail. Residual re-clustering
+found no single large clean lever remains; the cleanest bounded structural win
+was **layered (non-2D) color attachments** — the color analogue of the landed
+layered depth-stencil work (e185afc). `create_render_fbo` rejected any color
+target that was not `TEXTURE_2D`/`_MULTISAMPLE` ("GLES render pass supports only
+2D color attachments"), blocking render passes to a 2D-array layer or 3D z-slice
+(160 `command_buffer,copyTextureToTexture` 3D/array setup passes + 7
+`rendering,3d_texture_slices`).
+
+**Fix (`gles/queue.rs`):** accept `TEXTURE_2D_ARRAY`/`TEXTURE_3D` color targets;
+new `attach_color_texture_to_framebuffer` attaches the selected `array_layer`
+(2D-array) or `depth_slice` (3D) via `glFramebufferTextureLayer` (fields already
+on `HalRenderColorTarget`). Covers single + MRT slots; clear/readBuffer/blit
+paths are target-agnostic; MSAA resolve target already handled 2D-array. Cube /
+cube-array color targets stay `HalError` (catalogued). No core change. Real-EGL
+tests: clear a specific 2D-array layer and a specific 3D z-slice, assert only
+that layer/slice changed.
+
+**Verified crocus:** `rendering,3d_texture_slices` 7 -> **0**; the "only 2D
+color attachments" rejection eliminated. `command_buffer` 1,359 -> **1,263**
+(the copyTextureToTexture non-2D setup passes now succeed; 108 residual there are
+the catalogued stencil-readback limit, not the attachment). `rendering` 173 ->
+**166**. Full `api,operation` 3,139 -> **3,036** (−103). yawgpu-hal gles
+182/182, Noop green, clippy clean. README total fail 6,995 -> **6,892**.
+
+### Campaign status (total fail 30,408 -> 6,892) — diminishing returns
+The big structural levers are exhausted (bind-groups, MSAA infra, cube/cube-
+array, storage, copies, feature/limit truthfulness, depth raw-read, buffer
+zero-init, whole-size bindings, layered color). The remaining ~6,900 is a
+genuinely fragmented long tail: MSAA per-sample behaviour (1,510, deep debug,
+deferred), catalogued Tier-2 limits (stencil readback ~900, vertex-stage storage
+images, rg32 formats, no image1D, depth24plus precision), storage layer-subrange
+(482, glTextureView-based), B2B copy value (283), and scattered per-format value
+bugs. Each is an independent investigation with modest per-slice yield.
