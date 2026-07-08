@@ -1253,3 +1253,29 @@ deferred), catalogued Tier-2 limits (stencil readback ~900, vertex-stage storage
 images, rg32 formats, no image1D, depth24plus precision), storage layer-subrange
 (482, glTextureView-based), B2B copy value (283), and scattered per-format value
 bugs. Each is an independent investigation with modest per-slice yield.
+
+## Storage layer-subrange views DONE (2026-07-08) — user-picked, ~631 FAIL->PASS
+
+`glBindImageTexture` can bind only a whole-layered or single-layer image, so a
+2d-array/3d storage view of a layer SUBRANGE (`base_array_layer>0` or
+`array_layer_count<full`, count>1) was rejected ("GLES storage texture views
+must bind a whole layered view or one layer", 482 fails — all compute/fragment,
+none vertex, so all reachable/fixable). Fix (`gles/queue.rs`, reusing the
+sampled-view machinery): thread `TextureViewCaps` into `bind_storage_textures`;
+for a subrange, create a transient `glTextureView` aliasing `[base, base+count)`
+(via `create_transient_texture_view`) and `glBindImageTexture(view,
+layered=GL_TRUE, layer=0)` — the view has exactly `count` layers so
+view-relative layers and `imageSize().z`/`textureNumLayers` are correct; a
+`StorageImageCleanup` Drop deletes the transient views after the dispatch/draw.
+Whole-view and single-layer fast paths unchanged; ES-3.1 (no glTextureView)
+keeps the `HalError` (catalogued). No format-compat issue (R32UI view matches
+the image format). No core change.
+
+**Verified crocus (workers=2):** the "whole layered view" cluster (482) -> **0**.
+Full `shader,execution` re-measure: pass 314,971 -> **315,602**, fail 3,531 ->
+**2,900** (−631 = 482 direct + ~149 poisoned-CB secondaries downstream of the
+layer-subrange bind rejection). crash 0. yawgpu-hal gles 184/184 (base>0 +
+base=0-partial real-EGL subrange tests), Noop green, clippy clean. README GLES
+table: shader/execution 3,531 -> 2,900, total fail 6,892 -> **6,261**. Storage
+residual now dominated by vertex-stage storage images
+(GL_MAX_VERTEX_IMAGE_UNIFORMS=0, catalogued) + rg32 formats + no-image1D.

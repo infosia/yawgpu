@@ -331,12 +331,17 @@ fn submit_compute_pass(
             pipeline.texture_metadata_slots(),
             &pass.bind_textures,
         )?;
-        bind_storage_textures(
+        let storage_views = bind_storage_textures(
             gl,
             pipeline.bindings(),
             pipeline.binding_remaps(),
             &pass.bind_textures,
+            texture_view_caps,
         )?;
+        let _storage_cleanup = StorageImageCleanup {
+            gl,
+            views: storage_views,
+        };
         match &pass.dispatch {
             HalComputeDispatch::Direct { workgroups } => {
                 // WebGPU: a dispatch with any zero workgroup count does
@@ -715,7 +720,9 @@ fn bind_storage_textures(
     descriptors: &[HalDescriptorBinding],
     remaps: &[HalGlesBindingRemap],
     textures: &[HalBoundTexture],
-) -> Result<(), HalError> {
+    texture_view_caps: TextureViewCaps,
+) -> Result<Vec<glow::Texture>, HalError> {
+    let mut transient_views = Vec::new();
     for texture in textures
         .iter()
         .filter(|texture| texture.storage_access.is_some())
@@ -774,24 +781,62 @@ fn bind_storage_textures(
                 message: "GLES storage texture views must expose exactly one mip level",
             });
         }
-        let (layered, layer) = storage_image_layer_binding(
-            texture,
-            gles_texture.meta().target,
-            gles_texture.meta().depth_or_array_layers,
-        )?;
-        unsafe {
-            gl.bind_image_texture(
-                flat_binding,
-                raw_texture,
-                base_level,
-                layered,
-                layer,
-                access,
-                internal_format,
-            );
+        let meta = gles_texture.meta();
+        match storage_image_layer_binding(texture, meta.target, meta.depth_or_array_layers)? {
+            StorageImageBinding::Base { layered, layer } => unsafe {
+                gl.bind_image_texture(
+                    flat_binding,
+                    raw_texture,
+                    base_level,
+                    layered,
+                    layer,
+                    access,
+                    internal_format,
+                );
+            },
+            StorageImageBinding::Subrange => {
+                // `glBindImageTexture` cannot express a >1-layer subrange on the
+                // base texture, so alias `[base, base + count)` as a fresh
+                // texture and bind it as a whole layered image. This mirrors the
+                // sampled-view path (`bind_combined_samplers`). Requires
+                // `glTextureView` (ES 3.2); on ES 3.1 this stays a Tier-2 gap.
+                if !texture_view_caps.supports_texture_view {
+                    return Err(HalError::BufferOperationFailed {
+                        backend: BACKEND,
+                        message:
+                            "GLES storage texture views must bind a whole layered view or one layer",
+                    });
+                }
+                let Some(texture_view) = texture_view_caps.texture_view else {
+                    return Err(HalError::BufferOperationFailed {
+                        backend: BACKEND,
+                        message:
+                            "GLES texture-view support was reported but glTextureView is unavailable",
+                    });
+                };
+                let target = texture_view_target(
+                    texture.dimension,
+                    meta.target,
+                    texture_view_caps.supports_cube_map_array,
+                )?;
+                let view =
+                    create_transient_texture_view(gl, raw_texture, target, meta, texture, texture_view)?;
+                transient_views.push(view);
+                unsafe {
+                    gl.bind_image_texture(
+                        flat_binding,
+                        view,
+                        0,
+                        true,
+                        0,
+                        access,
+                        internal_format,
+                    );
+                }
+            }
         }
     }
-    Ok(())
+    Ok(transient_views)
 }
 
 fn storage_texture_access(access: HalStorageTextureAccess) -> u32 {
@@ -802,11 +847,25 @@ fn storage_texture_access(access: HalStorageTextureAccess) -> u32 {
     }
 }
 
+/// How a storage (image) texture view maps onto `glBindImageTexture`.
+enum StorageImageBinding {
+    /// Bind the underlying texture directly. `glBindImageTexture` can express
+    /// only whole-texture layered (`layered = true, layer = 0`) or a single
+    /// layer (`layered = false, layer = N`).
+    Base { layered: bool, layer: i32 },
+    /// The view is a layer subrange of more than one layer that is not the
+    /// whole texture (`base_array_layer > 0` or `array_layer_count < full`).
+    /// `glBindImageTexture` cannot express this on the base texture, so a
+    /// transient `glTextureView` aliasing `[base, base + count)` is bound as a
+    /// whole layered image instead.
+    Subrange,
+}
+
 fn storage_image_layer_binding(
     texture: &HalBoundTexture,
     texture_target: u32,
     full_layer_count: u32,
-) -> Result<(bool, i32), HalError> {
+) -> Result<StorageImageBinding, HalError> {
     match texture.dimension {
         HalTextureViewDimension::D2 => {
             let layer = if texture_target == glow::TEXTURE_2D {
@@ -820,28 +879,28 @@ fn storage_image_layer_binding(
             } else {
                 texture.base_array_layer
             };
-            Ok((
-                false,
-                i32_from_u32(layer, "storage texture layer exceeds GLES limit")?,
-            ))
+            Ok(StorageImageBinding::Base {
+                layered: false,
+                layer: i32_from_u32(layer, "storage texture layer exceeds GLES limit")?,
+            })
         }
         HalTextureViewDimension::D2Array | HalTextureViewDimension::D3 => {
             if texture.base_array_layer == 0 && texture.array_layer_count == full_layer_count {
-                return Ok((true, 0));
+                return Ok(StorageImageBinding::Base {
+                    layered: true,
+                    layer: 0,
+                });
             }
             if texture.array_layer_count == 1 {
-                return Ok((
-                    false,
-                    i32_from_u32(
+                return Ok(StorageImageBinding::Base {
+                    layered: false,
+                    layer: i32_from_u32(
                         texture.base_array_layer,
                         "storage texture layer exceeds GLES limit",
                     )?,
-                ));
+                });
             }
-            Err(HalError::BufferOperationFailed {
-                backend: BACKEND,
-                message: "GLES storage texture views must bind a whole layered view or one layer",
-            })
+            Ok(StorageImageBinding::Subrange)
         }
         HalTextureViewDimension::D1
         | HalTextureViewDimension::Cube
@@ -1011,6 +1070,25 @@ impl Drop for TextureUnitCleanup<'_> {
                 self.gl.bind_sampler(*unit, None);
             }
             self.gl.active_texture(glow::TEXTURE0);
+        }
+    }
+}
+
+/// Deletes the transient `glTextureView`s that back layer-subrange storage
+/// (image) bindings. The views must outlive the dispatch/draw that reads them,
+/// so this guard is dropped only after the GPU work is issued, mirroring
+/// `TextureUnitCleanup` for sampled views.
+struct StorageImageCleanup<'a> {
+    gl: &'a glow::Context,
+    views: Vec<glow::Texture>,
+}
+
+impl Drop for StorageImageCleanup<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            for view in &self.views {
+                self.gl.delete_texture(*view);
+            }
         }
     }
 }
@@ -1658,12 +1736,17 @@ fn run_render_draw(
         pipeline.texture_metadata_slots(),
         &pass.bind_textures,
     )?;
-    bind_storage_textures(
+    let storage_views = bind_storage_textures(
         gl,
         pipeline.bindings(),
         pipeline.binding_remaps(),
         &pass.bind_textures,
+        texture_view_caps,
     )?;
+    let _storage_cleanup = StorageImageCleanup {
+        gl,
+        views: storage_views,
+    };
     let first_instance = pass.draw.map(draw_first_instance).unwrap_or(0);
     bind_vertex_buffers(
         gl,
@@ -7796,6 +7879,226 @@ mod tests {
                 message: "GLES image load/store does not support this storage format",
             }
         ));
+    }
+
+    #[test]
+    fn submit_compute_pass_stores_storage_array_subrange_nonzero_base() {
+        // base = 1, count = 2 of a 4-layer 2d-array storage texture: the
+        // shader's view-relative layers 0/1 must land on ABSOLUTE layers 1/2,
+        // the untouched layers 0/3 keep their sentinel, and imageSize().z == 2.
+        run_storage_array_subrange_test(
+            "GLES storage-array subrange (base=1,count=2)",
+            1,
+            2,
+            4,
+        );
+    }
+
+    #[test]
+    fn submit_compute_pass_stores_storage_array_subrange_zero_base_partial() {
+        // base = 0, count = 3 of a 4-layer texture: view-relative layers 0/1/2
+        // land on absolute layers 0/1/2, layer 3 keeps its sentinel, and
+        // imageSize().z == 3.
+        run_storage_array_subrange_test(
+            "GLES storage-array subrange (base=0,count=3)",
+            0,
+            3,
+            4,
+        );
+    }
+
+    fn run_storage_array_subrange_test(label: &str, base: u32, count: u32, total: u32) {
+        let Some(device) = gles_device_or_skip(label) else {
+            return;
+        };
+        let format = crate::HalTextureFormat::R32Uint;
+        let texture = device
+            .create_texture(&crate::HalTextureDescriptor {
+                dimension: crate::HalTextureDimension::D2,
+                format,
+                width: 2,
+                height: 2,
+                depth_or_array_layers: total,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: crate::HalTextureUsage {
+                    copy_src: true,
+                    copy_dst: true,
+                    texture_binding: false,
+                    storage_binding: true,
+                    render_attachment: false,
+                    transient: false,
+                },
+            })
+            .expect("GLES storage array texture creation must succeed");
+
+        // Seed every layer with a sentinel so untouched layers are detectable.
+        const SENTINEL: u32 = 9;
+        for layer in 0..total {
+            let seed: Vec<u8> = [SENTINEL; 4]
+                .into_iter()
+                .flat_map(u32::to_ne_bytes)
+                .collect();
+            let upload = device
+                .create_buffer(
+                    16,
+                    crate::HalBufferUsage {
+                        copy_src: true,
+                        ..crate::HalBufferUsage::default()
+                    },
+                )
+                .expect("GLES storage array seed upload buffer creation must succeed");
+            upload
+                .write(0, &seed)
+                .expect("writing storage array seed data must succeed");
+            device
+                .queue()
+                .submit_copies(&[HalCopy::BufferToTexture(HalBufferTextureCopy {
+                    buffer: HalBuffer::Gles(upload),
+                    buffer_layout: crate::HalBufferTextureLayout {
+                        offset: 0,
+                        bytes_per_row: 8,
+                        rows_per_image: 2,
+                    },
+                    texture: HalTexture::Gles(texture.clone()),
+                    format,
+                    aspect: crate::HalTextureAspect::All,
+                    mip_level: 0,
+                    origin: crate::HalOrigin3d { x: 0, y: 0, z: layer },
+                    extent: crate::HalExtent3d {
+                        width: 2,
+                        height: 2,
+                        depth_or_array_layers: 1,
+                    },
+                })])
+                .expect("seeding storage array layer must succeed");
+        }
+
+        let pipeline = device
+            .create_compute_pipeline(
+                crate::HalShaderSource::Glsl {
+                    source: "#version 310 es\n\
+                             layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;\n\
+                             layout(binding = 0, r32ui) uniform highp uimage2DArray tex;\n\
+                             void main() {\n\
+                                 ivec3 p = ivec3(gl_GlobalInvocationID);\n\
+                                 uint nz = uint(imageSize(tex).z);\n\
+                                 imageStore(tex, p, uvec4(nz * 1000u + uint(p.z), 0u, 0u, 0u));\n\
+                             }\n"
+                    .to_owned(),
+                    stage: crate::HalShaderStage::Compute,
+                    combined_samplers: Vec::new(),
+                    texture_metadata_slots: Vec::new(),
+                    binding_remaps: vec![crate::HalGlesBindingRemap::new(
+                        0,
+                        0,
+                        crate::HalGlesBindingClass::StorageTexture,
+                        0,
+                    )],
+                    texture_metadata_ubo_binding: None,
+                },
+                "main",
+                (1, 1, 1),
+                &[HalDescriptorBinding {
+                    group: 0,
+                    binding: 0,
+                    kind: HalDescriptorBindingKind::StorageTexture {
+                        access: HalStorageTextureAccess::WriteOnly,
+                    },
+                }],
+            )
+            .expect("GLES storage array subrange compute pipeline must create");
+
+        let bound = HalBoundTexture {
+            group: 0,
+            binding: 0,
+            metal_index: 0,
+            vertex_metal_index: None,
+            fragment_metal_index: None,
+            texture: HalTexture::Gles(texture.clone()),
+            format,
+            dimension: HalTextureViewDimension::D2Array,
+            base_mip_level: 0,
+            mip_level_count: 1,
+            base_array_layer: base,
+            array_layer_count: count,
+            aspect: crate::HalTextureAspect::All,
+            swizzle: crate::HalTextureComponentSwizzle::default(),
+            storage_access: Some(HalStorageTextureAccess::WriteOnly),
+        };
+
+        device
+            .queue()
+            .submit_copies(&[HalCopy::ComputePass(HalComputePass {
+                pipeline: HalComputePipeline::Gles(pipeline),
+                bind_buffers: Vec::new(),
+                bind_textures: vec![bound],
+                bind_samplers: Vec::new(),
+                bind_external_textures: Vec::new(),
+                immediate_data: Vec::new(),
+                dispatch: HalComputeDispatch::Direct {
+                    workgroups: (2, 2, count),
+                },
+            })])
+            .expect("GLES storage array subrange dispatch must succeed");
+
+        for layer in 0..total {
+            let values = read_storage_array_layer(&device, texture.clone(), format, layer);
+            let expected = if layer >= base && layer < base + count {
+                // imageSize().z (== count) * 1000 + view-relative layer index.
+                count * 1000 + (layer - base)
+            } else {
+                SENTINEL
+            };
+            assert!(
+                values.iter().all(|value| *value == expected),
+                "{label}: absolute layer {layer} expected all {expected}, got {values:?}",
+            );
+        }
+    }
+
+    fn read_storage_array_layer(
+        device: &super::super::device::GlesDevice,
+        texture: super::super::texture::GlesTexture,
+        format: crate::HalTextureFormat,
+        layer: u32,
+    ) -> Vec<u32> {
+        let readback = device
+            .create_buffer(
+                16,
+                crate::HalBufferUsage {
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES storage array readback buffer creation must succeed");
+        device
+            .queue()
+            .submit_copies(&[HalCopy::TextureToBuffer(HalBufferTextureCopy {
+                buffer: HalBuffer::Gles(readback.clone()),
+                buffer_layout: crate::HalBufferTextureLayout {
+                    offset: 0,
+                    bytes_per_row: 8,
+                    rows_per_image: 2,
+                },
+                texture: HalTexture::Gles(texture),
+                format,
+                aspect: crate::HalTextureAspect::All,
+                mip_level: 0,
+                origin: crate::HalOrigin3d { x: 0, y: 0, z: layer },
+                extent: crate::HalExtent3d {
+                    width: 2,
+                    height: 2,
+                    depth_or_array_layers: 1,
+                },
+            })])
+            .expect("GLES storage array layer readback copy must succeed");
+        readback
+            .read(0, 16)
+            .expect("reading storage array readback buffer must succeed")
+            .chunks_exact(4)
+            .map(|chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect()
     }
 
     fn storage_texture_2x2(
