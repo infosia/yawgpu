@@ -161,12 +161,27 @@ fn allocate_buffer(device: &Arc<GlesDeviceInner>, size: u64) -> Result<glow::Buf
                     backend: BACKEND,
                     message: "glCreateBuffer failed",
                 })?;
-            let size = i32::try_from(size).map_err(|_| HalError::BufferOperationFailed {
+            // Validate the size fits the `i32` GLES limit (`glBufferData`
+            // takes `GLsizeiptr`); the checked value is derived from the same
+            // `u64` used for the zero vector below.
+            i32::try_from(size).map_err(|_| HalError::BufferOperationFailed {
                 backend: BACKEND,
                 message: "buffer size exceeds GLES limit",
             })?;
+            let size_as_usize =
+                usize::try_from(size).map_err(|_| HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "buffer size exceeds host limit",
+                })?;
+            // WebGPU requires buffers to behave as zero-initialized on
+            // creation. Unlike fresh Vulkan/Metal allocations (whose OS pages
+            // come back zeroed), GL recycles freed-buffer memory within the
+            // process, so `glBufferData(size, NULL)` would expose stale bytes
+            // from a previously-destroyed buffer. Uploading a host zero vector
+            // both allocates and initializes the storage to zero.
+            let zeros = vec![0u8; size_as_usize];
             gl.bind_buffer(glow::COPY_WRITE_BUFFER, Some(buffer));
-            gl.buffer_data_size(glow::COPY_WRITE_BUFFER, size, glow::DYNAMIC_DRAW);
+            gl.buffer_data_u8_slice(glow::COPY_WRITE_BUFFER, &zeros, glow::DYNAMIC_DRAW);
             gl.bind_buffer(glow::COPY_WRITE_BUFFER, None);
             Ok(buffer)
         })
@@ -229,5 +244,73 @@ mod tests {
                 message: "buffer write range exceeds buffer size",
             }
         ));
+    }
+
+    /// Creates a real EGL-backed device, self-skipping (returning `None`) when
+    /// no GLES backend/adapter/device is available so the suite stays green on
+    /// GPU-less CI (Noop-first).
+    fn gles_device_or_skip(label: &str) -> Option<super::super::device::GlesDevice> {
+        let instance = match super::super::instance::GlesInstance::new() {
+            Ok(instance) => instance,
+            Err(error) => {
+                eprintln!("skipping {label}; backend unavailable: {error:?}");
+                return None;
+            }
+        };
+        let Some(adapter) = instance.enumerate_adapters().into_iter().next() else {
+            eprintln!("skipping {label}; no adapter available");
+            return None;
+        };
+        match adapter.create_device() {
+            Ok(device) => Some(device),
+            Err(error) => {
+                eprintln!("skipping {label}; device unavailable: {error:?}");
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn new_buffer_reads_back_all_zeros_even_after_allocation_recycling() {
+        // WebGPU requires buffers to behave as zero-initialized on creation.
+        // GL recycles freed-buffer memory within the process, so without the
+        // zero-init in `allocate_buffer` a freshly created buffer can expose
+        // stale bytes from a previously destroyed one. To make the pre-fix
+        // state reliably non-zero, first fill a buffer with a 0xAB sentinel and
+        // destroy it so its GL allocation is available for recycling, then
+        // create a NEW buffer of the same size with NO writes and assert every
+        // byte reads back as zero. This FAILS before the fix (stale 0xAB /
+        // garbage) and PASSES after.
+        let label = "GLES buffer zero-init test";
+        let Some(device) = gles_device_or_skip(label) else {
+            return;
+        };
+
+        const SIZE: u64 = 256;
+        let usage = crate::HalBufferUsage::default();
+
+        // Prime the GL allocator with a sentinel-filled buffer, then drop it so
+        // the freed storage becomes a candidate for recycling.
+        {
+            let primer = device
+                .create_buffer(SIZE, usage)
+                .expect("primer buffer creation must succeed");
+            primer
+                .write(0, &vec![0xABu8; SIZE as usize])
+                .expect("primer sentinel write must succeed");
+        }
+
+        // Create the buffer under test with no writes and read it back.
+        let fresh = device
+            .create_buffer(SIZE, usage)
+            .expect("fresh buffer creation must succeed");
+        let contents = fresh.read(0, SIZE).expect("fresh buffer read must succeed");
+
+        assert_eq!(contents.len(), SIZE as usize);
+        assert!(
+            contents.iter().all(|&byte| byte == 0),
+            "a freshly created buffer must read back all zeros (WebGPU zero-init); \
+             found non-zero bytes indicating recycled, uninitialized GL storage"
+        );
     }
 }

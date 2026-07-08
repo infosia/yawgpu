@@ -1125,3 +1125,52 @@ framebuffer-incomplete 145, texture-contents 86, textureStore 84, memory-
 model 38, metadata 18. README GLES table updated: shader/execution
 10,129 -> 3,531, total fail 30,388 -> **23,790**. Next: P3 (command_buffer
 copy tail, 16,724 = 15,081 image_copy padding).
+
+## P3 DONE (2026-07-08) — GLES buffer zero-init (~15.4k FAIL->PASS)
+
+**The earlier P3 "compute-blit padding-protection / slice-stride" theory was
+a MISDIAGNOSIS** (it caused the slice-4b/piece-4/piece-5 reverts). Deep
+re-investigation found the real, much simpler root cause: **GLES buffers were
+not zero-initialized.** `allocate_buffer` (gles/buffer.rs) used
+`glBufferData(size, NULL)`; GL recycles freed-buffer memory within the
+process, so a new buffer held stale bytes from a destroyed one (Vulkan/Metal
+get zeroed fresh OS pages instead — their HALs also don't explicitly zero,
+but pass). WebGPU requires zero-init. yawgpu's T2B paths already preserve
+padding correctly (tight byte-granular row copies via glReadPixels/
+glBufferSubData — verified by reading both paths), so the 15,081
+`image_copy` "texture padding mismatch" fails were NOT a copy bug: the
+`FullCopyT2B` check copies a whole subresource into TWO fresh
+(spec-zero-init) buffers and compares row padding
+(harness.cpp:628-643); yawgpu preserved each buffer's UNINITIALIZED garbage,
+which differed between the two -> mismatch (got0 = one happened to be zero;
+got-nonzero = leaked bytes, 3D-heavy only because 3D has more padding rows).
+
+Checker semantics verified (P3 mandated step 1): the check compares two fresh
+buffers' padding, not a seeded value. Directly confirmed via
+`resource_init,buffer` (2 fail: "uninitialized buffer expected green=0, got
+red") and the run-to-run-deterministic but snapshot-vs-cmp-divergent padding
+values (recycled-memory signature).
+
+**Fix (gles/buffer.rs `allocate_buffer`):** upload a host zero vector
+(`buffer_data_u8_slice(&vec![0u8; size])`) instead of `buffer_data_size`
+(NULL) — allocates + zeroes in one call. Tier-independent (GLES made to match
+the zero-init core assumes), no core/Vulkan/Metal change. block-67 buffer row
+updated. Real-EGL HAL test creates+drops a 0xAB-filled buffer to recycle the
+allocation, then asserts a fresh unwritten buffer reads all zeros (fails
+pre-fix on crocus, passes post-fix).
+
+**Verified on crocus (workers=2):**
+- `resource_init,buffer` 2 -> 0; `image_copy` "texture padding mismatch"
+  family **15,081 -> 0**.
+- `command_buffer` **16,724 -> 1,359** (residual: 908 stencil readback
+  catalogued, 283 B2B value, 160 MRT/color-attachment, small).
+- Full `api,operation` re-measure: pass 132,829 -> **148,214**, fail
+  **19,934 -> 4,549** (−15,385; rendering 187->173 and resource_init 5->0 are
+  extra zero-init wins). crash 0.
+- yawgpu-hal gles 175/175, Noop workspace green, clippy clean.
+
+README GLES table: api,operation 19,934 -> 4,549, total fail 23,790 ->
+**8,405**. Campaign arc so far: total fail 30,408 -> 8,405. Remaining
+api,operation residual 4,549: render_pipeline 2,699 (MSAA sample_mask = P4),
+memory_sync 234 (P6 binding-size), rendering 173, command_buffer 1,359
+(stencil/B2B/MRT), render_pass 55, texture_view 20.
