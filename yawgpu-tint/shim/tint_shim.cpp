@@ -862,6 +862,15 @@ bool remap_texture_builtin_ubo_contents(
             return false;
         }
         builtin.binding = remap_binding_point(resolved_bindings.texture, *wgsl_binding);
+        // Make the metadata UBO offset a deterministic function of the resolved
+        // (post-remap) texture binding so that vertex and fragment stages
+        // independently compute disjoint offsets for different textures and
+        // identical offsets for a shared texture. This mirrors Dawn's
+        // per-pipeline EmulatedTextureBuiltinRegistrar, which keys on the flat
+        // binding identity. Without this, each stage packs offsets from 0 and
+        // core's merge_texture_metadata_slots sees the same offset map to two
+        // different textures across stages.
+        builtin.offset = builtin.binding.binding;
     }
     return true;
 }
@@ -2261,6 +2270,15 @@ bool yawgpu_tint_generate_glsl(const YawgpuTintProgram* program,
             options.bindings = resolved_bindings;
             options.texture_builtins_from_uniform =
                 std::move(generated_bindings.texture_builtins_from_uniform);
+            // Normalize metadata UBO offsets to the resolved texture binding
+            // (here generated==resolved, group 0). Same rationale as the
+            // remapped path above: keeps cross-stage offsets disjoint per
+            // texture and shared for a common texture, matching Dawn's
+            // per-pipeline registrar. Do not leave this path on Tint's
+            // per-stage-from-0 offsets.
+            for (auto& builtin : options.texture_builtins_from_uniform.ubo_contents) {
+                builtin.offset = builtin.binding.binding;
+            }
         } else {
             resolved_bindings = make_bindings(bindings);
             options.bindings = resolved_bindings;

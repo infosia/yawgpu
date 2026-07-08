@@ -4115,6 +4115,256 @@ mod tests {
         );
     }
 
+    #[test]
+    fn submit_render_pass_reads_disjoint_texture_metadata_per_stage() {
+        // Cross-stage texture-metadata UBO regression (P1-surfaced regression of
+        // c06e516): the vertex and fragment stages each query metadata
+        // (textureNumLevels) on a DIFFERENT texture. yawgpu-core merges both
+        // stages' metadata slots into one UBO, keyed by offset. The fixed shim
+        // makes each offset a function of the resolved texture binding, so the
+        // two stages get DISJOINT offsets (vtex -> offset 0, ftex -> offset 1)
+        // and each stage reads its own texture's level count. If the offsets
+        // collided (the pre-fix per-stage-from-0 packing), both stages would
+        // read the same UBO slot and the two channels would be equal -- this
+        // test fails in that case. This mirrors Dawn's per-pipeline
+        // EmulatedTextureBuiltinRegistrar. A Noop backend cannot catch it (it is
+        // a real GLES UBO layout bug), hence a real-EGL test.
+        let Some(device) = gles_device_or_skip("GLES cross-stage metadata test") else {
+            return;
+        };
+
+        // vtex has 3 mip levels (queried by the vertex stage); ftex has 1
+        // (queried by the fragment stage). Distinct counts prove each stage
+        // reads its own texture rather than a shared, colliding slot.
+        let metadata_texture = |mip_level_count: u32| {
+            device
+                .create_texture(&crate::HalTextureDescriptor {
+                    dimension: crate::HalTextureDimension::D2,
+                    format: crate::HalTextureFormat::Rgba8Unorm,
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                    mip_level_count,
+                    sample_count: 1,
+                    usage: crate::HalTextureUsage {
+                        copy_src: false,
+                        copy_dst: false,
+                        texture_binding: true,
+                        storage_binding: false,
+                        render_attachment: false,
+                        transient: false,
+                    },
+                })
+                .expect("GLES metadata texture creation must succeed")
+        };
+        let vtex = metadata_texture(3);
+        let ftex = metadata_texture(1);
+
+        let color_texture = device
+            .create_texture(&crate::HalTextureDescriptor {
+                dimension: crate::HalTextureDimension::D2,
+                format: crate::HalTextureFormat::Rgba8Unorm,
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: crate::HalTextureUsage {
+                    copy_src: true,
+                    copy_dst: false,
+                    texture_binding: false,
+                    storage_binding: false,
+                    render_attachment: true,
+                    transient: false,
+                },
+            })
+            .expect("GLES color attachment creation must succeed");
+        let readback = device
+            .create_buffer(
+                4,
+                crate::HalBufferUsage {
+                    copy_dst: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES readback buffer creation must succeed");
+
+        // Two distinct uniform blocks share metadata UBO binding 0 (as Tint
+        // emits: v_/f_ prefixed block names, same binding). The vertex stage
+        // reads slot 0 (vtex) and forwards it; the fragment stage reads slot 1
+        // (ftex). Output encodes both level counts in separate channels.
+        let vertex = "#version 310 es\n\
+             layout(binding = 0, std140) uniform v_TintTextureUniformData_ubo {\n\
+               uvec4 metadata[1];\n\
+             } v;\n\
+             flat out uint v_vertex_levels;\n\
+             void main() {\n\
+               v_vertex_levels = v.metadata[0u / 4u][0u % 4u];\n\
+               float x = float((gl_VertexID & 1) << 2) - 1.0;\n\
+               float y = float((gl_VertexID & 2) << 1) - 1.0;\n\
+               gl_Position = vec4(x, y, 0.0, 1.0);\n\
+             }\n"
+            .to_owned();
+        let fragment = "#version 310 es\n\
+             precision highp float;\n\
+             precision highp int;\n\
+             layout(binding = 0, std140) uniform f_TintTextureUniformData_ubo {\n\
+               uvec4 metadata[1];\n\
+             } v;\n\
+             flat in uint v_vertex_levels;\n\
+             layout(location = 0) out vec4 frag_color;\n\
+             void main() {\n\
+               uint fragment_levels = v.metadata[1u / 4u][1u % 4u];\n\
+               frag_color = vec4(float(v_vertex_levels) / 255.0,\n\
+                                 float(fragment_levels) / 255.0, 0.0, 1.0);\n\
+             }\n"
+            .to_owned();
+
+        let pipeline = device
+            .create_render_pipeline(
+                crate::HalShaderSource::GlslStages {
+                    vertex,
+                    fragment: Some(fragment),
+                    combined_samplers: Vec::new(),
+                    // Merged, disjoint slots exactly as core produces post-fix.
+                    texture_metadata_slots: vec![
+                        HalTextureMetadataSlot {
+                            offset: 0,
+                            texture_group: 0,
+                            texture_binding: 0,
+                        },
+                        HalTextureMetadataSlot {
+                            offset: 1,
+                            texture_group: 0,
+                            texture_binding: 1,
+                        },
+                    ],
+                    binding_remaps: Vec::new(),
+                    texture_metadata_ubo_binding: Some(0),
+                },
+                "main",
+                Some("main"),
+                &crate::HalRenderPipelineDescriptor {
+                    sample_count: 1,
+                    sample_mask: u32::MAX,
+                    alpha_to_coverage_enabled: false,
+                    color_targets: vec![Some(HalColorTargetState {
+                        format: crate::HalTextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: 0xf,
+                    })],
+                    depth_stencil: None,
+                    vertex_buffers: Vec::new(),
+                    primitive_topology: crate::HalPrimitiveTopology::TriangleList,
+                    front_face: HalFrontFace::Ccw,
+                    cull_mode: HalCullMode::None,
+                    unclipped_depth: false,
+                    needs_frag_depth_range_push_constant: false,
+                    user_immediate_size: 0,
+                },
+                &[
+                    HalDescriptorBinding {
+                        group: 0,
+                        binding: 0,
+                        kind: HalDescriptorBindingKind::Texture,
+                    },
+                    HalDescriptorBinding {
+                        group: 0,
+                        binding: 1,
+                        kind: HalDescriptorBindingKind::Texture,
+                    },
+                ],
+            )
+            .expect("GLES cross-stage metadata pipeline creation must succeed");
+
+        let bound_metadata_texture =
+            |texture: super::super::texture::GlesTexture, binding: u32, mip_level_count: u32| {
+                HalBoundTexture {
+                    group: 0,
+                    binding,
+                    metal_index: 0,
+                    vertex_metal_index: None,
+                    fragment_metal_index: None,
+                    texture: HalTexture::Gles(texture),
+                    format: crate::HalTextureFormat::Rgba8Unorm,
+                    dimension: HalTextureViewDimension::D2,
+                    base_mip_level: 0,
+                    mip_level_count,
+                    base_array_layer: 0,
+                    array_layer_count: 1,
+                    aspect: crate::HalTextureAspect::All,
+                    swizzle: crate::HalTextureComponentSwizzle::default(),
+                    storage_access: None,
+                }
+            };
+
+        let mut pass = render_pass(vec![Some(crate::HalRenderColorTarget {
+            texture: HalTexture::Gles(color_texture.clone()),
+            view_format: crate::HalTextureFormat::Rgba8Unorm,
+            resolve_target: None,
+            resolve_view_format: None,
+            mip_level: 0,
+            array_layer: 0,
+            depth_slice: 0,
+            resolve_mip_level: 0,
+            resolve_array_layer: 0,
+            load_op: HalRenderLoadOp::Clear,
+            store: true,
+            clear_color: [0.0, 0.0, 0.0, 1.0],
+        })]);
+        pass.pipeline = Some(HalRenderPipeline::Gles(pipeline));
+        pass.bind_textures = vec![
+            bound_metadata_texture(vtex, 0, 3),
+            bound_metadata_texture(ftex, 1, 1),
+        ];
+        pass.draw = Some(HalDraw::Direct {
+            vertex_count: 3,
+            instance_count: 1,
+            first_vertex: 0,
+            first_instance: 0,
+        });
+
+        device
+            .queue()
+            .submit_copies(&[
+                HalCopy::RenderPass(pass),
+                HalCopy::TextureToBuffer(HalBufferTextureCopy {
+                    buffer: HalBuffer::Gles(readback.clone()),
+                    buffer_layout: crate::HalBufferTextureLayout {
+                        offset: 0,
+                        bytes_per_row: 4,
+                        rows_per_image: 1,
+                    },
+                    texture: HalTexture::Gles(color_texture),
+                    format: crate::HalTextureFormat::Rgba8Unorm,
+                    aspect: crate::HalTextureAspect::All,
+                    mip_level: 0,
+                    origin: crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+                    extent: crate::HalExtent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                }),
+            ])
+            .expect("cross-stage metadata render plus readback must succeed");
+
+        let bytes = readback
+            .read(0, 4)
+            .expect("reading back the cross-stage metadata texel must succeed");
+        // R = vertex stage's texture level count (3), G = fragment stage's (1).
+        // A collision (shared offset) would make R == G; the fix keeps them
+        // disjoint so each stage observes its own texture.
+        assert_eq!(
+            bytes[0], 3,
+            "vertex stage must read vtex's 3 mip levels; got {bytes:?}"
+        );
+        assert_eq!(
+            bytes[1], 1,
+            "fragment stage must read ftex's 1 mip level; got {bytes:?}"
+        );
+    }
+
     /// Creates a 2x2 Rgba8Unorm texture with `depth_or_array_layers` slices of
     /// the given dimension, usable as both a copy source and destination.
     fn rgba8_copy_texture(

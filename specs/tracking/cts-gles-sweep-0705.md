@@ -919,7 +919,7 @@ GLES table (currently mixed a94ab06/15a9ddb baselines).
 
 ### Dawn-reference findings for P2 / P3a (2026-07-07, from the full Dawn checkout)
 
-Investigated how Dawn handles both problems (checkout: `../../C/dawn`;
+Investigated how Dawn handles both problems (from a full Dawn checkout;
 line numbers are from that checkout — re-verify against the pinned
 `third_party/dawn` submodule before coding, versions may differ).
 
@@ -1043,3 +1043,37 @@ render_pipeline 2,699 (MSAA per-sample `sample_mask` — P4), memory_sync
 234 (`binding size exceeds GLES limit` — P6), rendering 187, render_pass
 55, texture_view 20 (was 210 pre-cube — the view work landed here),
 buffers 8, resource_init 5, limits/sampling 1 each.
+
+## Metadata-slot regression FIXED (2026-07-08) — api,validation 389 -> 325
+
+The 64 `conflicting texture metadata slot` internal errors from c06e516
+are fixed shim-side (handoff: `specs/handoff-metadata-slot-conflict.md`;
+block-67 metadata row updated). Root cause: the shim generates GLSL per
+stage, packing each stage's `texture_builtins_from_uniform.ubo_contents`
+offsets from 0 independently, so vertex and fragment collided at the same
+UBO offset for different textures; core's `merge_texture_metadata_slots`
+(matches by offset) then raised the internal error. Fix: the shim sets
+`ubo_contents[i].offset = resolved_binding.binding` (both the remapped and
+empty-remaps paths in `yawgpu_tint_generate_glsl`), making the offset a
+deterministic function of the pipeline-stable resolved binding — both
+stages independently compute disjoint offsets for different textures and
+identical offsets for a shared one. Mirrors Dawn's per-pipeline
+`EmulatedTextureBuiltinRegistrar` (keyed on FlatBindingIndex,
+`opengl/PipelineGL.cpp:222-246`), verified byte-identical in the pinned
+submodule. Core unchanged (the merge error becomes an unreachable safety
+net). Shim-only rebuild (~33 s, no full Tint recompile → no host-hang
+risk).
+
+**Verified on crocus (workers=2):**
+- `maxSampledTexturesPerShaderStage:*` → pass 1020, **fail 0** (was 64
+  internal errors).
+- Full `api,validation` re-measure: pass 194,827 / skip 157,163 /
+  **fail 325** / crash 0 (was 389 — clean −64, no collateral). Residual
+  325 = pre-existing catalogued/P6 items (90 color-target format, 57
+  depth-stencil bytes_per_row, 54 indexed-indirect, ~100 shader-compile,
+  etc.), unchanged in composition.
+- Unit gates: yawgpu-tint 61/61, yawgpu-hal gles 173/173 (incl. new
+  cross-stage real-EGL test), Noop workspace green, clippy clean.
+
+README GLES table: api,validation 389 -> 325, total fail 30,452 ->
+30,388.

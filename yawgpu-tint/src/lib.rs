@@ -3014,6 +3014,85 @@ fn main() {
     }
 
     #[test]
+    fn generate_glsl_metadata_slot_offset_follows_resolved_binding_across_stages() {
+        // A vertex stage and a fragment stage each query textureNumLevels on a
+        // DIFFERENT texture, plus a third texture shared by both. With the
+        // per-resolved-binding offset scheme, each stage independently computes
+        // offset == its resolved binding, so different textures get disjoint
+        // offsets (no cross-stage collision) and the shared texture gets the
+        // same offset in both stages. This mirrors Dawn's per-pipeline
+        // EmulatedTextureBuiltinRegistrar and is what lets core's
+        // merge_texture_metadata_slots agree instead of raising a conflict.
+        let wgsl = r#"
+@group(0) @binding(0) var vtex: texture_2d<f32>;
+@group(0) @binding(1) var ftex: texture_2d<f32>;
+@group(0) @binding(2) var shared_tex: texture_2d<f32>;
+
+@vertex
+fn vs() -> @builtin(position) vec4f {
+  let a = textureNumLevels(vtex);
+  let b = textureNumLevels(shared_tex);
+  return vec4f(f32(a + b), 0.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs() -> @location(0) vec4f {
+  let a = textureNumLevels(ftex);
+  let b = textureNumLevels(shared_tex);
+  return vec4f(f32(a + b), 0.0, 0.0, 1.0);
+}
+"#;
+        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let mut bindings = Bindings::default();
+        // yawgpu's flat remap: each texture keeps its binding as the flat value
+        // under group 0 (unique per texture across the pipeline).
+        for b in 0..3u32 {
+            bindings.texture.push(BindingRemap {
+                group: 0,
+                binding: b,
+                dst_group: 0,
+                dst_binding: b,
+            });
+        }
+
+        let vs = program.generate_glsl("vs", &bindings, &[], None).unwrap();
+        let fs = program.generate_glsl("fs", &bindings, &[], None).unwrap();
+
+        // Every slot's offset equals its resolved binding, in both stages.
+        for slot in vs.texture_metadata_slots.iter().chain(&fs.texture_metadata_slots) {
+            assert_eq!(
+                slot.offset, slot.binding,
+                "slot offset must equal resolved binding: {slot:?}"
+            );
+            assert_eq!(slot.group, 0, "resolved group must be 0: {slot:?}");
+        }
+
+        let offset_for = |slots: &[TextureMetadataSlot], binding: u32| -> u32 {
+            slots
+                .iter()
+                .find(|s| s.binding == binding)
+                .unwrap_or_else(|| panic!("no metadata slot for binding {binding}"))
+                .offset
+        };
+
+        // Different textures -> disjoint offsets across the two stages.
+        let vtex_off = offset_for(&vs.texture_metadata_slots, 0);
+        let ftex_off = offset_for(&fs.texture_metadata_slots, 1);
+        assert_ne!(
+            vtex_off, ftex_off,
+            "vertex-only and fragment-only textures must not share a metadata offset"
+        );
+
+        // Shared texture -> identical offset in both stages.
+        let shared_vs = offset_for(&vs.texture_metadata_slots, 2);
+        let shared_fs = offset_for(&fs.texture_metadata_slots, 2);
+        assert_eq!(
+            shared_vs, shared_fs,
+            "a texture shared by both stages must map to the same metadata offset"
+        );
+    }
+
+    #[test]
     fn generate_glsl_returns_combined_sampler_mapping_for_texture_sample() {
         let wgsl = r#"
 @group(0) @binding(0) var t: texture_2d<f32>;
