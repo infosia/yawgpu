@@ -433,7 +433,7 @@ pub(crate) struct MultisampleStateCacheKey {
 
 /// Owns the core object and retained handles for the WGPU Surface handle.
 pub struct WGPUSurfaceImpl {
-    pub(crate) label: Mutex<String>,
+    pub(crate) label: Mutex<Option<String>>,
     pub(crate) configured: Mutex<Option<SurfaceConfigurationState>>,
     pub(crate) hal: Mutex<Option<HalSurface>>,
     pub(crate) is_error: bool,
@@ -539,6 +539,7 @@ impl_test_label_accessor!(
     WGPURenderPipelineImpl,
     WGPUSamplerImpl,
     WGPUShaderModuleImpl,
+    WGPUSurfaceImpl,
     WGPUTextureImpl,
     WGPUTextureViewImpl,
 );
@@ -6858,12 +6859,8 @@ mod tests {
             assert_eq!(Arc::strong_count(&surface_arc), 2);
             wgpuSurfaceSetLabel(surface, label_view("surface label"));
             assert_eq!(
-                borrow_handle(surface, "WGPUSurface")
-                    .label
-                    .lock()
-                    .expect("surface label lock is not poisoned")
-                    .as_str(),
-                "surface label"
+                borrow_handle(surface, "WGPUSurface").label(),
+                Some("surface label".to_owned())
             );
 
             let mut capabilities = empty_surface_capabilities();
@@ -6895,6 +6892,58 @@ mod tests {
             wgpuSurfaceCapabilitiesFreeMembers(capabilities);
 
             drop(surface_arc);
+            wgpuSurfaceRelease(surface);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpu_surface_set_label_stores_string_view_cases() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let surface = create_noop_surface(instance);
+            let handle = borrow_handle(surface, "WGPUSurface");
+
+            wgpuSurfaceSetLabel(surface, crate::conv::string_view(b"a\0b"));
+            assert_eq!(handle.label(), Some("a\0b".to_owned()));
+
+            let strlen_bytes = b"strlen\0";
+            wgpuSurfaceSetLabel(
+                surface,
+                native::WGPUStringView {
+                    data: strlen_bytes.as_ptr().cast(),
+                    length: crate::conv::WGPU_STRLEN,
+                },
+            );
+            assert_eq!(handle.label(), Some("strlen".to_owned()));
+
+            wgpuSurfaceSetLabel(
+                surface,
+                native::WGPUStringView {
+                    data: std::ptr::null(),
+                    length: crate::conv::WGPU_STRLEN,
+                },
+            );
+            assert_eq!(handle.label(), None);
+
+            wgpuSurfaceSetLabel(
+                surface,
+                native::WGPUStringView {
+                    data: std::ptr::null(),
+                    length: 0,
+                },
+            );
+            assert_eq!(handle.label(), Some(String::new()));
+
+            wgpuSurfaceSetLabel(
+                surface,
+                native::WGPUStringView {
+                    data: b"ignored".as_ptr().cast(),
+                    length: 0,
+                },
+            );
+            assert_eq!(handle.label(), Some(String::new()));
+
             wgpuSurfaceRelease(surface);
             release_handles(instance, adapter, device);
         }

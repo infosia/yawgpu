@@ -278,8 +278,7 @@ pub unsafe extern "C" fn wgpuSurfaceSetLabel(
     *surface
         .label
         .lock()
-        .expect("surface label lock is not poisoned") =
-        label_from_string_view(label).unwrap_or_default();
+        .expect("surface label lock is not poisoned") = label_from_string_view(label);
 }
 
 /// Releases one owned reference to a surface handle.

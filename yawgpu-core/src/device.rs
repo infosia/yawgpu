@@ -34,6 +34,11 @@ pub(crate) struct DeviceInner {
     pub(crate) queue: Queue,
     pub(crate) error_sink: Mutex<ErrorSink>,
     pub(crate) lost: Mutex<DeviceLostState>,
+    // Dawn's `GetLabel()` collapses the null label into "" (the `label_validation.rs`
+    // Dawn port depends on this), so core keeps `String`. The FFI handles store
+    // `Option<String>` instead so their unit tests can prove `label_from_string_view`
+    // is `WGPUStringView`-spec-exact; the distinction is unobservable from C anyway
+    // (canonical `webgpu.h` declares no `wgpuXxxGetLabel`).
     pub(crate) label: Mutex<String>,
     pub(crate) limits: Limits,
     pub(crate) features: FeatureSet,

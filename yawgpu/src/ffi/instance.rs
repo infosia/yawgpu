@@ -371,12 +371,12 @@ pub unsafe extern "C" fn wgpuInstanceCreateSurface(
         let surface_source_is_unsupported = !has_supported_surface_source(descriptor.nextInChain);
         real_surface_creation_failed = real_surface_creation_failed && hal.is_none();
         (
-            label_from_string_view(descriptor.label).unwrap_or_default(),
+            label_from_string_view(descriptor.label),
             surface_source_is_unsupported || real_surface_creation_failed,
             hal,
         )
     } else {
-        (String::new(), true, None)
+        (None, true, None)
     };
     arc_to_handle(Arc::new(WGPUSurfaceImpl {
         label: Mutex::new(label),
