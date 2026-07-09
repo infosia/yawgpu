@@ -39,5 +39,20 @@ pub unsafe fn string_view_to_str<'a>(value: native::WGPUStringView) -> Option<&'
 ///
 /// Same requirements as [`string_view_to_str`].
 pub unsafe fn label_from_string_view(value: native::WGPUStringView) -> Option<String> {
-    string_view_to_str(value).map(ToOwned::to_owned)
+    // Labels preserve `{NULL, 0}` as the empty string, while `string_view_to_str`
+    // keeps treating it as absent for non-label defaults such as entry points.
+    if value.length == 0 {
+        return Some(String::new());
+    }
+    if value.data.is_null() {
+        return None;
+    }
+
+    let bytes = if value.length == WGPU_STRLEN {
+        CStr::from_ptr(value.data).to_bytes()
+    } else {
+        std::slice::from_raw_parts(value.data.cast::<u8>(), value.length)
+    };
+
+    std::str::from_utf8(bytes).ok().map(ToOwned::to_owned)
 }

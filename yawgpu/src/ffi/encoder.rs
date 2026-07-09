@@ -2,6 +2,26 @@ use super::*;
 use crate::conv::map_render_pass_timestamp_writes;
 use yawgpu_core::validate_compute_pass_timestamp_writes;
 
+/// Sets a command encoder label.
+///
+/// # Safety
+///
+/// `command_encoder` must be a non-null live yawgpu command encoder handle.
+/// `label` must point to valid string data according to `WGPUStringView` when
+/// non-empty.
+/// Returns WGPU command encoder set label.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuCommandEncoderSetLabel(
+    command_encoder: native::WGPUCommandEncoder,
+    label: native::WGPUStringView,
+) {
+    let command_encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    *command_encoder
+        .label
+        .lock()
+        .expect("label lock must not poison") = label_from_string_view(label);
+}
+
 /// Begins a render pass.
 ///
 /// # Safety
@@ -33,6 +53,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderBeginRenderPass(
         device: Arc::clone(&encoder.device),
         _parent: Arc::clone(&encoder.core),
         _instance: Arc::clone(&encoder.instance),
+        label: Mutex::new(label_from_string_view(native_descriptor.label)),
     }))
 }
 
@@ -91,6 +112,11 @@ pub unsafe extern "C" fn wgpuCommandEncoderBeginComputePass(
         device: Arc::clone(&encoder.device),
         _parent: Arc::clone(&encoder.core),
         _instance: Arc::clone(&encoder.instance),
+        label: Mutex::new(
+            descriptor
+                .as_ref()
+                .and_then(|descriptor| label_from_string_view(descriptor.label)),
+        ),
     }))
 }
 /// Finishes command encoding into a command buffer.
@@ -103,7 +129,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderBeginComputePass(
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCommandEncoderFinish(
     command_encoder: native::WGPUCommandEncoder,
-    _descriptor: *const native::WGPUCommandBufferDescriptor,
+    descriptor: *const native::WGPUCommandBufferDescriptor,
 ) -> native::WGPUCommandBuffer {
     let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
     let (command_buffer, error) = encoder.core.finish();
@@ -112,6 +138,11 @@ pub unsafe extern "C" fn wgpuCommandEncoderFinish(
         core: Arc::new(command_buffer),
         _device: Arc::clone(&encoder.device),
         _instance: Arc::clone(&encoder.instance),
+        label: Mutex::new(
+            descriptor
+                .as_ref()
+                .and_then(|descriptor| label_from_string_view(descriptor.label)),
+        ),
     }))
 }
 

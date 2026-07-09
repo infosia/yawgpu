@@ -195,6 +195,7 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
             let device_impl = Arc::new(WGPUDeviceImpl {
                 core: Arc::new(device),
                 instance: Arc::clone(&adapter.instance),
+                adapter: Arc::clone(&adapter.core),
                 device_lost_callback,
                 device_lost_futures: Mutex::new(Vec::new()),
                 default_queue: Mutex::new(None),

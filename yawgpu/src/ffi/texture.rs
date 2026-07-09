@@ -1,5 +1,41 @@
 use super::*;
 
+/// Sets a texture label.
+///
+/// # Safety
+///
+/// `texture` must be a non-null live yawgpu texture handle. `label` must point
+/// to valid string data according to `WGPUStringView` when non-empty.
+/// Returns WGPU texture set label.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuTextureSetLabel(
+    texture: native::WGPUTexture,
+    label: native::WGPUStringView,
+) {
+    let texture = borrow_handle(texture, "WGPUTexture");
+    *texture.label.lock().expect("label lock must not poison") = label_from_string_view(label);
+}
+
+/// Sets a texture view label.
+///
+/// # Safety
+///
+/// `texture_view` must be a non-null live yawgpu texture view handle. `label`
+/// must point to valid string data according to `WGPUStringView` when
+/// non-empty.
+/// Returns WGPU texture view set label.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuTextureViewSetLabel(
+    texture_view: native::WGPUTextureView,
+    label: native::WGPUStringView,
+) {
+    let texture_view = borrow_handle(texture_view, "WGPUTextureView");
+    *texture_view
+        .label
+        .lock()
+        .expect("label lock must not poison") = label_from_string_view(label);
+}
+
 /// Destroys a texture. This operation is idempotent.
 ///
 /// # Safety
@@ -24,7 +60,9 @@ pub unsafe extern "C" fn wgpuTextureCreateView(
     descriptor: *const native::WGPUTextureViewDescriptor,
 ) -> native::WGPUTextureView {
     let texture = borrow_handle(texture, "WGPUTexture");
-    let descriptor = map_texture_view_descriptor(descriptor.as_ref());
+    let native_descriptor = descriptor.as_ref();
+    let label = native_descriptor.and_then(|descriptor| label_from_string_view(descriptor.label));
+    let descriptor = map_texture_view_descriptor(native_descriptor);
     let (view, error) = texture.core.create_view(descriptor);
     if let Some(message) = error {
         texture
@@ -36,6 +74,7 @@ pub unsafe extern "C" fn wgpuTextureCreateView(
         _texture: Arc::clone(&texture.core),
         _device: Arc::clone(&texture.device),
         _instance: Arc::clone(&texture.instance),
+        label: Mutex::new(label),
     }))
 }
 
@@ -63,6 +102,34 @@ pub unsafe extern "C" fn wgpuTextureGetDimension(
     texture: native::WGPUTexture,
 ) -> native::WGPUTextureDimension {
     map_texture_dimension_to_native(borrow_handle(texture, "WGPUTexture").core.dimension())
+}
+
+/// Returns the texture binding view dimension.
+///
+/// # Safety
+///
+/// `texture` must be a non-null live yawgpu texture handle.
+/// Returns WGPU texture get texture binding view dimension.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuTextureGetTextureBindingViewDimension(
+    texture: native::WGPUTexture,
+) -> native::WGPUTextureViewDimension {
+    let texture = borrow_handle(texture, "WGPUTexture");
+    if texture.core.is_error() {
+        return native::WGPUTextureViewDimension_Undefined;
+    }
+    if texture.binding_view_dimension != native::WGPUTextureViewDimension_Undefined {
+        return texture.binding_view_dimension;
+    }
+    match texture.core.dimension() {
+        core::TextureDimension::D1 => native::WGPUTextureViewDimension_1D,
+        core::TextureDimension::D2 if texture.core.size().depth_or_array_layers == 1 => {
+            native::WGPUTextureViewDimension_2D
+        }
+        core::TextureDimension::D2 => native::WGPUTextureViewDimension_2DArray,
+        core::TextureDimension::D3 => native::WGPUTextureViewDimension_3D,
+        _ => native::WGPUTextureViewDimension_Undefined,
+    }
 }
 
 /// Returns the descriptor width reflected by the texture.

@@ -1,5 +1,11 @@
 use super::*;
 
+const SUPPORTED_INSTANCE_FEATURES: &[native::WGPUInstanceFeatureName] =
+    &[native::WGPUInstanceFeatureName_TimedWaitAny];
+
+// Advertised for native parity; FutureRegistry::wait_any does not enforce it today.
+pub(crate) const TIMED_WAIT_ANY_MAX_COUNT: usize = 64;
+
 /// Creates a new WebGPU instance.
 ///
 /// Resolves the HAL backend per the `YaWGPUInstanceBackendSelect` chain entry,
@@ -138,6 +144,76 @@ pub unsafe extern "C" fn wgpuCreateInstance(
         }
     };
     arc_to_handle(instance)
+}
+
+/// Gets the instance features supported by this library.
+///
+/// # Safety
+///
+/// `features` must point to writable `WGPUSupportedInstanceFeatures` storage.
+/// Returns WGPU get instance features.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuGetInstanceFeatures(
+    features: *mut native::WGPUSupportedInstanceFeatures,
+) {
+    let features = features
+        .as_mut()
+        .expect("WGPUSupportedInstanceFeatures must not be null");
+    let boxed = SUPPORTED_INSTANCE_FEATURES.to_vec().into_boxed_slice();
+    features.featureCount = boxed.len();
+    features.features = Box::into_raw(boxed).cast::<native::WGPUInstanceFeatureName>();
+}
+
+/// Gets the instance limits supported by this library.
+///
+/// # Safety
+///
+/// `limits` must be null or point to writable `WGPUInstanceLimits` storage.
+/// Returns WGPU get instance limits.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuGetInstanceLimits(
+    limits: *mut native::WGPUInstanceLimits,
+) -> native::WGPUStatus {
+    let Some(limits) = limits.as_mut() else {
+        return native::WGPUStatus_Error;
+    };
+    limits.timedWaitAnyMaxCount = TIMED_WAIT_ANY_MAX_COUNT;
+    native::WGPUStatus_Success
+}
+
+/// Reports whether an instance feature is supported by this library.
+///
+/// # Safety
+///
+/// This function does not dereference pointers.
+/// Returns WGPU has instance feature.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuHasInstanceFeature(
+    feature: native::WGPUInstanceFeatureName,
+) -> native::WGPUBool {
+    u32::from(SUPPORTED_INSTANCE_FEATURES.contains(&feature))
+}
+
+/// Frees feature members returned by `wgpuGetInstanceFeatures`.
+///
+/// # Safety
+///
+/// `supported_features.features`, when non-null, must be a pointer previously
+/// returned by yawgpu from `wgpuGetInstanceFeatures`, paired with the same
+/// `featureCount`, and must not be freed more than once.
+/// Returns WGPU supported instance features free members.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuSupportedInstanceFeaturesFreeMembers(
+    supported_features: native::WGPUSupportedInstanceFeatures,
+) {
+    if supported_features.features.is_null() || supported_features.featureCount == 0 {
+        return;
+    }
+    let slice = std::ptr::slice_from_raw_parts_mut(
+        supported_features.features.cast_mut(),
+        supported_features.featureCount,
+    );
+    drop(Box::from_raw(slice));
 }
 
 /// Releases one owned reference to an instance handle.

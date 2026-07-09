@@ -1,5 +1,65 @@
 use super::*;
 
+/// Sets a compute pipeline label.
+///
+/// # Safety
+///
+/// `compute_pipeline` must be a non-null live yawgpu compute pipeline handle.
+/// `label` must point to valid string data according to `WGPUStringView` when
+/// non-empty.
+/// Returns WGPU compute pipeline set label.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuComputePipelineSetLabel(
+    compute_pipeline: native::WGPUComputePipeline,
+    label: native::WGPUStringView,
+) {
+    let compute_pipeline = borrow_handle(compute_pipeline, "WGPUComputePipeline");
+    *compute_pipeline
+        .label
+        .lock()
+        .expect("label lock must not poison") = label_from_string_view(label);
+}
+
+/// Sets a pipeline layout label.
+///
+/// # Safety
+///
+/// `pipeline_layout` must be a non-null live yawgpu pipeline layout handle.
+/// `label` must point to valid string data according to `WGPUStringView` when
+/// non-empty.
+/// Returns WGPU pipeline layout set label.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuPipelineLayoutSetLabel(
+    pipeline_layout: native::WGPUPipelineLayout,
+    label: native::WGPUStringView,
+) {
+    let pipeline_layout = borrow_handle(pipeline_layout, "WGPUPipelineLayout");
+    *pipeline_layout
+        .label
+        .lock()
+        .expect("label lock must not poison") = label_from_string_view(label);
+}
+
+/// Sets a render pipeline label.
+///
+/// # Safety
+///
+/// `render_pipeline` must be a non-null live yawgpu render pipeline handle.
+/// `label` must point to valid string data according to `WGPUStringView` when
+/// non-empty.
+/// Returns WGPU render pipeline set label.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderPipelineSetLabel(
+    render_pipeline: native::WGPURenderPipeline,
+    label: native::WGPUStringView,
+) {
+    let render_pipeline = borrow_handle(render_pipeline, "WGPURenderPipeline");
+    *render_pipeline
+        .label
+        .lock()
+        .expect("label lock must not poison") = label_from_string_view(label);
+}
+
 /// Gets a compute pipeline bind group layout.
 ///
 /// # Safety

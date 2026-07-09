@@ -1,5 +1,25 @@
 use super::*;
 
+/// Sets a shader module label.
+///
+/// # Safety
+///
+/// `shader_module` must be a non-null live yawgpu shader module handle.
+/// `label` must point to valid string data according to `WGPUStringView` when
+/// non-empty.
+/// Returns WGPU shader module set label.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuShaderModuleSetLabel(
+    shader_module: native::WGPUShaderModule,
+    label: native::WGPUStringView,
+) {
+    let shader_module = borrow_handle(shader_module, "WGPUShaderModule");
+    *shader_module
+        .label
+        .lock()
+        .expect("label lock must not poison") = label_from_string_view(label);
+}
+
 /// Requests compilation information for a shader module.
 ///
 /// # Safety

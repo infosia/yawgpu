@@ -214,6 +214,8 @@ pub unsafe extern "C" fn wgpuSurfaceGetCurrentTexture(
                     core: Arc::new(core::Texture::from_hal(descriptor, hal_texture)),
                     device: Arc::clone(&config.device),
                     instance: Arc::clone(&surface._instance),
+                    label: Mutex::new(None),
+                    binding_view_dimension: native::WGPUTextureViewDimension_Undefined,
                 });
                 surface_texture.texture = arc_to_handle(texture);
                 surface_texture.status = native::WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal;

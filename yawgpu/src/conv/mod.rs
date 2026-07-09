@@ -146,6 +146,7 @@ mod tests {
         Arc::new(WGPUDeviceImpl {
             core: Arc::new(device),
             instance,
+            adapter: Arc::new(adapter),
             device_lost_callback: DeviceLostCallbackInfo {
                 mode: native::WGPUCallbackMode_AllowProcessEvents,
                 callback: None,
@@ -171,6 +172,7 @@ mod tests {
             core: Arc::new(buffer),
             device: Arc::clone(&device.core),
             instance: Arc::clone(&device.instance),
+            label: Mutex::new(None),
         }))
     }
 
@@ -184,6 +186,7 @@ mod tests {
             _core: Arc::new(shader),
             _device: Arc::clone(&device.core),
             _instance: Arc::clone(&device.instance),
+            label: Mutex::new(None),
         }))
     }
 
@@ -207,6 +210,7 @@ mod tests {
             _core: Arc::new(layout),
             _device: Arc::clone(&device.core),
             _instance: Arc::clone(&device.instance),
+            label: Mutex::new(None),
         }))
     }
 
@@ -222,6 +226,7 @@ mod tests {
             _core: Arc::new(layout),
             _device: Arc::clone(&device.core),
             _instance: Arc::clone(&device.instance),
+            label: Mutex::new(None),
         }))
     }
 
@@ -243,6 +248,8 @@ mod tests {
             core: Arc::new(texture),
             device: Arc::clone(&device.core),
             instance: Arc::clone(&device.instance),
+            label: Mutex::new(None),
+            binding_view_dimension: native::WGPUTextureViewDimension_Undefined,
         }))
     }
 
@@ -276,6 +283,7 @@ mod tests {
             _texture: texture,
             _device: Arc::clone(&device.core),
             _instance: Arc::clone(&device.instance),
+            label: Mutex::new(None),
         }))
     }
 
@@ -395,11 +403,46 @@ mod tests {
 
     #[test]
     fn label_from_string_view_returns_owned_label_or_none() {
+        let c_string = CString::new("auto").expect("CString");
+        let auto = native::WGPUStringView {
+            data: c_string.as_ptr(),
+            length: WGPU_STRLEN,
+        };
+        let null_strlen = native::WGPUStringView {
+            data: std::ptr::null(),
+            length: WGPU_STRLEN,
+        };
+        let non_null_empty = native::WGPUStringView {
+            data: b"ignored".as_ptr().cast(),
+            length: 0,
+        };
+        let null_nonzero = native::WGPUStringView {
+            data: std::ptr::null(),
+            length: 5,
+        };
+
         assert_eq!(
             unsafe { label_from_string_view(string_view(b"label")) },
             Some("label".to_owned())
         );
-        assert_eq!(unsafe { label_from_string_view(empty_string_view()) }, None);
+        assert_eq!(
+            unsafe { label_from_string_view(string_view(b"a\0b")) },
+            Some("a\0b".to_owned())
+        );
+        assert_eq!(
+            unsafe { label_from_string_view(auto) },
+            Some("auto".to_owned())
+        );
+        assert_eq!(
+            unsafe { label_from_string_view(empty_string_view()) },
+            Some(String::new())
+        );
+        assert_eq!(
+            unsafe { label_from_string_view(non_null_empty) },
+            Some(String::new())
+        );
+        assert_eq!(unsafe { label_from_string_view(null_strlen) }, None);
+        assert_eq!(unsafe { label_from_string_view(null_nonzero) }, None);
     }
 
     #[test]

@@ -1,5 +1,45 @@
 use super::*;
 
+/// Sets a render bundle label.
+///
+/// # Safety
+///
+/// `render_bundle` must be a non-null live yawgpu render bundle handle.
+/// `label` must point to valid string data according to `WGPUStringView` when
+/// non-empty.
+/// Returns WGPU render bundle set label.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderBundleSetLabel(
+    render_bundle: native::WGPURenderBundle,
+    label: native::WGPUStringView,
+) {
+    let render_bundle = borrow_handle(render_bundle, "WGPURenderBundle");
+    *render_bundle
+        .label
+        .lock()
+        .expect("label lock must not poison") = label_from_string_view(label);
+}
+
+/// Sets a render bundle encoder label.
+///
+/// # Safety
+///
+/// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder
+/// handle. `label` must point to valid string data according to
+/// `WGPUStringView` when non-empty.
+/// Returns WGPU render bundle encoder set label.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuRenderBundleEncoderSetLabel(
+    render_bundle_encoder: native::WGPURenderBundleEncoder,
+    label: native::WGPUStringView,
+) {
+    let render_bundle_encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
+    *render_bundle_encoder
+        .label
+        .lock()
+        .expect("label lock must not poison") = label_from_string_view(label);
+}
+
 /// Sets the render pipeline for a render bundle encoder.
 ///
 /// # Safety
@@ -353,7 +393,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderPopDebugGroup(
 #[no_mangle]
 pub unsafe extern "C" fn wgpuRenderBundleEncoderFinish(
     render_bundle_encoder: native::WGPURenderBundleEncoder,
-    _descriptor: *const native::WGPURenderBundleDescriptor,
+    descriptor: *const native::WGPURenderBundleDescriptor,
 ) -> native::WGPURenderBundle {
     let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
     let (bundle, error) = encoder.core.finish();
@@ -362,6 +402,11 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderFinish(
         core: Arc::new(bundle),
         _device: Arc::clone(&encoder.device),
         _instance: Arc::clone(&encoder._instance),
+        label: Mutex::new(
+            descriptor
+                .as_ref()
+                .and_then(|descriptor| label_from_string_view(descriptor.label)),
+        ),
     }))
 }
 

@@ -195,6 +195,7 @@ mod tests {
         Arc::new(WGPUDeviceImpl {
             core: Arc::new(device),
             instance,
+            adapter: Arc::new(adapter),
             device_lost_callback: DeviceLostCallbackInfo {
                 mode: native::WGPUCallbackMode_AllowProcessEvents,
                 callback: None,
@@ -241,6 +242,7 @@ mod tests {
             _texture: texture,
             _device: Arc::clone(&device.core),
             _instance: Arc::clone(&device.instance),
+            label: Mutex::new(None),
         }))
     }
 

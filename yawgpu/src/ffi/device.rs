@@ -132,6 +132,27 @@ pub unsafe extern "C" fn wgpuDeviceSetLabel(
     device.core.set_label(&label);
 }
 
+/// Gets information about the adapter used to create a device.
+///
+/// # Safety
+///
+/// `device` must be a non-null live yawgpu device handle. `adapter_info` must
+/// point to writable `WGPUAdapterInfo` storage. String members must be released
+/// with `wgpuAdapterInfoFreeMembers`.
+/// Returns WGPU device get adapter info.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuDeviceGetAdapterInfo(
+    device: native::WGPUDevice,
+    adapter_info: *mut native::WGPUAdapterInfo,
+) -> native::WGPUStatus {
+    let device = borrow_handle(device, "WGPUDevice");
+    let Some(adapter_info) = adapter_info.as_mut() else {
+        return native::WGPUStatus_Error;
+    };
+    *adapter_info = adapter_info_from_core(&device.adapter);
+    native::WGPUStatus_Success
+}
+
 /// Creates a buffer on a device.
 ///
 /// # Safety
@@ -153,6 +174,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateBuffer(
         core: Arc::new(buffer),
         device: Arc::clone(&device.core),
         instance: Arc::clone(&device.instance),
+        label: Mutex::new(label_from_string_view(descriptor.label)),
     }))
 }
 
@@ -179,7 +201,24 @@ pub unsafe extern "C" fn wgpuDeviceCreateTexture(
         core: Arc::new(texture),
         device: Arc::clone(&device.core),
         instance: Arc::clone(&device.instance),
+        label: Mutex::new(label_from_string_view(descriptor.label)),
+        binding_view_dimension: texture_binding_view_dimension(descriptor),
     }))
+}
+
+unsafe fn texture_binding_view_dimension(
+    descriptor: &native::WGPUTextureDescriptor,
+) -> native::WGPUTextureViewDimension {
+    let mut chain = descriptor.nextInChain;
+    while let Some(node) = chain.as_ref() {
+        if node.sType == native::WGPUSType_TextureBindingViewDimension {
+            let binding = &*(node as *const native::WGPUChainedStruct
+                as *const native::WGPUTextureBindingViewDimension);
+            return binding.textureBindingViewDimension;
+        }
+        chain = node.next;
+    }
+    native::WGPUTextureViewDimension_Undefined
 }
 
 /// Creates a sampler on a device.
@@ -202,6 +241,11 @@ pub unsafe extern "C" fn wgpuDeviceCreateSampler(
         _core: Arc::new(sampler),
         _device: Arc::clone(&device.core),
         _instance: Arc::clone(&device.instance),
+        label: Mutex::new(
+            descriptor
+                .as_ref()
+                .and_then(|descriptor| label_from_string_view(descriptor.label)),
+        ),
     }))
 }
 
@@ -267,6 +311,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateShaderModule(
         _core: Arc::new(shader_module),
         _device: Arc::clone(&device.core),
         _instance: Arc::clone(&device.instance),
+        label: Mutex::new(label_from_string_view(descriptor.label)),
     });
     let handle = if !handle._core.is_error() {
         if let Some(key) = key {
@@ -303,6 +348,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateBindGroupLayout(
         _core: Arc::new(layout),
         _device: Arc::clone(&device.core),
         _instance: Arc::clone(&device.instance),
+        label: Mutex::new(label_from_string_view(descriptor.label)),
     }))
 }
 
@@ -342,6 +388,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateBindGroup(
         _layout: Arc::clone(&layout._core),
         _device: Arc::clone(&device.core),
         _instance: Arc::clone(&device.instance),
+        label: Mutex::new(label_from_string_view(descriptor.label)),
     }))
 }
 
@@ -363,6 +410,7 @@ pub unsafe extern "C" fn wgpuDeviceCreatePipelineLayout(
         .as_ref()
         .expect("WGPUPipelineLayoutDescriptor must not be null");
     let key = pipeline_layout_cache_key(descriptor);
+    let label = label_from_string_view(descriptor.label);
     let device_error = validate_pipeline_layout_devices(device, descriptor);
     let mut descriptor = map_pipeline_layout_descriptor(descriptor);
     if descriptor.error.is_none() {
@@ -373,6 +421,7 @@ pub unsafe extern "C" fn wgpuDeviceCreatePipelineLayout(
         _core: Arc::new(pipeline_layout),
         _device: Arc::clone(&device.core),
         _instance: Arc::clone(&device.instance),
+        label: Mutex::new(label),
     });
     let handle = if !handle._core.is_error() {
         if let Some(key) = key {
@@ -499,13 +548,18 @@ pub unsafe extern "C" fn wgpuDeviceCreateRenderPipelineAsync(
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceCreateCommandEncoder(
     device: native::WGPUDevice,
-    _descriptor: *const native::WGPUCommandEncoderDescriptor,
+    descriptor: *const native::WGPUCommandEncoderDescriptor,
 ) -> native::WGPUCommandEncoder {
     let device = borrow_handle(device, "WGPUDevice");
     arc_to_handle(Arc::new(WGPUCommandEncoderImpl {
         core: Arc::new(device.core.create_command_encoder()),
         device: Arc::clone(&device.core),
         instance: Arc::clone(&device.instance),
+        label: Mutex::new(
+            descriptor
+                .as_ref()
+                .and_then(|descriptor| label_from_string_view(descriptor.label)),
+        ),
     }))
 }
 
@@ -524,6 +578,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateRenderBundleEncoder(
     let descriptor = descriptor
         .as_ref()
         .expect("WGPURenderBundleEncoderDescriptor must not be null");
+    let label = label_from_string_view(descriptor.label);
     let descriptor = map_render_bundle_encoder_descriptor(
         descriptor,
         device.core.limits().max_color_attachments,
@@ -535,6 +590,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateRenderBundleEncoder(
         core: Arc::new(encoder),
         device: Arc::clone(&device.core),
         _instance: Arc::clone(&device.instance),
+        label: Mutex::new(label),
     }))
 }
 

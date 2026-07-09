@@ -1,5 +1,21 @@
 use super::*;
 
+/// Sets a buffer label.
+///
+/// # Safety
+///
+/// `buffer` must be a non-null live yawgpu buffer handle. `label` must point
+/// to valid string data according to `WGPUStringView` when non-empty.
+/// Returns WGPU buffer set label.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuBufferSetLabel(
+    buffer: native::WGPUBuffer,
+    label: native::WGPUStringView,
+) {
+    let buffer = borrow_handle(buffer, "WGPUBuffer");
+    *buffer.label.lock().expect("label lock must not poison") = label_from_string_view(label);
+}
+
 /// Destroys a buffer. This operation is idempotent.
 ///
 /// # Safety

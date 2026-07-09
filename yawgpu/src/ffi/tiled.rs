@@ -98,6 +98,7 @@ pub unsafe extern "C" fn yawgpuDeviceCreateSubpassRenderPipeline(
         .as_ref()
         .expect("YaWGPUSubpassRenderPipelineDescriptor must not be null");
     let device_error = validate_subpass_render_pipeline_devices(device, descriptor);
+    let label = label_from_string_view(descriptor.base.label);
     let mut descriptor = map_subpass_render_pipeline_descriptor(descriptor);
     if descriptor.error.is_none() {
         descriptor.error = device_error;
@@ -108,6 +109,7 @@ pub unsafe extern "C" fn yawgpuDeviceCreateSubpassRenderPipeline(
         _device: Arc::clone(&device.core),
         _instance: Arc::clone(&device.instance),
         bind_group_layout_handles: Mutex::new(Vec::new()),
+        label: Mutex::new(label),
     }))
 }
 

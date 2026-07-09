@@ -140,6 +140,7 @@ pub struct WGPUBufferImpl {
     pub(crate) core: Arc<core::Buffer>,
     pub(crate) device: Arc<core::Device>,
     pub(crate) instance: Arc<WGPUInstanceImpl>,
+    pub(crate) label: Mutex<Option<String>>,
 }
 
 /// Owns the core object and retained handles for the WGPU BindGroupLayout handle.
@@ -147,6 +148,7 @@ pub struct WGPUBindGroupLayoutImpl {
     pub(crate) _core: Arc<core::BindGroupLayout>,
     pub(crate) _device: Arc<core::Device>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
+    pub(crate) label: Mutex<Option<String>>,
 }
 
 /// Owns the core object and retained handles for the WGPU BindGroup handle.
@@ -155,15 +157,18 @@ pub struct WGPUBindGroupImpl {
     pub(crate) _layout: Arc<core::BindGroupLayout>,
     pub(crate) _device: Arc<core::Device>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
+    pub(crate) label: Mutex<Option<String>>,
 }
 
 /// Owns the core object and retained handles for the WGPU Device handle.
 pub struct WGPUDeviceImpl {
     pub(crate) core: Arc<core::Device>,
     pub(crate) instance: Arc<WGPUInstanceImpl>,
+    pub(crate) adapter: Arc<core::Adapter>,
     pub(crate) device_lost_callback: DeviceLostCallbackInfo,
     pub(crate) device_lost_futures: Mutex<Vec<u64>>,
     pub(crate) default_queue: Mutex<Option<Arc<WGPUQueueImpl>>>,
+    // These descriptor caches deliberately omit labels, matching Dawn cached-object behavior.
     pub(crate) shader_module_cache:
         Mutex<HashMap<ShaderModuleCacheKey, Weak<WGPUShaderModuleImpl>>>,
     pub(crate) pipeline_layout_cache:
@@ -193,6 +198,8 @@ pub struct WGPUTextureImpl {
     pub(crate) core: Arc<core::Texture>,
     pub(crate) device: Arc<core::Device>,
     pub(crate) instance: Arc<WGPUInstanceImpl>,
+    pub(crate) label: Mutex<Option<String>>,
+    pub(crate) binding_view_dimension: native::WGPUTextureViewDimension,
 }
 
 /// Owns the core object and retained handles for the WGPU TextureView handle.
@@ -201,6 +208,7 @@ pub struct WGPUTextureViewImpl {
     pub(crate) _texture: Arc<core::Texture>,
     pub(crate) _device: Arc<core::Device>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
+    pub(crate) label: Mutex<Option<String>>,
 }
 
 /// Owns the core object and retained handles for the WGPU ExternalTexture handle.
@@ -216,6 +224,7 @@ pub struct WGPUSamplerImpl {
     pub(crate) _core: Arc<core::Sampler>,
     pub(crate) _device: Arc<core::Device>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
+    pub(crate) label: Mutex<Option<String>>,
 }
 
 /// Owns the core object and retained handles for the WGPU ShaderModule handle.
@@ -223,6 +232,7 @@ pub struct WGPUShaderModuleImpl {
     pub(crate) _core: Arc<core::ShaderModule>,
     pub(crate) _device: Arc<core::Device>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
+    pub(crate) label: Mutex<Option<String>>,
 }
 
 /// Owns the core object and retained handles for the WGPU PipelineLayout handle.
@@ -230,6 +240,7 @@ pub struct WGPUPipelineLayoutImpl {
     pub(crate) _core: Arc<core::PipelineLayout>,
     pub(crate) _device: Arc<core::Device>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
+    pub(crate) label: Mutex<Option<String>>,
 }
 
 /// Owns the core object and retained handles for the WGPU ComputePipeline handle.
@@ -238,6 +249,7 @@ pub struct WGPUComputePipelineImpl {
     pub(crate) _device: Arc<core::Device>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
     pub(crate) bind_group_layout_handles: Mutex<Vec<Option<Arc<WGPUBindGroupLayoutImpl>>>>,
+    pub(crate) label: Mutex<Option<String>>,
 }
 
 /// Owns the core object and retained handles for the WGPU RenderPipeline handle.
@@ -246,6 +258,7 @@ pub struct WGPURenderPipelineImpl {
     pub(crate) _device: Arc<core::Device>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
     pub(crate) bind_group_layout_handles: Mutex<Vec<Option<Arc<WGPUBindGroupLayoutImpl>>>>,
+    pub(crate) label: Mutex<Option<String>>,
 }
 
 /// Owns the core object and retained handles for a yawgpu subpass pass layout handle.
@@ -451,6 +464,7 @@ pub struct WGPUCommandEncoderImpl {
     pub(crate) core: Arc<core::CommandEncoder>,
     pub(crate) device: Arc<core::Device>,
     pub(crate) instance: Arc<WGPUInstanceImpl>,
+    pub(crate) label: Mutex<Option<String>>,
 }
 
 /// Owns the core object and retained handles for the WGPU CommandBuffer handle.
@@ -458,6 +472,7 @@ pub struct WGPUCommandBufferImpl {
     pub(crate) core: Arc<core::CommandBuffer>,
     pub(crate) _device: Arc<core::Device>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
+    pub(crate) label: Mutex<Option<String>>,
 }
 
 /// Owns the core object and retained handles for the WGPU RenderPassEncoder handle.
@@ -466,6 +481,7 @@ pub struct WGPURenderPassEncoderImpl {
     pub(crate) device: Arc<core::Device>,
     pub(crate) _parent: Arc<core::CommandEncoder>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
+    pub(crate) label: Mutex<Option<String>>,
 }
 
 /// Owns the core object and retained handles for the WGPU ComputePassEncoder handle.
@@ -474,6 +490,7 @@ pub struct WGPUComputePassEncoderImpl {
     pub(crate) device: Arc<core::Device>,
     pub(crate) _parent: Arc<core::CommandEncoder>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
+    pub(crate) label: Mutex<Option<String>>,
 }
 
 /// Owns the core object and retained handles for the WGPU RenderBundleEncoder handle.
@@ -481,6 +498,7 @@ pub struct WGPURenderBundleEncoderImpl {
     pub(crate) core: Arc<core::RenderBundleEncoder>,
     pub(crate) device: Arc<core::Device>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
+    pub(crate) label: Mutex<Option<String>>,
 }
 
 /// Owns the core object and retained handles for the WGPU RenderBundle handle.
@@ -488,7 +506,40 @@ pub struct WGPURenderBundleImpl {
     pub(crate) core: Arc<core::RenderBundle>,
     pub(crate) _device: Arc<core::Device>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
+    pub(crate) label: Mutex<Option<String>>,
 }
+
+macro_rules! impl_test_label_accessor {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl $ty {
+                #[cfg(test)]
+                pub(crate) fn label(&self) -> Option<String> {
+                    self.label.lock().expect("label lock must not poison").clone()
+                }
+            }
+        )*
+    };
+}
+
+impl_test_label_accessor!(
+    WGPUBindGroupImpl,
+    WGPUBindGroupLayoutImpl,
+    WGPUBufferImpl,
+    WGPUCommandBufferImpl,
+    WGPUCommandEncoderImpl,
+    WGPUComputePassEncoderImpl,
+    WGPUComputePipelineImpl,
+    WGPUPipelineLayoutImpl,
+    WGPURenderBundleImpl,
+    WGPURenderBundleEncoderImpl,
+    WGPURenderPassEncoderImpl,
+    WGPURenderPipelineImpl,
+    WGPUSamplerImpl,
+    WGPUShaderModuleImpl,
+    WGPUTextureImpl,
+    WGPUTextureViewImpl,
+);
 
 impl WGPUInstanceImpl {
     fn new_noop(timed_wait_any_enabled: bool) -> Arc<Self> {
@@ -1809,6 +1860,7 @@ unsafe fn create_compute_pipeline_handle(
             }
         }
     }
+    let label = label_from_string_view(descriptor.label);
     let mut descriptor = map_compute_pipeline_descriptor(descriptor);
     if descriptor.error.is_none() {
         descriptor.error = device_error;
@@ -1825,6 +1877,7 @@ unsafe fn create_compute_pipeline_handle(
         _device: Arc::clone(&device.core),
         _instance: Arc::clone(&device.instance),
         bind_group_layout_handles: Mutex::new(Vec::new()),
+        label: Mutex::new(label),
     });
     if !handle._core.is_error() {
         if let Some(key) = key {
@@ -1854,6 +1907,7 @@ unsafe fn create_render_pipeline_handle(
             }
         }
     }
+    let label = label_from_string_view(descriptor.label);
     let mut descriptor = map_render_pipeline_descriptor(descriptor);
     if descriptor.error.is_none() {
         descriptor.error = device_error;
@@ -1870,6 +1924,7 @@ unsafe fn create_render_pipeline_handle(
         _device: Arc::clone(&device.core),
         _instance: Arc::clone(&device.instance),
         bind_group_layout_handles: Mutex::new(Vec::new()),
+        label: Mutex::new(label),
     });
     if !handle._core.is_error() {
         if let Some(key) = key {
@@ -2024,6 +2079,7 @@ fn get_pipeline_bind_group_layout(
             _core: Arc::clone(&layout),
             _device: Arc::clone(device),
             _instance: Arc::clone(instance),
+            label: Mutex::new(None),
         })
     });
     arc_to_handle(Arc::clone(handle))
@@ -2037,6 +2093,7 @@ fn error_bind_group_layout_handle(
         _core: Arc::new(core::BindGroupLayout::error()),
         _device: Arc::clone(device),
         _instance: Arc::clone(instance),
+        label: Mutex::new(None),
     }))
 }
 
@@ -3653,12 +3710,244 @@ mod tests {
         (layout, bind_group)
     }
 
+    enum LabelObject {
+        BindGroup(native::WGPUBindGroup),
+        BindGroupLayout(native::WGPUBindGroupLayout),
+        Buffer(native::WGPUBuffer),
+        CommandBuffer(native::WGPUCommandBuffer),
+        CommandEncoder(native::WGPUCommandEncoder),
+        ComputePassEncoder(native::WGPUComputePassEncoder),
+        ComputePipeline(native::WGPUComputePipeline),
+        PipelineLayout(native::WGPUPipelineLayout),
+        RenderBundle(native::WGPURenderBundle),
+        RenderBundleEncoder(native::WGPURenderBundleEncoder),
+        RenderPassEncoder(native::WGPURenderPassEncoder),
+        RenderPipeline(native::WGPURenderPipeline),
+        Sampler(native::WGPUSampler),
+        ShaderModule(native::WGPUShaderModule),
+        Texture(native::WGPUTexture),
+        TextureView(native::WGPUTextureView),
+    }
+
+    impl LabelObject {
+        fn name(&self) -> &'static str {
+            match self {
+                Self::BindGroup(_) => "WGPUBindGroup",
+                Self::BindGroupLayout(_) => "WGPUBindGroupLayout",
+                Self::Buffer(_) => "WGPUBuffer",
+                Self::CommandBuffer(_) => "WGPUCommandBuffer",
+                Self::CommandEncoder(_) => "WGPUCommandEncoder",
+                Self::ComputePassEncoder(_) => "WGPUComputePassEncoder",
+                Self::ComputePipeline(_) => "WGPUComputePipeline",
+                Self::PipelineLayout(_) => "WGPUPipelineLayout",
+                Self::RenderBundle(_) => "WGPURenderBundle",
+                Self::RenderBundleEncoder(_) => "WGPURenderBundleEncoder",
+                Self::RenderPassEncoder(_) => "WGPURenderPassEncoder",
+                Self::RenderPipeline(_) => "WGPURenderPipeline",
+                Self::Sampler(_) => "WGPUSampler",
+                Self::ShaderModule(_) => "WGPUShaderModule",
+                Self::Texture(_) => "WGPUTexture",
+                Self::TextureView(_) => "WGPUTextureView",
+            }
+        }
+
+        unsafe fn set_label(&self, label: native::WGPUStringView) {
+            match self {
+                Self::BindGroup(handle) => wgpuBindGroupSetLabel(*handle, label),
+                Self::BindGroupLayout(handle) => wgpuBindGroupLayoutSetLabel(*handle, label),
+                Self::Buffer(handle) => wgpuBufferSetLabel(*handle, label),
+                Self::CommandBuffer(handle) => wgpuCommandBufferSetLabel(*handle, label),
+                Self::CommandEncoder(handle) => wgpuCommandEncoderSetLabel(*handle, label),
+                Self::ComputePassEncoder(handle) => wgpuComputePassEncoderSetLabel(*handle, label),
+                Self::ComputePipeline(handle) => wgpuComputePipelineSetLabel(*handle, label),
+                Self::PipelineLayout(handle) => wgpuPipelineLayoutSetLabel(*handle, label),
+                Self::RenderBundle(handle) => wgpuRenderBundleSetLabel(*handle, label),
+                Self::RenderBundleEncoder(handle) => {
+                    wgpuRenderBundleEncoderSetLabel(*handle, label)
+                }
+                Self::RenderPassEncoder(handle) => wgpuRenderPassEncoderSetLabel(*handle, label),
+                Self::RenderPipeline(handle) => wgpuRenderPipelineSetLabel(*handle, label),
+                Self::Sampler(handle) => wgpuSamplerSetLabel(*handle, label),
+                Self::ShaderModule(handle) => wgpuShaderModuleSetLabel(*handle, label),
+                Self::Texture(handle) => wgpuTextureSetLabel(*handle, label),
+                Self::TextureView(handle) => wgpuTextureViewSetLabel(*handle, label),
+            }
+        }
+
+        unsafe fn label(&self) -> Option<String> {
+            match self {
+                Self::BindGroup(handle) => borrow_handle(*handle, "WGPUBindGroup").label(),
+                Self::BindGroupLayout(handle) => {
+                    borrow_handle(*handle, "WGPUBindGroupLayout").label()
+                }
+                Self::Buffer(handle) => borrow_handle(*handle, "WGPUBuffer").label(),
+                Self::CommandBuffer(handle) => borrow_handle(*handle, "WGPUCommandBuffer").label(),
+                Self::CommandEncoder(handle) => {
+                    borrow_handle(*handle, "WGPUCommandEncoder").label()
+                }
+                Self::ComputePassEncoder(handle) => {
+                    borrow_handle(*handle, "WGPUComputePassEncoder").label()
+                }
+                Self::ComputePipeline(handle) => {
+                    borrow_handle(*handle, "WGPUComputePipeline").label()
+                }
+                Self::PipelineLayout(handle) => {
+                    borrow_handle(*handle, "WGPUPipelineLayout").label()
+                }
+                Self::RenderBundle(handle) => borrow_handle(*handle, "WGPURenderBundle").label(),
+                Self::RenderBundleEncoder(handle) => {
+                    borrow_handle(*handle, "WGPURenderBundleEncoder").label()
+                }
+                Self::RenderPassEncoder(handle) => {
+                    borrow_handle(*handle, "WGPURenderPassEncoder").label()
+                }
+                Self::RenderPipeline(handle) => {
+                    borrow_handle(*handle, "WGPURenderPipeline").label()
+                }
+                Self::Sampler(handle) => borrow_handle(*handle, "WGPUSampler").label(),
+                Self::ShaderModule(handle) => borrow_handle(*handle, "WGPUShaderModule").label(),
+                Self::Texture(handle) => borrow_handle(*handle, "WGPUTexture").label(),
+                Self::TextureView(handle) => borrow_handle(*handle, "WGPUTextureView").label(),
+            }
+        }
+
+        unsafe fn release(&self) {
+            match self {
+                Self::BindGroup(handle) => wgpuBindGroupRelease(*handle),
+                Self::BindGroupLayout(handle) => wgpuBindGroupLayoutRelease(*handle),
+                Self::Buffer(handle) => wgpuBufferRelease(*handle),
+                Self::CommandBuffer(handle) => wgpuCommandBufferRelease(*handle),
+                Self::CommandEncoder(handle) => wgpuCommandEncoderRelease(*handle),
+                Self::ComputePassEncoder(handle) => wgpuComputePassEncoderRelease(*handle),
+                Self::ComputePipeline(handle) => wgpuComputePipelineRelease(*handle),
+                Self::PipelineLayout(handle) => wgpuPipelineLayoutRelease(*handle),
+                Self::RenderBundle(handle) => wgpuRenderBundleRelease(*handle),
+                Self::RenderBundleEncoder(handle) => wgpuRenderBundleEncoderRelease(*handle),
+                Self::RenderPassEncoder(handle) => wgpuRenderPassEncoderRelease(*handle),
+                Self::RenderPipeline(handle) => wgpuRenderPipelineRelease(*handle),
+                Self::Sampler(handle) => wgpuSamplerRelease(*handle),
+                Self::ShaderModule(handle) => wgpuShaderModuleRelease(*handle),
+                Self::Texture(handle) => wgpuTextureRelease(*handle),
+                Self::TextureView(handle) => wgpuTextureViewRelease(*handle),
+            }
+        }
+    }
+
     unsafe fn noop_indirect_buffer(device: native::WGPUDevice) -> native::WGPUBuffer {
         let desc = buffer_descriptor(
             native::WGPUBufferUsage_Indirect | native::WGPUBufferUsage_CopyDst,
             20,
         );
         wgpuDeviceCreateBuffer(device, &desc)
+    }
+
+    #[test]
+    fn wgpuSetLabel_exports_store_string_view_cases_on_ffi_handles() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let buffer_desc = buffer_descriptor(native::WGPUBufferUsage_CopySrc, 16);
+            let buffer = wgpuDeviceCreateBuffer(device, &buffer_desc);
+            let (bind_group_layout, bind_group) = noop_bind_group(device);
+            let sampler_desc = default_sampler_descriptor();
+            let sampler = wgpuDeviceCreateSampler(device, &sampler_desc);
+            let module = create_wgsl_module(
+                device,
+                "@compute @workgroup_size(1) fn cs() {}
+                 @vertex fn vs() -> @builtin(position) vec4f { return vec4f(); }
+                 @fragment fn fs() -> @location(0) vec4f { return vec4f(); }",
+            );
+            let pipeline_layout_desc = pipeline_layout_descriptor(&[]);
+            let pipeline_layout = wgpuDeviceCreatePipelineLayout(device, &pipeline_layout_desc);
+            let compute_pipeline_desc = compute_pipeline_descriptor(module, pipeline_layout);
+            let compute_pipeline = wgpuDeviceCreateComputePipeline(device, &compute_pipeline_desc);
+            let render_pipeline_desc = render_pipeline_descriptor(module, module, pipeline_layout);
+            let render_pipeline = wgpuDeviceCreateRenderPipeline(device, &render_pipeline_desc);
+            let command_encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let command_buffer_encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let command_buffer = wgpuCommandEncoderFinish(command_buffer_encoder, std::ptr::null());
+            let (texture, texture_view) = noop_render_attachment(device);
+            let render_pass_parent = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let color_attachment = render_pass_color_attachment(texture_view);
+            let render_pass_desc = noop_render_pass_descriptor(
+                std::slice::from_ref(&color_attachment),
+                std::ptr::null(),
+            );
+            let render_pass =
+                wgpuCommandEncoderBeginRenderPass(render_pass_parent, &render_pass_desc);
+            let compute_pass_parent = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let compute_pass =
+                wgpuCommandEncoderBeginComputePass(compute_pass_parent, std::ptr::null());
+            let bundle_encoder_desc =
+                render_bundle_encoder_descriptor(&[native::WGPUTextureFormat_RGBA8Unorm]);
+            let render_bundle_encoder =
+                wgpuDeviceCreateRenderBundleEncoder(device, &bundle_encoder_desc);
+            let render_bundle_finish_encoder =
+                wgpuDeviceCreateRenderBundleEncoder(device, &bundle_encoder_desc);
+            let render_bundle =
+                wgpuRenderBundleEncoderFinish(render_bundle_finish_encoder, std::ptr::null());
+
+            let objects = vec![
+                LabelObject::BindGroup(bind_group),
+                LabelObject::BindGroupLayout(bind_group_layout),
+                LabelObject::Buffer(buffer),
+                LabelObject::CommandBuffer(command_buffer),
+                LabelObject::CommandEncoder(command_encoder),
+                LabelObject::ComputePassEncoder(compute_pass),
+                LabelObject::ComputePipeline(compute_pipeline),
+                LabelObject::PipelineLayout(pipeline_layout),
+                LabelObject::RenderBundle(render_bundle),
+                LabelObject::RenderBundleEncoder(render_bundle_encoder),
+                LabelObject::RenderPassEncoder(render_pass),
+                LabelObject::RenderPipeline(render_pipeline),
+                LabelObject::Sampler(sampler),
+                LabelObject::ShaderModule(module),
+                LabelObject::Texture(texture),
+                LabelObject::TextureView(texture_view),
+            ];
+
+            let explicit = string_view(b"a\0b");
+            let strlen_bytes = b"strlen\0";
+            let strlen = native::WGPUStringView {
+                data: strlen_bytes.as_ptr().cast(),
+                length: crate::conv::WGPU_STRLEN,
+            };
+            let null_strlen = native::WGPUStringView {
+                data: std::ptr::null(),
+                length: crate::conv::WGPU_STRLEN,
+            };
+            let null_empty = empty_string_view();
+            let non_null_empty = native::WGPUStringView {
+                data: b"ignored".as_ptr().cast(),
+                length: 0,
+            };
+
+            for object in &objects {
+                object.set_label(explicit);
+                assert_eq!(object.label(), Some("a\0b".to_owned()), "{}", object.name());
+                object.set_label(strlen);
+                assert_eq!(
+                    object.label(),
+                    Some("strlen".to_owned()),
+                    "{}",
+                    object.name()
+                );
+                object.set_label(null_strlen);
+                assert_eq!(object.label(), None, "{}", object.name());
+                object.set_label(null_empty);
+                assert_eq!(object.label(), Some(String::new()), "{}", object.name());
+                object.set_label(non_null_empty);
+                assert_eq!(object.label(), Some(String::new()), "{}", object.name());
+            }
+
+            for object in objects.iter().rev() {
+                object.release();
+            }
+            wgpuCommandEncoderRelease(render_pass_parent);
+            wgpuCommandEncoderRelease(compute_pass_parent);
+            wgpuCommandEncoderRelease(command_buffer_encoder);
+            wgpuRenderBundleEncoderRelease(render_bundle_finish_encoder);
+            release_handles(instance, adapter, device);
+        }
     }
 
     unsafe fn get_compilation_info(
@@ -3769,6 +4058,81 @@ mod tests {
 
             wgpuInstanceRelease(default_instance);
             wgpuInstanceRelease(noop_instance);
+        }
+    }
+
+    #[test]
+    fn wgpuGetInstanceFeatures_reports_timed_wait_any_and_free_members() {
+        unsafe {
+            let mut features = native::WGPUSupportedInstanceFeatures {
+                featureCount: 0,
+                features: std::ptr::null(),
+            };
+
+            wgpuGetInstanceFeatures(&mut features);
+
+            assert_eq!(features.featureCount, 1);
+            assert!(!features.features.is_null());
+            let reported = std::slice::from_raw_parts(features.features, features.featureCount);
+            assert_eq!(reported[0], native::WGPUInstanceFeatureName_TimedWaitAny);
+            for feature in reported {
+                assert_eq!(wgpuHasInstanceFeature(*feature), 1);
+            }
+
+            wgpuSupportedInstanceFeaturesFreeMembers(features);
+        }
+    }
+
+    #[test]
+    fn wgpuSupportedInstanceFeaturesFreeMembers_accepts_empty_members() {
+        unsafe {
+            wgpuSupportedInstanceFeaturesFreeMembers(native::WGPUSupportedInstanceFeatures {
+                featureCount: 0,
+                features: std::ptr::null(),
+            });
+        }
+    }
+
+    #[test]
+    fn wgpuHasInstanceFeature_matches_supported_instance_features() {
+        unsafe {
+            assert_eq!(
+                wgpuHasInstanceFeature(native::WGPUInstanceFeatureName_TimedWaitAny),
+                1
+            );
+            assert_eq!(
+                wgpuHasInstanceFeature(native::WGPUInstanceFeatureName_ShaderSourceSPIRV),
+                0
+            );
+            assert_eq!(
+                wgpuHasInstanceFeature(native::WGPUInstanceFeatureName_Force32),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn wgpuGetInstanceLimits_reports_timed_wait_any_max_count() {
+        unsafe {
+            let sentinel = 0xCAFEusize as *mut native::WGPUChainedStruct;
+            let mut limits = native::WGPUInstanceLimits {
+                nextInChain: sentinel,
+                timedWaitAnyMaxCount: 0,
+            };
+
+            assert_eq!(
+                wgpuGetInstanceLimits(&mut limits),
+                native::WGPUStatus_Success
+            );
+            assert_eq!(limits.nextInChain, sentinel);
+            assert_eq!(
+                limits.timedWaitAnyMaxCount,
+                instance::TIMED_WAIT_ANY_MAX_COUNT
+            );
+            assert_eq!(
+                wgpuGetInstanceLimits(std::ptr::null_mut()),
+                native::WGPUStatus_Error
+            );
         }
     }
 
@@ -4600,6 +4964,56 @@ mod tests {
     }
 
     #[test]
+    fn wgpuDeviceGetAdapterInfo_matches_adapter_info_with_distinct_owned_strings() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let mut adapter_info = zeroed_adapter_info();
+            let mut device_info = zeroed_adapter_info();
+
+            assert_eq!(
+                wgpuAdapterGetInfo(adapter, &mut adapter_info),
+                native::WGPUStatus_Success
+            );
+            assert_eq!(
+                wgpuDeviceGetAdapterInfo(device, &mut device_info),
+                native::WGPUStatus_Success
+            );
+            assert_eq!(string_view_to_string(device_info.vendor), "yawgpu");
+            assert_eq!(
+                string_view_to_string(device_info.vendor),
+                string_view_to_string(adapter_info.vendor)
+            );
+            assert_eq!(
+                string_view_to_string(device_info.architecture),
+                string_view_to_string(adapter_info.architecture)
+            );
+            assert_eq!(
+                string_view_to_string(device_info.device),
+                string_view_to_string(adapter_info.device)
+            );
+            assert_eq!(
+                string_view_to_string(device_info.description),
+                string_view_to_string(adapter_info.description)
+            );
+            assert_eq!(device_info.backendType, adapter_info.backendType);
+            assert_eq!(device_info.adapterType, adapter_info.adapterType);
+            assert_eq!(device_info.vendorID, adapter_info.vendorID);
+            assert_eq!(device_info.deviceID, adapter_info.deviceID);
+            assert_eq!(device_info.subgroupMinSize, adapter_info.subgroupMinSize);
+            assert_eq!(device_info.subgroupMaxSize, adapter_info.subgroupMaxSize);
+            assert_ne!(device_info.vendor.data, adapter_info.vendor.data);
+            assert_eq!(
+                wgpuDeviceGetAdapterInfo(device, std::ptr::null_mut()),
+                native::WGPUStatus_Error
+            );
+
+            wgpuAdapterInfoFreeMembers(device_info);
+            wgpuAdapterInfoFreeMembers(adapter_info);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
     fn wgpuAdapterInfoFreeMembers_accepts_empty_members() {
         unsafe {
             wgpuAdapterInfoFreeMembers(zeroed_adapter_info());
@@ -5272,6 +5686,75 @@ mod tests {
             assert_eq!(wgpuTextureGetUsage(texture), usage);
 
             wgpuTextureRelease(texture);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuTextureGetTextureBindingViewDimension_defaults_explicit_and_error() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let mut desc_1d = texture_descriptor(native::WGPUTextureUsage_TextureBinding, 4);
+            desc_1d.dimension = native::WGPUTextureDimension_1D;
+            let texture_1d = wgpuDeviceCreateTexture(device, &desc_1d);
+            assert_eq!(
+                wgpuTextureGetTextureBindingViewDimension(texture_1d),
+                native::WGPUTextureViewDimension_1D
+            );
+
+            let desc_2d = texture_descriptor(native::WGPUTextureUsage_TextureBinding, 4);
+            let texture_2d = wgpuDeviceCreateTexture(device, &desc_2d);
+            assert_eq!(
+                wgpuTextureGetTextureBindingViewDimension(texture_2d),
+                native::WGPUTextureViewDimension_2D
+            );
+
+            let mut desc_2d_array = texture_descriptor(native::WGPUTextureUsage_TextureBinding, 4);
+            desc_2d_array.size.depthOrArrayLayers = 2;
+            let texture_2d_array = wgpuDeviceCreateTexture(device, &desc_2d_array);
+            assert_eq!(
+                wgpuTextureGetTextureBindingViewDimension(texture_2d_array),
+                native::WGPUTextureViewDimension_2DArray
+            );
+
+            let desc_3d =
+                texture_descriptor_3d(native::WGPUTextureUsage_TextureBinding, extent(4, 4, 2), 1);
+            let texture_3d = wgpuDeviceCreateTexture(device, &desc_3d);
+            assert_eq!(
+                wgpuTextureGetTextureBindingViewDimension(texture_3d),
+                native::WGPUTextureViewDimension_3D
+            );
+
+            let mut explicit_binding = native::WGPUTextureBindingViewDimension {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: native::WGPUSType_TextureBindingViewDimension,
+                },
+                textureBindingViewDimension: native::WGPUTextureViewDimension_3D,
+            };
+            let mut explicit_desc = texture_descriptor(native::WGPUTextureUsage_TextureBinding, 4);
+            explicit_desc.nextInChain = (&mut explicit_binding.chain) as *mut _;
+            let explicit_texture = wgpuDeviceCreateTexture(device, &explicit_desc);
+            assert_eq!(
+                wgpuTextureGetTextureBindingViewDimension(explicit_texture),
+                native::WGPUTextureViewDimension_3D
+            );
+
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let bad_desc = texture_descriptor(native::WGPUTextureUsage_TextureBinding, 0);
+            let bad_texture = wgpuDeviceCreateTexture(device, &bad_desc);
+            assert_validation_error_contains(instance, device, "width is out of range");
+            assert_eq!(
+                wgpuTextureGetTextureBindingViewDimension(bad_texture),
+                native::WGPUTextureViewDimension_Undefined
+            );
+
+            wgpuTextureRelease(texture_1d);
+            wgpuTextureRelease(texture_2d);
+            wgpuTextureRelease(texture_2d_array);
+            wgpuTextureRelease(texture_3d);
+            wgpuTextureRelease(explicit_texture);
+            wgpuTextureRelease(bad_texture);
             release_handles(instance, adapter, device);
         }
     }

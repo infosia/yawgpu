@@ -1,5 +1,25 @@
 use super::*;
 
+/// Sets a compute pass encoder label.
+///
+/// # Safety
+///
+/// `compute_pass_encoder` must be a non-null live yawgpu compute pass encoder
+/// handle. `label` must point to valid string data according to
+/// `WGPUStringView` when non-empty.
+/// Returns WGPU compute pass encoder set label.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuComputePassEncoderSetLabel(
+    compute_pass_encoder: native::WGPUComputePassEncoder,
+    label: native::WGPUStringView,
+) {
+    let compute_pass_encoder = borrow_handle(compute_pass_encoder, "WGPUComputePassEncoder");
+    *compute_pass_encoder
+        .label
+        .lock()
+        .expect("label lock must not poison") = label_from_string_view(label);
+}
+
 /// Ends a compute pass.
 ///
 /// # Safety
