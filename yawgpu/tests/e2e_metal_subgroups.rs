@@ -139,7 +139,7 @@ fn main(@builtin(local_invocation_index) li: u32,
             "subgroup_size must be uniform across the workgroup: {sizes:?}"
         );
         assert!(
-            (WG as u32) % s == 0,
+            (WG as u32).is_multiple_of(s),
             "test assumes a full-subgroup workgroup; WG {WG} not a multiple of subgroup size {s}"
         );
         assert!(
