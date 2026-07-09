@@ -69,10 +69,22 @@
 Record the `webgpu.h` upstream commit/version here once Phase 0 vendors or
 references it, so bindgen output is reproducible:
 
-- `webgpu.h`: vendored at `yawgpu/ffi/webgpu-headers/webgpu.h` (6766 lines),
+- `webgpu.h`: vendored at `yawgpu/ffi/webgpu-headers/webgpu.h` (6768 lines),
   byte-identical copy from `webgpu-headers` commit
-  `673658bc2bd70ec39fc55ebe6bb0173cf6d0a603` (2026-05-07). Bound via
+  `a11ef4462405c4506ad7284e5b1edeff2750bb54` (2026-06-24). Bound via
   `bindgen 0.72` in `yawgpu/build.rs`.
+  Re-vendored 2026-07-09 from `673658bc2bd70ec39fc55ebe6bb0173cf6d0a603`
+  (2026-05-07). Between those two revisions the header gained exactly two
+  enumerators and **no new `WGPU_EXPORT` function** — the canonical function
+  set is unchanged at 202. One of the two, `WGPUWGSLLanguageFeatureName_
+  ImmediateAddressSpace = 0x0B`, had already been added locally in `9dfe091`
+  (which is why the "byte-identical" claim above was stale until this bump);
+  the other, `WGPUFeatureName_SubgroupSizeControl = 0x00000017`, is declared
+  but **not implemented** — `map_feature` routes it to `Feature::Other(23)`,
+  so `wgpuAdapterHasFeature` reports `false` and `requestDevice` rejects it.
+  Verify a future bump the same way: diff the canonical function set
+  (`grep -E '^WGPU_EXPORT' … | grep -oE '\bwgpu[A-Za-z0-9]+\('`) before and
+  after, so a header bump can never silently widen the unimplemented surface.
   bindgen workaround for Windows MSVC builds (added 2026-05-21):
   `.clang_macro_fallback()` plus blocklist+raw_line overrides for the four
   `(SIZE_MAX)`/`(UINT64_MAX)`-derived constants (`WGPU_WHOLE_MAP_SIZE`,
