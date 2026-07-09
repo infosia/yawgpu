@@ -217,6 +217,7 @@ pub struct WGPUExternalTextureImpl {
     pub(crate) _planes: Vec<Arc<WGPUTextureViewImpl>>,
     pub(crate) _device: Arc<core::Device>,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
+    pub(crate) label: Mutex<Option<String>>,
 }
 
 /// Owns the core object and retained handles for the WGPU Sampler handle.
@@ -530,6 +531,7 @@ impl_test_label_accessor!(
     WGPUCommandEncoderImpl,
     WGPUComputePassEncoderImpl,
     WGPUComputePipelineImpl,
+    WGPUExternalTextureImpl,
     WGPUPipelineLayoutImpl,
     WGPURenderBundleImpl,
     WGPURenderBundleEncoderImpl,

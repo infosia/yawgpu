@@ -44,6 +44,7 @@ pub unsafe extern "C" fn yawgpuDeviceCreateExternalTexture(
             _planes: plane_handles,
             _device: Arc::clone(&device.core),
             _instance: Arc::clone(&device.instance),
+            label: Mutex::new(None),
         })),
         Err(error) => {
             device.dispatch_error(error.kind, error.message);
@@ -61,9 +62,11 @@ pub unsafe extern "C" fn yawgpuDeviceCreateExternalTexture(
 #[no_mangle]
 pub unsafe extern "C" fn wgpuExternalTextureSetLabel(
     external_texture: native::WGPUExternalTexture,
-    _label: native::WGPUStringView,
+    label: native::WGPUStringView,
 ) {
-    let _external_texture = borrow_handle(external_texture, "WGPUExternalTexture");
+    let external_texture = borrow_handle(external_texture, "WGPUExternalTexture");
+    *external_texture.label.lock().expect("label lock must not poison") =
+        label_from_string_view(label);
 }
 
 /// Adds one owned reference to an external texture handle.
@@ -285,13 +288,6 @@ mod tests {
             let external = yawgpuDeviceCreateExternalTexture(device_handle, &desc);
             assert!(!external.is_null());
             assert_eq!(device.core.pop_error_scope().expect("scope"), None);
-            wgpuExternalTextureSetLabel(
-                external,
-                native::WGPUStringView {
-                    data: std::ptr::null(),
-                    length: 0,
-                },
-            );
             wgpuExternalTextureAddRef(external);
             wgpuExternalTextureRelease(external);
             wgpuExternalTextureRelease(external);
@@ -338,6 +334,63 @@ mod tests {
                 .expect("error");
             assert_eq!(error.kind, core::ErrorKind::Validation);
             assert_eq!(error.message, "external texture plane0 is required");
+            wgpuDeviceRelease(device_handle);
+        }
+    }
+
+    #[test]
+    fn wgpu_external_texture_set_label_stores_string_view_cases() {
+        let device = device_impl();
+        let device_handle = arc_to_handle(Arc::clone(&device));
+        let plane0 = texture_view_handle(&device);
+        let desc = descriptor(plane0);
+        unsafe {
+            let external = yawgpuDeviceCreateExternalTexture(device_handle, &desc);
+            assert!(!external.is_null());
+            let handle = borrow_handle(external, "WGPUExternalTexture");
+
+            wgpuExternalTextureSetLabel(external, crate::conv::string_view(b"a\0b"));
+            assert_eq!(handle.label(), Some("a\0b".to_owned()));
+
+            let strlen_bytes = b"strlen\0";
+            wgpuExternalTextureSetLabel(
+                external,
+                native::WGPUStringView {
+                    data: strlen_bytes.as_ptr().cast(),
+                    length: crate::conv::WGPU_STRLEN,
+                },
+            );
+            assert_eq!(handle.label(), Some("strlen".to_owned()));
+
+            wgpuExternalTextureSetLabel(
+                external,
+                native::WGPUStringView {
+                    data: std::ptr::null(),
+                    length: crate::conv::WGPU_STRLEN,
+                },
+            );
+            assert_eq!(handle.label(), None);
+
+            wgpuExternalTextureSetLabel(
+                external,
+                native::WGPUStringView {
+                    data: std::ptr::null(),
+                    length: 0,
+                },
+            );
+            assert_eq!(handle.label(), Some(String::new()));
+
+            wgpuExternalTextureSetLabel(
+                external,
+                native::WGPUStringView {
+                    data: b"ignored".as_ptr().cast(),
+                    length: 0,
+                },
+            );
+            assert_eq!(handle.label(), Some(String::new()));
+
+            wgpuExternalTextureRelease(external);
+            wgpuTextureViewRelease(plane0);
             wgpuDeviceRelease(device_handle);
         }
     }
