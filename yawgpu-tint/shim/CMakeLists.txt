@@ -55,6 +55,23 @@ add_subdirectory(${YAWGPU_DAWN_DIR} ${CMAKE_BINARY_DIR}/dawn EXCLUDE_FROM_ALL)
 # 56-static-library link-order problem.
 add_library(tint_shim SHARED tint_shim.cpp)
 target_compile_features(tint_shim PRIVATE cxx_std_20)
+
+# On Apple targets, make the dylib's own LC_ID_DYLIB loader-relative. The linker
+# copies this id string into whatever links against tint_shim, so
+# `libyawgpu.dylib` records `@loader_path/libtint_shim.dylib` at link time — the
+# shim is then resolved next to whatever image loaded it (test binary, example,
+# or the cdylib), with no rpath/DYLD_FALLBACK involvement. ELF (SONAME) and
+# Windows have no install names, so guard to Apple.
+if(APPLE)
+    # BUILD_WITH_INSTALL_NAME_DIR is required in addition to INSTALL_NAME_DIR:
+    # CMake's default MACOSX_RPATH gives a *build-tree* dylib the install name
+    # `@rpath/libtint_shim.dylib`, and INSTALL_NAME_DIR otherwise only applies at
+    # `install` time. We consume the build-tree dylib directly (never install it),
+    # so this flag makes the build-tree LC_ID_DYLIB use INSTALL_NAME_DIR now.
+    set_target_properties(tint_shim PROPERTIES
+        INSTALL_NAME_DIR "@loader_path"
+        BUILD_WITH_INSTALL_NAME_DIR ON)
+endif()
 target_include_directories(tint_shim PRIVATE
     ${YAWGPU_DAWN_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}

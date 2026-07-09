@@ -67,11 +67,21 @@ fn main() {
         // Windows has no rpath: a dependent loads `tint_shim.dll` from the
         // executable's directory (or PATH). Copy it next to the consuming
         // artifacts so `cargo test`/`cargo run` and the cdylib find it.
-        copy_runtime_dll(&build_dir);
+        copy_runtime_shim(&build_dir);
     } else {
         // Locate libtint_shim at runtime (it is built next to the crate's
         // artifacts). `-Wl,-rpath` is GNU/Clang linker syntax; MSVC rejects it.
+        // Harmless and still useful for any image linked directly by this crate's
+        // own targets; kept even though Apple builds resolve the shim via the
+        // `@loader_path` install name below.
         println!("cargo:rustc-link-arg=-Wl,-rpath,{}", build_dir.display());
+        // On Apple targets the shim's install name is `@loader_path/...` (set in
+        // shim/CMakeLists.txt), so dyld resolves it next to each loading image
+        // and NO LONGER consults DYLD_FALLBACK_LIBRARY_PATH for it. Every dir that
+        // hosts an image that loads the shim must therefore contain a copy — miss
+        // one and that target breaks at run time only. Copy it next to the
+        // consuming artifacts, exactly as on Windows.
+        copy_runtime_shim(&build_dir);
     }
     println!("cargo:rustc-cfg=have_tint");
 }
@@ -139,41 +149,60 @@ fn android_abi_for_arch(arch: &str) -> Option<&'static str> {
     }
 }
 
-/// Copies the built `tint_shim.dll` next to the Cargo target artifacts so it is
-/// discoverable at run time on Windows (which resolves dependent DLLs from the
-/// executable's directory, not via rpath). Failures are warnings, not errors:
-/// linking still succeeds against the import library, and a missing runtime copy
-/// only surfaces when an artifact that loads Tint is actually executed.
-fn copy_runtime_dll(build_dir: &Path) {
+/// Copies the built Tint shim next to the Cargo target artifacts so it is
+/// discoverable at run time. Needed on Windows (which resolves dependent DLLs
+/// from the executable's directory, not via rpath) and on Apple targets (where
+/// the shim's `@loader_path` install name makes dyld resolve it next to each
+/// loading image, bypassing DYLD_FALLBACK_LIBRARY_PATH). The runtime file name
+/// is chosen per *target* OS. Failures are warnings, not errors: linking still
+/// succeeds, and a missing runtime copy only surfaces when an artifact that
+/// loads Tint is actually executed.
+fn copy_runtime_shim(build_dir: &Path) {
+    let file_name = match env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("windows") => "tint_shim.dll",
+        Ok("macos") | Ok("ios") => "libtint_shim.dylib",
+        Ok("android") | Ok("linux") => "libtint_shim.so",
+        _ => return,
+    };
+
+    // Single-config generators (Ninja, Makefiles) place the artifact in
+    // `build/`; multi-config MSVC generators use a per-config subdir.
     let candidates = [
-        build_dir.join("tint_shim.dll"),
-        build_dir.join("Debug").join("tint_shim.dll"),
-        build_dir.join("Release").join("tint_shim.dll"),
-        build_dir.join("RelWithDebInfo").join("tint_shim.dll"),
-        build_dir.join("MinSizeRel").join("tint_shim.dll"),
+        build_dir.join(file_name),
+        build_dir.join("Debug").join(file_name),
+        build_dir.join("Release").join(file_name),
+        build_dir.join("RelWithDebInfo").join(file_name),
+        build_dir.join("MinSizeRel").join(file_name),
     ];
-    let Some(dll) = candidates.into_iter().find(|p| p.is_file()) else {
+    let Some(shim) = candidates.into_iter().find(|p| p.is_file()) else {
         println!(
-            "cargo:warning=tint_shim.dll not found under {}; runtime loads of Tint may fail",
+            "cargo:warning={file_name} not found under {}; runtime loads of Tint may fail",
             build_dir.display()
         );
         return;
     };
 
     // OUT_DIR is `<target>/<profile>/build/<pkg>-<hash>/out`; the profile dir
-    // (where test/example/cdylib artifacts and their `deps/` live) is 3 up.
+    // (where cdylib/test/example artifacts and their `deps/` live) is 3 up.
     let Some(out_dir) = env::var_os("OUT_DIR").map(PathBuf::from) else {
         return;
     };
     let Some(profile_dir) = out_dir.ancestors().nth(3) else {
         return;
     };
-    for dest_dir in [profile_dir.to_path_buf(), profile_dir.join("deps")] {
+    // `<profile>` holds libyawgpu.dylib; `<profile>/deps` holds its real file and
+    // every test binary; `<profile>/examples` holds example binaries. Each of
+    // these can load the shim, so each needs its own copy.
+    for dest_dir in [
+        profile_dir.to_path_buf(),
+        profile_dir.join("deps"),
+        profile_dir.join("examples"),
+    ] {
         if dest_dir.is_dir() {
-            let dest = dest_dir.join("tint_shim.dll");
-            if let Err(e) = std::fs::copy(&dll, &dest) {
+            let dest = dest_dir.join(file_name);
+            if let Err(e) = std::fs::copy(&shim, &dest) {
                 println!(
-                    "cargo:warning=failed to copy tint_shim.dll to {}: {e}",
+                    "cargo:warning=failed to copy {file_name} to {}: {e}",
                     dest.display()
                 );
             }

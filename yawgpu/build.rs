@@ -31,6 +31,18 @@ fn main() {
     let header = "ffi/webgpu-headers/webgpu.h";
     println!("cargo:rerun-if-changed={header}");
 
+    // Give the cdylib an `@rpath`-relative install name on Apple targets. Cargo's
+    // macOS default records the absolute build-tree path of `libyawgpu.dylib` as
+    // its LC_ID_DYLIB, which every consumer then hard-codes — so the binary only
+    // runs on the build machine. `@rpath/libyawgpu.dylib` lets each consumer
+    // resolve it via its own LC_RPATH instead. This must live in yawgpu's OWN
+    // build script: `cargo:rustc-*link-arg` from a dependency's build script does
+    // not propagate to a dependent's link. Detect the *target* vendor via
+    // CARGO_CFG_TARGET_VENDOR, never `cfg!(target_vendor)` (which is the host).
+    if env::var("CARGO_CFG_TARGET_VENDOR").as_deref() == Ok("apple") {
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/libyawgpu.dylib");
+    }
+
     let mut builder = bindgen::Builder::default()
         .header(header)
         .allowlist_item("WGPU.*")
