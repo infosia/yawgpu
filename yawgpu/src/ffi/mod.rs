@@ -5822,6 +5822,66 @@ mod tests {
     }
 
     #[test]
+    fn wgpuDeviceCreateSampler_enforces_anisotropy_filter_mode_rule() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+
+            // 1. D11 exact: filters left at INIT default (Undefined -> Nearest),
+            // maxAnisotropy > 1 must be rejected.
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let mut desc = default_sampler_descriptor();
+            desc.maxAnisotropy = 4;
+            let sampler = wgpuDeviceCreateSampler(device, &desc);
+            assert!(!sampler.is_null());
+            assert_validation_error_contains(instance, device, "anisotrop");
+            wgpuSamplerRelease(sampler);
+
+            // 2. Explicit Nearest (what the webgpu-native-js binding actually sends).
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let mut desc = default_sampler_descriptor();
+            desc.magFilter = native::WGPUFilterMode_Nearest;
+            desc.minFilter = native::WGPUFilterMode_Nearest;
+            desc.mipmapFilter = native::WGPUMipmapFilterMode_Nearest;
+            desc.maxAnisotropy = 4;
+            let sampler = wgpuDeviceCreateSampler(device, &desc);
+            assert!(!sampler.is_null());
+            assert_validation_error_contains(instance, device, "anisotrop");
+            wgpuSamplerRelease(sampler);
+
+            // 3. Valid: all Linear + anisotropy 4 must pass with no error captured.
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let mut desc = default_sampler_descriptor();
+            desc.magFilter = native::WGPUFilterMode_Linear;
+            desc.minFilter = native::WGPUFilterMode_Linear;
+            desc.mipmapFilter = native::WGPUMipmapFilterMode_Linear;
+            desc.maxAnisotropy = 4;
+            let sampler = wgpuDeviceCreateSampler(device, &desc);
+            assert!(!sampler.is_null());
+            let mut state = PopErrorScopeState::default();
+            let future = pop_error_scope(instance, device, &mut state);
+            assert_ne!(future.id, 0);
+            assert_eq!(state.fired, 1);
+            // The pushed scope was open and captured nothing: it pops
+            // successfully with no error (distinct from popping an empty stack).
+            assert_eq!(state.status, native::WGPUPopErrorScopeStatus_Success);
+            assert_eq!(state.error_type, native::WGPUErrorType_NoError);
+            assert!(state.message.is_empty(), "{}", state.message);
+            wgpuSamplerRelease(sampler);
+
+            // 4. maxAnisotropy = 0 is below the minimum of one.
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let mut desc = default_sampler_descriptor();
+            desc.maxAnisotropy = 0;
+            let sampler = wgpuDeviceCreateSampler(device, &desc);
+            assert!(!sampler.is_null());
+            assert_validation_error_contains(instance, device, "at least one");
+            wgpuSamplerRelease(sampler);
+
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
     fn wgpuCommandEncoder_lifecycle_release_addref_finish() {
         unsafe {
             let (instance, adapter, device) = noop_chain();
