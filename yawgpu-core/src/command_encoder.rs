@@ -1524,6 +1524,20 @@ pub(crate) fn validate_color_attachment(
     if attachment.store_op == StoreOp::Undefined {
         return Err("render pass color attachment storeOp must be set".to_owned());
     }
+    if attachment
+        .view
+        .usage()
+        .contains(TextureUsage::TRANSIENT_ATTACHMENT)
+    {
+        if attachment.load_op != LoadOp::Clear {
+            return Err("render pass transient color attachment loadOp must be clear".to_owned());
+        }
+        if attachment.store_op != StoreOp::Discard {
+            return Err(
+                "render pass transient color attachment storeOp must be discard".to_owned(),
+            );
+        }
+    }
     if attachment.load_op == LoadOp::Clear
         && ![
             attachment.clear_value.r,
@@ -1631,6 +1645,23 @@ pub(crate) fn validate_depth_stencil_attachment(
         } else if attachment.depth_store_op == StoreOp::Undefined {
             return Err("render pass depth storeOp must be set".to_owned());
         }
+        if attachment
+            .view
+            .usage()
+            .contains(TextureUsage::TRANSIENT_ATTACHMENT)
+        {
+            if attachment.depth_load_op != LoadOp::Clear {
+                return Err(
+                    "render pass transient depth attachment depthLoadOp must be clear".to_owned(),
+                );
+            }
+            if attachment.depth_store_op != StoreOp::Discard {
+                return Err(
+                    "render pass transient depth attachment depthStoreOp must be discard"
+                        .to_owned(),
+                );
+            }
+        }
         if attachment.depth_load_op == LoadOp::Clear
             && (!attachment.depth_clear_value.is_finite()
                 || !(0.0..=1.0).contains(&attachment.depth_clear_value))
@@ -1658,6 +1689,24 @@ pub(crate) fn validate_depth_stencil_attachment(
             return Err("render pass stencil loadOp must be set".to_owned());
         } else if attachment.stencil_store_op == StoreOp::Undefined {
             return Err("render pass stencil storeOp must be set".to_owned());
+        }
+        if attachment
+            .view
+            .usage()
+            .contains(TextureUsage::TRANSIENT_ATTACHMENT)
+        {
+            if attachment.stencil_load_op != LoadOp::Clear {
+                return Err(
+                    "render pass transient stencil attachment stencilLoadOp must be clear"
+                        .to_owned(),
+                );
+            }
+            if attachment.stencil_store_op != StoreOp::Discard {
+                return Err(
+                    "render pass transient stencil attachment stencilStoreOp must be discard"
+                        .to_owned(),
+                );
+            }
         }
     } else if attachment.stencil_load_op != LoadOp::Undefined
         || attachment.stencil_store_op != StoreOp::Undefined
@@ -2516,6 +2565,158 @@ mod tests {
     }
 
     #[test]
+    fn render_pass_transient_color_attachment_requires_clear_and_discard() {
+        let device = noop_device();
+        let view = transient_render_attachment_view_with_format(&device, rgba8_unorm());
+        let mut descriptor = noop_render_pass_descriptor(view, None);
+        let attachment = descriptor.color_attachments[0]
+            .as_mut()
+            .expect("color attachment");
+        attachment.load_op = LoadOp::Load;
+        attachment.store_op = StoreOp::Discard;
+
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
+            Err("render pass transient color attachment loadOp must be clear".to_owned())
+        );
+
+        let attachment = descriptor.color_attachments[0]
+            .as_mut()
+            .expect("color attachment");
+        attachment.load_op = LoadOp::Clear;
+        attachment.store_op = StoreOp::Store;
+
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
+            Err("render pass transient color attachment storeOp must be discard".to_owned())
+        );
+
+        descriptor.color_attachments[0]
+            .as_mut()
+            .expect("color attachment")
+            .store_op = StoreOp::Discard;
+
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn render_pass_transient_depth_stencil_attachment_requires_clear_and_discard() {
+        let device = noop_device();
+        let view = transient_render_attachment_view_with_format(
+            &device,
+            TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8),
+        );
+        let mut descriptor = RenderPassDescriptor {
+            max_color_attachments: device.limits().max_color_attachments,
+            color_attachments: Vec::new(),
+            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                view,
+                depth_load_op: LoadOp::Load,
+                depth_store_op: StoreOp::Discard,
+                depth_clear_value: 0.0,
+                depth_read_only: false,
+                stencil_load_op: LoadOp::Clear,
+                stencil_store_op: StoreOp::Discard,
+                stencil_clear_value: 0,
+                stencil_read_only: false,
+            }),
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            max_draw_count: 50_000_000,
+        };
+
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
+            Err("render pass transient depth attachment depthLoadOp must be clear".to_owned())
+        );
+
+        let attachment = descriptor
+            .depth_stencil_attachment
+            .as_mut()
+            .expect("depth-stencil attachment");
+        attachment.depth_load_op = LoadOp::Clear;
+        attachment.depth_store_op = StoreOp::Store;
+
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
+            Err("render pass transient depth attachment depthStoreOp must be discard".to_owned())
+        );
+
+        let attachment = descriptor
+            .depth_stencil_attachment
+            .as_mut()
+            .expect("depth-stencil attachment");
+        attachment.depth_store_op = StoreOp::Discard;
+        attachment.stencil_load_op = LoadOp::Load;
+
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
+            Err("render pass transient stencil attachment stencilLoadOp must be clear".to_owned())
+        );
+
+        let attachment = descriptor
+            .depth_stencil_attachment
+            .as_mut()
+            .expect("depth-stencil attachment");
+        attachment.stencil_load_op = LoadOp::Clear;
+        attachment.stencil_store_op = StoreOp::Store;
+
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
+            Err(
+                "render pass transient stencil attachment stencilStoreOp must be discard"
+                    .to_owned()
+            )
+        );
+
+        descriptor
+            .depth_stencil_attachment
+            .as_mut()
+            .expect("depth-stencil attachment")
+            .stencil_store_op = StoreOp::Discard;
+
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn render_pass_transient_read_only_depth_attachment_is_rejected() {
+        let device = noop_device();
+        let view = transient_render_attachment_view_with_format(
+            &device,
+            TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS),
+        );
+        let descriptor = RenderPassDescriptor {
+            max_color_attachments: device.limits().max_color_attachments,
+            color_attachments: Vec::new(),
+            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                view,
+                depth_load_op: LoadOp::Undefined,
+                depth_store_op: StoreOp::Undefined,
+                depth_clear_value: 0.0,
+                depth_read_only: true,
+                stencil_load_op: LoadOp::Undefined,
+                stencil_store_op: StoreOp::Undefined,
+                stencil_clear_value: 0,
+                stencil_read_only: true,
+            }),
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            max_draw_count: 50_000_000,
+        };
+
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
+            Err("render pass transient depth attachment depthLoadOp must be clear".to_owned())
+        );
+    }
+
+    #[test]
     fn render_pass_color_attachment_rejects_component_swizzled_view() {
         let device = noop_adapter()
             .create_device(None, &[crate::Feature::TextureComponentSwizzle], "", "")
@@ -2719,6 +2920,38 @@ mod tests {
             format,
             mip_level_count: 1,
             sample_count,
+            view_formats: Vec::new(),
+        });
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+            swizzle: None,
+        });
+        assert_eq!(error, None);
+        Arc::new(view)
+    }
+
+    fn transient_render_attachment_view_with_format(
+        device: &Device,
+        format: TextureFormat,
+    ) -> Arc<TextureView> {
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::TRANSIENT_ATTACHMENT,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format,
+            mip_level_count: 1,
+            sample_count: 1,
             view_formats: Vec::new(),
         });
         let (view, error) = texture.create_view(TextureViewDescriptor {

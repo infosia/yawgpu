@@ -315,6 +315,9 @@ pub(crate) fn validate_texture_view_descriptor(
     if usage.bits() & !texture.usage().bits() != 0 {
         return Some("texture view usage must be a subset of the texture usage");
     }
+    if texture.usage().contains(TextureUsage::TRANSIENT_ATTACHMENT) && usage != texture.usage() {
+        return Some("transient attachment texture view usage must equal the full texture usage");
+    }
     if mip_level_count == 0 {
         return Some("texture view mipLevelCount must be greater than zero");
     }
@@ -696,6 +699,46 @@ mod tests {
             swizzle: None,
         });
         assert_eq!(error, Some("texture view usage contains unknown bits"));
+    }
+
+    #[test]
+    fn transient_texture_view_usage_must_equal_full_texture_usage() {
+        let full_usage = TextureUsage::RENDER_ATTACHMENT | TextureUsage::TRANSIENT_ATTACHMENT;
+        let texture = noop_device().create_texture(TextureDescriptor {
+            usage: full_usage,
+            ..texture_descriptor_4x4()
+        });
+        let descriptor = TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: Some(TextureUsage::RENDER_ATTACHMENT),
+            swizzle: None,
+        };
+
+        let (_, error) = texture.create_view(descriptor);
+        assert_eq!(
+            error,
+            Some("transient attachment texture view usage must equal the full texture usage")
+        );
+
+        let (inherited_view, error) = texture.create_view(TextureViewDescriptor {
+            usage: None,
+            ..descriptor
+        });
+        assert_eq!(error, None);
+        assert_eq!(inherited_view.usage(), full_usage);
+
+        let (full_usage_view, error) = texture.create_view(TextureViewDescriptor {
+            usage: Some(full_usage),
+            ..descriptor
+        });
+        assert_eq!(error, None);
+        assert_eq!(full_usage_view.usage(), full_usage);
     }
 
     #[test]

@@ -523,6 +523,20 @@ pub(crate) fn validate_texture_descriptor(
     {
         return Some("transient attachment textures may only also be used as render attachment");
     }
+    if usage.contains(TextureUsage::TRANSIENT_ATTACHMENT) {
+        if descriptor.dimension != TextureDimension::D2 {
+            return Some("transient attachment textures must be 2D");
+        }
+        if size.depth_or_array_layers != 1 {
+            return Some("transient attachment textures must have exactly one array layer");
+        }
+        if descriptor.mip_level_count != 1 {
+            return Some("transient attachment textures must have exactly one mip level");
+        }
+        if !descriptor.view_formats.is_empty() {
+            return Some("transient attachment textures must not specify viewFormats");
+        }
+    }
     if descriptor.sample_count != 1 && descriptor.sample_count != 4 {
         return Some("texture sample count must be 1 or 4");
     }
@@ -1477,6 +1491,49 @@ mod tests {
         assert_eq!(
             validate_texture_descriptor(&descriptor, Limits::DEFAULT, &FeatureSet::new()),
             Some("transient attachment textures may only also be used as render attachment")
+        );
+    }
+
+    #[test]
+    fn validate_texture_descriptor_enforces_transient_attachment_shape() {
+        let mut descriptor = texture_descriptor_4x4();
+        descriptor.usage = TextureUsage::RENDER_ATTACHMENT | TextureUsage::TRANSIENT_ATTACHMENT;
+        descriptor.dimension = TextureDimension::D3;
+
+        assert_eq!(
+            validate_texture_descriptor(&descriptor, Limits::DEFAULT, &FeatureSet::new()),
+            Some("transient attachment textures must be 2D")
+        );
+
+        descriptor.dimension = TextureDimension::D2;
+        descriptor.size.depth_or_array_layers = 2;
+
+        assert_eq!(
+            validate_texture_descriptor(&descriptor, Limits::DEFAULT, &FeatureSet::new()),
+            Some("transient attachment textures must have exactly one array layer")
+        );
+
+        descriptor.size.depth_or_array_layers = 1;
+        descriptor.mip_level_count = 2;
+
+        assert_eq!(
+            validate_texture_descriptor(&descriptor, Limits::DEFAULT, &FeatureSet::new()),
+            Some("transient attachment textures must have exactly one mip level")
+        );
+
+        descriptor.mip_level_count = 1;
+        descriptor.view_formats.push(rgba8_unorm());
+
+        assert_eq!(
+            validate_texture_descriptor(&descriptor, Limits::DEFAULT, &FeatureSet::new()),
+            Some("transient attachment textures must not specify viewFormats")
+        );
+
+        descriptor.view_formats.clear();
+
+        assert_eq!(
+            validate_texture_descriptor(&descriptor, Limits::DEFAULT, &FeatureSet::new()),
+            None
         );
     }
 

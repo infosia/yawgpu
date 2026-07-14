@@ -125,13 +125,31 @@ Contract:
 - **Usage.** A transient texture may *only* additionally be `RENDER_ATTACHMENT`
   (core-validated). It is never sampled, copied, or used as a storage/texture
   binding — there is no way to observe its uninitialized content.
+- **Descriptor shape (createTexture, core-validated).** Because a memoryless
+  attachment is a single on-tile render target, a `TRANSIENT_ATTACHMENT` texture
+  must be `dimension: "2d"`, `depthOrArrayLayers == 1`, and `mipLevelCount == 1`,
+  and must declare **no `viewFormats`** (there is no persistent storage to
+  reinterpret). Each violation is a distinct core-validation error; matches Dawn
+  and the CTS `createTexture` transient cases.
+- **View usage (createView, core-validated).** A `WGPUTextureView` of a transient
+  texture may only request usage `0` (inherit) or the **full** texture usage —
+  `RENDER_ATTACHMENT | TRANSIENT_ATTACHMENT` is indivisible, so a partial-subset
+  view usage (e.g. `RENDER_ATTACHMENT` alone) is rejected. This is stricter than
+  the general "view usage ⊆ texture usage" subset rule, which still applies to
+  non-transient textures.
 - **Storage (HAL).** The backend keeps it on-tile with no DRAM backing: Metal
   `MTLStorageMode::Memoryless`; Vulkan `TRANSIENT_ATTACHMENT` image usage (no
   `TRANSFER_*` bits) backed by `LAZILY_ALLOCATED` device memory, falling back to
   `DEVICE_LOCAL` when no lazily-allocated memory type exists.
-- **Load/store.** `loadOp` must be `Clear` (or the subpass fully writes it) and
-  **`storeOp` must be `Discard`** — a memoryless attachment has no memory to store
-  into (Metal rejects a non-`DontCare` store on a Memoryless texture).
+- **Load/store (render-pass-descriptor, core-validated).** `loadOp` must be
+  `Clear` and **`storeOp` must be `Discard`** — a memoryless attachment has no
+  memory to load from or store into (Metal rejects a non-`DontCare` store on a
+  Memoryless texture). Enforced for every aspect of a transient attachment: a
+  color attachment's `loadOp`/`storeOp`, and a depth-stencil attachment's
+  `depthLoadOp`/`depthStoreOp` and `stencilLoadOp`/`stencilStoreOp` for whichever
+  aspects the format carries. `loadOp: "load"` or `storeOp: "store"` on a
+  transient attachment is a core-validation error; matches Dawn and the CTS
+  `render_pass_descriptor:color_attachments,loadOp_storeOp` cases.
 - **Lazy zero-init.** Transient textures are excluded from Stage-1 lazy
   zero-initialization: a memoryless texture cannot be a copy destination, and it has
   no observable uninitialized content. (`texture_lazy_init_eligible` returns false.)
