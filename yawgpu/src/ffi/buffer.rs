@@ -135,6 +135,66 @@ pub unsafe extern "C" fn wgpuBufferGetConstMappedRange(
         .map_or(std::ptr::null(), |ptr| ptr.cast_const().cast())
 }
 
+/// Copies bytes from a mapped buffer range into caller-provided storage.
+///
+/// # Safety
+///
+/// `buffer` must be a non-null live yawgpu buffer handle. When `size` is
+/// non-zero, `data` must point to writable storage for at least `size` bytes
+/// that does not overlap the mapped buffer range.
+/// Returns WGPU buffer read mapped range status.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuBufferReadMappedRange(
+    buffer: native::WGPUBuffer,
+    offset: usize,
+    data: *mut c_void,
+    size: usize,
+) -> native::WGPUStatus {
+    if size == native::WGPU_WHOLE_MAP_SIZE {
+        return native::WGPUStatus_Error;
+    }
+    if data.is_null() && size > 0 {
+        return native::WGPUStatus_Error;
+    }
+    let Some(range) = mapped_range_for_copy_ptr(buffer, true, offset, size) else {
+        return native::WGPUStatus_Error;
+    };
+    if size > 0 {
+        std::ptr::copy_nonoverlapping(range.cast_const(), data.cast(), size);
+    }
+    native::WGPUStatus_Success
+}
+
+/// Copies bytes from caller-provided storage into a mapped buffer range.
+///
+/// # Safety
+///
+/// `buffer` must be a non-null live yawgpu buffer handle. When `size` is
+/// non-zero, `data` must point to readable storage for at least `size` bytes
+/// that does not overlap the mapped buffer range.
+/// Returns WGPU buffer write mapped range status.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuBufferWriteMappedRange(
+    buffer: native::WGPUBuffer,
+    offset: usize,
+    data: *const c_void,
+    size: usize,
+) -> native::WGPUStatus {
+    if size == native::WGPU_WHOLE_MAP_SIZE {
+        return native::WGPUStatus_Error;
+    }
+    if data.is_null() && size > 0 {
+        return native::WGPUStatus_Error;
+    }
+    let Some(range) = mapped_range_for_copy_ptr(buffer, false, offset, size) else {
+        return native::WGPUStatus_Error;
+    };
+    if size > 0 {
+        std::ptr::copy_nonoverlapping(data.cast(), range, size);
+    }
+    native::WGPUStatus_Success
+}
+
 /// Returns the buffer map state.
 ///
 /// # Safety

@@ -643,6 +643,40 @@ impl Buffer {
         size: Option<u64>,
     ) -> Option<*mut u8> {
         let mut state = self.inner.state.lock();
+        let range = self.validate_mapped_range(&state, const_access, offset, size)?;
+        if state
+            .mapped_ranges
+            .iter()
+            .any(|existing| ranges_overlap(*existing, range))
+        {
+            return None;
+        }
+        state.mapped_ranges.push(range);
+        drop(state);
+        self.mapped_ptr_at(range.offset)
+    }
+
+    /// Resolves a mapped-range pointer without registering the range.
+    #[must_use]
+    pub fn mapped_range_for_copy(
+        &self,
+        const_access: bool,
+        offset: u64,
+        size: u64,
+    ) -> Option<*mut u8> {
+        let state = self.inner.state.lock();
+        let range = self.validate_mapped_range(&state, const_access, offset, Some(size))?;
+        drop(state);
+        self.mapped_ptr_at(range.offset)
+    }
+
+    fn validate_mapped_range(
+        &self,
+        state: &BufferState,
+        const_access: bool,
+        offset: u64,
+        size: Option<u64>,
+    ) -> Option<MappedRange> {
         if state.is_destroyed || state.map_state != BufferMapState::Mapped {
             return None;
         }
@@ -668,16 +702,10 @@ impl Buffer {
         if end > map_end {
             return None;
         }
-        let range = MappedRange { offset, size };
-        if state
-            .mapped_ranges
-            .iter()
-            .any(|existing| ranges_overlap(*existing, range))
-        {
-            return None;
-        }
-        state.mapped_ranges.push(range);
-        drop(state);
+        Some(MappedRange { offset, size })
+    }
+
+    fn mapped_ptr_at(&self, offset: u64) -> Option<*mut u8> {
         if let Some(mapped_ptr) = self.inner.hal.as_ref().and_then(HalBuffer::mapped_ptr) {
             let offset = usize::try_from(offset).ok()?;
             return Some(unsafe { mapped_ptr.as_ptr().add(offset) });
@@ -1049,6 +1077,32 @@ mod tests {
             .expect("map should begin after unmap");
         assert_eq!(buffer.resolve_pending_map(), MapAsyncStatus::Success);
         assert!(buffer.mapped_range(false, 24, Some(0)).is_some());
+    }
+
+    #[test]
+    fn mapped_range_for_copy_is_stateless_and_shares_mapped_range_validation() {
+        let buffer = noop_buffer(32, BufferUsage::MAP_WRITE);
+        assert_eq!(buffer.mapped_range_for_copy(false, 0, 4), None);
+
+        assert_eq!(buffer.begin_map(MapMode::Write, 0, 32), Ok(()));
+        assert_eq!(buffer.resolve_pending_map(), MapAsyncStatus::Success);
+        assert!(buffer.mapped_range_for_copy(false, 0, 4).is_some());
+        assert!(buffer.mapped_range_for_copy(false, 0, 4).is_some());
+        assert!(buffer.mapped_range(false, 0, Some(4)).is_some());
+        assert_eq!(buffer.mapped_range_for_copy(false, 4, 4), None);
+        assert_eq!(buffer.mapped_range_for_copy(false, 8, 2), None);
+        assert_eq!(buffer.mapped_range_for_copy(false, 32, 4), None);
+
+        assert_eq!(buffer.unmap(), None);
+        assert_eq!(buffer.mapped_range_for_copy(false, 0, 4), None);
+
+        let read_buffer = noop_buffer(16, BufferUsage::MAP_READ);
+        assert_eq!(read_buffer.begin_map(MapMode::Read, 0, 16), Ok(()));
+        assert_eq!(read_buffer.resolve_pending_map(), MapAsyncStatus::Success);
+        assert!(read_buffer.mapped_range_for_copy(true, 0, 4).is_some());
+        assert_eq!(read_buffer.mapped_range_for_copy(false, 0, 4), None);
+        read_buffer.destroy();
+        assert_eq!(read_buffer.mapped_range_for_copy(true, 0, 4), None);
     }
 
     #[test]

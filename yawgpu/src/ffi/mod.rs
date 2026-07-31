@@ -2232,6 +2232,20 @@ unsafe fn mapped_range_ptr(
     buffer.core.mapped_range(const_access, offset, size)
 }
 
+unsafe fn mapped_range_for_copy_ptr(
+    buffer: native::WGPUBuffer,
+    const_access: bool,
+    offset: usize,
+    size: usize,
+) -> Option<*mut u8> {
+    let buffer = borrow_handle(buffer, "WGPUBuffer");
+    let offset = u64::try_from(offset).ok()?;
+    let size = u64::try_from(size).ok()?;
+    buffer
+        .core
+        .mapped_range_for_copy(const_access, offset, size)
+}
+
 /// Installs a Rust-side uncaptured-error callback for test harnesses.
 ///
 /// # Safety
@@ -5645,6 +5659,214 @@ mod tests {
 
             wgpuBufferRelease(read_buffer);
             wgpuBufferRelease(write_buffer);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuBufferWriteMappedRange_round_trips_and_validates_copy_access() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let write_desc = buffer_descriptor(native::WGPUBufferUsage_MapWrite, 16);
+            let write_buffer = wgpuDeviceCreateBuffer(device, &write_desc);
+            let mut write_state = BufferMapAsyncState::default();
+            map_buffer_async(
+                write_buffer,
+                native::WGPUMapMode_Write,
+                0,
+                16,
+                &mut write_state,
+            );
+            process_events_until_buffer_map_fires(instance, &write_state);
+            assert_eq!(write_state.status, native::WGPUMapAsyncStatus_Success);
+
+            let pattern = [0x10_u8, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87];
+            assert_eq!(
+                wgpuBufferWriteMappedRange(write_buffer, 0, pattern.as_ptr().cast(), pattern.len(),),
+                native::WGPUStatus_Success
+            );
+            let written = wgpuBufferGetConstMappedRange(write_buffer, 0, pattern.len());
+            assert!(!written.is_null());
+            assert_eq!(
+                std::slice::from_raw_parts(written.cast::<u8>(), pattern.len()),
+                pattern
+            );
+            assert_eq!(
+                wgpuBufferWriteMappedRange(
+                    write_buffer,
+                    0,
+                    pattern.as_ptr().cast(),
+                    native::WGPU_WHOLE_MAP_SIZE,
+                ),
+                native::WGPUStatus_Error
+            );
+            assert_eq!(
+                wgpuBufferWriteMappedRange(write_buffer, 0, std::ptr::null(), 4),
+                native::WGPUStatus_Error
+            );
+            assert_eq!(
+                wgpuBufferWriteMappedRange(write_buffer, 16, std::ptr::null(), 0),
+                native::WGPUStatus_Success
+            );
+
+            let read_desc = buffer_descriptor(native::WGPUBufferUsage_MapRead, 16);
+            let read_buffer = wgpuDeviceCreateBuffer(device, &read_desc);
+            let mut read_state = BufferMapAsyncState::default();
+            map_buffer_async(
+                read_buffer,
+                native::WGPUMapMode_Read,
+                0,
+                16,
+                &mut read_state,
+            );
+            process_events_until_buffer_map_fires(instance, &read_state);
+            assert_eq!(read_state.status, native::WGPUMapAsyncStatus_Success);
+            assert_eq!(
+                wgpuBufferWriteMappedRange(read_buffer, 0, pattern.as_ptr().cast(), pattern.len(),),
+                native::WGPUStatus_Error
+            );
+            let mut read_back = [0xff_u8; 8];
+            assert_eq!(
+                wgpuBufferReadMappedRange(
+                    read_buffer,
+                    0,
+                    read_back.as_mut_ptr().cast(),
+                    read_back.len(),
+                ),
+                native::WGPUStatus_Success
+            );
+            assert_eq!(read_back, [0_u8; 8]);
+
+            wgpuBufferRelease(read_buffer);
+            wgpuBufferRelease(write_buffer);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuBufferReadMappedRange_copies_without_registering_and_validates_errors() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let seeded_desc = buffer_descriptor(native::WGPUBufferUsage_MapWrite, 16);
+            let seeded_buffer = wgpuDeviceCreateBuffer(device, &seeded_desc);
+            let mut seeded_state = BufferMapAsyncState::default();
+            map_buffer_async(
+                seeded_buffer,
+                native::WGPUMapMode_Write,
+                0,
+                16,
+                &mut seeded_state,
+            );
+            process_events_until_buffer_map_fires(instance, &seeded_state);
+            assert_eq!(seeded_state.status, native::WGPUMapAsyncStatus_Success);
+
+            let pattern = [0xde_u8, 0xad, 0xbe, 0xef];
+            let seed = wgpuBufferGetMappedRange(seeded_buffer, 0, pattern.len());
+            assert!(!seed.is_null());
+            std::ptr::copy_nonoverlapping(pattern.as_ptr(), seed.cast::<u8>(), pattern.len());
+            let mut destination = [0_u8; 4];
+            assert_eq!(
+                wgpuBufferReadMappedRange(
+                    seeded_buffer,
+                    0,
+                    destination.as_mut_ptr().cast(),
+                    destination.len(),
+                ),
+                native::WGPUStatus_Success
+            );
+            assert_eq!(destination, pattern);
+
+            let stateless_desc = mapped_buffer_descriptor(native::WGPUBufferUsage_MapWrite, 16);
+            let stateless_buffer = wgpuDeviceCreateBuffer(device, &stateless_desc);
+            let mut repeated = [0xff_u8; 4];
+            assert_eq!(
+                wgpuBufferReadMappedRange(
+                    stateless_buffer,
+                    0,
+                    repeated.as_mut_ptr().cast(),
+                    repeated.len(),
+                ),
+                native::WGPUStatus_Success
+            );
+            assert_eq!(repeated, [0_u8; 4]);
+            repeated.fill(0xff);
+            assert_eq!(
+                wgpuBufferReadMappedRange(
+                    stateless_buffer,
+                    0,
+                    repeated.as_mut_ptr().cast(),
+                    repeated.len(),
+                ),
+                native::WGPUStatus_Success
+            );
+            assert_eq!(repeated, [0_u8; 4]);
+            assert!(!wgpuBufferGetConstMappedRange(stateless_buffer, 0, 4).is_null());
+
+            let mut untouched = [0xa5_u8; 16];
+            assert_eq!(
+                wgpuBufferReadMappedRange(stateless_buffer, 24, untouched.as_mut_ptr().cast(), 4,),
+                native::WGPUStatus_Error
+            );
+            assert_eq!(untouched, [0xa5_u8; 16]);
+            assert_eq!(
+                wgpuBufferReadMappedRange(stateless_buffer, 8, untouched.as_mut_ptr().cast(), 12,),
+                native::WGPUStatus_Error
+            );
+            assert_eq!(untouched, [0xa5_u8; 16]);
+            assert_eq!(
+                wgpuBufferReadMappedRange(stateless_buffer, 4, untouched.as_mut_ptr().cast(), 4,),
+                native::WGPUStatus_Error
+            );
+            assert_eq!(untouched, [0xa5_u8; 16]);
+            assert_eq!(
+                wgpuBufferReadMappedRange(stateless_buffer, 0, untouched.as_mut_ptr().cast(), 2,),
+                native::WGPUStatus_Error
+            );
+            assert_eq!(untouched, [0xa5_u8; 16]);
+            assert_eq!(
+                wgpuBufferReadMappedRange(
+                    stateless_buffer,
+                    0,
+                    untouched.as_mut_ptr().cast(),
+                    native::WGPU_WHOLE_MAP_SIZE,
+                ),
+                native::WGPUStatus_Error
+            );
+            assert_eq!(untouched, [0xa5_u8; 16]);
+            assert_eq!(
+                wgpuBufferReadMappedRange(stateless_buffer, 0, std::ptr::null_mut(), 4),
+                native::WGPUStatus_Error
+            );
+            assert_eq!(
+                wgpuBufferReadMappedRange(stateless_buffer, 16, std::ptr::null_mut(), 0),
+                native::WGPUStatus_Success
+            );
+            assert_eq!(
+                wgpuBufferReadMappedRange(stateless_buffer, 24, std::ptr::null_mut(), 0),
+                native::WGPUStatus_Error
+            );
+
+            let unmapped_desc = buffer_descriptor(native::WGPUBufferUsage_MapRead, 16);
+            let unmapped_buffer = wgpuDeviceCreateBuffer(device, &unmapped_desc);
+            assert_eq!(
+                wgpuBufferReadMappedRange(unmapped_buffer, 0, untouched.as_mut_ptr().cast(), 4,),
+                native::WGPUStatus_Error
+            );
+            assert_eq!(untouched, [0xa5_u8; 16]);
+
+            let destroyed_desc = mapped_buffer_descriptor(native::WGPUBufferUsage_CopyDst, 16);
+            let destroyed_buffer = wgpuDeviceCreateBuffer(device, &destroyed_desc);
+            wgpuBufferDestroy(destroyed_buffer);
+            assert_eq!(
+                wgpuBufferReadMappedRange(destroyed_buffer, 0, untouched.as_mut_ptr().cast(), 4,),
+                native::WGPUStatus_Error
+            );
+            assert_eq!(untouched, [0xa5_u8; 16]);
+
+            wgpuBufferRelease(destroyed_buffer);
+            wgpuBufferRelease(unmapped_buffer);
+            wgpuBufferRelease(stateless_buffer);
+            wgpuBufferRelease(seeded_buffer);
             release_handles(instance, adapter, device);
         }
     }

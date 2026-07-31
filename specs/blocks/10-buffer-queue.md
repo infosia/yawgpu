@@ -19,8 +19,10 @@ Phase 2. Rules extracted from Dawn `BufferValidationTests`,
 - `wgpuDeviceCreateBuffer` 6281; `wgpuBufferMapAsync` 6119
   (+`WGPUBufferMapCallbackInfo` 1533) → `WGPUFuture`;
   `wgpuBufferGetMappedRange` 6104 / `wgpuBufferGetConstMappedRange` 6087;
-  `wgpuBufferUnmap` 6142; `wgpuBufferDestroy` 6069; `wgpuBufferGetSize`
-  6106; `wgpuBufferGetUsage` 6107; `wgpuBufferGetMapState` 6105.
+  `wgpuBufferReadMappedRange` 6142 / `wgpuBufferWriteMappedRange` 6165
+  (both → `WGPUStatus`); `wgpuBufferUnmap` 6142; `wgpuBufferDestroy` 6069;
+  `wgpuBufferGetSize` 6106; `wgpuBufferGetUsage` 6107;
+  `wgpuBufferGetMapState` 6105.
 - `wgpuQueueSubmit` 6464; `wgpuQueueWriteBuffer` 6469;
   `wgpuQueueOnSubmittedWorkDone` 6462 (+`WGPUQueueWorkDoneCallbackInfo`
   1677) → `WGPUFuture`.
@@ -47,6 +49,21 @@ re-fire.
   matches canonical pointer-returning semantics (Dawn additionally emits a
   device log we do not require).
 - `WGPU_WHOLE_MAP_SIZE` sentinel handled per webgpu.h.
+- **`Read/WriteMappedRange` do not register a mapped range** (B37).
+  `Buffer::mapped_range` records each granted range and rejects an
+  overlapping one (WebGPU's disjointness rule for the `ArrayBuffer`s
+  `getMappedRange` hands out); Dawn's `CanGetMappedRange` is stateless and
+  leaves that rule to its JS layer. The copy accessors return no pointer to
+  the caller, so registering would be a pure Dawn divergence: a second
+  `ReadMappedRange` over the same bytes would fail where Dawn succeeds.
+  They therefore take a **non-registering** core path that shares its
+  validation with `mapped_range` rather than duplicating it.
+- **`Read/WriteMappedRange` reject `WGPU_WHOLE_MAP_SIZE` and a NULL `data`**
+  (B34, B36) where Dawn has undefined behaviour — Dawn forwards both
+  straight to `memcpy` (`SIZE_MAX` bytes, or a NULL source/destination).
+  webgpu.h documents the sentinel as not accepted, so `WGPUStatus_Error` is
+  within contract and keeps the FFI boundary panic-free per CLAUDE.md
+  principle 3.
 - **Buffer descriptor validation is first-match-wins** (B1–B6): a
   multi-rule-violating descriptor dispatches exactly **one** device error
   (Dawn does too). Tests assert "exactly one error" (not a rule-specific
@@ -129,6 +146,36 @@ re-fire.
 - **B30** offset before mapped-range start ⇒ NULL. same :1096. ☑ (P2.3)
 - **B31** NULL on destroyed buffer. `GetMappedRange_OnDestroyedBuffer`
   :914. ☑ (P2.3)
+
+### Read/WriteMappedRange — copy accessors
+
+Canonical `webgpu.h` additions whose stated purpose is a Wasm-side copy
+optimisation (`:6127`, `:6150`); on a native target they are semantically
+`Get[Const]MappedRange` + `memcpy`. Oracle is Dawn
+`BufferBase::APIRead/WriteMappedRange` (`src/dawn/native/Buffer.cpp:783`),
+which delegates to `APIGet[Const]MappedRange` and returns
+`WGPUStatus_Error` on a null range. Like B25–B31 these report **only**
+through the return value — never a device error, never a panic.
+
+- **B32** `wgpuBufferReadMappedRange(buffer, offset, data, size)` copies
+  `size` bytes out of the mapping into `data` and returns
+  `WGPUStatus_Success`. Validity is **exactly** that of
+  `wgpuBufferGetConstMappedRange(buffer, offset, size)`: every condition
+  that makes B25–B31 return NULL yields `WGPUStatus_Error` here, with
+  `data` left untouched.
+- **B33** `wgpuBufferWriteMappedRange(buffer, offset, data, size)` is the
+  mirror, gated on `wgpuBufferGetMappedRange` — so a read-only mapping
+  gives `WGPUStatus_Error` (write counterpart of B26), and the buffer is
+  left unmodified.
+- **B34** `size == WGPU_WHOLE_MAP_SIZE` ⇒ `WGPUStatus_Error`. The sentinel
+  is explicitly not accepted here (`:6137`, `:6160`), unlike B29.
+- **B35** `size == 0` ⇒ `WGPUStatus_Success` and `data` is not
+  dereferenced, provided `offset` is otherwise in range.
+- **B36** `data == NULL` with `size > 0` ⇒ `WGPUStatus_Error`, checked
+  before any range resolution.
+- **B37** neither function consumes a mapped range: calling either twice
+  over the same bytes, or following it with a `Get[Const]MappedRange`
+  covering those bytes, still succeeds.
 
 ### Queue — Phase 2 (P2.4)
 
