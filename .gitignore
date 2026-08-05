@@ -2,6 +2,7 @@
 /target-*
 .DS_Store
 /examples/build*
+/benches/build*
 .claude/
 *.transcript
 /HANDOFF.md
