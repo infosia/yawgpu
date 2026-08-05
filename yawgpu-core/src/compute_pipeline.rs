@@ -3076,12 +3076,13 @@ fn cs() {
             ComputePipelineLayout::Explicit(Arc::clone(&layout)),
         );
 
-        let (entry, bindings, workgroup, layouts) =
+        let (entry, bindings, workgroup, layouts, immediate_written) =
             resolve_spirv_passthrough_compute_pipeline_descriptor(&descriptor)
                 .expect("SPIR-V passthrough resolve");
 
         assert_eq!(entry, "cs");
         assert!(bindings.is_empty());
+        assert_eq!(immediate_written, 0);
         assert_eq!(
             workgroup,
             Some(ResolvedComputeWorkgroup {

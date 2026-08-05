@@ -5543,13 +5543,14 @@ fn fs() -> @builtin(frag_depth) f32 {
         let device = noop_device();
         let descriptor = msl_render_passthrough_descriptor(&device);
 
-        let (vertex_entry, fragment_entry, layouts) =
+        let (vertex_entry, fragment_entry, layouts, immediate_written) =
             resolve_shader_passthrough_render_pipeline_descriptor(&descriptor)
                 .expect("MSL render passthrough resolve");
 
         assert_eq!(vertex_entry, "vs");
         assert_eq!(fragment_entry.as_deref(), Some("fs"));
         assert_eq!(layouts.len(), 0);
+        assert_eq!(immediate_written, 0);
     }
 
     #[cfg(feature = "shader-passthrough")]

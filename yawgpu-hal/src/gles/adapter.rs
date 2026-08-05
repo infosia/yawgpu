@@ -251,7 +251,7 @@ impl GlesAdapter {
                 create_egl_device(instance, egl_state, *config)
             }
             #[cfg(windows)]
-            GlesAdapterInner::Wgl { instance } => {
+            GlesAdapterInner::Wgl { instance, .. } => {
                 let GlesInstanceInner::Wgl(wgl_state) = instance.as_ref() else {
                     return Err(HalError::DeviceCreationFailed { backend: BACKEND });
                 };
