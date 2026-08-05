@@ -119,8 +119,74 @@ spot to micro-optimise.
 The picture is consistent: **object construction, validation and shader
 compilation are competitive; the queue/submission layer is not.**
 
+## CTS baseline before Block 96
+
+Taken so a queue-layer change can be proved not to move a single result
+(Block 96 **Q24**). Metal, yawgpu `0e12cd5`, `--workers 6`,
+`--expectations expectations/yawgpu.txt`, trees `api,operation,{queue,buffers,
+memory_sync,command_buffer,resource_init}`:
+
+```
+pass=171474 skip=37 warn=0 fail=0 crash=0 xfail=0 xpass=0
+```
+
+## Run 2 — 2026-08-05, after Block 96 Slice A (P-002 fixed)
+
+Same machine, same Dawn build, `--reps 9`. `before` is Run 1's yawgpu column.
+
+| case | before ns | after ns | dawn ns | after/dawn |
+|---|---|---|---|---|
+| `buffer/create_destroy` | 1756 | 1780 | 1929 | 0.92× |
+| `buffer/create_mapped_unmap` | 1781 | 1816 | 4428 | 0.41× |
+| `bindgroup/create_destroy` | 163 | 164 | 133 | 1.24× |
+| `queue/write_buffer_4kb` | 156238 | **636** | 669 | 0.95× |
+| `queue/write_buffer_then_wait` | 147249 | **788** | 592 | 1.33× |
+| `frame/10writes_dispatch_submit_wait` | 1604314 | **164336** | 159279 | 1.03× |
+| `shader/create_cached` | 132 | 140 | 657 | 0.21× |
+| `shader/create_unique` | 16091 | 16423 | 21154 | 0.78× |
+| `pipeline/compute_cached` | 66 | 67 | 364 | 0.18× |
+| `pipeline/compute_unique` | 84787 | 85360 | 87555 | 0.97× |
+| `pipeline/render_unique` | 118858 | 118421 | 135576 | 0.87× |
+| `encode/empty_encoder_finish` | 159 | 162 | 177 | 0.91× |
+| `encode/compute_1_dispatch` | 727 | 787 | 668 | 1.18× |
+| `encode/render_pass_empty` | 875 | 842 | 928 | 0.91× |
+| `encode/render_draw` | 148 | 147 | 42 | 3.47× |
+| `submit/empty` | 193 | 220 | 3123 | 0.07× |
+| `submit/compute_1_dispatch` | 155875 | 161238 | 25885 | 6.23× |
+| `submit/compute_wait_idle` | 149310 | 151241 | 134873 | 1.12× |
+
+**P-002 is resolved.** `queue.writeBuffer` went 156 µs → 636 ns (246×) and is
+now marginally ahead of Dawn. End-to-end, `frame/10writes_dispatch_submit_wait`
+went 1.60 ms → 164 µs (9.8×) and sits at 1.03× of Dawn — parity. Nothing else
+moved outside noise; P-001 (`submit/compute_1_dispatch`, still 6.2×) and P-003
+(`encode/render_draw`, still 3.5×) are untouched by design.
+
+CTS re-run on Metal over the same trees as the baseline:
+`pass=171474 skip=37 warn=0 fail=0 crash=0` — **byte-identical**, so Q24 holds
+for this slice on Metal.
+
+### A methodology note worth keeping
+
+The first post-fix measurement was taken while the CTS run was still executing
+with 6 workers, and reported everything ~30% slower — including
+`shader/create_cached` and `buffer/create_destroy`, which the change cannot
+touch. That across-the-board shift on untouched cases is the tell. Benchmark
+runs must have the machine to themselves; a case that "regressed" alongside
+cases the diff never reaches is measuring the load, not the code.
+
+### Known cost carried by Slice A
+
+Recycling a staging chunk requires proving the GPU is done with it. Submission
+is asynchronous on Vulkan, so Slice A returns chunks to the reuse pool only
+after `wait_idle`, and allocates a fresh 64 KiB chunk otherwise. That costs
+roughly 14 µs per submit on Metal — visible as `frame/*` sitting at 1.03×
+rather than the 0.94× an unconditional recycle reached. It is deliberate: the
+alternative measured earlier made Vulkan submission synchronous, which is a
+regression on a Tier 1 backend. Block 96 **Q17** removes the cost by keying
+recycling on the completion index Slice B introduces.
+
 ## Status
 
-Measured only. No fix is in progress; P-001–P-003 are recorded here so the
-baseline is reproducible before anything changes. Re-run the harness and add a
-new "Run" section rather than editing Run 1 in place.
+**P-002 resolved** (Block 96 Slice A). **P-001 and P-003 open.** Re-run the
+harness and add a new "Run" section rather than editing an earlier one in
+place.

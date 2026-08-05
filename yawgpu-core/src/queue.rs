@@ -4,12 +4,12 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use yawgpu_hal::{
     HalBoundBuffer, HalBoundExternalTexture, HalBoundIndexBuffer, HalBoundIndirectBuffer,
-    HalBoundSampler, HalBoundTexture, HalBufferClear, HalBufferCopy, HalBufferTextureCopy,
-    HalBufferTextureLayout, HalBufferUsage, HalComputeDispatch, HalComputePass, HalCopy, HalDevice,
-    HalDraw, HalIndexFormat, HalQueue, HalRenderColorTarget, HalRenderDepthStencilAttachment,
-    HalRenderLoadOp, HalRenderPass, HalResolveQuerySet, HalScissorRect, HalTextureAspect,
-    HalTextureClear, HalTextureComponentSwizzle, HalTextureCopy, HalTextureViewDimension,
-    HalViewport,
+    HalBoundSampler, HalBoundTexture, HalBuffer, HalBufferClear, HalBufferCopy,
+    HalBufferTextureCopy, HalBufferTextureLayout, HalBufferUsage, HalComputeDispatch,
+    HalComputePass, HalCopy, HalDevice, HalDraw, HalIndexFormat, HalQueue, HalRenderColorTarget,
+    HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass, HalResolveQuerySet,
+    HalScissorRect, HalTextureAspect, HalTextureClear, HalTextureComponentSwizzle, HalTextureCopy,
+    HalTextureViewDimension, HalViewport,
 };
 #[cfg(feature = "tiled")]
 use yawgpu_hal::{
@@ -47,12 +47,182 @@ pub struct Queue {
 pub(crate) struct QueueInner {
     pub(crate) hal: HalQueue,
     pub(crate) label: Mutex<String>,
+    pending_writes: Mutex<PendingWriteBatch>,
+}
+
+const STAGING_CHUNK_SIZE: u64 = 64 * 1024;
+
+/// Caps the staging chunks kept for reuse, so a burst of queue writes cannot
+/// leave a large pool resident for the lifetime of the queue. Four chunks is
+/// 256 KiB: deferred writes between two submits normally fit in one or two,
+/// and the headroom absorbs a burst without letting a pathological batch keep
+/// megabytes alive. Excess chunks are dropped rather than pooled.
+const MAX_FREE_STAGING_CHUNKS: usize = 4;
+
+#[derive(Debug)]
+struct StagingChunk {
+    buffer: HalBuffer,
+    cursor: u64,
+}
+
+#[derive(Debug, Default)]
+struct PendingWriteBatch {
+    copies: Vec<HalCopy>,
+    chunks: Vec<StagingChunk>,
+    current_chunk: Option<usize>,
+    /// Chunks consumed by a submission that has not been proven complete.
+    /// Reusing one would let the host overwrite bytes the GPU may still be
+    /// reading, and submission is asynchronous on Vulkan (fence + retire
+    /// ring). They move to `free_chunks` only once the queue is known idle.
+    /// Slice B of Block 96 replaces this with completion-indexed recycling
+    /// (rule Q17), at which point the drain no longer needs a full wait.
+    in_flight: Vec<HalBuffer>,
+    /// Chunks proven free for reuse, all of exactly `STAGING_CHUNK_SIZE`.
+    free_chunks: Vec<HalBuffer>,
+}
+
+#[derive(Debug, Default)]
+struct PendingWriteSubmission {
+    copies: Vec<HalCopy>,
+    chunks: Vec<StagingChunk>,
+}
+
+impl PendingWriteBatch {
+    /// Copies `data` into staging memory and returns the buffer plus the byte
+    /// offset the copy must read from.
+    ///
+    /// `alignment` is the constraint the resulting offset must satisfy for the
+    /// copy the caller is about to record. Buffer copies pass 4. Texture
+    /// copies pass `max(block_size, 4)`, which satisfies both backends:
+    /// `vkCmdCopyBufferToImage` requires `bufferOffset` to be a multiple of 4
+    /// **and** of the texel block size, and Metal's
+    /// `copyFromBuffer:sourceOffset:` requires a multiple of the block size.
+    /// Taking the max is sufficient rather than needing the least common
+    /// multiple because every WebGPU texel block size is a power of two (1, 2,
+    /// 4, 8 or 16 bytes), so the larger of the two is always a multiple of the
+    /// smaller. A non-power-of-two block size would break that argument and
+    /// require an LCM here.
+    fn stage(
+        &mut self,
+        device: &HalDevice,
+        data: &[u8],
+        size: u64,
+        alignment: u64,
+    ) -> Result<(HalBuffer, u64), yawgpu_hal::HalError> {
+        if size > STAGING_CHUNK_SIZE {
+            // Too large to sub-allocate: give this write a dedicated buffer.
+            // It is never pooled (see `retire`), so its size is always
+            // strictly greater than `STAGING_CHUNK_SIZE`.
+            let buffer = self.create_staging_buffer(device, size)?;
+            buffer.write(0, data)?;
+            self.chunks.push(StagingChunk {
+                buffer: buffer.clone(),
+                cursor: size,
+            });
+            return Ok((buffer, 0));
+        }
+
+        let current = self.current_chunk.and_then(|index| {
+            let chunk = self.chunks.get(index)?;
+            let offset = align_up(chunk.cursor, alignment)?;
+            offset
+                .checked_add(size)
+                .filter(|end| *end <= STAGING_CHUNK_SIZE)?;
+            Some((index, offset))
+        });
+        let (chunk_index, offset) = if let Some(current) = current {
+            current
+        } else {
+            let buffer = self.take_chunk(device)?;
+            let index = self.chunks.len();
+            self.chunks.push(StagingChunk { buffer, cursor: 0 });
+            self.current_chunk = Some(index);
+            (index, 0)
+        };
+
+        let chunk = &mut self.chunks[chunk_index];
+        chunk.buffer.write(offset, data)?;
+        chunk.cursor = offset + size;
+        Ok((chunk.buffer.clone(), offset))
+    }
+
+    /// Takes a pooled standard-size chunk, allocating one when the pool is
+    /// empty. Every pooled buffer is exactly `STAGING_CHUNK_SIZE`, so any
+    /// entry fits any sub-allocating write and no size search is needed.
+    fn take_chunk(&mut self, device: &HalDevice) -> Result<HalBuffer, yawgpu_hal::HalError> {
+        match self.free_chunks.pop() {
+            Some(buffer) => Ok(buffer),
+            None => self.create_staging_buffer(device, STAGING_CHUNK_SIZE),
+        }
+    }
+
+    fn create_staging_buffer(
+        &mut self,
+        device: &HalDevice,
+        size: u64,
+    ) -> Result<HalBuffer, yawgpu_hal::HalError> {
+        device.create_buffer(
+            size,
+            HalBufferUsage {
+                copy_src: true,
+                ..HalBufferUsage::default()
+            },
+        )
+    }
+
+    fn take_submission(&mut self) -> PendingWriteSubmission {
+        self.current_chunk = None;
+        PendingWriteSubmission {
+            copies: std::mem::take(&mut self.copies),
+            chunks: std::mem::take(&mut self.chunks),
+        }
+    }
+
+    /// Hands consumed chunks over to the in-flight list. Dedicated
+    /// oversized buffers are dropped instead of pooled: they are allocated
+    /// for one write of one exact size, so pooling them would grow an
+    /// unbounded cache that almost never produces a hit.
+    fn retire(&mut self, chunks: Vec<StagingChunk>) {
+        self.in_flight.extend(
+            chunks
+                .into_iter()
+                .map(|chunk| chunk.buffer)
+                .filter(|buffer| buffer.size() == STAGING_CHUNK_SIZE),
+        );
+    }
+
+    /// Moves in-flight chunks into the reuse pool. The caller must have
+    /// established that the queue is idle, so nothing the GPU still reads is
+    /// handed back out. Anything over `MAX_FREE_STAGING_CHUNKS` is dropped.
+    fn drain_in_flight(&mut self) {
+        for buffer in std::mem::take(&mut self.in_flight) {
+            if self.free_chunks.len() < MAX_FREE_STAGING_CHUNKS {
+                self.free_chunks.push(buffer);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn pool_sizes(&self) -> (usize, usize) {
+        (self.in_flight.len(), self.free_chunks.len())
+    }
+}
+
+fn align_up(value: u64, alignment: u64) -> Option<u64> {
+    let alignment = alignment.max(1);
+    let remainder = value % alignment;
+    let padding = if remainder == 0 {
+        0
+    } else {
+        alignment - remainder
+    };
+    value.checked_add(padding)
 }
 
 /// Describes a queue buffer write operation.
 #[derive(Debug, Clone, Copy)]
 pub struct QueueBufferWrite<'a> {
-    /// Device used to allocate the temporary staging buffer.
+    /// Device used to allocate queue-owned staging chunks.
     pub device: &'a HalDevice,
     /// Destination buffer.
     pub buffer: &'a Buffer,
@@ -65,7 +235,7 @@ pub struct QueueBufferWrite<'a> {
 /// Describes a queue texture write operation.
 #[derive(Debug, Clone, Copy)]
 pub struct QueueTextureWrite<'a> {
-    /// Device used to allocate the temporary staging buffer.
+    /// Device used to allocate queue-owned staging chunks.
     pub device: &'a HalDevice,
     /// Destination texture.
     pub texture: &'a Texture,
@@ -91,6 +261,7 @@ impl Queue {
             inner: Arc::new(QueueInner {
                 hal,
                 label: Mutex::new(label.into()),
+                pending_writes: Mutex::new(PendingWriteBatch::default()),
             }),
         }
     }
@@ -114,13 +285,12 @@ impl Queue {
 
     /// Writes `data` into the buffer at `offset` using a staging buffer copy.
     ///
-    /// The write is ordered after all previously submitted queue work: a
-    /// temporary `copy_src` staging buffer is allocated, the host data is
-    /// written into it, and then a `HalCopy::Buffer` is submitted via
-    /// `submit_copies`.  This matches the WebGPU queue-timeline ordering
-    /// guarantee and avoids the race on Vulkan where a direct host write
-    /// into the destination buffer can be observed by still-executing prior
-    /// submits (CTS finding F-074).
+    /// The write is ordered after all previously submitted queue work: the
+    /// host data is copied into a queue-owned `copy_src` staging chunk and a
+    /// `HalCopy::Buffer` is recorded ahead of the next submission. This
+    /// matches the WebGPU queue-timeline ordering guarantee and avoids the
+    /// race on Vulkan where a direct host write into the destination buffer
+    /// can be observed by still-executing prior submits (CTS finding F-074).
     ///
     /// Empty writes (zero-length `data`) are validated and then skip
     /// staging allocation, matching the no-op behaviour of the former direct
@@ -153,30 +323,6 @@ impl Queue {
             return None;
         }
 
-        // Allocate a staging buffer with copy_src semantics.  The host writes
-        // the data into fresh memory with no ordering constraint; the GPU copy
-        // that follows is sequenced after prior submits by the queue.
-        let staging = match device.create_buffer(
-            size,
-            HalBufferUsage {
-                copy_src: true,
-                ..HalBufferUsage::default()
-            },
-        ) {
-            Ok(buf) => buf,
-            Err(error) => {
-                let kind = match error {
-                    yawgpu_hal::HalError::OutOfMemory { .. } => ErrorKind::OutOfMemory,
-                    _ => ErrorKind::Internal,
-                };
-                return Some(DeviceError::new(kind, error.to_string()));
-            }
-        };
-
-        if let Err(error) = staging.write(0, data) {
-            return Some(DeviceError::internal(error.to_string()));
-        }
-
         // Retrieve the HAL handle for the destination buffer.  A None here
         // means the buffer is an error buffer, which validate_queue_write
         // would have caught above; treat it as internal if somehow reached.
@@ -186,28 +332,38 @@ impl Queue {
             ));
         };
 
-        let copy = HalCopy::Buffer(HalBufferCopy {
-            source: staging,
-            source_offset: 0,
+        let mut pending = self.inner.pending_writes.lock();
+        let (source, source_offset) = match pending.stage(device, data, size, 4) {
+            Ok(staged) => staged,
+            Err(error) => return Some(device_error_from_staging(error)),
+        };
+        pending.copies.push(HalCopy::Buffer(HalBufferCopy {
+            source,
+            source_offset,
             destination,
             destination_offset: offset,
             size,
-        });
-
-        self.inner
-            .hal
-            .submit_copies(&[copy])
-            .err()
-            .map(|error| DeviceError::internal(error.to_string()))
+        }));
+        None
     }
 
     /// Waits until all submitted queue work has completed.
     pub fn wait_idle(&self) -> Option<DeviceError> {
-        self.inner
+        let flush_error = self.flush_pending_writes();
+        let wait_error = self
+            .inner
             .hal
             .wait_idle()
             .err()
-            .map(|error| DeviceError::internal(error.to_string()))
+            .map(|error| DeviceError::internal(error.to_string()));
+        if wait_error.is_none() {
+            // The queue is idle, so no staging chunk handed to a submission
+            // can still be read by the GPU. This is the only point that
+            // establishes that, and therefore the only place chunks may
+            // re-enter the reuse pool.
+            self.inner.pending_writes.lock().drain_in_flight();
+        }
+        flush_error.or(wait_error)
     }
 
     /// Writes `data` into the texture through the backend copy path.
@@ -301,27 +457,9 @@ impl Queue {
                     ))
                 }
             };
-            let staging = match device.create_buffer(
-                repacked_size,
-                HalBufferUsage {
-                    copy_src: true,
-                    ..HalBufferUsage::default()
-                },
-            ) {
-                Ok(buffer) => buffer,
-                Err(error) => {
-                    let kind = match error {
-                        yawgpu_hal::HalError::OutOfMemory { .. } => ErrorKind::OutOfMemory,
-                        _ => ErrorKind::Internal,
-                    };
-                    return Some(DeviceError::new(kind, error.to_string()));
-                }
-            };
-            if let Err(error) = staging.write(0, &repacked) {
-                return Some(DeviceError::internal(error.to_string()));
-            }
-
-            // Build a packed HAL layout: offset=0, tight stride, height_blocks rows.
+            // Build a packed HAL layout with a tight stride and
+            // `height_blocks` rows. The staging sub-allocation offset is
+            // filled in after the bytes have been copied into the batch.
             let packed_bytes_per_row = match u32::try_from(tight_row_bytes) {
                 Ok(n) => n,
                 Err(_) => {
@@ -338,21 +476,25 @@ impl Queue {
                     ))
                 }
             };
-            let buffer_layout = HalBufferTextureLayout {
-                offset: 0,
-                bytes_per_row: packed_bytes_per_row,
-                rows_per_image: packed_rows_per_image,
-            };
-
             let format = hal_texture_format(texture.format());
             let Some(texture) = texture.hal() else {
                 return Some(DeviceError::internal(
                     "queue write texture has no HAL texture",
                 ));
             };
+            let mut pending = self.inner.pending_writes.lock();
+            let (staging, staging_offset) =
+                match pending.stage(device, &repacked, repacked_size, block_size.max(4)) {
+                    Ok(staged) => staged,
+                    Err(error) => return Some(device_error_from_staging(error)),
+                };
             let copy = HalCopy::BufferToTexture(HalBufferTextureCopy {
                 buffer: staging,
-                buffer_layout,
+                buffer_layout: HalBufferTextureLayout {
+                    offset: staging_offset,
+                    bytes_per_row: packed_bytes_per_row,
+                    rows_per_image: packed_rows_per_image,
+                },
                 texture,
                 format,
                 aspect: hal_texture_aspect(aspect),
@@ -370,35 +512,12 @@ impl Queue {
                 aspect,
             );
             copies.push(copy);
-            return self
-                .inner
-                .hal
-                .submit_copies(&copies)
-                .err()
-                .map(|error| DeviceError::internal(error.to_string()));
+            pending.copies.extend(copies);
+            return None;
         }
 
         // Fast path: layout is already backend-representable; copy verbatim.
-        let staging = match device.create_buffer(
-            data_size,
-            HalBufferUsage {
-                copy_src: true,
-                ..HalBufferUsage::default()
-            },
-        ) {
-            Ok(buffer) => buffer,
-            Err(error) => {
-                let kind = match error {
-                    yawgpu_hal::HalError::OutOfMemory { .. } => ErrorKind::OutOfMemory,
-                    _ => ErrorKind::Internal,
-                };
-                return Some(DeviceError::new(kind, error.to_string()));
-            }
-        };
-        if let Err(error) = staging.write(0, data) {
-            return Some(DeviceError::internal(error.to_string()));
-        }
-        let Some(buffer_layout) = hal_buffer_texture_layout(layout, texture, write_size) else {
+        let Some(mut buffer_layout) = hal_buffer_texture_layout(layout, texture, write_size) else {
             return Some(DeviceError::internal(
                 "queue write texture format is unsupported",
             ));
@@ -408,6 +527,20 @@ impl Queue {
             return Some(DeviceError::internal(
                 "queue write texture has no HAL texture",
             ));
+        };
+        let mut pending = self.inner.pending_writes.lock();
+        let (staging, staging_offset) =
+            match pending.stage(device, data, data_size, block_size.max(4)) {
+                Ok(staged) => staged,
+                Err(error) => return Some(device_error_from_staging(error)),
+            };
+        buffer_layout.offset = match buffer_layout.offset.checked_add(staging_offset) {
+            Some(offset) => offset,
+            None => {
+                return Some(DeviceError::internal(
+                    "queue write texture staging offset overflows",
+                ))
+            }
         };
         let copy = HalCopy::BufferToTexture(HalBufferTextureCopy {
             buffer: staging,
@@ -429,11 +562,8 @@ impl Queue {
             aspect,
         );
         copies.push(copy);
-        self.inner
-            .hal
-            .submit_copies(&copies)
-            .err()
-            .map(|error| DeviceError::internal(error.to_string()))
+        pending.copies.extend(copies);
+        None
     }
 
     /// Submits command buffers to the queue after validating each is non-error and not already submitted.
@@ -508,19 +638,29 @@ impl Queue {
         }
         for command_buffer in command_buffers {
             if let Err(message) = command_buffer.mark_submitted() {
+                let _ = self.flush_pending_writes();
                 return Some(DeviceError::validation(message));
             }
         }
         if let Some(message) = validation_error {
+            // Queue writes issued before an invalid submit were already
+            // visible in the former immediate-submit path. Preserve that
+            // ordering even though the command buffers themselves are
+            // rejected. The validation error remains the submit's reported
+            // error, matching the existing error surface.
+            let _ = self.flush_pending_writes();
             return Some(DeviceError::validation(message));
         }
         if command_buffers.is_empty() {
-            if let Err(error) = self.inner.hal.submit_empty() {
-                return Some(DeviceError::internal(error.to_string()));
-            }
-            return None;
+            let PendingWriteSubmission { copies, chunks } = self.take_pending_writes();
+            let result = if copies.is_empty() {
+                self.inner.hal.submit_empty()
+            } else {
+                self.inner.hal.submit_copies(&copies)
+            };
+            return self.finish_pending_submission(chunks, result);
         }
-        let mut copies = Vec::new();
+        let PendingWriteSubmission { mut copies, chunks } = self.take_pending_writes();
         let all_ops: Vec<_> = command_buffers
             .iter()
             .flat_map(|command_buffer| command_buffer.command_ops().iter())
@@ -528,11 +668,54 @@ impl Queue {
         for (op_index, op) in all_ops.iter().enumerate() {
             append_hal_command_execution(&mut copies, op, &all_ops[..=op_index]);
         }
-        if let Err(error) = self.inner.hal.submit_copies(&copies) {
-            return Some(DeviceError::internal(error.to_string()));
-        }
-        None
+        let result = self.inner.hal.submit_copies(&copies);
+        self.finish_pending_submission(chunks, result)
     }
+
+    pub(crate) fn flush_pending_writes(&self) -> Option<DeviceError> {
+        let PendingWriteSubmission { copies, chunks } = self.take_pending_writes();
+        if copies.is_empty() {
+            self.inner.pending_writes.lock().retire(chunks);
+            return None;
+        }
+        let result = self.inner.hal.submit_copies(&copies);
+        self.finish_pending_submission(chunks, result)
+    }
+
+    fn take_pending_writes(&self) -> PendingWriteSubmission {
+        self.inner.pending_writes.lock().take_submission()
+    }
+
+    fn finish_pending_submission(
+        &self,
+        chunks: Vec<StagingChunk>,
+        result: Result<(), yawgpu_hal::HalError>,
+    ) -> Option<DeviceError> {
+        match result {
+            Ok(()) => {
+                self.inner.pending_writes.lock().retire(chunks);
+                None
+            }
+            Err(error) => Some(DeviceError::internal(error.to_string())),
+        }
+    }
+}
+
+impl Drop for QueueInner {
+    fn drop(&mut self) {
+        let pending = self.pending_writes.get_mut().take_submission();
+        if !pending.copies.is_empty() {
+            let _ = self.hal.submit_copies(&pending.copies);
+        }
+    }
+}
+
+fn device_error_from_staging(error: yawgpu_hal::HalError) -> DeviceError {
+    let kind = match error {
+        yawgpu_hal::HalError::OutOfMemory { .. } => ErrorKind::OutOfMemory,
+        _ => ErrorKind::Internal,
+    };
+    DeviceError::new(kind, error.to_string())
 }
 
 fn command_buffer_referenced_textures(command_buffer: &CommandBuffer) -> Vec<Texture> {
@@ -3100,7 +3283,7 @@ fn fs() -> @location(0) vec4<f32> {
     }
 
     #[test]
-    fn queue_write_buffer_then_map_read_resolves_after_wait_idle() {
+    fn queue_write_buffer_then_map_without_submit_flushes_before_readback() {
         let device = noop_device();
         let queue = device.queue();
         let buffer = device.create_buffer(BufferDescriptor {
@@ -3119,10 +3302,118 @@ fn fs() -> @location(0) vec4<f32> {
             None
         );
         assert_eq!(buffer.begin_map(MapMode::Read, 0, 4), Ok(()));
+        assert_eq!(
+            buffer.resolve_pending_map_with_gpu_completion(|| queue.wait_idle().is_none()),
+            MapAsyncStatus::Success
+        );
+        let ptr = buffer
+            .mapped_range(true, 0, Some(4))
+            .expect("mapped range after successful read map");
+        // Safety: the resolved map owns four readable bytes until unmap.
+        assert_eq!(unsafe { std::slice::from_raw_parts(ptr, 4) }, &[1, 2, 3, 4]);
+        assert_eq!(buffer.unmap(), None);
+    }
+
+    /// Q5/Q17: a chunk consumed by a submission may not be reused until the
+    /// queue is known idle, and once it is, it must actually be reused —
+    /// otherwise the bound added for the leak would silently disable pooling.
+    #[test]
+    fn queue_staging_chunk_is_reused_only_after_wait_idle() {
+        let device = noop_device();
+        let queue = device.queue();
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 64,
+            mapped_at_creation: false,
+        });
+        let write = || {
+            assert_eq!(
+                queue.write_buffer(QueueBufferWrite {
+                    device: device.hal(),
+                    buffer: &buffer,
+                    offset: 0,
+                    data: &[7; 16],
+                }),
+                None
+            );
+        };
+
+        write();
+        // Staged but not submitted: the chunk is still the batch's own.
+        assert_eq!(queue.inner.pending_writes.lock().pool_sizes(), (0, 0));
+
+        assert_eq!(queue.submit(&[]), None);
+        // Submitted: in flight, and explicitly *not* yet available for reuse.
+        assert_eq!(queue.inner.pending_writes.lock().pool_sizes(), (1, 0));
+
+        assert_eq!(queue.wait_idle(), None);
+        assert_eq!(queue.inner.pending_writes.lock().pool_sizes(), (0, 1));
+
+        // The pooled chunk is taken rather than a fresh one allocated.
+        write();
+        assert_eq!(queue.inner.pending_writes.lock().pool_sizes(), (0, 0));
+    }
+
+    /// Q5: dedicated buffers for oversized writes are never pooled, and the
+    /// pool of standard chunks is capped. Both halves of the leak fix are
+    /// asserted here because either alone still grows without bound.
+    #[test]
+    fn queue_staging_pool_stays_bounded() {
+        let device = noop_device();
+        let queue = device.queue();
+
+        // Oversized writes each get a dedicated exact-size buffer. Distinct
+        // sizes are the leak case: pooling them could never produce a hit.
+        let oversized = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: STAGING_CHUNK_SIZE + 64,
+            mapped_at_creation: false,
+        });
+        for extra in 0..6u64 {
+            let data = vec![1u8; (STAGING_CHUNK_SIZE + 4 + extra * 4) as usize];
+            assert_eq!(
+                queue.write_buffer(QueueBufferWrite {
+                    device: device.hal(),
+                    buffer: &oversized,
+                    offset: 0,
+                    data: &data,
+                }),
+                None
+            );
+        }
+        assert_eq!(queue.submit(&[]), None);
         assert_eq!(queue.wait_idle(), None);
         assert_eq!(
-            buffer.resolve_pending_map_with_gpu_completion(|| true),
-            MapAsyncStatus::Success
+            queue.inner.pending_writes.lock().pool_sizes(),
+            (0, 0),
+            "dedicated oversized buffers must not be pooled"
+        );
+
+        // Standard writes large enough to span more chunks than the cap.
+        let standard = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: STAGING_CHUNK_SIZE,
+            mapped_at_creation: false,
+        });
+        let half = vec![2u8; (STAGING_CHUNK_SIZE / 2) as usize];
+        for _ in 0..(MAX_FREE_STAGING_CHUNKS as u64 * 2 + 4) * 2 {
+            assert_eq!(
+                queue.write_buffer(QueueBufferWrite {
+                    device: device.hal(),
+                    buffer: &standard,
+                    offset: 0,
+                    data: &half,
+                }),
+                None
+            );
+        }
+        assert_eq!(queue.submit(&[]), None);
+        assert_eq!(queue.wait_idle(), None);
+        let (in_flight, free) = queue.inner.pending_writes.lock().pool_sizes();
+        assert_eq!(in_flight, 0, "wait_idle drains the in-flight list");
+        assert_eq!(
+            free, MAX_FREE_STAGING_CHUNKS,
+            "the reuse pool is capped, excess chunks are dropped"
         );
     }
 
@@ -3157,8 +3448,7 @@ fn fs() -> @location(0) vec4<f32> {
             None
         );
 
-        // Map the full buffer for reading; the staged copy must already have
-        // landed in the destination buffer storage.
+        // Map the full buffer for reading and explicitly drain the queue.
         assert_eq!(buffer.begin_map(MapMode::Read, 0, 16), Ok(()));
         assert_eq!(queue.wait_idle(), None);
         let status = buffer.resolve_pending_map_with_gpu_completion(|| true);
@@ -3282,10 +3572,10 @@ fn fs() -> @location(0) vec4<f32> {
         );
     }
 
-    /// Verifies that `write_buffer` submits a `HalCopy::Buffer` on the Noop
-    /// queue, confirming the staging-copy dispatch path is taken.
+    /// Verifies that `write_buffer` defers its `HalCopy::Buffer` until the
+    /// next submission.
     #[test]
-    fn queue_write_buffer_submits_buffer_copy_to_hal() {
+    fn queue_write_buffer_defers_buffer_copy_until_submit() {
         let device = noop_device();
         let queue = device.queue();
         let buffer = device.create_buffer(BufferDescriptor {
@@ -3303,6 +3593,8 @@ fn fs() -> @location(0) vec4<f32> {
             }),
             None
         );
+        assert!(matches!(queue.hal(), HalQueue::Noop(q) if q.submitted_copies().is_empty()));
+        assert_eq!(queue.submit(&[]), None);
 
         let submitted = match queue.hal() {
             HalQueue::Noop(q) => q.submitted_copies(),
@@ -3310,8 +3602,357 @@ fn fs() -> @location(0) vec4<f32> {
         };
         assert!(
             matches!(submitted.as_slice(), [HalCopy::Buffer(copy)] if copy.size == 8),
-            "write_buffer must submit exactly one HalCopy::Buffer of the correct size"
+            "submit must flush exactly one pending HalCopy::Buffer of the correct size"
         );
+    }
+
+    #[test]
+    fn queue_submit_prepends_pending_writes_in_issue_order_before_commands() {
+        let device = noop_device();
+        let queue = device.queue();
+        let written = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
+            size: 8,
+            mapped_at_creation: false,
+        }));
+        let copied = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 8,
+            mapped_at_creation: false,
+        }));
+        let copied_hal = copied.hal().expect("valid destination HAL buffer");
+
+        assert_eq!(
+            queue.write_buffer(QueueBufferWrite {
+                device: device.hal(),
+                buffer: &written,
+                offset: 0,
+                data: &[1, 2, 3, 4],
+            }),
+            None
+        );
+        assert_eq!(
+            queue.write_buffer(QueueBufferWrite {
+                device: device.hal(),
+                buffer: &written,
+                offset: 4,
+                data: &[5, 6, 7, 8],
+            }),
+            None
+        );
+
+        let encoder = device.create_command_encoder();
+        assert_eq!(
+            encoder.copy_buffer_to_buffer(Arc::clone(&written), 0, Arc::clone(&copied), 0, 8,),
+            None
+        );
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert_eq!(queue.submit(&[Arc::new(command_buffer)]), None);
+
+        let submitted = match queue.hal() {
+            HalQueue::Noop(queue) => queue.submitted_copies(),
+            _ => panic!("expected Noop queue"),
+        };
+        assert!(matches!(
+            submitted.as_slice(),
+            [
+                HalCopy::Buffer(first),
+                HalCopy::Buffer(second),
+                HalCopy::Buffer(command)
+            ] if first.destination_offset == 0
+                && first.size == 4
+                && second.destination_offset == 4
+                && second.size == 4
+                && command.source_offset == 0
+                && command.destination_offset == 0
+                && command.size == 8
+        ));
+        assert_eq!(
+            copied_hal.read(0, 8).expect("read copied bytes"),
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
+        );
+    }
+
+    #[test]
+    fn queue_write_after_submit_stays_pending_until_next_submit() {
+        let device = noop_device();
+        let queue = device.queue();
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 8,
+            mapped_at_creation: false,
+        });
+
+        assert_eq!(
+            queue.write_buffer(QueueBufferWrite {
+                device: device.hal(),
+                buffer: &buffer,
+                offset: 0,
+                data: &[1, 2, 3, 4],
+            }),
+            None
+        );
+        assert_eq!(queue.submit(&[]), None);
+        assert_eq!(
+            queue.write_buffer(QueueBufferWrite {
+                device: device.hal(),
+                buffer: &buffer,
+                offset: 4,
+                data: &[5, 6, 7, 8],
+            }),
+            None
+        );
+        assert!(matches!(queue.hal(), HalQueue::Noop(q) if q.submitted_copies().len() == 1));
+
+        assert_eq!(queue.submit(&[]), None);
+        assert!(matches!(queue.hal(), HalQueue::Noop(q) if q.submitted_copies().len() == 2));
+    }
+
+    #[test]
+    fn queue_pending_write_chunk_bump_allocation_and_free_list_reuse() {
+        let device = noop_device();
+        let queue = device.queue();
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 12,
+            mapped_at_creation: false,
+        });
+        let allocations_before_writes = device.allocation_count();
+
+        for (offset, data) in [(0, [1, 2, 3, 4]), (4, [5, 6, 7, 8])] {
+            assert_eq!(
+                queue.write_buffer(QueueBufferWrite {
+                    device: device.hal(),
+                    buffer: &buffer,
+                    offset,
+                    data: &data,
+                }),
+                None
+            );
+        }
+        assert_eq!(device.allocation_count(), allocations_before_writes + 1);
+        assert!(matches!(queue.hal(), HalQueue::Noop(q) if q.submitted_copies().is_empty()));
+        assert_eq!(queue.submit(&[]), None);
+        // The submitted chunk is in flight, not free: only an idle queue
+        // proves the GPU is done reading it. Without this the next write
+        // must allocate a fresh chunk rather than reuse this one.
+        assert_eq!(queue.wait_idle(), None);
+
+        assert_eq!(
+            queue.write_buffer(QueueBufferWrite {
+                device: device.hal(),
+                buffer: &buffer,
+                offset: 8,
+                data: &[9, 10, 11, 12],
+            }),
+            None
+        );
+        assert_eq!(device.allocation_count(), allocations_before_writes + 1);
+        assert_eq!(queue.submit(&[]), None);
+
+        let submitted = match queue.hal() {
+            HalQueue::Noop(queue) => queue.submitted_copies(),
+            _ => panic!("expected Noop queue"),
+        };
+        assert!(matches!(
+            submitted.as_slice(),
+            [HalCopy::Buffer(first), HalCopy::Buffer(second), HalCopy::Buffer(third)]
+                if first.source_offset == 0
+                    && second.source_offset == 4
+                    && third.source_offset == 0
+        ));
+    }
+
+    #[test]
+    fn queue_oversized_write_uses_dedicated_exact_size_staging_buffer() {
+        let device = noop_device();
+        let queue = device.queue();
+        let size = STAGING_CHUNK_SIZE + 4;
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size,
+            mapped_at_creation: false,
+        });
+        let data = vec![0x5a; usize::try_from(size).expect("test size fits usize")];
+
+        assert_eq!(
+            queue.write_buffer(QueueBufferWrite {
+                device: device.hal(),
+                buffer: &buffer,
+                offset: 0,
+                data: &data,
+            }),
+            None
+        );
+        assert_eq!(queue.submit(&[]), None);
+        let submitted = match queue.hal() {
+            HalQueue::Noop(queue) => queue.submitted_copies(),
+            _ => panic!("expected Noop queue"),
+        };
+        assert!(matches!(
+            submitted.as_slice(),
+            [HalCopy::Buffer(copy)] if copy.source.size() == size && copy.size == size
+        ));
+    }
+
+    #[test]
+    fn queue_pending_write_keeps_destroyed_destination_alive_until_flush() {
+        let device = noop_device();
+        let queue = device.queue();
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 4,
+            mapped_at_creation: false,
+        });
+        let destination = buffer.hal().expect("valid destination HAL buffer");
+
+        assert_eq!(
+            queue.write_buffer(QueueBufferWrite {
+                device: device.hal(),
+                buffer: &buffer,
+                offset: 0,
+                data: &[9, 8, 7, 6],
+            }),
+            None
+        );
+        buffer.destroy();
+        drop(buffer);
+
+        assert_eq!(queue.submit(&[]), None);
+        assert_eq!(
+            destination.read(0, 4).expect("read destroyed destination"),
+            vec![9, 8, 7, 6]
+        );
+    }
+
+    #[test]
+    fn queue_pending_texture_write_keeps_destroyed_destination_alive_until_flush() {
+        let device = noop_device();
+        let queue = device.queue();
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_DST,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+
+        assert_eq!(
+            queue.write_texture(QueueTextureWrite {
+                device: device.hal(),
+                texture: &texture,
+                mip_level: 0,
+                origin: Origin3d { x: 0, y: 0, z: 0 },
+                write_size: Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                aspect: TextureAspect::All,
+                layout: TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4),
+                    rows_per_image: Some(1),
+                },
+                data: &[1, 2, 3, 4],
+            }),
+            None
+        );
+        texture.destroy();
+        drop(texture);
+
+        assert_eq!(queue.submit(&[]), None);
+        assert!(matches!(
+            queue.hal(),
+            HalQueue::Noop(q)
+                if matches!(q.submitted_copies().as_slice(), [HalCopy::BufferToTexture(_)])
+        ));
+    }
+
+    #[test]
+    fn invalid_queue_submit_still_flushes_earlier_pending_writes() {
+        let device = noop_device();
+        let queue = device.queue();
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 4,
+            mapped_at_creation: false,
+        });
+        assert_eq!(
+            queue.write_buffer(QueueBufferWrite {
+                device: device.hal(),
+                buffer: &buffer,
+                offset: 0,
+                data: &[1, 2, 3, 4],
+            }),
+            None
+        );
+
+        let encoder = device.create_command_encoder();
+        assert_eq!(encoder.record_validation_error("forced error"), None);
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, Some("forced error".to_owned()));
+        assert!(queue.submit(&[Arc::new(command_buffer)]).is_some());
+        assert!(matches!(queue.hal(), HalQueue::Noop(q) if q.submitted_copies().len() == 1));
+    }
+
+    #[test]
+    fn device_destroy_flushes_pending_queue_writes() {
+        let device = noop_device();
+        let queue = device.queue();
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 4,
+            mapped_at_creation: false,
+        });
+
+        assert_eq!(
+            queue.write_buffer(QueueBufferWrite {
+                device: device.hal(),
+                buffer: &buffer,
+                offset: 0,
+                data: &[1, 2, 3, 4],
+            }),
+            None
+        );
+        assert_eq!(device.destroy(), Some(DeviceLostReason::Destroyed));
+        assert!(matches!(queue.hal(), HalQueue::Noop(q) if q.submitted_copies().len() == 1));
+    }
+
+    #[test]
+    fn final_queue_drop_flushes_pending_queue_writes() {
+        let device = noop_device();
+        let queue = device.queue();
+        let observed = match queue.hal() {
+            HalQueue::Noop(queue) => queue.clone(),
+            _ => panic!("expected Noop queue"),
+        };
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 4,
+            mapped_at_creation: false,
+        });
+
+        assert_eq!(
+            queue.write_buffer(QueueBufferWrite {
+                device: device.hal(),
+                buffer: &buffer,
+                offset: 0,
+                data: &[1, 2, 3, 4],
+            }),
+            None
+        );
+        drop(queue);
+        drop(device);
+
+        assert_eq!(observed.submitted_copies().len(), 1);
     }
 
     #[test]
@@ -3355,6 +3996,7 @@ fn fs() -> @location(0) vec4<f32> {
             }),
             None
         );
+        assert_eq!(queue.submit(&[]), None);
 
         let submitted = match queue.hal() {
             HalQueue::Noop(queue) => queue.submitted_copies(),
@@ -3416,6 +4058,7 @@ fn fs() -> @location(0) vec4<f32> {
             }),
             None
         );
+        assert_eq!(queue.submit(&[]), None);
 
         let submitted = match queue.hal() {
             HalQueue::Noop(queue) => queue.submitted_copies(),
@@ -3962,6 +4605,7 @@ fn fs() -> @location(0) vec4<f32> {
         });
         // Must succeed: no error on noop backend.
         assert_eq!(error, None);
+        assert_eq!(queue.submit(&[]), None);
 
         // On the noop HAL the submitted copy should carry the packed layout:
         // offset=0, bytes_per_row=8 (2 texels * 4 bytes), rows_per_image=2.
@@ -4005,6 +4649,7 @@ fn fs() -> @location(0) vec4<f32> {
             data: &data,
         });
         assert_eq!(error, None);
+        assert_eq!(queue.submit(&[]), None);
 
         let submitted = match queue.hal() {
             HalQueue::Noop(q) => q.submitted_copies(),

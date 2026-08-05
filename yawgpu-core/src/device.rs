@@ -47,6 +47,12 @@ pub(crate) struct DeviceInner {
     pub(crate) render_pipeline_creation_count: AtomicU64,
 }
 
+impl Drop for DeviceInner {
+    fn drop(&mut self) {
+        let _ = self.queue.flush_pending_writes();
+    }
+}
+
 impl Device {
     /// Constructs this object from the backend HAL object.
     #[must_use]
@@ -195,6 +201,11 @@ impl Device {
 
     /// Marks the device as lost for the supplied reason.
     pub fn lose(&self, reason: DeviceLostReason) -> Option<DeviceLostReason> {
+        if reason == DeviceLostReason::Destroyed {
+            if let Some(error) = self.inner.queue.flush_pending_writes() {
+                self.dispatch_error(error.kind, error.message);
+            }
+        }
         let mut lost = self.inner.lost.lock();
         if lost.reason.is_some() {
             return None;
