@@ -17,9 +17,9 @@ use crate::{
     HalBufferBindingKind, HalBufferClear, HalBufferCopy, HalBufferTextureCopy, HalColorTargetState,
     HalCompareFunction, HalComputeDispatch, HalComputePass, HalComputePipeline, HalCopy,
     HalCullMode, HalDepthStencilState, HalDescriptorBinding, HalDescriptorBindingKind, HalDraw,
-    HalError, HalFrontFace, HalGlesBindingClass, HalGlesBindingRemap, HalIndexFormat,
-    HalRenderLoadOp, HalRenderPass, HalRenderPassCommand, HalRenderPassCommandStream,
-    HalRenderPipeline, HalSampler, HalStencilFaceState, HalStencilOperation,
+    HalError, HalFrontFace, HalGlesBindingClass, HalGlesBindingRemap, HalIndexFormat, HalQuerySet,
+    HalRenderLoadOp, HalRenderPassCommand, HalRenderPassCommandStream, HalRenderPipeline,
+    HalResolveQuerySet, HalSampler, HalStencilFaceState, HalStencilOperation,
     HalStorageTextureAccess, HalTexture, HalTextureAspect, HalTextureClear, HalTextureCopy,
     HalTextureFormat, HalTextureMetadataSlot, HalTextureViewDimension, HalVertexStepMode,
     SubmissionIndex,
@@ -112,26 +112,7 @@ impl GlesQueue {
                         HalCopy::BufferClear(clear) => submit_buffer_clear(gl, clear)?,
                         HalCopy::ClearTexture(clear) => submit_texture_clear(gl, clear)?,
                         HalCopy::ResolveQuerySet(resolve) => {
-                            let HalBuffer::Gles(destination) = &resolve.destination else {
-                                return Err(HalError::BufferOperationFailed {
-                                    backend: BACKEND,
-                                    message: "query resolve destination is not a GLES buffer",
-                                });
-                            };
-                            let byte_count = usize::try_from(u64::from(resolve.query_count) * 8)
-                                .map_err(|_| HalError::BufferOperationFailed {
-                                    backend: BACKEND,
-                                    message: "query resolve byte count is too large",
-                                })?;
-                            // The device's make-current lock is already held
-                            // by this closure; `GlesBuffer::write` would
-                            // re-acquire it and self-deadlock (T-G4), so use
-                            // the lock-free variant with the current `gl`.
-                            destination.write_with_gl(
-                                gl,
-                                resolve.destination_offset,
-                                &vec![0; byte_count],
-                            )?;
+                            submit_resolve_query_set(gl, resolve)?;
                         }
                         HalCopy::BufferToTexture(copy) => submit_buffer_to_texture(gl, copy)?,
                         HalCopy::TextureToBuffer(copy) => submit_texture_to_buffer(gl, copy)?,
@@ -140,24 +121,6 @@ impl GlesQueue {
                             submit_compute_pass(
                                 gl,
                                 pass,
-                                placeholder_sampler,
-                                TextureViewCaps {
-                                    supports_texture_view,
-                                    supports_cube_map_array,
-                                    texture_view,
-                                },
-                            )?;
-                        }
-                        HalCopy::RenderPass(pass) => {
-                            let render_caps = RenderDrawCaps {
-                                supports_base_vertex,
-                                supports_vertex_array_bgra,
-                                sample_mask_i,
-                            };
-                            submit_render_pass(
-                                gl,
-                                pass,
-                                render_caps,
                                 placeholder_sampler,
                                 TextureViewCaps {
                                     supports_texture_view,
@@ -201,6 +164,75 @@ impl GlesQueue {
             })??;
         crate::next_submission_index(&self.last_submission_index, BACKEND)
     }
+}
+
+fn submit_resolve_query_set(
+    gl: &glow::Context,
+    resolve: &HalResolveQuerySet,
+) -> Result<(), HalError> {
+    let HalBuffer::Gles(destination) = &resolve.destination else {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "query resolve destination is not a GLES buffer",
+        });
+    };
+    let HalQuerySet::Gles { results, .. } = &resolve.query_set else {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "query resolve set is not a GLES query set",
+        });
+    };
+    let results = results
+        .lock()
+        .map_err(|_| HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES query result lock is poisoned",
+        })?;
+    let bytes = gles_query_resolve_bytes(
+        &results,
+        resolve.first_query,
+        resolve.query_count,
+        &resolve.written_queries,
+    )?;
+    // The device's make-current lock is already held by the caller;
+    // `GlesBuffer::write` would re-acquire it and self-deadlock (T-G4).
+    destination.write_with_gl(gl, resolve.destination_offset, &bytes)
+}
+
+fn gles_query_resolve_bytes(
+    results: &[u64],
+    first_query: u32,
+    query_count: u32,
+    written_queries: &[u32],
+) -> Result<Vec<u8>, HalError> {
+    let end_query =
+        first_query
+            .checked_add(query_count)
+            .ok_or(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "GLES query resolve range overflows",
+            })?;
+    let byte_count = usize::try_from(u64::from(query_count) * 8).map_err(|_| {
+        HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "query resolve byte count is too large",
+        }
+    })?;
+    let mut bytes = Vec::with_capacity(byte_count);
+    for query_index in first_query..end_query {
+        let result = if written_queries.contains(&query_index) {
+            *results
+                .get(query_index as usize)
+                .ok_or(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "GLES query resolve index is out of range",
+                })?
+        } else {
+            0
+        };
+        bytes.extend_from_slice(&result.to_ne_bytes());
+    }
+    Ok(bytes)
 }
 
 fn submit_buffer_copy(gl: &glow::Context, copy: &HalBufferCopy) -> Result<(), HalError> {
@@ -1157,13 +1189,143 @@ struct GlesRenderStreamState {
     bind_external_textures: Vec<HalBoundExternalTexture>,
     vertex_buffers: Vec<HalBoundBuffer>,
     index_buffer: Option<HalBoundIndexBuffer>,
-    viewport: Option<crate::HalViewport>,
-    scissor_rect: Option<crate::HalScissorRect>,
     blend_constant: [f32; 4],
     stencil_reference: u32,
-    occlusion_query_index: Option<u32>,
     immediate_data: Vec<u8>,
-    draw_index: usize,
+}
+
+struct GlesRenderQueryState<'a> {
+    gl: &'a glow::Context,
+    results: Option<std::sync::Arc<std::sync::Mutex<Vec<u64>>>>,
+    active: Option<(u32, glow::Query)>,
+    completed: Vec<(u32, glow::Query)>,
+}
+
+impl<'a> GlesRenderQueryState<'a> {
+    fn new(gl: &'a glow::Context, query_set: Option<&HalQuerySet>) -> Result<Self, HalError> {
+        let results = match query_set {
+            Some(HalQuerySet::Gles { results, .. }) => Some(std::sync::Arc::clone(results)),
+            Some(_) => {
+                return Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "render-pass query set is not a GLES query set",
+                });
+            }
+            None => None,
+        };
+        Ok(Self {
+            gl,
+            results,
+            active: None,
+            completed: Vec::new(),
+        })
+    }
+
+    fn begin(&mut self, index: u32) -> Result<(), HalError> {
+        if self.active.is_some() {
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "GLES render pass already has an active occlusion query",
+            });
+        }
+        let Some(results) = &self.results else {
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "GLES occlusion query has no query set",
+            });
+        };
+        let mut results = results
+            .lock()
+            .map_err(|_| HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "GLES query result lock is poisoned",
+            })?;
+        let result = results
+            .get_mut(index as usize)
+            .ok_or(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "GLES occlusion query index is out of range",
+            })?;
+        *result = 0;
+        drop(results);
+        let query = unsafe {
+            self.gl
+                .create_query()
+                .map_err(|_| HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "glCreateQuery failed",
+                })?
+        };
+        unsafe {
+            self.gl.begin_query(glow::ANY_SAMPLES_PASSED, query);
+        }
+        self.active = Some((index, query));
+        Ok(())
+    }
+
+    fn end(&mut self) -> Result<(), HalError> {
+        let Some(active) = self.active.take() else {
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "GLES render pass has no active occlusion query",
+            });
+        };
+        unsafe {
+            self.gl.end_query(glow::ANY_SAMPLES_PASSED);
+        }
+        self.completed.push(active);
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<(), HalError> {
+        if self.active.is_some() {
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "GLES render pass ended with an active occlusion query",
+            });
+        }
+        let completed = std::mem::take(&mut self.completed);
+        let mut query_results = Vec::with_capacity(completed.len());
+        for (index, query) in completed {
+            let result = unsafe { self.gl.get_query_parameter_u32(query, glow::QUERY_RESULT) };
+            unsafe {
+                self.gl.delete_query(query);
+            }
+            query_results.push((index, u64::from(result)));
+        }
+        let Some(results) = &self.results else {
+            return Ok(());
+        };
+        let mut results = results
+            .lock()
+            .map_err(|_| HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "GLES query result lock is poisoned",
+            })?;
+        for (index, result) in query_results {
+            *results
+                .get_mut(index as usize)
+                .ok_or(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "GLES occlusion query index is out of range",
+                })? = result;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for GlesRenderQueryState<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some((_, query)) = self.active.take() {
+                self.gl.end_query(glow::ANY_SAMPLES_PASSED);
+                self.gl.delete_query(query);
+            }
+            for (_, query) in self.completed.drain(..) {
+                self.gl.delete_query(query);
+            }
+        }
+    }
 }
 
 fn submit_render_pass_command_stream_gles(
@@ -1173,51 +1335,60 @@ fn submit_render_pass_command_stream_gles(
     placeholder_sampler: glow::Sampler,
     texture_view_caps: TextureViewCaps,
 ) -> Result<(), HalError> {
-    let draw_count = gles_render_stream_draw_count(&stream.commands);
-    if draw_count == 0 {
-        let pass =
-            gles_stream_draw_pass(stream, &GlesRenderStreamState::default(), None, true, true);
-        return submit_render_pass(gl, &pass, caps, placeholder_sampler, texture_view_caps);
+    if !stream.framebuffer_fetch_color_slots.is_empty() {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES render-pass framebuffer fetch is unsupported",
+        });
     }
+    let fbo = create_render_fbo(gl, stream)?;
+    let vao = unsafe {
+        gl.create_vertex_array()
+            .map_err(|_| HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "glCreateVertexArray failed",
+            })
+    };
+    let vao = match vao {
+        Ok(vao) => vao,
+        Err(error) => {
+            let _cleanup = RenderPassCleanup { gl, fbo, vao: None };
+            return Err(error);
+        }
+    };
+    let _cleanup = RenderPassCleanup {
+        gl,
+        fbo,
+        vao: Some(vao),
+    };
     let mut state = GlesRenderStreamState {
         immediate_data: vec![0; 64],
         ..Default::default()
     };
+    let mut queries = GlesRenderQueryState::new(gl, stream.occlusion_query_set.as_ref())?;
     replay_gles_render_stream(
         gl,
-        stream,
         &stream.commands,
-        draw_count,
         &mut state,
+        &mut queries,
+        vao,
         caps,
         placeholder_sampler,
         texture_view_caps,
-    )
-}
-
-fn gles_render_stream_draw_count(commands: &[HalRenderPassCommand]) -> usize {
-    commands
-        .iter()
-        .map(|command| match command {
-            HalRenderPassCommand::Draw { .. }
-            | HalRenderPassCommand::DrawIndexed { .. }
-            | HalRenderPassCommand::DrawIndirect { .. }
-            | HalRenderPassCommand::DrawIndexedIndirect { .. } => 1,
-            HalRenderPassCommand::ExecuteRenderBundle(bundle) => {
-                gles_render_stream_draw_count(&bundle.commands)
-            }
-            _ => 0,
-        })
-        .sum()
+    )?;
+    queries.finish()?;
+    resolve_render_pass(gl, stream, fbo)?;
+    discard_render_pass_attachments(gl, stream);
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
 fn replay_gles_render_stream(
     gl: &glow::Context,
-    stream: &HalRenderPassCommandStream,
     commands: &[HalRenderPassCommand],
-    draw_count: usize,
     state: &mut GlesRenderStreamState,
+    queries: &mut GlesRenderQueryState<'_>,
+    vao: glow::VertexArray,
     caps: RenderDrawCaps,
     placeholder_sampler: glow::Sampler,
     texture_view_caps: TextureViewCaps,
@@ -1262,8 +1433,24 @@ fn replay_gles_render_stream(
             HalRenderPassCommand::SetIndexBuffer(buffer) => {
                 state.index_buffer = Some(buffer.clone());
             }
-            HalRenderPassCommand::SetViewport(viewport) => state.viewport = Some(*viewport),
-            HalRenderPassCommand::SetScissorRect(rect) => state.scissor_rect = Some(*rect),
+            HalRenderPassCommand::SetViewport(viewport) => unsafe {
+                gl.viewport(
+                    viewport.x as i32,
+                    viewport.y as i32,
+                    viewport.width as i32,
+                    viewport.height as i32,
+                );
+                gl.depth_range_f32(viewport.min_depth, viewport.max_depth);
+            },
+            HalRenderPassCommand::SetScissorRect(rect) => unsafe {
+                gl.enable(glow::SCISSOR_TEST);
+                gl.scissor(
+                    rect.x as i32,
+                    rect.y as i32,
+                    rect.width as i32,
+                    rect.height as i32,
+                );
+            },
             HalRenderPassCommand::SetBlendConstant(color) => state.blend_constant = *color,
             HalRenderPassCommand::SetStencilReference(reference) => {
                 state.stencil_reference = *reference;
@@ -1290,19 +1477,18 @@ fn replay_gles_render_stream(
                     .copy_from_slice(data);
             }
             HalRenderPassCommand::BeginOcclusionQuery { index } => {
-                state.occlusion_query_index = Some(*index);
+                queries.begin(*index)?;
             }
-            HalRenderPassCommand::EndOcclusionQuery => state.occlusion_query_index = None,
+            HalRenderPassCommand::EndOcclusionQuery => queries.end()?,
             HalRenderPassCommand::Draw {
                 vertex_count,
                 instance_count,
                 first_vertex,
                 first_instance,
-            } => submit_gles_stream_draw(
+            } => run_render_draw(
                 gl,
-                stream,
                 state,
-                draw_count,
+                vao,
                 HalDraw::Direct {
                     vertex_count: *vertex_count,
                     instance_count: *instance_count,
@@ -1320,11 +1506,10 @@ fn replay_gles_render_stream(
                 first_index,
                 base_vertex,
                 first_instance,
-            } => submit_gles_stream_draw(
+            } => run_render_draw(
                 gl,
-                stream,
                 state,
-                draw_count,
+                vao,
                 HalDraw::Indexed {
                     index_count: *index_count,
                     instance_count: *instance_count,
@@ -1337,11 +1522,10 @@ fn replay_gles_render_stream(
                 placeholder_sampler,
                 texture_view_caps,
             )?,
-            HalRenderPassCommand::DrawIndirect { indirect_buffer } => submit_gles_stream_draw(
+            HalRenderPassCommand::DrawIndirect { indirect_buffer } => run_render_draw(
                 gl,
-                stream,
                 state,
-                draw_count,
+                vao,
                 HalDraw::Indirect {
                     offset: indirect_buffer.offset,
                 },
@@ -1351,11 +1535,10 @@ fn replay_gles_render_stream(
                 texture_view_caps,
             )?,
             HalRenderPassCommand::DrawIndexedIndirect { indirect_buffer } => {
-                submit_gles_stream_draw(
+                run_render_draw(
                     gl,
-                    stream,
                     state,
-                    draw_count,
+                    vao,
                     HalDraw::IndexedIndirect {
                         offset: indirect_buffer.offset,
                     },
@@ -1368,154 +1551,29 @@ fn replay_gles_render_stream(
             HalRenderPassCommand::ExecuteRenderBundle(bundle) => {
                 replay_gles_render_stream(
                     gl,
-                    stream,
                     &bundle.commands,
-                    draw_count,
                     state,
+                    queries,
+                    vao,
                     caps,
                     placeholder_sampler,
                     texture_view_caps,
                 )?;
-                state.pipeline = None;
-                state.bind_buffers.clear();
-                state.bind_textures.clear();
-                state.bind_samplers.clear();
-                state.bind_external_textures.clear();
-                state.vertex_buffers.clear();
-                state.index_buffer = None;
+                invalidate_gles_render_bundle_state(state);
             }
         }
     }
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn submit_gles_stream_draw(
-    gl: &glow::Context,
-    stream: &HalRenderPassCommandStream,
-    state: &mut GlesRenderStreamState,
-    draw_count: usize,
-    draw: HalDraw,
-    indirect_buffer: Option<&HalBoundIndirectBuffer>,
-    caps: RenderDrawCaps,
-    placeholder_sampler: glow::Sampler,
-    texture_view_caps: TextureViewCaps,
-) -> Result<(), HalError> {
-    let first = state.draw_index == 0;
-    let last = state.draw_index + 1 == draw_count;
-    let pass = gles_stream_draw_pass(stream, state, Some((draw, indirect_buffer)), first, last);
-    submit_render_pass(gl, &pass, caps, placeholder_sampler, texture_view_caps)?;
-    state.draw_index += 1;
-    Ok(())
-}
-
-fn gles_stream_draw_pass(
-    stream: &HalRenderPassCommandStream,
-    state: &GlesRenderStreamState,
-    draw: Option<(HalDraw, Option<&HalBoundIndirectBuffer>)>,
-    first: bool,
-    last: bool,
-) -> HalRenderPass {
-    let mut color_targets = stream.color_targets.clone();
-    for target in color_targets.iter_mut().flatten() {
-        if !first {
-            target.load_op = HalRenderLoadOp::Load;
-        }
-        // Tier-2 compatibility only: GLES still executes the legacy one-draw
-        // `HalRenderPass` path in S2, so intermediate legacy passes must store
-        // for the following legacy pass to load. Metal and Vulkan never enter
-        // this adapter and honor the user's store op once on their one encoder.
-        if !last {
-            target.store = true;
-        }
-    }
-    let mut depth_stencil_attachment = stream.depth_stencil_attachment.clone();
-    if let Some(attachment) = &mut depth_stencil_attachment {
-        if !first {
-            attachment.depth_load_op = HalRenderLoadOp::Load;
-            attachment.stencil_load_op = HalRenderLoadOp::Load;
-        }
-        if !last {
-            attachment.depth_store = true;
-            attachment.stencil_store = true;
-        }
-    }
-    let (draw, indirect_buffer) = draw.unzip();
-    HalRenderPass {
-        pipeline: state.pipeline.clone(),
-        color_targets,
-        framebuffer_fetch_color_slots: stream.framebuffer_fetch_color_slots.clone(),
-        depth_stencil_attachment,
-        bind_buffers: state.bind_buffers.clone(),
-        bind_textures: state.bind_textures.clone(),
-        bind_samplers: state.bind_samplers.clone(),
-        bind_external_textures: state.bind_external_textures.clone(),
-        vertex_buffers: state.vertex_buffers.clone(),
-        index_buffer: state.index_buffer.clone().map(Box::new),
-        indirect_buffer: indirect_buffer.flatten().cloned().map(Box::new),
-        viewport: state.viewport,
-        scissor_rect: state.scissor_rect,
-        blend_constant: state.blend_constant,
-        stencil_reference: state.stencil_reference,
-        occlusion_query_set: stream.occlusion_query_set.clone(),
-        occlusion_query_index: state.occlusion_query_index,
-        draw,
-        immediate_data: state.immediate_data.clone(),
-    }
-}
-
-fn submit_render_pass(
-    gl: &glow::Context,
-    pass: &HalRenderPass,
-    caps: RenderDrawCaps,
-    placeholder_sampler: glow::Sampler,
-    texture_view_caps: TextureViewCaps,
-) -> Result<(), HalError> {
-    reject_external_texture_bindings(pass.bind_external_textures.len())?;
-    let fbo = create_render_fbo(gl, pass)?;
-    let pipeline = match &pass.pipeline {
-        None => {
-            let _cleanup = RenderPassCleanup { gl, fbo, vao: None };
-            return Ok(());
-        }
-        Some(HalRenderPipeline::Gles(pipeline)) => pipeline,
-        Some(_) => {
-            let _cleanup = RenderPassCleanup { gl, fbo, vao: None };
-            return Err(HalError::BufferOperationFailed {
-                backend: BACKEND,
-                message: "render pass pipeline is not a GLES pipeline",
-            });
-        }
-    };
-    let vao = unsafe {
-        gl.create_vertex_array()
-            .map_err(|_| HalError::BufferOperationFailed {
-                backend: BACKEND,
-                message: "glCreateVertexArray failed",
-            })
-    };
-    let vao = match vao {
-        Ok(vao) => vao,
-        Err(error) => {
-            let _cleanup = RenderPassCleanup { gl, fbo, vao: None };
-            return Err(error);
-        }
-    };
-    let _cleanup = RenderPassCleanup {
-        gl,
-        fbo,
-        vao: Some(vao),
-    };
-    run_render_draw(
-        gl,
-        pass,
-        pipeline,
-        vao,
-        caps,
-        placeholder_sampler,
-        texture_view_caps,
-    )?;
-    resolve_render_pass(gl, pass, fbo)
+fn invalidate_gles_render_bundle_state(state: &mut GlesRenderStreamState) {
+    state.pipeline = None;
+    state.bind_buffers.clear();
+    state.bind_textures.clear();
+    state.bind_samplers.clear();
+    state.bind_external_textures.clear();
+    state.vertex_buffers.clear();
+    state.index_buffer = None;
 }
 
 struct RenderPassCleanup<'a> {
@@ -1547,7 +1605,7 @@ impl Drop for RenderPassCleanup<'_> {
 
 fn create_render_fbo(
     gl: &glow::Context,
-    pass: &HalRenderPass,
+    pass: &HalRenderPassCommandStream,
 ) -> Result<glow::Framebuffer, HalError> {
     // T-G8 (MRT): resolve every color slot up front -- `Some` slots must be
     // 2D GLES textures with a live GL name; `None` slots stay sparse and get
@@ -1713,29 +1771,9 @@ fn create_render_fbo(
                 message: "framebuffer incomplete for render pass",
             });
         }
-        if let Some(viewport) = pass.viewport {
-            gl.viewport(
-                viewport.x as i32,
-                viewport.y as i32,
-                viewport.width as i32,
-                viewport.height as i32,
-            );
-            gl.depth_range_f32(viewport.min_depth, viewport.max_depth);
-        } else {
-            gl.viewport(0, 0, width, height);
-            gl.depth_range_f32(0.0, 1.0);
-        }
-        if let Some(rect) = pass.scissor_rect {
-            gl.enable(glow::SCISSOR_TEST);
-            gl.scissor(
-                rect.x as i32,
-                rect.y as i32,
-                rect.width as i32,
-                rect.height as i32,
-            );
-        } else {
-            gl.disable(glow::SCISSOR_TEST);
-        }
+        gl.viewport(0, 0, width, height);
+        gl.depth_range_f32(0.0, 1.0);
+        gl.disable(glow::SCISSOR_TEST);
         let mut clear_mask = 0;
         // T-G8 (MRT): each attachment carries its own load op and clear
         // value, so clears go through the per-draw-buffer `glClearBuffer*`
@@ -1967,7 +2005,7 @@ unsafe fn attach_resolve_texture_to_framebuffer(
 
 fn resolve_render_pass(
     gl: &glow::Context,
-    pass: &HalRenderPass,
+    pass: &HalRenderPassCommandStream,
     render_fbo: glow::Framebuffer,
 ) -> Result<(), HalError> {
     let resolves = pass
@@ -2067,25 +2105,65 @@ fn resolve_render_pass(
     }
 }
 
+fn discard_render_pass_attachments(gl: &glow::Context, pass: &HalRenderPassCommandStream) {
+    let mut attachments = pass
+        .color_targets
+        .iter()
+        .enumerate()
+        .filter_map(|(index, target)| {
+            target
+                .as_ref()
+                .filter(|target| !target.store)
+                .map(|_| glow::COLOR_ATTACHMENT0 + index as u32)
+        })
+        .collect::<Vec<_>>();
+    if let Some(depth_stencil) = &pass.depth_stencil_attachment {
+        let discard_depth =
+            format_has_depth_aspect(depth_stencil.format) && !depth_stencil.depth_store;
+        let discard_stencil =
+            format_has_stencil_aspect(depth_stencil.format) && !depth_stencil.stencil_store;
+        match (discard_depth, discard_stencil) {
+            (true, true) => attachments.push(glow::DEPTH_STENCIL_ATTACHMENT),
+            (true, false) => attachments.push(glow::DEPTH_ATTACHMENT),
+            (false, true) => attachments.push(glow::STENCIL_ATTACHMENT),
+            (false, false) => {}
+        }
+    }
+    if !attachments.is_empty() {
+        unsafe {
+            gl.invalidate_framebuffer(glow::DRAW_FRAMEBUFFER, &attachments);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_render_draw(
     gl: &glow::Context,
-    pass: &HalRenderPass,
-    pipeline: &super::pipeline::GlesRenderPipeline,
+    state: &GlesRenderStreamState,
     vao: glow::VertexArray,
+    draw: HalDraw,
+    indirect_buffer: Option<&HalBoundIndirectBuffer>,
     caps: RenderDrawCaps,
     placeholder_sampler: glow::Sampler,
     texture_view_caps: TextureViewCaps,
 ) -> Result<(), HalError> {
+    reject_external_texture_bindings(state.bind_external_textures.len())?;
+    let Some(HalRenderPipeline::Gles(pipeline)) = &state.pipeline else {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "render draw has no GLES pipeline",
+        });
+    };
     let program = pipeline.raw_or_err()?;
     unsafe {
         gl.use_program(Some(program));
     }
-    bind_render_buffers(gl, pass, pipeline)?;
+    bind_render_buffers(gl, &state.bind_buffers, pipeline)?;
     let texture_units = bind_combined_samplers(
         gl,
         pipeline.combined_samplers(),
-        &pass.bind_textures,
-        &pass.bind_samplers,
+        &state.bind_textures,
+        &state.bind_samplers,
         placeholder_sampler,
         texture_view_caps,
     )?;
@@ -2098,44 +2176,49 @@ fn run_render_draw(
         gl,
         pipeline.texture_metadata_ubo_binding(),
         pipeline.texture_metadata_slots(),
-        &pass.bind_textures,
+        &state.bind_textures,
     )?;
     let storage_views = bind_storage_textures(
         gl,
         pipeline.bindings(),
         pipeline.binding_remaps(),
-        &pass.bind_textures,
+        &state.bind_textures,
         texture_view_caps,
     )?;
     let _storage_cleanup = StorageImageCleanup {
         gl,
         views: storage_views,
     };
-    let first_instance = pass.draw.map(draw_first_instance).unwrap_or(0);
+    let first_instance = draw_first_instance(draw);
     bind_vertex_buffers(
         gl,
-        pass,
+        &state.vertex_buffers,
         pipeline,
         vao,
         first_instance,
         caps.supports_vertex_array_bgra,
     )?;
-    if let Some(draw) = pass.draw {
-        apply_raster_state(gl, pipeline.front_face(), pipeline.cull_mode());
-        apply_multisample_state(
-            gl,
-            pipeline.sample_mask(),
-            pipeline.alpha_to_coverage_enabled(),
-            caps.sample_mask_i,
-        )?;
-        apply_color_target_state(gl, pipeline.color_target(), pass.blend_constant);
-        apply_stencil_state(gl, pipeline.depth_stencil(), pass.stencil_reference)?;
-        if let Some(location) = pipeline.first_instance_location() {
-            set_first_instance_uniform(gl, location, draw);
-        }
-        let topology = map_primitive_topology(pipeline.primitive_topology());
-        run_gles_draw(gl, pass, topology, draw, caps.supports_base_vertex)?;
+    apply_raster_state(gl, pipeline.front_face(), pipeline.cull_mode());
+    apply_multisample_state(
+        gl,
+        pipeline.sample_mask(),
+        pipeline.alpha_to_coverage_enabled(),
+        caps.sample_mask_i,
+    )?;
+    apply_color_target_state(gl, pipeline.color_target(), state.blend_constant);
+    apply_stencil_state(gl, pipeline.depth_stencil(), state.stencil_reference)?;
+    if let Some(location) = pipeline.first_instance_location() {
+        set_first_instance_uniform(gl, location, draw);
     }
+    let topology = map_primitive_topology(pipeline.primitive_topology());
+    run_gles_draw(
+        gl,
+        state.index_buffer.as_ref(),
+        indirect_buffer,
+        topology,
+        draw,
+        caps.supports_base_vertex,
+    )?;
     Ok(())
 }
 
@@ -2451,7 +2534,8 @@ fn instance_step_offset(array_stride: u64, first_instance: u32) -> Result<i64, H
 
 fn run_gles_draw(
     gl: &glow::Context,
-    pass: &HalRenderPass,
+    index_buffer: Option<&HalBoundIndexBuffer>,
+    indirect_buffer: Option<&HalBoundIndirectBuffer>,
     topology: u32,
     draw: HalDraw,
     supports_base_vertex: bool,
@@ -2493,7 +2577,7 @@ fn run_gles_draw(
                     message: "GLES indexed draw with non-zero baseVertex requires GLES 3.2 or OES/EXT_draw_elements_base_vertex",
                 });
             }
-            let (index_type, index_offset) = bind_gles_index_buffer(gl, pass, first_index)?;
+            let (index_type, index_offset) = bind_gles_index_buffer(gl, index_buffer, first_index)?;
             let index_count = i32_from_u32(index_count, "draw indexCount exceeds GLES limit")?;
             let instance_count =
                 i32_from_u32(instance_count, "draw instanceCount exceeds GLES limit")?;
@@ -2534,25 +2618,21 @@ fn run_gles_draw(
             }
         }
         HalDraw::Indirect { offset } => {
-            bind_gles_indirect_buffer(gl, pass)?;
+            bind_gles_indirect_buffer(gl, indirect_buffer)?;
             let offset = i32_from_u64(offset, "draw indirect offset exceeds GLES limit")?;
             unsafe {
                 gl.draw_arrays_indirect_offset(topology, offset);
             }
         }
         HalDraw::IndexedIndirect { offset } => {
-            if pass
-                .index_buffer
-                .as_ref()
-                .is_some_and(|bound| bound.offset != 0)
-            {
+            if index_buffer.is_some_and(|bound| bound.offset != 0) {
                 return Err(HalError::BufferOperationFailed {
                     backend: BACKEND,
                     message: "GLES indexed indirect draw requires index buffer offset 0",
                 });
             }
-            let (index_type, _) = bind_gles_index_buffer(gl, pass, 0)?;
-            bind_gles_indirect_buffer(gl, pass)?;
+            let (index_type, _) = bind_gles_index_buffer(gl, index_buffer, 0)?;
+            bind_gles_indirect_buffer(gl, indirect_buffer)?;
             let offset = i32_from_u64(offset, "draw indexed indirect offset exceeds GLES limit")?;
             unsafe {
                 gl.draw_elements_indirect_offset(topology, index_type, offset);
@@ -2564,16 +2644,13 @@ fn run_gles_draw(
 
 fn bind_gles_index_buffer(
     gl: &glow::Context,
-    pass: &HalRenderPass,
+    bound: Option<&HalBoundIndexBuffer>,
     first_index: u32,
 ) -> Result<(u32, i32), HalError> {
-    let bound = pass
-        .index_buffer
-        .as_ref()
-        .ok_or(HalError::BufferOperationFailed {
-            backend: BACKEND,
-            message: "render index buffer is missing",
-        })?;
+    let bound = bound.ok_or(HalError::BufferOperationFailed {
+        backend: BACKEND,
+        message: "render index buffer is missing",
+    })?;
     let HalBuffer::Gles(buffer) = &bound.buffer else {
         return Err(HalError::BufferOperationFailed {
             backend: BACKEND,
@@ -2598,14 +2675,14 @@ fn bind_gles_index_buffer(
     Ok((gles_index_type(bound.format), offset))
 }
 
-fn bind_gles_indirect_buffer(gl: &glow::Context, pass: &HalRenderPass) -> Result<(), HalError> {
-    let bound = pass
-        .indirect_buffer
-        .as_ref()
-        .ok_or(HalError::BufferOperationFailed {
-            backend: BACKEND,
-            message: "render indirect buffer is missing",
-        })?;
+fn bind_gles_indirect_buffer(
+    gl: &glow::Context,
+    bound: Option<&HalBoundIndirectBuffer>,
+) -> Result<(), HalError> {
+    let bound = bound.ok_or(HalError::BufferOperationFailed {
+        backend: BACKEND,
+        message: "render indirect buffer is missing",
+    })?;
     let HalBuffer::Gles(buffer) = &bound.buffer else {
         return Err(HalError::BufferOperationFailed {
             backend: BACKEND,
@@ -2668,10 +2745,10 @@ fn resolve_bound_buffer_size(
 
 fn bind_render_buffers(
     gl: &glow::Context,
-    pass: &HalRenderPass,
+    bind_buffers: &[HalBoundBuffer],
     pipeline: &super::pipeline::GlesRenderPipeline,
 ) -> Result<(), HalError> {
-    for bound in &pass.bind_buffers {
+    for bound in bind_buffers {
         let HalBuffer::Gles(buffer) = &bound.buffer else {
             return Err(HalError::BufferOperationFailed {
                 backend: BACKEND,
@@ -2703,7 +2780,7 @@ fn bind_render_buffers(
 
 fn bind_vertex_buffers(
     gl: &glow::Context,
-    pass: &HalRenderPass,
+    vertex_buffers: &[HalBoundBuffer],
     pipeline: &super::pipeline::GlesRenderPipeline,
     vao: glow::VertexArray,
     first_instance: u32,
@@ -2712,7 +2789,7 @@ fn bind_vertex_buffers(
     unsafe {
         gl.bind_vertex_array(Some(vao));
     }
-    for bound in &pass.vertex_buffers {
+    for bound in vertex_buffers {
         let layout_index =
             usize::try_from(bound.binding).map_err(|_| HalError::BufferOperationFailed {
                 backend: BACKEND,
@@ -2745,17 +2822,10 @@ fn bind_vertex_buffers(
             })?;
         // M2 (GLES first-instance vertex fix): instance-stepped buffers get
         // `firstInstance * arrayStride` folded into the base offset here, on
-        // every draw, because this function already re-specifies every
-        // attribute pointer against a freshly created VAO for every single
-        // `HalRenderPass` (see `submit_render_pass`'s
-        // `gl.create_vertex_array()` -- one HAL render pass models exactly
-        // one draw call, unlike Dawn's persistent-VAO GL backend). That
-        // means there is no cross-draw GL state to go stale, so unlike
-        // Dawn's `VertexStateBufferBindingTracker` (which dirty-tracks
-        // `mFirstInstance` because its VAO persists across draws within a
-        // render pass) this HAL needs no `first_instance` dirty bit: a
-        // subsequent draw with a different (or zero) `first_instance`
-        // recomputes this offset from scratch.
+        // every draw. The pass-scoped VAO persists across draws, so this
+        // function re-specifies every active attribute pointer on every draw;
+        // a subsequent draw with a different (or zero) `first_instance`
+        // therefore recomputes this offset without stale state.
         let buffer_offset = if matches!(layout.step_mode, HalVertexStepMode::Instance) {
             buffer_offset
                 .checked_add(instance_step_offset(layout.array_stride, first_instance)?)
@@ -4149,6 +4219,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn query_resolve_bytes_emit_written_results_and_zero_unwritten_queries() {
+        let bytes = gles_query_resolve_bytes(&[11, 22, 33], 0, 3, &[0, 2])
+            .expect("valid query resolve range");
+        let values = bytes
+            .chunks_exact(8)
+            .map(|bytes| u64::from_ne_bytes(bytes.try_into().expect("eight-byte query result")))
+            .collect::<Vec<_>>();
+        assert_eq!(values, vec![11, 0, 33]);
+    }
+
+    #[test]
+    fn query_resolve_bytes_reject_out_of_range_and_overflow() {
+        assert!(gles_query_resolve_bytes(&[1], 1, 1, &[1]).is_err());
+        assert!(gles_query_resolve_bytes(&[], u32::MAX, 1, &[]).is_err());
+    }
+
+    #[test]
+    fn render_bundle_invalidation_clears_pipeline_bind_and_buffer_state() {
+        let buffer = HalBuffer::Noop(crate::noop::NoopBuffer::new(16));
+        let bound = HalBoundBuffer {
+            group: 0,
+            binding: 0,
+            metal_index: 0,
+            vertex_metal_index: None,
+            fragment_metal_index: None,
+            buffer: buffer.clone(),
+            offset: 0,
+            size: 16,
+        };
+        let mut state = GlesRenderStreamState {
+            pipeline: Some(HalRenderPipeline::Noop),
+            bind_buffers: vec![bound.clone()],
+            vertex_buffers: vec![bound],
+            index_buffer: Some(HalBoundIndexBuffer {
+                buffer,
+                format: HalIndexFormat::Uint16,
+                offset: 0,
+                size: 16,
+            }),
+            ..Default::default()
+        };
+
+        invalidate_gles_render_bundle_state(&mut state);
+
+        assert!(state.pipeline.is_none());
+        assert!(state.bind_buffers.is_empty());
+        assert!(state.bind_textures.is_empty());
+        assert!(state.bind_samplers.is_empty());
+        assert!(state.bind_external_textures.is_empty());
+        assert!(state.vertex_buffers.is_empty());
+        assert!(state.index_buffer.is_none());
+    }
+
+    #[test]
     fn gles_queue_completion_index_tracks_flushed_submissions() {
         let Some(device) = gles_device_or_skip("GLES queue completion-index test") else {
             return;
@@ -4217,7 +4341,10 @@ mod tests {
         device
             .queue()
             .submit_copies(&[HalCopy::ResolveQuerySet(crate::HalResolveQuerySet {
-                query_set: crate::HalQuerySet::Gles { count: 2 },
+                query_set: crate::HalQuerySet::Gles {
+                    count: 2,
+                    results: std::sync::Arc::new(std::sync::Mutex::new(vec![0; 2])),
+                },
                 first_query: 0,
                 query_count: 2,
                 written_queries: Vec::new(),
@@ -4352,27 +4479,32 @@ mod tests {
             store: true,
             clear_color: [0.0, 0.0, 0.0, 1.0],
         })]);
-        pass.pipeline = Some(HalRenderPipeline::Gles(pipeline));
-        pass.vertex_buffers = vec![crate::HalBoundBuffer {
-            group: 0,
-            binding: 0,
-            metal_index: 0,
-            vertex_metal_index: None,
-            fragment_metal_index: None,
-            buffer: HalBuffer::Gles(vertex_buffer),
-            offset: 0,
-            size: 16,
-        }];
-        pass.draw = Some(HalDraw::Direct {
-            vertex_count: 3,
-            instance_count: 1,
-            first_vertex: 0,
-            first_instance: 0,
-        });
+        pass.commands = vec![
+            HalRenderPassCommand::SetPipeline(HalRenderPipeline::Gles(pipeline)),
+            HalRenderPassCommand::SetVertexBuffer {
+                slot: 0,
+                buffer: Some(crate::HalBoundBuffer {
+                    group: 0,
+                    binding: 0,
+                    metal_index: 0,
+                    vertex_metal_index: None,
+                    fragment_metal_index: None,
+                    buffer: HalBuffer::Gles(vertex_buffer),
+                    offset: 0,
+                    size: 16,
+                }),
+            },
+            HalRenderPassCommand::Draw {
+                vertex_count: 3,
+                instance_count: 1,
+                first_vertex: 0,
+                first_instance: 0,
+            },
+        ];
 
         device
             .queue()
-            .submit_copies(&[HalCopy::RenderPass(pass)])
+            .submit_copies(&[HalCopy::RenderPassCommandStream(pass)])
             .expect("submit must ignore a vertex buffer bound at an undeclared slot");
     }
 
@@ -4430,7 +4562,7 @@ mod tests {
         let pass = render_pass(vec![Some(target)]);
         device
             .queue()
-            .submit_copies(&[HalCopy::RenderPass(pass)])
+            .submit_copies(&[HalCopy::RenderPassCommandStream(pass)])
             .expect("render pass must clear 2D-array color layer 1");
 
         let bytes = read_back_rgba8_slices(&device, &texture, 0, layer_count);
@@ -4474,7 +4606,7 @@ mod tests {
         let pass = render_pass(vec![Some(target)]);
         device
             .queue()
-            .submit_copies(&[HalCopy::RenderPass(pass)])
+            .submit_copies(&[HalCopy::RenderPassCommandStream(pass)])
             .expect("render pass must clear 3D color z-slice 2");
 
         let bytes = read_back_rgba8_slices(&device, &texture, 0, depth);
@@ -4570,7 +4702,7 @@ mod tests {
 
         device
             .queue()
-            .submit_copies(&[HalCopy::RenderPass(pass)])
+            .submit_copies(&[HalCopy::RenderPassCommandStream(pass)])
             .expect("render pass must attach and clear depth layer 1");
     }
 
@@ -4685,27 +4817,32 @@ mod tests {
             crate::HalTextureFormat::Rgba8Unorm,
             [0.0, 0.0, 0.0, 0.0],
         ))]);
-        pass.pipeline = Some(HalRenderPipeline::Gles(pipeline));
-        pass.vertex_buffers = vec![crate::HalBoundBuffer {
-            group: 0,
-            binding: 0,
-            metal_index: 0,
-            vertex_metal_index: None,
-            fragment_metal_index: None,
-            buffer: HalBuffer::Gles(vertex_buffer),
-            offset: 0,
-            size: vertex_bytes.len() as u64,
-        }];
-        pass.draw = Some(HalDraw::Direct {
-            vertex_count: 3,
-            instance_count: 1,
-            first_vertex: 0,
-            first_instance: 0,
-        });
+        pass.commands = vec![
+            HalRenderPassCommand::SetPipeline(HalRenderPipeline::Gles(pipeline)),
+            HalRenderPassCommand::SetVertexBuffer {
+                slot: 0,
+                buffer: Some(crate::HalBoundBuffer {
+                    group: 0,
+                    binding: 0,
+                    metal_index: 0,
+                    vertex_metal_index: None,
+                    fragment_metal_index: None,
+                    buffer: HalBuffer::Gles(vertex_buffer),
+                    offset: 0,
+                    size: vertex_bytes.len() as u64,
+                }),
+            },
+            HalRenderPassCommand::Draw {
+                vertex_count: 3,
+                instance_count: 1,
+                first_vertex: 0,
+                first_instance: 0,
+            },
+        ];
 
         device
             .queue()
-            .submit_copies(&[HalCopy::RenderPass(pass)])
+            .submit_copies(&[HalCopy::RenderPassCommandStream(pass)])
             .expect("GLES BGRA vertex attribute draw must succeed");
 
         assert_eq!(
@@ -4771,7 +4908,7 @@ mod tests {
             )
             .expect("GLES readback buffer creation must succeed");
 
-        let mut pass = render_pass(vec![Some(crate::HalRenderColorTarget {
+        let pass = render_pass(vec![Some(crate::HalRenderColorTarget {
             texture: HalTexture::Gles(color_texture.clone()),
             view_format: crate::HalTextureFormat::R32Uint,
             resolve_target: None,
@@ -4785,12 +4922,10 @@ mod tests {
             store: true,
             clear_color: [5.0, 0.0, 0.0, 1.0],
         })]);
-        pass.pipeline = None;
-
         device
             .queue()
             .submit_copies(&[
-                HalCopy::RenderPass(pass),
+                HalCopy::RenderPassCommandStream(pass),
                 HalCopy::TextureToBuffer(HalBufferTextureCopy {
                     buffer: HalBuffer::Gles(readback.clone()),
                     buffer_layout: crate::HalBufferTextureLayout {
@@ -5019,22 +5154,30 @@ mod tests {
             store: true,
             clear_color: [0.0, 0.0, 0.0, 1.0],
         })]);
-        pass.pipeline = Some(HalRenderPipeline::Gles(pipeline));
-        pass.bind_textures = vec![
-            bound_metadata_texture(vtex, 0, 3),
-            bound_metadata_texture(ftex, 1, 1),
+        pass.commands = vec![
+            HalRenderPassCommand::SetPipeline(HalRenderPipeline::Gles(pipeline)),
+            HalRenderPassCommand::SetBindGroup {
+                index: 0,
+                buffers: Vec::new(),
+                textures: vec![
+                    bound_metadata_texture(vtex, 0, 3),
+                    bound_metadata_texture(ftex, 1, 1),
+                ],
+                samplers: Vec::new(),
+                external_textures: Vec::new(),
+            },
+            HalRenderPassCommand::Draw {
+                vertex_count: 3,
+                instance_count: 1,
+                first_vertex: 0,
+                first_instance: 0,
+            },
         ];
-        pass.draw = Some(HalDraw::Direct {
-            vertex_count: 3,
-            instance_count: 1,
-            first_vertex: 0,
-            first_instance: 0,
-        });
 
         device
             .queue()
             .submit_copies(&[
-                HalCopy::RenderPass(pass),
+                HalCopy::RenderPassCommandStream(pass),
                 HalCopy::TextureToBuffer(HalBufferTextureCopy {
                     buffer: HalBuffer::Gles(readback.clone()),
                     buffer_layout: crate::HalBufferTextureLayout {
@@ -6090,20 +6233,22 @@ mod tests {
             crate::HalTextureFormat::Rgba8Unorm,
             [0.0, 0.0, 0.0, 0.0],
         ))]);
-        pass.pipeline = Some(HalRenderPipeline::Gles(pipeline));
-        pass.bind_textures = vec![bound_sampled_texture(sampled, 1)];
-        pass.bind_samplers = vec![nearest_sampler_binding(&device, 2)];
-        pass.draw = Some(HalDraw::Direct {
-            vertex_count: 3,
-            instance_count: 1,
-            first_vertex: 0,
-            first_instance: 0,
-        });
+        pass.commands = vec![
+            HalRenderPassCommand::SetPipeline(HalRenderPipeline::Gles(pipeline)),
+            HalRenderPassCommand::SetBindGroup {
+                index: 0,
+                buffers: Vec::new(),
+                textures: vec![bound_sampled_texture(sampled, 1)],
+                samplers: vec![nearest_sampler_binding(&device, 2)],
+                external_textures: Vec::new(),
+            },
+            direct_triangle_draw(),
+        ];
 
         device
             .queue()
             .submit_copies(&[
-                HalCopy::RenderPass(pass),
+                HalCopy::RenderPassCommandStream(pass),
                 HalCopy::TextureToBuffer(HalBufferTextureCopy {
                     buffer: HalBuffer::Gles(readback.clone()),
                     buffer_layout: rgba8_slice_layout(0),
@@ -6188,7 +6333,7 @@ mod tests {
         });
         device
             .queue()
-            .submit_copies(&[HalCopy::RenderPass(clear_pass)])
+            .submit_copies(&[HalCopy::RenderPassCommandStream(clear_pass)])
             .expect("clearing the depth texture to 0.5 must succeed");
 
         // Pass 2: sample the depth texture as a plain `sampler2D` (the shim's
@@ -6284,18 +6429,20 @@ mod tests {
             crate::HalTextureFormat::Rgba8Unorm,
             [0.0, 0.0, 0.0, 0.0],
         ))]);
-        pass.pipeline = Some(HalRenderPipeline::Gles(pipeline));
-        pass.bind_textures = vec![depth_binding];
-        pass.bind_samplers = vec![nearest_sampler_binding(&device, 2)];
-        pass.draw = Some(HalDraw::Direct {
-            vertex_count: 3,
-            instance_count: 1,
-            first_vertex: 0,
-            first_instance: 0,
-        });
+        pass.commands = vec![
+            HalRenderPassCommand::SetPipeline(HalRenderPipeline::Gles(pipeline)),
+            HalRenderPassCommand::SetBindGroup {
+                index: 0,
+                buffers: Vec::new(),
+                textures: vec![depth_binding],
+                samplers: vec![nearest_sampler_binding(&device, 2)],
+                external_textures: Vec::new(),
+            },
+            direct_triangle_draw(),
+        ];
         device
             .queue()
-            .submit_copies(&[HalCopy::RenderPass(pass)])
+            .submit_copies(&[HalCopy::RenderPassCommandStream(pass)])
             .expect("sampling the depth texture as a raw sampler2D must succeed");
 
         let out = read_rgba8_1x1(&device, output);
@@ -6447,30 +6594,38 @@ mod tests {
             crate::HalTextureFormat::Rgba8Unorm,
             [0.0, 0.0, 0.0, 0.0],
         ))]);
-        pass.pipeline = Some(HalRenderPipeline::Gles(pipeline));
-        pass.bind_buffers = vec![crate::HalBoundBuffer {
-            group: 0,
-            binding: 0,
-            metal_index: 0,
-            vertex_metal_index: None,
-            fragment_metal_index: None,
-            buffer: HalBuffer::Gles(uniform),
-            offset: 0,
-            size: 16,
-        }];
-        pass.bind_textures = vec![texture_binding];
-        pass.bind_samplers = vec![sampler_binding];
-        pass.draw = Some(HalDraw::Direct {
-            vertex_count: 3,
-            instance_count: 1,
-            first_vertex: 0,
-            first_instance: 0,
-        });
+        pass.commands = vec![
+            HalRenderPassCommand::SetPipeline(HalRenderPipeline::Gles(pipeline)),
+            HalRenderPassCommand::SetBindGroup {
+                index: 0,
+                buffers: vec![crate::HalBoundBuffer {
+                    group: 0,
+                    binding: 0,
+                    metal_index: 0,
+                    vertex_metal_index: None,
+                    fragment_metal_index: None,
+                    buffer: HalBuffer::Gles(uniform),
+                    offset: 0,
+                    size: 16,
+                }],
+                textures: Vec::new(),
+                samplers: Vec::new(),
+                external_textures: Vec::new(),
+            },
+            HalRenderPassCommand::SetBindGroup {
+                index: 1,
+                buffers: Vec::new(),
+                textures: vec![texture_binding],
+                samplers: vec![sampler_binding],
+                external_textures: Vec::new(),
+            },
+            direct_triangle_draw(),
+        ];
 
         device
             .queue()
             .submit_copies(&[
-                HalCopy::RenderPass(pass),
+                HalCopy::RenderPassCommandStream(pass),
                 HalCopy::TextureToBuffer(HalBufferTextureCopy {
                     buffer: HalBuffer::Gles(readback.clone()),
                     buffer_layout: rgba8_slice_layout(0),
@@ -7894,19 +8049,21 @@ mod tests {
             crate::HalTextureFormat::Rgba8Unorm,
             [0.0, 0.0, 0.0, 0.0],
         ))]);
-        pass.pipeline = Some(HalRenderPipeline::Gles(pipeline));
-        pass.bind_textures = vec![bound_sampled_texture(sampled.clone(), 1)];
-        pass.bind_samplers = vec![nearest_sampler_binding(&device, 2)];
-        pass.draw = Some(HalDraw::Direct {
-            vertex_count: 3,
-            instance_count: 1,
-            first_vertex: 0,
-            first_instance: 0,
-        });
+        pass.commands = vec![
+            HalRenderPassCommand::SetPipeline(HalRenderPipeline::Gles(pipeline)),
+            HalRenderPassCommand::SetBindGroup {
+                index: 0,
+                buffers: Vec::new(),
+                textures: vec![bound_sampled_texture(sampled.clone(), 1)],
+                samplers: vec![nearest_sampler_binding(&device, 2)],
+                external_textures: Vec::new(),
+            },
+            direct_triangle_draw(),
+        ];
 
         device
             .queue()
-            .submit_copies(&[HalCopy::RenderPass(pass)])
+            .submit_copies(&[HalCopy::RenderPassCommandStream(pass)])
             .expect("render pass with sampled mip subrange must succeed");
 
         assert_eq!(
@@ -8694,16 +8851,13 @@ mod tests {
         target.resolve_view_format = Some(crate::HalTextureFormat::Rgba8Unorm);
         target.store = false;
         let mut pass = render_pass(vec![Some(target)]);
-        pass.pipeline = Some(HalRenderPipeline::Gles(pipeline));
-        pass.draw = Some(HalDraw::Direct {
-            vertex_count: 3,
-            instance_count: 1,
-            first_vertex: 0,
-            first_instance: 0,
-        });
+        pass.commands = vec![
+            HalRenderPassCommand::SetPipeline(HalRenderPipeline::Gles(pipeline)),
+            direct_triangle_draw(),
+        ];
         device
             .queue()
-            .submit_copies(&[HalCopy::RenderPass(pass)])
+            .submit_copies(&[HalCopy::RenderPassCommandStream(pass)])
             .expect("MSAA render pass plus resolve must succeed");
         resolve
     }
@@ -8895,7 +9049,7 @@ mod tests {
         device
             .queue()
             .submit_copies(&[
-                HalCopy::RenderPass(pass),
+                HalCopy::RenderPassCommandStream(pass),
                 texture_to_buffer_copy(
                     rgba_texture,
                     crate::HalTextureFormat::Rgba8Unorm,
@@ -9031,18 +9185,15 @@ mod tests {
                 [0.0, 0.0, 0.0, 0.0],
             )),
         ]);
-        pass.pipeline = Some(HalRenderPipeline::Gles(pipeline));
-        pass.draw = Some(HalDraw::Direct {
-            vertex_count: 3,
-            instance_count: 1,
-            first_vertex: 0,
-            first_instance: 0,
-        });
+        pass.commands = vec![
+            HalRenderPassCommand::SetPipeline(HalRenderPipeline::Gles(pipeline)),
+            direct_triangle_draw(),
+        ];
 
         device
             .queue()
             .submit_copies(&[
-                HalCopy::RenderPass(pass),
+                HalCopy::RenderPassCommandStream(pass),
                 texture_to_buffer_copy(
                     rgba_texture,
                     crate::HalTextureFormat::Rgba8Unorm,
@@ -9256,35 +9407,40 @@ mod tests {
             crate::HalTextureFormat::Rgba8Unorm,
             [0.0, 0.0, 0.0, 0.0],
         ))]);
-        pass.pipeline = Some(HalRenderPipeline::Gles(pipeline));
-        pass.vertex_buffers = vec![crate::HalBoundBuffer {
-            group: 0,
-            binding: 0,
-            metal_index: 0,
-            vertex_metal_index: None,
-            fragment_metal_index: None,
-            buffer: HalBuffer::Gles(vertex_buffer),
-            offset: 0,
-            size: vertex_bytes.len() as u64,
-        }];
-        pass.index_buffer = Some(Box::new(crate::HalBoundIndexBuffer {
-            buffer: HalBuffer::Gles(index_buffer),
-            format: HalIndexFormat::Uint16,
-            offset: 0,
-            size: index_bytes.len() as u64,
-        }));
-        pass.draw = Some(HalDraw::Indexed {
-            index_count: 3,
-            instance_count: 1,
-            first_index: 0,
-            base_vertex: 1,
-            first_instance: 0,
-        });
+        pass.commands = vec![
+            HalRenderPassCommand::SetPipeline(HalRenderPipeline::Gles(pipeline)),
+            HalRenderPassCommand::SetVertexBuffer {
+                slot: 0,
+                buffer: Some(crate::HalBoundBuffer {
+                    group: 0,
+                    binding: 0,
+                    metal_index: 0,
+                    vertex_metal_index: None,
+                    fragment_metal_index: None,
+                    buffer: HalBuffer::Gles(vertex_buffer),
+                    offset: 0,
+                    size: vertex_bytes.len() as u64,
+                }),
+            },
+            HalRenderPassCommand::SetIndexBuffer(crate::HalBoundIndexBuffer {
+                buffer: HalBuffer::Gles(index_buffer),
+                format: HalIndexFormat::Uint16,
+                offset: 0,
+                size: index_bytes.len() as u64,
+            }),
+            HalRenderPassCommand::DrawIndexed {
+                index_count: 3,
+                instance_count: 1,
+                first_index: 0,
+                base_vertex: 1,
+                first_instance: 0,
+            },
+        ];
 
         device
             .queue()
             .submit_copies(&[
-                HalCopy::RenderPass(pass),
+                HalCopy::RenderPassCommandStream(pass),
                 texture_to_buffer_copy(
                     color_texture,
                     crate::HalTextureFormat::Rgba8Unorm,
@@ -9398,7 +9554,7 @@ mod tests {
         device
             .queue()
             .submit_copies(&[
-                HalCopy::RenderPass(pass),
+                HalCopy::RenderPassCommandStream(pass),
                 texture_to_buffer_copy(
                     float_texture,
                     crate::HalTextureFormat::R32Float,
@@ -9420,27 +9576,22 @@ mod tests {
 
     fn render_pass(
         color_targets: Vec<Option<crate::HalRenderColorTarget>>,
-    ) -> crate::HalRenderPass {
-        crate::HalRenderPass {
-            pipeline: None,
+    ) -> crate::HalRenderPassCommandStream {
+        crate::HalRenderPassCommandStream {
             color_targets,
             framebuffer_fetch_color_slots: Vec::new(),
             depth_stencil_attachment: None,
-            bind_buffers: Vec::new(),
-            bind_textures: Vec::new(),
-            bind_samplers: Vec::new(),
-            bind_external_textures: Vec::new(),
-            vertex_buffers: Vec::new(),
-            index_buffer: None,
-            indirect_buffer: None,
-            viewport: None,
-            scissor_rect: None,
-            blend_constant: [0.0; 4],
-            stencil_reference: 0,
             occlusion_query_set: None,
-            occlusion_query_index: None,
-            draw: None,
-            immediate_data: Vec::new(),
+            commands: Vec::new(),
+        }
+    }
+
+    fn direct_triangle_draw() -> HalRenderPassCommand {
+        HalRenderPassCommand::Draw {
+            vertex_count: 3,
+            instance_count: 1,
+            first_vertex: 0,
+            first_instance: 0,
         }
     }
 
@@ -10021,29 +10172,32 @@ mod tests {
             crate::HalTextureFormat::Rgba8Unorm,
             [0.0, 0.0, 0.0, 0.0],
         ))]);
-        pass.pipeline = Some(HalRenderPipeline::Gles(pipeline));
-        pass.bind_buffers = vec![crate::HalBoundBuffer {
-            group: 0,
-            binding: 0,
-            metal_index: 0,
-            vertex_metal_index: None,
-            fragment_metal_index: None,
-            buffer: HalBuffer::Gles(uniform),
-            offset: 256,
-            // Whole-buffer-from-offset sentinel (previously rejected on GLES).
-            size: u64::MAX,
-        }];
-        pass.draw = Some(HalDraw::Direct {
-            vertex_count: 3,
-            instance_count: 1,
-            first_vertex: 0,
-            first_instance: 0,
-        });
+        pass.commands = vec![
+            HalRenderPassCommand::SetPipeline(HalRenderPipeline::Gles(pipeline)),
+            HalRenderPassCommand::SetBindGroup {
+                index: 0,
+                buffers: vec![crate::HalBoundBuffer {
+                    group: 0,
+                    binding: 0,
+                    metal_index: 0,
+                    vertex_metal_index: None,
+                    fragment_metal_index: None,
+                    buffer: HalBuffer::Gles(uniform),
+                    offset: 256,
+                    // Whole-buffer-from-offset sentinel (previously rejected on GLES).
+                    size: u64::MAX,
+                }],
+                textures: Vec::new(),
+                samplers: Vec::new(),
+                external_textures: Vec::new(),
+            },
+            direct_triangle_draw(),
+        ];
 
         device
             .queue()
             .submit_copies(&[
-                HalCopy::RenderPass(pass),
+                HalCopy::RenderPassCommandStream(pass),
                 HalCopy::TextureToBuffer(HalBufferTextureCopy {
                     buffer: HalBuffer::Gles(readback.clone()),
                     buffer_layout: rgba8_slice_layout(0),

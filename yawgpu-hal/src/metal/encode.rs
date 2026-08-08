@@ -716,17 +716,6 @@ fn bound_buffer_size(bound: &HalBoundBuffer) -> Result<u64, HalError> {
     }
 }
 
-/// Returns render pass descriptor.
-pub(super) fn render_pass_descriptor(
-    pass: &HalRenderPass,
-) -> Result<Retained<MTLRenderPassDescriptor>, HalError> {
-    render_pass_descriptor_parts(
-        &pass.color_targets,
-        pass.depth_stencil_attachment.as_ref(),
-        pass.occlusion_query_set.as_ref(),
-    )
-}
-
 pub(super) fn render_pass_command_stream_descriptor(
     pass: &HalRenderPassCommandStream,
 ) -> Result<Retained<MTLRenderPassDescriptor>, HalError> {
@@ -924,39 +913,6 @@ fn subpass_attachment_texture(
             "transient subpass attachments not yet supported",
         )),
     }
-}
-
-/// Records encode into the command stream.
-pub(super) fn encode_render_pass(
-    encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
-    pass: &HalRenderPass,
-) -> Result<(), HalError> {
-    let (Some(pipeline), Some(draw)) = (&pass.pipeline, pass.draw) else {
-        return Ok(());
-    };
-    let crate::HalRenderPipeline::Metal(pipeline) = pipeline else {
-        return Err(shader_error(
-            "render pipeline is not Metal-backed".to_owned(),
-        ));
-    };
-    let state = RenderEncodeState {
-        pipeline,
-        bind_buffers: &pass.bind_buffers,
-        bind_textures: &pass.bind_textures,
-        bind_external_textures: &pass.bind_external_textures,
-        bind_samplers: &pass.bind_samplers,
-        vertex_buffers: &pass.vertex_buffers,
-        index_buffer: pass.index_buffer.as_deref(),
-        indirect_buffer: pass.indirect_buffer.as_deref(),
-        viewport: pass.viewport,
-        scissor_rect: pass.scissor_rect,
-        blend_constant: pass.blend_constant,
-        stencil_reference: pass.stencil_reference,
-        occlusion_query_index: pass.occlusion_query_index,
-        draw,
-        immediate_data: &pass.immediate_data,
-    };
-    encode_render_state(encoder, &state)
 }
 
 pub(super) fn encode_render_pass_command_stream(
@@ -1199,24 +1155,13 @@ fn encode_metal_stream_draw(
         &state.vertex_buffers,
     )?;
     encode_render_immediates(encoder, pipeline, &state.immediate_data, state.viewport)?;
-    let draw_state = RenderEncodeState {
-        pipeline,
-        bind_buffers: &state.bind_buffers,
-        bind_textures: &state.bind_textures,
-        bind_external_textures: &state.bind_external_textures,
-        bind_samplers: &state.bind_samplers,
-        vertex_buffers: &state.vertex_buffers,
-        index_buffer: state.index_buffer.as_ref(),
+    encode_render_draw(
+        encoder,
+        state.index_buffer.as_ref(),
         indirect_buffer,
-        viewport: state.viewport,
-        scissor_rect: state.scissor_rect,
-        blend_constant: state.blend_constant,
-        stencil_reference: state.stencil_reference,
-        occlusion_query_index: None,
+        pipeline.primitive_topology,
         draw,
-        immediate_data: &state.immediate_data,
-    };
-    encode_render_draw(encoder, &draw_state, pipeline.primitive_topology, draw)
+    )
 }
 
 /// Records subpass encode into the command stream.
@@ -1262,6 +1207,7 @@ pub(super) fn encode_subpass_render_pass(
     Ok(())
 }
 
+#[cfg(feature = "tiled")]
 struct RenderEncodeState<'a> {
     pipeline: &'a MetalRenderPipeline,
     bind_buffers: &'a [HalBoundBuffer],
@@ -1281,6 +1227,7 @@ struct RenderEncodeState<'a> {
     immediate_data: &'a [u8],
 }
 
+#[cfg(feature = "tiled")]
 fn encode_render_state(
     encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
     state: &RenderEncodeState<'_>,
@@ -1350,7 +1297,13 @@ fn encode_render_state(
     for binding in state.vertex_buffers {
         encode_render_vertex_buffer(encoder, binding)?;
     }
-    encode_render_draw(encoder, state, pipeline.primitive_topology, state.draw)
+    encode_render_draw(
+        encoder,
+        state.index_buffer,
+        state.indirect_buffer,
+        pipeline.primitive_topology,
+        state.draw,
+    )
 }
 
 fn mtl_front_face(front_face: HalFrontFace) -> MTLWinding {
@@ -1806,7 +1759,8 @@ fn encode_render_vertex_buffer(
 
 fn encode_render_draw(
     encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
-    state: &RenderEncodeState<'_>,
+    index_buffer: Option<&HalBoundIndexBuffer>,
+    indirect_buffer: Option<&HalBoundIndirectBuffer>,
     topology: HalPrimitiveTopology,
     draw: HalDraw,
 ) -> Result<(), HalError> {
@@ -1832,8 +1786,7 @@ fn encode_render_draw(
             base_vertex,
             first_instance,
         } => {
-            let (buffer, index_type, index_offset) =
-                metal_index_buffer(state.index_buffer, first_index)?;
+            let (buffer, index_type, index_offset) = metal_index_buffer(index_buffer, first_index)?;
             unsafe {
                 encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount_baseVertex_baseInstance(
                     map_primitive_topology(topology),
@@ -1848,7 +1801,7 @@ fn encode_render_draw(
             }
         }
         HalDraw::Indirect { offset } => {
-            let buffer = metal_indirect_buffer(state.indirect_buffer)?;
+            let buffer = metal_indirect_buffer(indirect_buffer)?;
             unsafe {
                 encoder.drawPrimitives_indirectBuffer_indirectBufferOffset(
                     map_primitive_topology(topology),
@@ -1858,9 +1811,8 @@ fn encode_render_draw(
             }
         }
         HalDraw::IndexedIndirect { offset } => {
-            let (index_buffer, index_type, index_offset) =
-                metal_index_buffer(state.index_buffer, 0)?;
-            let indirect_buffer = metal_indirect_buffer(state.indirect_buffer)?;
+            let (index_buffer, index_type, index_offset) = metal_index_buffer(index_buffer, 0)?;
+            let indirect_buffer = metal_indirect_buffer(indirect_buffer)?;
             unsafe {
                 encoder.drawIndexedPrimitives_indexType_indexBuffer_indexBufferOffset_indirectBuffer_indirectBufferOffset(
                     map_primitive_topology(topology),

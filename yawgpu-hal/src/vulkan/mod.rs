@@ -10,21 +10,21 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use ash::vk;
 
-#[cfg(feature = "tiled")]
-use crate::HalSubpassPassLayout;
 use crate::{
     HalAddressMode, HalBlendFactor, HalBlendOperation, HalBoundBuffer, HalBoundIndexBuffer,
     HalBoundSampler, HalBoundTexture, HalBuffer, HalBufferBindingKind, HalBufferClear,
     HalBufferCopy, HalBufferTextureCopy, HalBufferUsage, HalColorClearKind, HalColorTargetState,
     HalCompareFunction, HalComputeDispatch, HalComputePass, HalCopy, HalCullMode,
-    HalDepthStencilState, HalDescriptorBinding, HalDescriptorBindingKind, HalDraw, HalError,
-    HalExtent3d, HalFilterMode, HalFrontFace, HalIndexFormat, HalLimits, HalMipmapFilterMode,
-    HalPrimitiveTopology, HalQueryKind, HalQuerySet, HalRenderLoadOp, HalRenderPass,
-    HalRenderPassCommand, HalRenderPassCommandStream, HalRenderPipelineDescriptor,
-    HalResolveQuerySet, HalSampler, HalSamplerDescriptor, HalShaderSource, HalStencilOperation,
-    HalSurfaceConfiguration, HalTexture, HalTextureCopy, HalTextureDescriptor, HalTextureFormat,
-    HalTextureUsage, HalVertexFormat, HalVertexStepMode, SubmissionIndex,
+    HalDepthStencilState, HalDescriptorBinding, HalDescriptorBindingKind, HalError, HalExtent3d,
+    HalFilterMode, HalFrontFace, HalIndexFormat, HalLimits, HalMipmapFilterMode,
+    HalPrimitiveTopology, HalQueryKind, HalQuerySet, HalRenderLoadOp, HalRenderPassCommand,
+    HalRenderPassCommandStream, HalRenderPipelineDescriptor, HalResolveQuerySet, HalSampler,
+    HalSamplerDescriptor, HalShaderSource, HalStencilOperation, HalSurfaceConfiguration,
+    HalTexture, HalTextureCopy, HalTextureDescriptor, HalTextureFormat, HalTextureUsage,
+    HalVertexFormat, HalVertexStepMode, SubmissionIndex,
 };
+#[cfg(feature = "tiled")]
+use crate::{HalDraw, HalSubpassPassLayout};
 
 const BACKEND: &str = "vulkan";
 const ASSUMED_MAX_BUFFER_SIZE: u64 = 2 * 1024 * 1024 * 1024;

@@ -18,10 +18,9 @@ pub use command::{
     HalBoundSampler, HalBoundTexture, HalBufferBindingKind, HalBufferClear, HalBufferCopy,
     HalBufferTextureCopy, HalBufferTextureLayout, HalComputeDispatch, HalComputePass, HalCopy,
     HalDescriptorBinding, HalDescriptorBindingKind, HalDraw, HalIndexFormat, HalRenderBundle,
-    HalRenderColorTarget, HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass,
-    HalRenderPassCommand, HalRenderPassCommandStream, HalResolveQuerySet, HalScissorRect,
-    HalStorageTextureAccess, HalTextureAspect, HalTextureClear, HalTextureCopy,
-    HalTextureViewDimension, HalViewport,
+    HalRenderColorTarget, HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPassCommand,
+    HalRenderPassCommandStream, HalResolveQuerySet, HalScissorRect, HalStorageTextureAccess,
+    HalTextureAspect, HalTextureClear, HalTextureCopy, HalTextureViewDimension, HalViewport,
 };
 #[cfg(feature = "tiled")]
 pub use command::{
@@ -932,7 +931,10 @@ impl HalDevice {
             #[cfg(feature = "metal")]
             Self::Metal(device) => device.create_query_set(kind, count).map(HalQuerySet::Metal),
             #[cfg(feature = "gles")]
-            Self::Gles(_) => Ok(HalQuerySet::Gles { count }),
+            Self::Gles(_) => Ok(HalQuerySet::Gles {
+                count,
+                results: std::sync::Arc::new(std::sync::Mutex::new(vec![0; count as usize])),
+            }),
         }
     }
 
@@ -1472,10 +1474,12 @@ pub enum HalQuerySet {
     /// Metal query-set variant.
     Metal(metal::MetalQuerySet),
     #[cfg(feature = "gles")]
-    /// GLES placeholder query-set variant.
+    /// GLES query-set variant.
     Gles {
         /// Number of queries in the set.
         count: u32,
+        /// Most recently completed result for each query.
+        results: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
     },
 }
 
@@ -1491,7 +1495,7 @@ impl HalQuerySet {
             #[cfg(feature = "metal")]
             Self::Metal(query_set) => query_set.count(),
             #[cfg(feature = "gles")]
-            Self::Gles { count } => *count,
+            Self::Gles { count, .. } => *count,
         }
     }
 }
@@ -2127,40 +2131,28 @@ mod tests {
         let queue = device.queue();
         let depth = device.create_texture(&depth_texture_descriptor())?;
 
-        queue.submit_copies(&[HalCopy::RenderPass(HalRenderPass {
-            pipeline: None,
-            color_targets: Vec::new(),
-            framebuffer_fetch_color_slots: Vec::new(),
-            depth_stencil_attachment: Some(HalRenderDepthStencilAttachment {
-                texture: depth,
-                format: HalTextureFormat::Depth32Float,
-                mip_level: 0,
-                array_layer: 0,
-                depth_load_op: HalRenderLoadOp::Clear,
-                depth_store: true,
-                depth_clear_value: 0.25,
-                depth_read_only: false,
-                stencil_load_op: HalRenderLoadOp::Clear,
-                stencil_store: false,
-                stencil_clear_value: 3,
-                stencil_read_only: true,
-            }),
-            bind_buffers: Vec::new(),
-            bind_textures: Vec::new(),
-            bind_samplers: Vec::new(),
-            bind_external_textures: Vec::new(),
-            vertex_buffers: Vec::new(),
-            index_buffer: None,
-            indirect_buffer: None,
-            viewport: None,
-            scissor_rect: None,
-            blend_constant: [0.0; 4],
-            stencil_reference: 0,
-            occlusion_query_set: None,
-            occlusion_query_index: None,
-            draw: None,
-            immediate_data: Vec::new(),
-        })])?;
+        queue.submit_copies(&[HalCopy::RenderPassCommandStream(
+            HalRenderPassCommandStream {
+                color_targets: Vec::new(),
+                framebuffer_fetch_color_slots: Vec::new(),
+                depth_stencil_attachment: Some(HalRenderDepthStencilAttachment {
+                    texture: depth,
+                    format: HalTextureFormat::Depth32Float,
+                    mip_level: 0,
+                    array_layer: 0,
+                    depth_load_op: HalRenderLoadOp::Clear,
+                    depth_store: true,
+                    depth_clear_value: 0.25,
+                    depth_read_only: false,
+                    stencil_load_op: HalRenderLoadOp::Clear,
+                    stencil_store: false,
+                    stencil_clear_value: 3,
+                    stencil_read_only: true,
+                }),
+                occlusion_query_set: None,
+                commands: Vec::new(),
+            },
+        )])?;
 
         let submitted = match &queue {
             HalQueue::Noop(queue) => queue.submitted_copies(),
@@ -2169,70 +2161,13 @@ mod tests {
         };
         assert!(matches!(
             submitted.as_slice(),
-            [HalCopy::RenderPass(pass)]
+            [HalCopy::RenderPassCommandStream(pass)]
                 if pass.color_targets.is_empty()
                     && pass.depth_stencil_attachment.as_ref().is_some_and(|attachment|
                         attachment.format == HalTextureFormat::Depth32Float
                             && (attachment.depth_clear_value - 0.25).abs() < f32::EPSILON
                             && attachment.stencil_clear_value == 3
                     )
-        ));
-        Ok(())
-    }
-
-    /// Block 94 S1: the Noop backend "accepts and records, executes as
-    /// no-op" for `HalRenderPass::immediate_data` -- the field round-trips
-    /// through `submit_copies` without error or mutation, but Noop performs
-    /// no actual delivery (that lands in S2/S3 for Metal/Vulkan).
-    #[test]
-    fn hal_queue_submit_copies_noop_records_render_pass_immediate_data() -> Result<(), HalError> {
-        let device = noop_device()?;
-        let queue = device.queue();
-        let depth = device.create_texture(&depth_texture_descriptor())?;
-
-        queue.submit_copies(&[HalCopy::RenderPass(HalRenderPass {
-            pipeline: None,
-            color_targets: Vec::new(),
-            framebuffer_fetch_color_slots: Vec::new(),
-            depth_stencil_attachment: Some(HalRenderDepthStencilAttachment {
-                texture: depth,
-                format: HalTextureFormat::Depth32Float,
-                mip_level: 0,
-                array_layer: 0,
-                depth_load_op: HalRenderLoadOp::Clear,
-                depth_store: true,
-                depth_clear_value: 0.25,
-                depth_read_only: false,
-                stencil_load_op: HalRenderLoadOp::Clear,
-                stencil_store: false,
-                stencil_clear_value: 3,
-                stencil_read_only: true,
-            }),
-            bind_buffers: Vec::new(),
-            bind_textures: Vec::new(),
-            bind_samplers: Vec::new(),
-            bind_external_textures: Vec::new(),
-            vertex_buffers: Vec::new(),
-            index_buffer: None,
-            indirect_buffer: None,
-            viewport: None,
-            scissor_rect: None,
-            blend_constant: [0.0; 4],
-            stencil_reference: 0,
-            occlusion_query_set: None,
-            occlusion_query_index: None,
-            draw: None,
-            immediate_data: vec![1, 2, 3, 4],
-        })])?;
-
-        let submitted = match &queue {
-            HalQueue::Noop(queue) => queue.submitted_copies(),
-            #[cfg(any(feature = "vulkan", feature = "metal", feature = "gles"))]
-            _ => Vec::new(),
-        };
-        assert!(matches!(
-            submitted.as_slice(),
-            [HalCopy::RenderPass(pass)] if pass.immediate_data == vec![1, 2, 3, 4]
         ));
         Ok(())
     }

@@ -166,8 +166,6 @@ pub enum HalCopy {
     ResolveQuerySet(HalResolveQuerySet),
     /// Compute pass variant.
     ComputePass(HalComputePass),
-    /// Render pass variant.
-    RenderPass(HalRenderPass),
     /// Render pass command-stream variant.
     RenderPassCommandStream(HalRenderPassCommandStream),
     #[cfg(feature = "tiled")]
@@ -421,60 +419,6 @@ pub struct HalBoundExternalTexture {
     pub params_offset: u64,
     /// Params buffer byte size.
     pub params_size: u64,
-}
-
-/// Wraps  for the selected backend.
-#[derive(Debug, Clone)]
-pub struct HalRenderPass {
-    /// Pipeline.
-    pub pipeline: Option<HalRenderPipeline>,
-    /// Color targets in attachment slot order; `None` is an empty slot.
-    pub color_targets: Vec<Option<HalRenderColorTarget>>,
-    /// Color attachment slots read as framebuffer-fetch input attachments.
-    pub framebuffer_fetch_color_slots: Vec<u32>,
-    /// Optional depth-stencil attachment.
-    pub depth_stencil_attachment: Option<HalRenderDepthStencilAttachment>,
-    /// Bind buffers.
-    pub bind_buffers: Vec<HalBoundBuffer>,
-    /// Bind textures.
-    pub bind_textures: Vec<HalBoundTexture>,
-    /// Bind samplers.
-    pub bind_samplers: Vec<HalBoundSampler>,
-    /// Bind external textures.
-    pub bind_external_textures: Vec<HalBoundExternalTexture>,
-    /// Vertex buffers.
-    pub vertex_buffers: Vec<HalBoundBuffer>,
-    /// Optional index buffer.
-    pub index_buffer: Option<Box<HalBoundIndexBuffer>>,
-    /// Optional indirect draw buffer.
-    pub indirect_buffer: Option<Box<HalBoundIndirectBuffer>>,
-    /// Optional viewport override.
-    pub viewport: Option<HalViewport>,
-    /// Optional scissor rectangle override.
-    pub scissor_rect: Option<HalScissorRect>,
-    /// Render pass blend constant.
-    pub blend_constant: [f32; 4],
-    /// Render pass stencil reference.
-    pub stencil_reference: u32,
-    /// Optional occlusion query set for this render pass.
-    pub occlusion_query_set: Option<HalQuerySet>,
-    /// Optional active occlusion query index for this draw.
-    pub occlusion_query_index: Option<u32>,
-    /// Draw.
-    pub draw: Option<HalDraw>,
-    /// The pipeline's immediates block for this draw: user bytes
-    /// `[0, layout.immediate_size)` (Block 94). The internal constants that
-    /// follow the user prefix per `specs/blocks/94-immediates.md`
-    /// "Immediates block layout" (Metal frag-depth clamp / Vulkan
-    /// pixel-center depth range, `ClampFragDepthArgs`,
-    /// `dawn/native/ImmediatesLayout.h:47-50`) are composed at delivery
-    /// from pipeline metadata plus the pass viewport, not carried here.
-    /// Metal (S2, `set{Vertex,Fragment}Bytes` at the pipeline's immediate
-    /// slot) and Vulkan (S3, `vkCmdPushConstants`) deliver the combined
-    /// block per draw; Noop records it and GLES ignores it (unreachable --
-    /// GLES advertises `maxImmediateSize = 0`, so core validation never
-    /// lets user immediates reach it).
-    pub immediate_data: Vec<u8>,
 }
 
 /// Stores one render pass as pass-level state plus an ordered command stream.

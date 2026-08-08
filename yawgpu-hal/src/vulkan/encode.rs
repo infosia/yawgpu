@@ -95,15 +95,6 @@ pub(super) fn record_and_submit_copies(
                     }
                     image_views.extend(temps.image_views);
                 }
-                HalCopy::RenderPass(pass) => {
-                    let temps = encode_render_pass(&queue.device, command_buffer, pass)?;
-                    descriptor_pools.extend(temps.descriptor_pools);
-                    framebuffers.push(temps.framebuffer);
-                    image_views.extend(temps.image_views);
-                    if let Some(render_pass) = temps.render_pass {
-                        render_passes.push(render_pass);
-                    }
-                }
                 HalCopy::RenderPassCommandStream(pass) => {
                     let temps =
                         encode_render_pass_command_stream(&queue.device, command_buffer, pass)?;
@@ -451,44 +442,6 @@ fn retain_copy_resources(copy: &HalCopy, retained: &mut Vec<RetainedResource>) {
                 retain_hal_buffer(&buffer.buffer, retained);
             }
         }
-        HalCopy::RenderPass(pass) => {
-            if let Some(pipeline) = &pass.pipeline {
-                retain_hal_render_pipeline(pipeline, retained);
-            }
-            if let Some(query_set) = &pass.occlusion_query_set {
-                retain_hal_query_set(query_set, retained);
-            }
-            for color_target in pass.color_targets.iter().flatten() {
-                retain_hal_texture(&color_target.texture, retained);
-                if let Some(resolve_target) = &color_target.resolve_target {
-                    retain_hal_texture(resolve_target, retained);
-                }
-            }
-            if let Some(depth_stencil_attachment) = &pass.depth_stencil_attachment {
-                retain_hal_texture(&depth_stencil_attachment.texture, retained);
-            }
-            for bound in &pass.bind_buffers {
-                retain_hal_buffer(&bound.buffer, retained);
-            }
-            for bound in &pass.bind_textures {
-                retain_hal_texture(&bound.texture, retained);
-            }
-            for bound in &pass.bind_samplers {
-                retain_hal_sampler(&bound.sampler, retained);
-            }
-            for bound in &pass.bind_external_textures {
-                retain_hal_external_texture(bound, retained);
-            }
-            for bound in &pass.vertex_buffers {
-                retain_hal_buffer(&bound.buffer, retained);
-            }
-            if let Some(index_buffer) = &pass.index_buffer {
-                retain_hal_buffer(&index_buffer.buffer, retained);
-            }
-            if let Some(indirect_buffer) = &pass.indirect_buffer {
-                retain_hal_buffer(&indirect_buffer.buffer, retained);
-            }
-        }
         HalCopy::RenderPassCommandStream(pass) => {
             if let Some(query_set) = &pass.occlusion_query_set {
                 retain_hal_query_set(query_set, retained);
@@ -696,14 +649,6 @@ fn surface_pending_from_copy(copy: &HalCopy) -> Option<Arc<Mutex<SurfacePendingS
         }
         HalCopy::TextureToTexture(copy) => surface_pending_from_hal_texture(&copy.source)
             .or_else(|| surface_pending_from_hal_texture(&copy.destination)),
-        HalCopy::RenderPass(pass) => pass.color_targets.iter().flatten().find_map(|target| {
-            surface_pending_from_hal_texture(&target.texture).or_else(|| {
-                target
-                    .resolve_target
-                    .as_ref()
-                    .and_then(surface_pending_from_hal_texture)
-            })
-        }),
         HalCopy::RenderPassCommandStream(pass) => {
             pass.color_targets.iter().flatten().find_map(|target| {
                 surface_pending_from_hal_texture(&target.texture).or_else(|| {
@@ -2079,58 +2024,21 @@ fn vk_sample_count(sample_count: u32) -> Result<vk::SampleCountFlags, HalError> 
     }
 }
 
-/// Records encode into the command stream.
-pub(super) fn encode_render_pass(
-    device: &VulkanDeviceInner,
-    command_buffer: vk::CommandBuffer,
-    pass: &HalRenderPass,
-) -> Result<RenderPassTemps, HalError> {
-    encode_render_pass_impl(device, command_buffer, pass, None)
-}
-
 pub(super) fn encode_render_pass_command_stream(
     device: &VulkanDeviceInner,
     command_buffer: vk::CommandBuffer,
     pass: &HalRenderPassCommandStream,
 ) -> Result<RenderPassTemps, HalError> {
-    let mut bind_buffers = Vec::new();
     let mut bind_textures = Vec::new();
-    let mut bind_samplers = Vec::new();
-    collect_vulkan_stream_bindings(
-        &pass.commands,
-        &mut bind_buffers,
-        &mut bind_textures,
-        &mut bind_samplers,
-    );
-    let setup = HalRenderPass {
-        pipeline: None,
-        color_targets: pass.color_targets.clone(),
-        framebuffer_fetch_color_slots: pass.framebuffer_fetch_color_slots.clone(),
-        depth_stencil_attachment: pass.depth_stencil_attachment.clone(),
-        bind_buffers,
-        bind_textures,
-        bind_samplers,
-        bind_external_textures: Vec::new(),
-        vertex_buffers: Vec::new(),
-        index_buffer: None,
-        indirect_buffer: None,
-        viewport: None,
-        scissor_rect: None,
-        blend_constant: [0.0; 4],
-        stencil_reference: 0,
-        occlusion_query_set: pass.occlusion_query_set.clone(),
-        occlusion_query_index: None,
-        draw: None,
-        immediate_data: Vec::new(),
-    };
-    encode_render_pass_impl(device, command_buffer, &setup, Some(&pass.commands))
+    collect_vulkan_stream_textures(&pass.commands, &mut bind_textures);
+    encode_render_pass_impl(device, command_buffer, pass, &bind_textures)
 }
 
 fn encode_render_pass_impl(
     device: &VulkanDeviceInner,
     command_buffer: vk::CommandBuffer,
-    pass: &HalRenderPass,
-    stream_commands: Option<&[HalRenderPassCommand]>,
+    pass: &HalRenderPassCommandStream,
+    bind_textures: &[HalBoundTexture],
 ) -> Result<RenderPassTemps, HalError> {
     let vk_device = &device.device;
     let color_textures = vulkan_render_color_textures(pass)?;
@@ -2139,25 +2047,12 @@ fn encode_render_pass_impl(
     if !color_textures.iter().any(Option::is_some) && depth_stencil_texture.is_none() {
         return Err(shader_error("Vulkan render pass requires an attachment"));
     }
-    let active_query = vulkan_active_occlusion_query(pass)?;
-    if let Some((query_set, query_index)) = active_query {
-        unsafe {
-            vk_device.cmd_reset_query_pool(command_buffer, query_set.pool(), query_index, 1);
-        }
-    }
-    if let Some(commands) = stream_commands {
-        let query_set = vulkan_stream_query_set(pass)?;
-        if let Some(query_set) = query_set {
-            for query_index in vulkan_stream_query_indices(commands) {
-                query_set.validate_query(query_index)?;
-                unsafe {
-                    vk_device.cmd_reset_query_pool(
-                        command_buffer,
-                        query_set.pool(),
-                        query_index,
-                        1,
-                    );
-                }
+    let query_set = vulkan_stream_query_set(pass)?;
+    if let Some(query_set) = query_set {
+        for query_index in vulkan_stream_query_indices(&pass.commands) {
+            query_set.validate_query(query_index)?;
+            unsafe {
+                vk_device.cmd_reset_query_pool(command_buffer, query_set.pool(), query_index, 1);
             }
         }
     }
@@ -2221,36 +2116,23 @@ fn encode_render_pass_impl(
     if let Some(texture) = depth_stencil_texture {
         attachment_images.push(texture.inner()?.image);
     }
-    transition_sampled_textures(
-        vk_device,
-        command_buffer,
-        &pass.bind_textures,
-        &attachment_images,
-    )?;
+    transition_sampled_textures(vk_device, command_buffer, bind_textures, &attachment_images)?;
     // Storage-bound textures (e.g. a fragment-stage read-write storage image)
     // need GENERAL, whose descriptors declare it. Ordered after the sampled
     // transition so GENERAL wins for a texture bound both sampled and storage,
     // mirroring the compute-pass encoder. Attachment images keep their
     // attachment layout.
-    transition_storage_textures(
-        vk_device,
-        command_buffer,
-        &pass.bind_textures,
-        &attachment_images,
-    )?;
+    transition_storage_textures(vk_device, command_buffer, bind_textures, &attachment_images)?;
     let color_formats = render_pass_color_formats(&pass.color_targets);
     let resolve_formats = render_pass_resolve_formats(&pass.color_targets)?;
-    let render_pass = match &pass.pipeline {
-        Some(crate::HalRenderPipeline::Vulkan(_)) | None => create_render_pass_for_targets(
-            vk_device,
-            &color_formats,
-            &resolve_formats,
-            &pass.color_targets,
-            pass.depth_stencil_attachment.as_ref(),
-            &pass.framebuffer_fetch_color_slots,
-        )?,
-        Some(_) => return Err(shader_error("render pipeline is not Vulkan-backed")),
-    };
+    let render_pass = create_render_pass_for_targets(
+        vk_device,
+        &color_formats,
+        &resolve_formats,
+        &pass.color_targets,
+        pass.depth_stencil_attachment.as_ref(),
+        &pass.framebuffer_fetch_color_slots,
+    )?;
     let temporary_render_pass = Some(render_pass);
     let color_attachments: Vec<_> = color_textures
         .iter()
@@ -2275,55 +2157,8 @@ fn encode_render_pass_impl(
         depth_stencil_attachment,
     )?;
     let framebuffer = framebuffer_resources.framebuffer;
-    let mut image_views = framebuffer_resources.image_views;
+    let image_views = framebuffer_resources.image_views;
     let color_attachment_views = framebuffer_resources.color_attachment_views;
-    let mut descriptor_pool = None;
-    let mut descriptor_sets = Vec::new();
-    if let Some(crate::HalRenderPipeline::Vulkan(pipeline)) = &pass.pipeline {
-        descriptor_pool = create_render_descriptor_pool(vk_device, pipeline)?;
-        descriptor_sets = if let Some(pool) = descriptor_pool {
-            match allocate_render_descriptor_sets(vk_device, pool, pipeline) {
-                Ok(sets) => sets,
-                Err(error) => {
-                    unsafe {
-                        vk_device.destroy_descriptor_pool(pool, None);
-                        vk_device.destroy_framebuffer(framebuffer, None);
-                        destroy_image_views(vk_device, &image_views);
-                        if let Some(render_pass) = temporary_render_pass {
-                            vk_device.destroy_render_pass(render_pass, None);
-                        }
-                    }
-                    return Err(error);
-                }
-            }
-        } else {
-            Vec::new()
-        };
-        match update_render_descriptor_sets(
-            vk_device,
-            pipeline,
-            &pass.bind_buffers,
-            &pass.bind_textures,
-            &pass.bind_samplers,
-            &color_attachment_views,
-            &descriptor_sets,
-        ) {
-            Ok(descriptor_image_views) => image_views.extend(descriptor_image_views),
-            Err(error) => {
-                unsafe {
-                    if let Some(pool) = descriptor_pool {
-                        vk_device.destroy_descriptor_pool(pool, None);
-                    }
-                    vk_device.destroy_framebuffer(framebuffer, None);
-                    destroy_image_views(vk_device, &image_views);
-                    if let Some(render_pass) = temporary_render_pass {
-                        vk_device.destroy_render_pass(render_pass, None);
-                    }
-                }
-                return Err(error);
-            }
-        }
-    }
     let clear_values = render_pass_clear_values(pass);
     let (width, height) =
         render_pass_extent_from_targets(&color_attachments, depth_stencil_attachment)?;
@@ -2338,115 +2173,20 @@ fn encode_render_pass_impl(
         .clear_values(&clear_values);
     unsafe {
         vk_device.cmd_begin_render_pass(command_buffer, &begin_info, vk::SubpassContents::INLINE);
-        if let Some((query_set, query_index)) = active_query {
-            vk_device.cmd_begin_query(
-                command_buffer,
-                query_set.pool(),
-                query_index,
-                if device.occlusion_query_precise {
-                    vk::QueryControlFlags::PRECISE
-                } else {
-                    vk::QueryControlFlags::empty()
-                },
-            );
-        }
     }
     let mut stream_temps = VulkanRenderStreamTemps::default();
-    if let Some(commands) = stream_commands {
-        let query_set = vulkan_stream_query_set(pass)?;
-        let mut state = VulkanRenderStreamState::new(render_area, width, height, query_set);
-        encode_vulkan_render_commands(
-            device,
-            command_buffer,
-            commands,
-            &color_attachment_views,
-            &pass.color_targets,
-            pass.depth_stencil_attachment.as_ref(),
-            &mut state,
-            &mut stream_temps,
-        )?;
-    } else if let (Some(crate::HalRenderPipeline::Vulkan(pipeline)), Some(draw)) =
-        (&pass.pipeline, pass.draw)
-    {
-        unsafe {
-            vk_device.cmd_bind_pipeline(
-                command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                pipeline.inner.pipeline,
-            );
-            // Flip clip-space Y with a negative-height viewport (the wgpu/Dawn
-            // convention: origin at `y + height`, height negated). WebGPU clip space
-            // is Y-up while the Vulkan framebuffer is Y-down; doing the flip here
-            // means the shader frontend (Tint) never has to flip Y in-shader, so
-            // generated SPIR-V agrees with the fixed-function state. Requires
-            // Vulkan 1.1 / VK_KHR_maintenance1 (MoltenVK supports it).
-            let viewport = pass.viewport.map_or(
-                vk::Viewport {
-                    x: 0.0,
-                    y: height as f32,
-                    width: width as f32,
-                    height: -(height as f32),
-                    min_depth: 0.0,
-                    max_depth: 1.0,
-                },
-                |viewport| vk::Viewport {
-                    x: viewport.x,
-                    y: viewport.y + viewport.height,
-                    width: viewport.width,
-                    height: -viewport.height,
-                    min_depth: viewport.min_depth,
-                    max_depth: viewport.max_depth,
-                },
-            );
-            let scissor = pass.scissor_rect.map_or(render_area, |rect| vk::Rect2D {
-                offset: vk::Offset2D {
-                    x: rect.x as i32,
-                    y: rect.y as i32,
-                },
-                extent: vk::Extent2D {
-                    width: rect.width,
-                    height: rect.height,
-                },
-            });
-            vk_device.cmd_set_viewport(command_buffer, 0, &[viewport]);
-            vk_device.cmd_set_scissor(command_buffer, 0, &[scissor]);
-            // Deliver the combined immediates push-constant block (Block 94
-            // S3): the pass's user immediate bytes first, then -- for the
-            // `@builtin(position)` pixel-center polyfill -- the viewport
-            // depth-range pair (min/max f32s) at `depth_range_offset`. The
-            // pipeline layout declared a matching range over the whole
-            // block; a polyfill-only pipeline (no user immediates) composes
-            // exactly the bare 8-byte pair delivered before Block 94.
-            if let Some(immediates) = pipeline.inner.immediates {
-                let block = crate::immediates::compose_immediates_block(
-                    &pass.immediate_data,
-                    immediates.block_size,
-                    immediates.depth_range_offset,
-                    [viewport.min_depth, viewport.max_depth],
-                );
-                vk_device.cmd_push_constants(
-                    command_buffer,
-                    pipeline.inner.pipeline_layout,
-                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    0,
-                    &block,
-                );
-            }
-            vk_device.cmd_set_blend_constants(command_buffer, &pass.blend_constant);
-            vk_device.cmd_set_stencil_reference(
-                command_buffer,
-                vk::StencilFaceFlags::FRONT_AND_BACK,
-                pass.stencil_reference,
-            );
-            bind_render_descriptor_sets(vk_device, command_buffer, pipeline, &descriptor_sets);
-        }
-        bind_vertex_buffers(vk_device, command_buffer, pass)?;
-        encode_render_draw(vk_device, command_buffer, pass, draw)?;
-    }
+    let mut state = VulkanRenderStreamState::new(render_area, width, height, query_set);
+    encode_vulkan_render_commands(
+        device,
+        command_buffer,
+        &pass.commands,
+        &color_attachment_views,
+        &pass.color_targets,
+        pass.depth_stencil_attachment.as_ref(),
+        &mut state,
+        &mut stream_temps,
+    )?;
     unsafe {
-        if let Some((query_set, query_index)) = active_query {
-            vk_device.cmd_end_query(command_buffer, query_set.pool(), query_index);
-        }
         vk_device.cmd_end_render_pass(command_buffer);
     }
     for texture in color_textures.iter().flatten() {
@@ -2538,10 +2278,7 @@ fn encode_render_pass_impl(
         }
     }
     Ok(RenderPassTemps {
-        descriptor_pools: descriptor_pool
-            .into_iter()
-            .chain(stream_temps.descriptor_pools)
-            .collect(),
+        descriptor_pools: stream_temps.descriptor_pools,
         framebuffer,
         image_views: image_views
             .into_iter()
@@ -2551,99 +2288,29 @@ fn encode_render_pass_impl(
     })
 }
 
-fn encode_render_draw(
-    device: &ash::Device,
-    command_buffer: vk::CommandBuffer,
-    pass: &HalRenderPass,
-    draw: HalDraw,
-) -> Result<(), HalError> {
-    match draw {
-        HalDraw::Direct {
-            vertex_count,
-            instance_count,
-            first_vertex,
-            first_instance,
-        } => unsafe {
-            device.cmd_draw(
-                command_buffer,
-                vertex_count,
-                instance_count,
-                first_vertex,
-                first_instance,
-            );
-            Ok(())
-        },
-        HalDraw::Indexed {
-            index_count,
-            instance_count,
-            first_index,
-            base_vertex,
-            first_instance,
-        } => {
-            bind_render_index_buffer(device, command_buffer, pass)?;
-            unsafe {
-                device.cmd_draw_indexed(
-                    command_buffer,
-                    index_count,
-                    instance_count,
-                    first_index,
-                    base_vertex,
-                    first_instance,
-                );
-            }
-            Ok(())
-        }
-        HalDraw::Indirect { offset } => {
-            let buffer = vulkan_indirect_buffer(pass)?;
-            unsafe {
-                device.cmd_draw_indirect(command_buffer, buffer.inner()?.buffer, offset, 1, 16);
-            }
-            Ok(())
-        }
-        HalDraw::IndexedIndirect { offset } => {
-            bind_render_index_buffer(device, command_buffer, pass)?;
-            let buffer = vulkan_indirect_buffer(pass)?;
-            unsafe {
-                device.cmd_draw_indexed_indirect(
-                    command_buffer,
-                    buffer.inner()?.buffer,
-                    offset,
-                    1,
-                    20,
-                );
-            }
-            Ok(())
-        }
-    }
-}
-
-fn collect_vulkan_stream_bindings(
+fn collect_vulkan_stream_textures(
     commands: &[HalRenderPassCommand],
-    buffers: &mut Vec<HalBoundBuffer>,
     textures: &mut Vec<HalBoundTexture>,
-    samplers: &mut Vec<HalBoundSampler>,
 ) {
     for command in commands {
         match command {
             HalRenderPassCommand::SetBindGroup {
-                buffers: command_buffers,
                 textures: command_textures,
-                samplers: command_samplers,
                 ..
             } => {
-                buffers.extend(command_buffers.iter().cloned());
                 textures.extend(command_textures.iter().cloned());
-                samplers.extend(command_samplers.iter().cloned());
             }
             HalRenderPassCommand::ExecuteRenderBundle(bundle) => {
-                collect_vulkan_stream_bindings(&bundle.commands, buffers, textures, samplers);
+                collect_vulkan_stream_textures(&bundle.commands, textures);
             }
             _ => {}
         }
     }
 }
 
-fn vulkan_stream_query_set(pass: &HalRenderPass) -> Result<Option<&VulkanQuerySet>, HalError> {
+fn vulkan_stream_query_set(
+    pass: &HalRenderPassCommandStream,
+) -> Result<Option<&VulkanQuerySet>, HalError> {
     match &pass.occlusion_query_set {
         Some(HalQuerySet::Vulkan(query_set)) => Ok(Some(query_set)),
         Some(_) => Err(buffer_error("occlusion query set is not Vulkan-backed")),
@@ -3084,57 +2751,6 @@ fn prepare_vulkan_render_draw(
     Ok(())
 }
 
-fn vulkan_active_occlusion_query(
-    pass: &HalRenderPass,
-) -> Result<Option<(&VulkanQuerySet, u32)>, HalError> {
-    let Some(query_index) = pass.occlusion_query_index else {
-        return Ok(None);
-    };
-    let Some(query_set) = &pass.occlusion_query_set else {
-        return Err(buffer_error("active occlusion query has no query set"));
-    };
-    let HalQuerySet::Vulkan(query_set) = query_set else {
-        return Err(buffer_error("occlusion query set is not Vulkan-backed"));
-    };
-    query_set.validate_query(query_index)?;
-    Ok(Some((query_set, query_index)))
-}
-
-fn bind_render_index_buffer(
-    device: &ash::Device,
-    command_buffer: vk::CommandBuffer,
-    pass: &HalRenderPass,
-) -> Result<(), HalError> {
-    let bound = pass
-        .index_buffer
-        .as_ref()
-        .ok_or_else(|| buffer_error("render index buffer is missing"))?;
-    let crate::HalBuffer::Vulkan(buffer) = &bound.buffer else {
-        return Err(buffer_error("render index buffer is not Vulkan-backed"));
-    };
-    buffer.validate_range(bound.offset, bound.size)?;
-    unsafe {
-        device.cmd_bind_index_buffer(
-            command_buffer,
-            buffer.inner()?.buffer,
-            bound.offset,
-            vk_index_type(bound.format),
-        );
-    }
-    Ok(())
-}
-
-fn vulkan_indirect_buffer(pass: &HalRenderPass) -> Result<&VulkanBuffer, HalError> {
-    let bound = pass
-        .indirect_buffer
-        .as_ref()
-        .ok_or_else(|| buffer_error("render indirect buffer is missing"))?;
-    let crate::HalBuffer::Vulkan(buffer) = &bound.buffer else {
-        return Err(buffer_error("render indirect buffer is not Vulkan-backed"));
-    };
-    Ok(buffer)
-}
-
 fn vk_index_type(format: HalIndexFormat) -> vk::IndexType {
     match format {
         HalIndexFormat::Uint16 => vk::IndexType::UINT16,
@@ -3143,7 +2759,7 @@ fn vk_index_type(format: HalIndexFormat) -> vk::IndexType {
 }
 
 fn vulkan_render_color_textures(
-    pass: &HalRenderPass,
+    pass: &HalRenderPassCommandStream,
 ) -> Result<Vec<Option<&VulkanTexture>>, HalError> {
     pass.color_targets
         .iter()
@@ -3158,7 +2774,7 @@ fn vulkan_render_color_textures(
 }
 
 fn vulkan_render_resolve_textures(
-    pass: &HalRenderPass,
+    pass: &HalRenderPassCommandStream,
 ) -> Result<Vec<Option<&VulkanTexture>>, HalError> {
     pass.color_targets
         .iter()
@@ -3177,7 +2793,7 @@ fn vulkan_render_resolve_textures(
 }
 
 fn vulkan_render_depth_stencil_texture(
-    pass: &HalRenderPass,
+    pass: &HalRenderPassCommandStream,
 ) -> Result<Option<&VulkanTexture>, HalError> {
     pass.depth_stencil_attachment
         .as_ref()
@@ -3219,7 +2835,7 @@ fn render_pass_resolve_formats(
         .collect()
 }
 
-fn render_pass_clear_values(pass: &HalRenderPass) -> Vec<vk::ClearValue> {
+fn render_pass_clear_values(pass: &HalRenderPassCommandStream) -> Vec<vk::ClearValue> {
     let mut clear_values = Vec::new();
     for color in &pass.color_targets {
         let Some(color) = color else {
@@ -4089,8 +3705,9 @@ mod tests {
     use crate::{
         HalBoundExternalTexture, HalBoundIndexBuffer, HalBoundIndirectBuffer, HalBoundSampler,
         HalBoundTexture, HalBuffer, HalBufferUsage, HalComputeDispatch, HalComputePass,
-        HalComputePipeline, HalIndexFormat, HalRenderPass, HalSampler, HalShaderSource, HalTexture,
-        HalTextureComponentSwizzle, HalTextureViewDimension,
+        HalComputePipeline, HalIndexFormat, HalRenderPassCommand, HalRenderPassCommandStream,
+        HalSampler, HalShaderSource, HalTexture, HalTextureComponentSwizzle,
+        HalTextureViewDimension,
     };
     #[cfg(feature = "tiled")]
     use crate::{
@@ -4335,41 +3952,39 @@ mod tests {
                 .expect("plane1 texture inner"),
         );
         let sampler_inner = Arc::clone(sampler._inner.as_ref().expect("sampler inner"));
-        let pass = HalRenderPass {
-            pipeline: None,
+        let pass = HalRenderPassCommandStream {
             color_targets: Vec::new(),
             framebuffer_fetch_color_slots: Vec::new(),
             depth_stencil_attachment: None,
-            bind_buffers: Vec::new(),
-            bind_textures: vec![bound_texture(HalTexture::Vulkan(texture))],
-            bind_samplers: vec![bound_sampler(HalSampler::Vulkan(sampler))],
-            bind_external_textures: vec![bound_external_texture(
-                HalTexture::Vulkan(external_plane0),
-                HalTexture::Vulkan(external_plane1),
-                HalBuffer::Vulkan(params),
-            )],
-            vertex_buffers: Vec::new(),
-            index_buffer: Some(Box::new(HalBoundIndexBuffer {
-                buffer: HalBuffer::Vulkan(index),
-                format: HalIndexFormat::Uint16,
-                offset: 0,
-                size: 16,
-            })),
-            indirect_buffer: Some(Box::new(HalBoundIndirectBuffer {
-                buffer: HalBuffer::Vulkan(indirect),
-                offset: 0,
-            })),
-            viewport: None,
-            scissor_rect: None,
-            blend_constant: [0.0; 4],
-            stencil_reference: 0,
             occlusion_query_set: None,
-            occlusion_query_index: None,
-            draw: None,
-            immediate_data: Vec::new(),
+            commands: vec![
+                HalRenderPassCommand::SetBindGroup {
+                    index: 0,
+                    buffers: Vec::new(),
+                    textures: vec![bound_texture(HalTexture::Vulkan(texture))],
+                    samplers: vec![bound_sampler(HalSampler::Vulkan(sampler))],
+                    external_textures: vec![bound_external_texture(
+                        HalTexture::Vulkan(external_plane0),
+                        HalTexture::Vulkan(external_plane1),
+                        HalBuffer::Vulkan(params),
+                    )],
+                },
+                HalRenderPassCommand::SetIndexBuffer(HalBoundIndexBuffer {
+                    buffer: HalBuffer::Vulkan(index),
+                    format: HalIndexFormat::Uint16,
+                    offset: 0,
+                    size: 16,
+                }),
+                HalRenderPassCommand::DrawIndexedIndirect {
+                    indirect_buffer: HalBoundIndirectBuffer {
+                        buffer: HalBuffer::Vulkan(indirect),
+                        offset: 0,
+                    },
+                },
+            ],
         };
 
-        let retained = collect_retained_resources(&[HalCopy::RenderPass(pass)]);
+        let retained = collect_retained_resources(&[HalCopy::RenderPassCommandStream(pass)]);
 
         assert_eq!(retained_buffer_count(&retained, &index_inner), 1);
         assert_eq!(retained_buffer_count(&retained, &indirect_inner), 1);

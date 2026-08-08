@@ -1969,27 +1969,6 @@ pub(super) fn bind_render_descriptor_sets(
     }
 }
 
-/// Returns bind vertex buffers.
-pub(super) fn bind_vertex_buffers(
-    device: &ash::Device,
-    command_buffer: vk::CommandBuffer,
-    pass: &HalRenderPass,
-) -> Result<(), HalError> {
-    for bound in &pass.vertex_buffers {
-        let crate::HalBuffer::Vulkan(buffer) = &bound.buffer else {
-            return Err(buffer_error("vertex buffer is not Vulkan-backed"));
-        };
-        let inner = buffer.inner()?;
-        validate_bound_buffer_range(bound)?;
-        let buffers = [inner.buffer];
-        let offsets = [bound.offset];
-        unsafe {
-            device.cmd_bind_vertex_buffers(command_buffer, bound.binding, &buffers, &offsets);
-        }
-    }
-    Ok(())
-}
-
 /// Validates bound buffer range and returns a descriptive error on failure.
 pub(super) fn validate_bound_buffer_range(bound: &HalBoundBuffer) -> Result<(), HalError> {
     let crate::HalBuffer::Vulkan(buffer) = &bound.buffer else {
