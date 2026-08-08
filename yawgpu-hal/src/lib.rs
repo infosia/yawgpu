@@ -1122,15 +1122,14 @@ impl HalDevice {
         pass_layout: &HalSubpassPassLayout,
         subpass_index: u32,
     ) -> Result<HalRenderPipeline, HalError> {
-        #[cfg(not(any(feature = "gles", feature = "metal", feature = "vulkan")))]
+        // GLES is intentionally absent: its arm rejects without consuming these arguments.
+        #[cfg(not(any(feature = "metal", feature = "vulkan")))]
         let _ = (
             shader,
             vertex_entry_point,
             fragment_entry_point,
             descriptor,
             bindings,
-            pass_layout,
-            subpass_index,
         );
         let _ = (pass_layout, subpass_index);
         match self {
