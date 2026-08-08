@@ -52,13 +52,18 @@ pub unsafe extern "C" fn wgpuQueueOnSubmittedWorkDone(
     callback_info: native::WGPUQueueWorkDoneCallbackInfo,
 ) -> native::WGPUFuture {
     let queue = borrow_handle(queue, "WGPUQueue");
+    let submission_index = queue.core.latest_submission_index();
     queue
         .instance
-        .register_callback(PendingCallback::QueueWorkDone {
+        .register_submission_callback(PendingCallback::QueueWorkDone {
             mode: callback_info.mode,
             callback: callback_info.callback,
             device: Arc::clone(&queue.device),
             status: core::QueueWorkDoneStatus::Success,
+            gate: Some(SubmissionGate {
+                queue: queue.core.clone(),
+                submission_index,
+            }),
             userdata1: callback_info.userdata1 as usize,
             userdata2: callback_info.userdata2 as usize,
         })

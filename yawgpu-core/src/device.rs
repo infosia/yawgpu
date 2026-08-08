@@ -49,7 +49,7 @@ pub(crate) struct DeviceInner {
 
 impl Drop for DeviceInner {
     fn drop(&mut self) {
-        let _ = self.queue.flush_pending_writes();
+        let _ = self.queue.wait_idle();
     }
 }
 
@@ -202,7 +202,7 @@ impl Device {
     /// Marks the device as lost for the supplied reason.
     pub fn lose(&self, reason: DeviceLostReason) -> Option<DeviceLostReason> {
         if reason == DeviceLostReason::Destroyed {
-            if let Some(error) = self.inner.queue.flush_pending_writes() {
+            if let Some(error) = self.inner.queue.wait_idle() {
                 self.dispatch_error(error.kind, error.message);
             }
         }

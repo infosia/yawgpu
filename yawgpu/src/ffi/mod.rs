@@ -563,6 +563,12 @@ impl WGPUInstanceImpl {
         future
     }
 
+    fn register_submission_callback(&self, callback: PendingCallback) -> native::WGPUFuture {
+        let future = self.register_pending_callback(callback);
+        self.poll_submission_callbacks();
+        future
+    }
+
     fn register_pending_callback(&self, callback: PendingCallback) -> native::WGPUFuture {
         let future = self
             .core
@@ -586,7 +592,8 @@ impl WGPUInstanceImpl {
             .pending_callbacks
             .lock()
             .expect("pending callback lock is not poisoned");
-        for callback in callbacks.values_mut() {
+        let mut completed = Vec::new();
+        for (future_id, callback) in callbacks.iter_mut() {
             match callback {
                 PendingCallback::BufferMap {
                     device: callback_device,
@@ -598,6 +605,8 @@ impl WGPUInstanceImpl {
                         buffer.abort_pending_map();
                     }
                     *status = core::MapAsyncStatus::Aborted;
+                    callback.clear_submission_gate();
+                    completed.push(*future_id);
                 }
                 PendingCallback::QueueWorkDone {
                     device: callback_device,
@@ -605,13 +614,68 @@ impl WGPUInstanceImpl {
                     ..
                 } if callback_device.same(device) => {
                     *status = core::QueueWorkDoneStatus::Error;
+                    callback.clear_submission_gate();
+                    completed.push(*future_id);
                 }
                 _ => {}
             }
         }
+        drop(callbacks);
+        for future_id in completed {
+            self.complete_future(native::WGPUFuture { id: future_id });
+        }
+    }
+
+    fn poll_submission_callbacks(&self) {
+        let mut callbacks = self
+            .pending_callbacks
+            .lock()
+            .expect("pending callback lock is not poisoned");
+        let mut completed = Vec::new();
+        let mut errors = Vec::new();
+        let mut blocked_queues = Vec::new();
+
+        // Future ids increase monotonically and this map iterates in id order.
+        // A later gate on the same queue captures an equal or newer submission
+        // index. Once an earlier gate is observed incomplete, skipping later
+        // gates for that queue in this poll prevents a completion race between
+        // two HAL queries from reversing callback order (Block 96 Q21).
+        for (future_id, callback) in callbacks.iter_mut() {
+            let Some(gate) = callback.submission_gate() else {
+                continue;
+            };
+            if blocked_queues
+                .iter()
+                .any(|queue: &core::Queue| queue.same(&gate.queue))
+            {
+                continue;
+            }
+            match gate.queue.submission_complete(gate.submission_index) {
+                Ok(true) => {
+                    callback.clear_submission_gate();
+                    completed.push(*future_id);
+                }
+                Ok(false) => blocked_queues.push(gate.queue),
+                Err(error) => {
+                    if let Some(device) = callback.fail_submission_gate() {
+                        errors.push((device, error));
+                    }
+                    completed.push(*future_id);
+                }
+            }
+        }
+        drop(callbacks);
+
+        for future_id in completed {
+            self.complete_future(native::WGPUFuture { id: future_id });
+        }
+        for (device, error) in errors {
+            device.dispatch_error(error.kind, error.message);
+        }
     }
 
     fn process_callbacks(&self) -> usize {
+        self.poll_submission_callbacks();
         let ready = self.core.future_registry().process_events();
         let mut callbacks = self
             .pending_callbacks
@@ -633,6 +697,7 @@ impl WGPUInstanceImpl {
     }
 
     fn wait_any(&self, future_ids: &[core::FutureId]) -> core::WaitAnyResult {
+        self.poll_submission_callbacks();
         let result = self.core.future_registry().wait_any(future_ids);
 
         let mut callbacks = self
@@ -1372,6 +1437,13 @@ fn multisample_state_cache_key(
     }
 }
 
+#[derive(Clone)]
+/// Holds the queue timeline point that must complete before a callback.
+pub(crate) struct SubmissionGate {
+    queue: core::Queue,
+    submission_index: yawgpu_hal::SubmissionIndex,
+}
+
 /// Enumerates pending callback values.
 pub(crate) enum PendingCallback {
     /// Request adapter variant.
@@ -1429,6 +1501,8 @@ pub(crate) enum PendingCallback {
         buffer: Option<core::Buffer>,
         /// Status variant.
         status: core::MapAsyncStatus,
+        /// Queue-timeline gate for submissions preceding the map request.
+        gate: Option<SubmissionGate>,
         /// Userdata1 variant.
         userdata1: usize,
         /// Userdata2 variant.
@@ -1444,6 +1518,8 @@ pub(crate) enum PendingCallback {
         device: Arc<core::Device>,
         /// Status variant.
         status: core::QueueWorkDoneStatus,
+        /// Queue-timeline gate captured when the callback was registered.
+        gate: Option<SubmissionGate>,
         /// Userdata1 variant.
         userdata1: usize,
         /// Userdata2 variant.
@@ -1508,6 +1584,50 @@ pub(crate) enum PendingCallback {
 }
 
 impl PendingCallback {
+    fn submission_gate(&self) -> Option<SubmissionGate> {
+        match self {
+            Self::BufferMap { gate, .. } | Self::QueueWorkDone { gate, .. } => gate.clone(),
+            _ => None,
+        }
+    }
+
+    fn clear_submission_gate(&mut self) {
+        match self {
+            Self::BufferMap { gate, .. } | Self::QueueWorkDone { gate, .. } => *gate = None,
+            _ => {}
+        }
+    }
+
+    fn fail_submission_gate(&mut self) -> Option<Arc<core::Device>> {
+        match self {
+            Self::BufferMap {
+                device,
+                buffer,
+                status,
+                gate,
+                ..
+            } => {
+                if let Some(buffer) = buffer.as_ref() {
+                    buffer.abort_pending_map();
+                }
+                *status = core::MapAsyncStatus::Error;
+                *gate = None;
+                Some(Arc::clone(device))
+            }
+            Self::QueueWorkDone {
+                device,
+                status,
+                gate,
+                ..
+            } => {
+                *status = core::QueueWorkDoneStatus::Error;
+                *gate = None;
+                Some(Arc::clone(device))
+            }
+            _ => None,
+        }
+    }
+
     fn callback_mode(&self) -> core::FutureCallbackMode {
         let mode = match self {
             Self::RequestAdapter { mode, .. }
@@ -1604,7 +1724,7 @@ impl PendingCallback {
             }
             Self::BufferMap {
                 callback,
-                device,
+                device: _,
                 buffer,
                 status,
                 userdata1,
@@ -1612,23 +1732,14 @@ impl PendingCallback {
                 ..
             } => {
                 if let Some(callback) = callback {
-                    let wait_error = std::cell::RefCell::new(None);
-                    let status = buffer
-                        .as_ref()
-                        .map(|buffer| {
-                            buffer.resolve_pending_map_with_gpu_completion(|| {
-                                if let Some(error) = device.wait_idle() {
-                                    *wait_error.borrow_mut() = Some(error);
-                                    false
-                                } else {
-                                    true
-                                }
-                            })
-                        })
-                        .unwrap_or(status);
-                    if let Some(error) = wait_error.into_inner() {
-                        device.dispatch_error(error.kind, error.message);
-                    }
+                    let status = buffer.as_ref().map_or(status, |buffer| {
+                        let resolved = buffer.resolve_pending_map();
+                        if status == core::MapAsyncStatus::Success {
+                            resolved
+                        } else {
+                            status
+                        }
+                    });
                     callback(
                         map_map_async_status(status),
                         string_view(map_async_message(status).as_bytes()),
@@ -5472,10 +5583,140 @@ mod tests {
             let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
             let command_buffer = wgpuCommandEncoderFinish(encoder, std::ptr::null());
             wgpuQueueSubmit(queue, 1, &command_buffer);
+            let submitted_future = wgpuQueueOnSubmittedWorkDone(
+                queue,
+                native::WGPUQueueWorkDoneCallbackInfo {
+                    nextInChain: std::ptr::null_mut(),
+                    mode: native::WGPUCallbackMode_AllowProcessEvents,
+                    callback: Some(queue_work_done_callback),
+                    userdata1: (&mut state as *mut QueueWorkDoneState).cast(),
+                    userdata2: std::ptr::null_mut(),
+                },
+            );
+            assert_ne!(submitted_future.id, future.id);
+            wgpuInstanceProcessEvents(instance);
+            assert_eq!(state.fired, 2);
+            assert_eq!(state.status, native::WGPUQueueWorkDoneStatus_Success);
             wgpuCommandBufferRelease(command_buffer);
             wgpuCommandEncoderRelease(encoder);
             wgpuQueueRelease(queue);
             release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn submission_gate_and_timed_wait_any_hold_then_poll_until_completion() {
+        unsafe {
+            let (first_instance, first_adapter, first_device) = noop_chain();
+            let first_queue = wgpuDeviceGetQueue(first_device);
+            wgpuQueueSubmit(first_queue, 0, std::ptr::null());
+            let incomplete_index = borrow_handle(first_queue, "WGPUQueue")
+                .core
+                .latest_submission_index();
+
+            let instance = wgpuCreateInstance(std::ptr::null());
+            let adapter = request_noop_adapter(instance);
+            let device = request_noop_device(instance, adapter);
+            let queue = wgpuDeviceGetQueue(device);
+            let queue_impl = borrow_handle(queue, "WGPUQueue");
+            let queue_core = queue_impl.core.clone();
+            assert!(!queue_core.submission_complete(incomplete_index).unwrap());
+
+            let mut state = QueueWorkDoneState::default();
+            let callback = PendingCallback::QueueWorkDone {
+                mode: native::WGPUCallbackMode_AllowProcessEvents,
+                callback: Some(queue_work_done_callback),
+                device: Arc::clone(&queue_impl.device),
+                status: core::QueueWorkDoneStatus::Success,
+                gate: Some(SubmissionGate {
+                    queue: queue_core.clone(),
+                    submission_index: incomplete_index,
+                }),
+                userdata1: (&mut state as *mut QueueWorkDoneState) as usize,
+                userdata2: 0,
+            };
+            let future =
+                borrow_handle(instance, "WGPUInstance").register_submission_callback(callback);
+            wgpuInstanceProcessEvents(instance);
+            assert_eq!(state.fired, 0);
+
+            let submitting_queue = queue_core.clone();
+            let submitter = std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                assert_eq!(submitting_queue.submit(&[]), None);
+            });
+            let mut wait_info = native::WGPUFutureWaitInfo {
+                future,
+                completed: 0,
+            };
+            assert_eq!(
+                wgpuInstanceWaitAny(instance, 1, &mut wait_info, 1_000_000_000),
+                native::WGPUWaitStatus_Success
+            );
+            submitter.join().expect("submission thread must finish");
+            assert_eq!(wait_info.completed, 1);
+            assert_eq!(state.fired, 1);
+            assert_eq!(state.status, native::WGPUQueueWorkDoneStatus_Success);
+
+            wgpuQueueRelease(queue);
+            release_handles(instance, adapter, device);
+            wgpuQueueRelease(first_queue);
+            release_handles(first_instance, first_adapter, first_device);
+        }
+    }
+
+    #[test]
+    fn wgpuBufferMapAsync_error_callback_ignores_incomplete_submission_gate() {
+        unsafe {
+            let (first_instance, first_adapter, first_device) = noop_chain();
+            let first_queue = wgpuDeviceGetQueue(first_device);
+            wgpuQueueSubmit(first_queue, 0, std::ptr::null());
+            let incomplete_index = borrow_handle(first_queue, "WGPUQueue")
+                .core
+                .latest_submission_index();
+
+            let (instance, adapter, device) = noop_chain();
+            let queue = wgpuDeviceGetQueue(device);
+            let queue_impl = borrow_handle(queue, "WGPUQueue");
+            let queue_core = queue_impl.core.clone();
+            assert!(!queue_core.submission_complete(incomplete_index).unwrap());
+
+            let mut blocked_state = QueueWorkDoneState::default();
+            let blocked_callback = PendingCallback::QueueWorkDone {
+                mode: native::WGPUCallbackMode_AllowProcessEvents,
+                callback: Some(queue_work_done_callback),
+                device: Arc::clone(&queue_impl.device),
+                status: core::QueueWorkDoneStatus::Success,
+                gate: Some(SubmissionGate {
+                    queue: queue_core.clone(),
+                    submission_index: incomplete_index,
+                }),
+                userdata1: (&mut blocked_state as *mut QueueWorkDoneState) as usize,
+                userdata2: 0,
+            };
+            borrow_handle(instance, "WGPUInstance").register_submission_callback(blocked_callback);
+
+            let desc = buffer_descriptor(native::WGPUBufferUsage_MapRead, 16);
+            let buffer = wgpuDeviceCreateBuffer(device, &desc);
+            let mut map_state = BufferMapAsyncState::default();
+            let future = map_buffer_async(buffer, native::WGPUMapMode_Read, 1, 8, &mut map_state);
+            assert_ne!(future.id, 0);
+
+            wgpuInstanceProcessEvents(instance);
+            assert_eq!(blocked_state.fired, 0);
+            assert_eq!(map_state.fired, 1);
+            assert_eq!(map_state.status, native::WGPUMapAsyncStatus_Error);
+            assert_eq!(map_state.message, "Buffer map failed");
+
+            assert_eq!(queue_core.submit(&[]), None);
+            wgpuInstanceProcessEvents(instance);
+            assert_eq!(blocked_state.fired, 1);
+
+            wgpuBufferRelease(buffer);
+            wgpuQueueRelease(queue);
+            release_handles(instance, adapter, device);
+            wgpuQueueRelease(first_queue);
+            release_handles(first_instance, first_adapter, first_device);
         }
     }
 

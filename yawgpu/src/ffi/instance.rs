@@ -487,7 +487,18 @@ pub unsafe extern "C" fn wgpuInstanceWaitAny(
         .iter()
         .map(|info| core::FutureId::from_raw(info.future.id))
         .collect::<Vec<_>>();
-    let result = instance.wait_any(&future_ids);
+    let timeout = std::time::Duration::from_nanos(timeout_ns);
+    let started = std::time::Instant::now();
+    let result = loop {
+        let result = instance.wait_any(&future_ids);
+        if result.status != core::WaitAnyStatus::TimedOut
+            || timeout_ns == 0
+            || started.elapsed() >= timeout
+        {
+            break result;
+        }
+        std::thread::yield_now();
+    };
 
     for info in wait_infos {
         let id = core::FutureId::from_raw(info.future.id);

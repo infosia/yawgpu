@@ -55,51 +55,69 @@ pub unsafe extern "C" fn wgpuBufferMapAsync(
     callback_info: native::WGPUBufferMapCallbackInfo,
 ) -> native::WGPUFuture {
     let buffer = borrow_handle(buffer, "WGPUBuffer");
-    let map_result = validate_map_async(buffer, mode, offset, size);
-
-    let pending = match map_result {
+    match validate_map_async(buffer, mode, offset, size) {
         Ok((mode, offset, size)) => match buffer.core.begin_map(mode, offset, size) {
-            Ok(()) => PendingCallback::BufferMap {
-                mode: callback_info.mode,
-                callback: callback_info.callback,
-                device: Arc::clone(&buffer.device),
-                buffer: Some((*buffer.core).clone()),
-                status: core::MapAsyncStatus::Success,
-                userdata1: callback_info.userdata1 as usize,
-                userdata2: callback_info.userdata2 as usize,
-            },
+            Ok(()) => {
+                let queue = buffer.device.queue();
+                let mut status = core::MapAsyncStatus::Success;
+                if let Some(error) = queue.flush_pending_writes() {
+                    buffer.device.dispatch_error(error.kind, error.message);
+                    buffer.core.abort_pending_map();
+                    status = core::MapAsyncStatus::Error;
+                }
+                let submission_index = queue.latest_submission_index();
+                buffer
+                    .instance
+                    .register_submission_callback(PendingCallback::BufferMap {
+                        mode: callback_info.mode,
+                        callback: callback_info.callback,
+                        device: Arc::clone(&buffer.device),
+                        buffer: Some((*buffer.core).clone()),
+                        status,
+                        gate: Some(SubmissionGate {
+                            queue,
+                            submission_index,
+                        }),
+                        userdata1: callback_info.userdata1 as usize,
+                        userdata2: callback_info.userdata2 as usize,
+                    })
+            }
             Err(message) => {
                 buffer
                     .device
                     .dispatch_error(core::ErrorKind::Validation, message);
-                PendingCallback::BufferMap {
-                    mode: callback_info.mode,
-                    callback: callback_info.callback,
-                    device: Arc::clone(&buffer.device),
-                    buffer: None,
-                    status: core::MapAsyncStatus::Error,
-                    userdata1: callback_info.userdata1 as usize,
-                    userdata2: callback_info.userdata2 as usize,
-                }
+                buffer
+                    .instance
+                    .register_callback(PendingCallback::BufferMap {
+                        mode: callback_info.mode,
+                        callback: callback_info.callback,
+                        device: Arc::clone(&buffer.device),
+                        buffer: None,
+                        status: core::MapAsyncStatus::Error,
+                        gate: None,
+                        userdata1: callback_info.userdata1 as usize,
+                        userdata2: callback_info.userdata2 as usize,
+                    })
             }
         },
         Err(message) => {
             buffer
                 .device
                 .dispatch_error(core::ErrorKind::Validation, message);
-            PendingCallback::BufferMap {
-                mode: callback_info.mode,
-                callback: callback_info.callback,
-                device: Arc::clone(&buffer.device),
-                buffer: None,
-                status: core::MapAsyncStatus::Error,
-                userdata1: callback_info.userdata1 as usize,
-                userdata2: callback_info.userdata2 as usize,
-            }
+            buffer
+                .instance
+                .register_callback(PendingCallback::BufferMap {
+                    mode: callback_info.mode,
+                    callback: callback_info.callback,
+                    device: Arc::clone(&buffer.device),
+                    buffer: None,
+                    status: core::MapAsyncStatus::Error,
+                    gate: None,
+                    userdata1: callback_info.userdata1 as usize,
+                    userdata2: callback_info.userdata2 as usize,
+                })
         }
-    };
-
-    buffer.instance.register_callback(pending)
+    }
 }
 
 /// Returns a mutable pointer to a mapped buffer range, or null on misuse.

@@ -9,7 +9,7 @@ use yawgpu_hal::{
     HalComputePass, HalCopy, HalDevice, HalDraw, HalIndexFormat, HalQueue, HalRenderColorTarget,
     HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass, HalResolveQuerySet,
     HalScissorRect, HalTextureAspect, HalTextureClear, HalTextureComponentSwizzle, HalTextureCopy,
-    HalTextureViewDimension, HalViewport,
+    HalTextureViewDimension, HalViewport, SubmissionIndex,
 };
 #[cfg(feature = "tiled")]
 use yawgpu_hal::{
@@ -47,6 +47,7 @@ pub struct Queue {
 pub(crate) struct QueueInner {
     pub(crate) hal: HalQueue,
     pub(crate) label: Mutex<String>,
+    latest_submission_index: Mutex<SubmissionIndex>,
     pending_writes: Mutex<PendingWriteBatch>,
 }
 
@@ -65,18 +66,22 @@ struct StagingChunk {
     cursor: u64,
 }
 
+#[derive(Debug)]
+struct InFlightStagingChunk {
+    submission_index: SubmissionIndex,
+    buffer: HalBuffer,
+}
+
 #[derive(Debug, Default)]
 struct PendingWriteBatch {
     copies: Vec<HalCopy>,
     chunks: Vec<StagingChunk>,
     current_chunk: Option<usize>,
-    /// Chunks consumed by a submission that has not been proven complete.
-    /// Reusing one would let the host overwrite bytes the GPU may still be
-    /// reading, and submission is asynchronous on Vulkan (fence + retire
-    /// ring). They move to `free_chunks` only once the queue is known idle.
-    /// Slice B of Block 96 replaces this with completion-indexed recycling
-    /// (rule Q17), at which point the drain no longer needs a full wait.
-    in_flight: Vec<HalBuffer>,
+    /// Standard-size chunks consumed by submissions that have not yet been
+    /// proven complete. Each chunk moves to `free_chunks` when the queue's
+    /// completed submission index reaches its key. If completion polling
+    /// fails after device loss, the chunks remain retained until queue drop.
+    in_flight: Vec<InFlightStagingChunk>,
     /// Chunks proven free for reuse, all of exactly `STAGING_CHUNK_SIZE`.
     free_chunks: Vec<HalBuffer>,
 }
@@ -182,24 +187,34 @@ impl PendingWriteBatch {
     /// oversized buffers are dropped instead of pooled: they are allocated
     /// for one write of one exact size, so pooling them would grow an
     /// unbounded cache that almost never produces a hit.
-    fn retire(&mut self, chunks: Vec<StagingChunk>) {
+    fn retire(&mut self, submission_index: SubmissionIndex, chunks: Vec<StagingChunk>) {
         self.in_flight.extend(
             chunks
                 .into_iter()
                 .map(|chunk| chunk.buffer)
-                .filter(|buffer| buffer.size() == STAGING_CHUNK_SIZE),
+                .filter(|buffer| buffer.size() == STAGING_CHUNK_SIZE)
+                .map(|buffer| InFlightStagingChunk {
+                    submission_index,
+                    buffer,
+                }),
         );
     }
 
-    /// Moves in-flight chunks into the reuse pool. The caller must have
-    /// established that the queue is idle, so nothing the GPU still reads is
-    /// handed back out. Anything over `MAX_FREE_STAGING_CHUNKS` is dropped.
-    fn drain_in_flight(&mut self) {
-        for buffer in std::mem::take(&mut self.in_flight) {
-            if self.free_chunks.len() < MAX_FREE_STAGING_CHUNKS {
-                self.free_chunks.push(buffer);
+    /// Recycles chunks whose consuming submission is known complete. Chunks
+    /// after `completed_submission_index` remain retained and cannot be
+    /// overwritten by a later queue write. Anything over the pool cap drops.
+    fn recycle_completed(&mut self, completed_submission_index: SubmissionIndex) {
+        let mut still_in_flight = Vec::with_capacity(self.in_flight.len());
+        for chunk in std::mem::take(&mut self.in_flight) {
+            if chunk.submission_index <= completed_submission_index {
+                if self.free_chunks.len() < MAX_FREE_STAGING_CHUNKS {
+                    self.free_chunks.push(chunk.buffer);
+                }
+            } else {
+                still_in_flight.push(chunk);
             }
         }
+        self.in_flight = still_in_flight;
     }
 
     #[cfg(test)]
@@ -261,6 +276,7 @@ impl Queue {
             inner: Arc::new(QueueInner {
                 hal,
                 label: Mutex::new(label.into()),
+                latest_submission_index: Mutex::new(SubmissionIndex::NONE),
                 pending_writes: Mutex::new(PendingWriteBatch::default()),
             }),
         }
@@ -281,6 +297,56 @@ impl Queue {
     #[must_use]
     pub fn label(&self) -> String {
         self.inner.label.lock().clone()
+    }
+
+    /// Returns true when both handles share the same queue timeline.
+    #[must_use]
+    pub fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    /// Returns the index of the most recently successful submission.
+    #[must_use]
+    pub fn latest_submission_index(&self) -> SubmissionIndex {
+        *self.inner.latest_submission_index.lock()
+    }
+
+    /// Reports whether `submission_index` has completed without blocking.
+    ///
+    /// This also recycles staging chunks whose consuming submissions are now
+    /// complete. An index from another queue is not complete unless this
+    /// queue's own completed timeline has reached the same numeric value.
+    pub fn submission_complete(
+        &self,
+        submission_index: SubmissionIndex,
+    ) -> Result<bool, DeviceError> {
+        let completed = self
+            .inner
+            .hal
+            .completed_submission_index()
+            .map_err(device_error_from_hal)?;
+        self.inner
+            .pending_writes
+            .lock()
+            .recycle_completed(completed);
+        Ok(submission_index <= completed)
+    }
+
+    /// Blocks until `submission_index` completes and recycles staging chunks
+    /// consumed at or before that point.
+    pub fn wait_for_submission(
+        &self,
+        submission_index: SubmissionIndex,
+    ) -> Result<(), DeviceError> {
+        self.inner
+            .hal
+            .wait_for_submission(submission_index)
+            .map_err(device_error_from_hal)?;
+        self.inner
+            .pending_writes
+            .lock()
+            .recycle_completed(submission_index);
+        Ok(())
     }
 
     /// Writes `data` into the buffer at `offset` using a staging buffer copy.
@@ -332,6 +398,7 @@ impl Queue {
             ));
         };
 
+        self.recycle_completed_staging();
         let mut pending = self.inner.pending_writes.lock();
         let (source, source_offset) = match pending.stage(device, data, size, 4) {
             Ok(staged) => staged,
@@ -357,11 +424,11 @@ impl Queue {
             .err()
             .map(|error| DeviceError::internal(error.to_string()));
         if wait_error.is_none() {
-            // The queue is idle, so no staging chunk handed to a submission
-            // can still be read by the GPU. This is the only point that
-            // establishes that, and therefore the only place chunks may
-            // re-enter the reuse pool.
-            self.inner.pending_writes.lock().drain_in_flight();
+            let completed = self.latest_submission_index();
+            self.inner
+                .pending_writes
+                .lock()
+                .recycle_completed(completed);
         }
         flush_error.or(wait_error)
     }
@@ -482,6 +549,7 @@ impl Queue {
                     "queue write texture has no HAL texture",
                 ));
             };
+            self.recycle_completed_staging();
             let mut pending = self.inner.pending_writes.lock();
             let (staging, staging_offset) =
                 match pending.stage(device, &repacked, repacked_size, block_size.max(4)) {
@@ -528,6 +596,7 @@ impl Queue {
                 "queue write texture has no HAL texture",
             ));
         };
+        self.recycle_completed_staging();
         let mut pending = self.inner.pending_writes.lock();
         let (staging, staging_offset) =
             match pending.stage(device, data, data_size, block_size.max(4)) {
@@ -657,8 +726,7 @@ impl Queue {
                 self.inner.hal.submit_empty()
             } else {
                 self.inner.hal.submit_copies(&copies)
-            }
-            .map(|_| ());
+            };
             return self.finish_pending_submission(chunks, result);
         }
         let PendingWriteSubmission { mut copies, chunks } = self.take_pending_writes();
@@ -669,17 +737,20 @@ impl Queue {
         for (op_index, op) in all_ops.iter().enumerate() {
             append_hal_command_execution(&mut copies, op, &all_ops[..=op_index]);
         }
-        let result = self.inner.hal.submit_copies(&copies).map(|_| ());
+        let result = self.inner.hal.submit_copies(&copies);
         self.finish_pending_submission(chunks, result)
     }
 
-    pub(crate) fn flush_pending_writes(&self) -> Option<DeviceError> {
+    /// Submits all deferred queue writes and records their submission index.
+    ///
+    /// If there are no deferred writes, this does not create an empty HAL
+    /// submission and leaves the latest index unchanged.
+    pub fn flush_pending_writes(&self) -> Option<DeviceError> {
         let PendingWriteSubmission { copies, chunks } = self.take_pending_writes();
         if copies.is_empty() {
-            self.inner.pending_writes.lock().retire(chunks);
             return None;
         }
-        let result = self.inner.hal.submit_copies(&copies).map(|_| ());
+        let result = self.inner.hal.submit_copies(&copies);
         self.finish_pending_submission(chunks, result)
     }
 
@@ -690,14 +761,34 @@ impl Queue {
     fn finish_pending_submission(
         &self,
         chunks: Vec<StagingChunk>,
-        result: Result<(), yawgpu_hal::HalError>,
+        result: Result<SubmissionIndex, yawgpu_hal::HalError>,
     ) -> Option<DeviceError> {
         match result {
-            Ok(()) => {
-                self.inner.pending_writes.lock().retire(chunks);
+            Ok(submission_index) => {
+                self.record_submission(submission_index);
+                self.inner
+                    .pending_writes
+                    .lock()
+                    .retire(submission_index, chunks);
                 None
             }
             Err(error) => Some(DeviceError::internal(error.to_string())),
+        }
+    }
+
+    fn record_submission(&self, submission_index: SubmissionIndex) {
+        let mut latest = self.inner.latest_submission_index.lock();
+        if submission_index > *latest {
+            *latest = submission_index;
+        }
+    }
+
+    fn recycle_completed_staging(&self) {
+        if let Ok(completed) = self.inner.hal.completed_submission_index() {
+            self.inner
+                .pending_writes
+                .lock()
+                .recycle_completed(completed);
         }
     }
 }
@@ -706,9 +797,21 @@ impl Drop for QueueInner {
     fn drop(&mut self) {
         let pending = self.pending_writes.get_mut().take_submission();
         if !pending.copies.is_empty() {
-            let _ = self.hal.submit_copies(&pending.copies);
+            if let Ok(submission_index) = self.hal.submit_copies(&pending.copies) {
+                let latest = self.latest_submission_index.get_mut();
+                if submission_index > *latest {
+                    *latest = submission_index;
+                }
+            }
         }
+        let _ = self
+            .hal
+            .wait_for_submission(*self.latest_submission_index.get_mut());
     }
+}
+
+fn device_error_from_hal(error: yawgpu_hal::HalError) -> DeviceError {
+    DeviceError::internal(error.to_string())
 }
 
 fn device_error_from_staging(error: yawgpu_hal::HalError) -> DeviceError {
@@ -3284,6 +3387,57 @@ fn fs() -> @location(0) vec4<f32> {
     }
 
     #[test]
+    fn queue_submission_gate_holds_back_an_incomplete_index() {
+        let submitted_device = noop_device();
+        let submitted_queue = submitted_device.queue();
+        assert_eq!(
+            submitted_queue.latest_submission_index(),
+            SubmissionIndex::NONE
+        );
+        assert_eq!(submitted_queue.submit(&[]), None);
+        let submitted_index = submitted_queue.latest_submission_index();
+        assert!(submitted_index > SubmissionIndex::NONE);
+        assert!(submitted_queue
+            .submission_complete(submitted_index)
+            .unwrap());
+        assert_eq!(submitted_queue.wait_for_submission(submitted_index), Ok(()));
+
+        let idle_device = noop_device();
+        let idle_queue = idle_device.queue();
+        assert!(idle_queue.same(&idle_device.queue()));
+        assert!(!idle_queue.same(&submitted_queue));
+        assert!(!idle_queue.submission_complete(submitted_index).unwrap());
+        assert_eq!(
+            idle_queue.wait_for_submission(SubmissionIndex::NONE),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn queue_flush_pending_writes_records_the_flush_submission() {
+        let device = noop_device();
+        let queue = device.queue();
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 4,
+            mapped_at_creation: false,
+        });
+
+        assert_eq!(
+            queue.write_buffer(QueueBufferWrite {
+                device: device.hal(),
+                buffer: &buffer,
+                offset: 0,
+                data: &[1, 2, 3, 4],
+            }),
+            None
+        );
+        assert_eq!(queue.latest_submission_index(), SubmissionIndex::NONE);
+        assert_eq!(queue.flush_pending_writes(), None);
+        assert!(queue.latest_submission_index() > SubmissionIndex::NONE);
+    }
+
+    #[test]
     fn queue_write_buffer_then_map_without_submit_flushes_before_readback() {
         let device = noop_device();
         let queue = device.queue();
@@ -3315,11 +3469,10 @@ fn fs() -> @location(0) vec4<f32> {
         assert_eq!(buffer.unmap(), None);
     }
 
-    /// Q5/Q17: a chunk consumed by a submission may not be reused until the
-    /// queue is known idle, and once it is, it must actually be reused —
-    /// otherwise the bound added for the leak would silently disable pooling.
+    /// Q5/Q17: a chunk consumed by a submission may not be reused until its
+    /// index completes, and then it must be reusable without a full idle wait.
     #[test]
-    fn queue_staging_chunk_is_reused_only_after_wait_idle() {
+    fn queue_staging_chunk_is_reused_after_its_submission_completes() {
         let device = noop_device();
         let queue = device.queue();
         let buffer = device.create_buffer(BufferDescriptor {
@@ -3347,7 +3500,8 @@ fn fs() -> @location(0) vec4<f32> {
         // Submitted: in flight, and explicitly *not* yet available for reuse.
         assert_eq!(queue.inner.pending_writes.lock().pool_sizes(), (1, 0));
 
-        assert_eq!(queue.wait_idle(), None);
+        let submission_index = queue.latest_submission_index();
+        assert!(queue.submission_complete(submission_index).unwrap());
         assert_eq!(queue.inner.pending_writes.lock().pool_sizes(), (0, 1));
 
         // The pooled chunk is taken rather than a fresh one allocated.
