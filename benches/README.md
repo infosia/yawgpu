@@ -27,7 +27,9 @@ as a benchmark win.
 
 ## Build
 
-yawgpu (requires the backend feature to be compiled in):
+yawgpu (requires the backend feature to be compiled in — `metal` on macOS,
+`vulkan` on Windows and Linux; the CMake side only locates the built library, it
+does not run Cargo):
 
 ```sh
 cargo build -p yawgpu --release --features metal
@@ -45,6 +47,20 @@ cmake -S benches -B benches/build-dawn -DBENCH_BACKEND=dawn \
 cmake --build benches/build-dawn -j8
 ```
 
+On Windows the default generator is multi-config, so the configuration belongs
+on the build step rather than in `CMAKE_BUILD_TYPE`, and the binary lands in a
+`Release/` subdirectory:
+
+```pwsh
+cargo build -p yawgpu --release --features vulkan
+cmake -S benches -B benches/build-yawgpu -DBENCH_BACKEND=yawgpu
+cmake --build benches/build-yawgpu --config Release
+.\benches\build-yawgpu\Release\bench.exe
+```
+
+Both backends are discovered under a multi-config Dawn build too. Set
+`-DBENCH_DAWN_LIB=` explicitly only if the search misses a bespoke layout.
+
 ## Run
 
 ```sh
@@ -56,7 +72,14 @@ cmake --build benches/build-dawn -j8
 ```
 
 `YAWGPU_BENCH_BACKEND=metal|vulkan|gles` selects the backend for either binary,
-mirroring the CTS harness's `CTS_YAWGPU_BACKEND` / `CTS_DAWN_BACKEND`.
+mirroring the CTS harness's `CTS_YAWGPU_BACKEND` / `CTS_DAWN_BACKEND`. There is
+no D3D12 selector, so a Dawn build on Windows has to expose a working Vulkan
+adapter to be comparable.
+
+The runtime DLLs (`yawgpu.dll` plus `tint_shim.dll`, or `webgpu_dawn.dll`) are
+copied next to `bench.exe` at build time, since Windows has no rpath. If the
+configure step warned that one could not be found, `bench.exe` exits with
+`0xC0000135` and no output until its directory is added to `PATH`.
 
 To compare two TSV runs:
 

@@ -53,12 +53,26 @@ elseif(BENCH_BACKEND STREQUAL "dawn")
     if(BENCH_DAWN_LIB)
         set(BENCH_LIB "${BENCH_DAWN_LIB}")
     else()
+        set(BENCH_DAWN_LIB_DIRS
+            "${BENCH_DAWN_BUILD_DIR}/src/dawn/native"
+            "${BENCH_DAWN_BUILD_DIR}/src/dawn"
+            "${BENCH_DAWN_BUILD_DIR}"
+        )
+        # A multi-config generator (Visual Studio, Xcode) writes the library into
+        # a per-configuration subdirectory of the directory a single-config
+        # generator writes it into directly. Search both layouts, preferring a
+        # Release Dawn since the benchmark itself defaults to Release.
+        foreach(config Release RelWithDebInfo MinSizeRel Debug)
+            list(APPEND BENCH_DAWN_LIB_DIRS
+                "${BENCH_DAWN_BUILD_DIR}/src/dawn/native/${config}"
+                "${BENCH_DAWN_BUILD_DIR}/src/dawn/${config}"
+                "${BENCH_DAWN_BUILD_DIR}/${config}"
+            )
+        endforeach()
+
         find_library(DAWN_WEBGPU_LIB
             NAMES webgpu_dawn
-            PATHS
-                "${BENCH_DAWN_BUILD_DIR}/src/dawn/native"
-                "${BENCH_DAWN_BUILD_DIR}/src/dawn"
-                "${BENCH_DAWN_BUILD_DIR}"
+            PATHS ${BENCH_DAWN_LIB_DIRS}
             NO_DEFAULT_PATH
         )
         set(BENCH_LIB "${DAWN_WEBGPU_LIB}")
@@ -77,6 +91,55 @@ add_executable(bench src/main.cpp ${BENCH_BACKEND_SOURCE})
 target_include_directories(bench PRIVATE ${BENCH_HEADER_DIR} src)
 target_compile_definitions(bench PRIVATE ${BENCH_BACKEND_DEFINE})
 target_link_libraries(bench PRIVATE "${BENCH_LIB}")
+
+if(WIN32)
+    # bench.exe links an import library and Windows has no rpath, so every
+    # runtime DLL must sit next to the executable. Without this the loader
+    # aborts the process before main with 0xC0000135 and no diagnostic, and the
+    # only workaround is putting the cargo target dir (or Dawn's build dir) on
+    # PATH by hand. Mirrors examples/CMakeLists.txt's POST_BUILD copy.
+    get_filename_component(BENCH_LIB_DIR "${BENCH_LIB}" DIRECTORY)
+    set(BENCH_RUNTIME_DIRS "${BENCH_LIB_DIR}")
+
+    if(BENCH_BACKEND STREQUAL "dawn")
+        # webgpu_dawn.dll lands at the build root (under the per-configuration
+        # subdirectory for a multi-config generator), not beside its import
+        # library in src/dawn/native.
+        list(APPEND BENCH_RUNTIME_DIRS "${BENCH_DAWN_BUILD_DIR}")
+        foreach(config Release RelWithDebInfo MinSizeRel Debug)
+            list(APPEND BENCH_RUNTIME_DIRS "${BENCH_DAWN_BUILD_DIR}/${config}")
+        endforeach()
+        set(BENCH_RUNTIME_DLLS webgpu_dawn.dll)
+        set(BENCH_OPTIONAL_DLLS)
+    else()
+        # The default Tint-linked yawgpu.dll loads tint_shim.dll at startup;
+        # yawgpu-tint's build.rs places it beside yawgpu.dll. A non-Tint stub
+        # build produces no shim, so that one is optional.
+        set(BENCH_RUNTIME_DLLS yawgpu.dll)
+        set(BENCH_OPTIONAL_DLLS tint_shim.dll)
+    endif()
+
+    foreach(dll ${BENCH_RUNTIME_DLLS} ${BENCH_OPTIONAL_DLLS})
+        set(BENCH_FOUND_DLL "")
+        foreach(dir ${BENCH_RUNTIME_DIRS})
+            if(NOT BENCH_FOUND_DLL AND EXISTS "${dir}/${dll}")
+                set(BENCH_FOUND_DLL "${dir}/${dll}")
+            endif()
+        endforeach()
+
+        if(BENCH_FOUND_DLL)
+            add_custom_command(TARGET bench POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${BENCH_FOUND_DLL}" "$<TARGET_FILE_DIR:bench>"
+                VERBATIM
+            )
+            message(STATUS "bench runtime: ${BENCH_FOUND_DLL}")
+        elseif(dll IN_LIST BENCH_RUNTIME_DLLS)
+            message(WARNING "Could not find ${dll} near ${BENCH_LIB}; bench.exe "
+                            "will not start unless its directory is on PATH")
+        endif()
+    endforeach()
+endif()
 
 if(APPLE)
     # libyawgpu.dylib carries an @rpath install_name and loads the Tint shim
