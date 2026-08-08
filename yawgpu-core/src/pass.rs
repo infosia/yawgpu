@@ -9,6 +9,7 @@ use crate::buffer::*;
 use crate::command_encoder::*;
 use crate::compute_pipeline::*;
 use crate::extent::*;
+use crate::identity_hash::IdentityBuildHasher;
 use crate::limits::*;
 use crate::query_set::*;
 use crate::render_pipeline::*;
@@ -32,6 +33,14 @@ pub(crate) struct PassEncoderState {
     pub(crate) compute_pipeline: Option<Arc<ComputePipeline>>,
     pub(crate) limits: Limits,
     pub(crate) bind_groups: BTreeMap<u32, BoundBindGroup>,
+    // This cache is invalidated by every pipeline/bind-group identity change:
+    // RenderPassEncoder, ComputePassEncoder, and RenderBundleEncoder
+    // set_pipeline/set_bind_group call the mutation helpers below, while
+    // RenderPassEncoder::execute_bundles calls clear_render_state because
+    // bundle replay invalidates all outer render bindings. Rebinding the exact
+    // same immutable object does not change the compatibility input; dynamic
+    // offsets are deliberately excluded and remain draw-time validated.
+    pub(crate) pipeline_bind_group_compatibility_dirty: bool,
     pub(crate) vertex_buffers: BTreeMap<u32, BoundVertexBuffer>,
     pub(crate) index_buffer: Option<BoundIndexBuffer>,
     pub(crate) viewport: Option<Viewport>,
@@ -103,6 +112,7 @@ impl PassEncoderState {
             compute_pipeline: None,
             limits,
             bind_groups: BTreeMap::new(),
+            pipeline_bind_group_compatibility_dirty: true,
             vertex_buffers: BTreeMap::new(),
             index_buffer: None,
             viewport: None,
@@ -140,8 +150,48 @@ impl PassEncoderState {
     pub(crate) fn clear_render_state(&mut self) {
         self.render_pipeline = None;
         self.bind_groups.clear();
+        self.pipeline_bind_group_compatibility_dirty = true;
         self.vertex_buffers.clear();
         self.index_buffer = None;
+    }
+
+    pub(crate) fn set_render_pipeline(&mut self, pipeline: Arc<RenderPipeline>) {
+        if self
+            .render_pipeline
+            .as_ref()
+            .is_none_or(|current| !Arc::ptr_eq(current, &pipeline))
+        {
+            self.pipeline_bind_group_compatibility_dirty = true;
+        }
+        self.render_pipeline = Some(pipeline);
+    }
+
+    pub(crate) fn set_compute_pipeline(&mut self, pipeline: Arc<ComputePipeline>) {
+        if self
+            .compute_pipeline
+            .as_ref()
+            .is_none_or(|current| !Arc::ptr_eq(current, &pipeline))
+        {
+            self.pipeline_bind_group_compatibility_dirty = true;
+        }
+        self.compute_pipeline = Some(pipeline);
+    }
+
+    pub(crate) fn set_bind_group(&mut self, index: u32, bound: BoundBindGroup) {
+        if self
+            .bind_groups
+            .get(&index)
+            .is_none_or(|current| !Arc::ptr_eq(&current.group, &bound.group))
+        {
+            self.pipeline_bind_group_compatibility_dirty = true;
+        }
+        self.bind_groups.insert(index, bound);
+    }
+
+    pub(crate) fn clear_bind_group(&mut self, index: u32) {
+        if self.bind_groups.remove(&index).is_some() {
+            self.pipeline_bind_group_compatibility_dirty = true;
+        }
     }
 
     /// Sets attachment texture usages for render-pass scope validation.
@@ -162,8 +212,10 @@ impl PassEncoderState {
 // in the scope history, so an address cannot be reused while its key exists.
 #[derive(Debug, Default)]
 struct LenientUsageScopeIndex {
-    buffer_accesses: HashMap<usize, ResourceAccess>,
-    texture_uses_by_identity: HashMap<usize, Vec<TextureScopeUse>>,
+    buffer_accesses: HashMap<usize, ResourceAccess, IdentityBuildHasher>,
+    texture_uses_by_identity: HashMap<usize, Vec<TextureScopeUse>, IdentityBuildHasher>,
+    batch_buffer_accesses: HashMap<usize, ResourceAccess, IdentityBuildHasher>,
+    batch_texture_uses_by_identity: HashMap<usize, Vec<TextureScopeUse>, IdentityBuildHasher>,
 }
 
 impl LenientUsageScopeIndex {
@@ -172,76 +224,79 @@ impl LenientUsageScopeIndex {
         buffer_uses: &[BufferScopeUse],
         texture_uses: &[TextureScopeUse],
     ) -> Result<(), String> {
-        let new_buffer_accesses = self.validate_buffer_uses(buffer_uses)?;
-        let new_texture_uses = self.validate_texture_uses(texture_uses)?;
+        self.batch_buffer_accesses.clear();
+        self.batch_texture_uses_by_identity.clear();
 
-        for (identity, access) in new_buffer_accesses {
-            self.buffer_accesses.entry(identity).or_insert(access);
-        }
-        for (identity, new_uses) in new_texture_uses {
-            let bucket = self.texture_uses_by_identity.entry(identity).or_default();
-            bucket.extend(new_uses);
-        }
-        Ok(())
-    }
-
-    fn validate_buffer_uses(
-        &self,
-        buffer_uses: &[BufferScopeUse],
-    ) -> Result<HashMap<usize, ResourceAccess>, String> {
-        let mut new_accesses = HashMap::new();
-        for current in buffer_uses {
-            let identity = buffer_identity(current);
-            if self
-                .buffer_accesses
-                .get(&identity)
-                .is_some_and(|previous| *previous != current.access)
-                || new_accesses
+        let result = (|| {
+            for current in buffer_uses {
+                let identity = buffer_identity(current);
+                if self
+                    .buffer_accesses
                     .get(&identity)
                     .is_some_and(|previous| *previous != current.access)
-            {
-                return Err(
-                    "usage scope cannot read and write or write the same buffer range twice"
-                        .to_owned(),
-                );
+                    || self
+                        .batch_buffer_accesses
+                        .get(&identity)
+                        .is_some_and(|previous| *previous != current.access)
+                {
+                    return Err(
+                        "usage scope cannot read and write or write the same buffer range twice"
+                            .to_owned(),
+                    );
+                }
+                self.batch_buffer_accesses
+                    .entry(identity)
+                    .or_insert(current.access);
             }
-            new_accesses.entry(identity).or_insert(current.access);
-        }
-        Ok(new_accesses)
-    }
 
-    fn validate_texture_uses(
-        &self,
-        texture_uses: &[TextureScopeUse],
-    ) -> Result<HashMap<usize, Vec<TextureScopeUse>>, String> {
-        let mut new_uses_by_identity: HashMap<usize, Vec<TextureScopeUse>> = HashMap::new();
-        for current in texture_uses {
-            let identity = texture_identity(current);
-            let accumulated_bucket = self.texture_uses_by_identity.get(&identity);
-            if let Some(bucket) = accumulated_bucket {
-                for previous in bucket {
+            for current in texture_uses {
+                let identity = texture_identity(current);
+                let accumulated_bucket = self.texture_uses_by_identity.get(&identity);
+                if let Some(bucket) = accumulated_bucket {
+                    for previous in bucket {
+                        validate_texture_usage_pair_lenient(current, previous)?;
+                    }
+                }
+
+                let new_bucket = self
+                    .batch_texture_uses_by_identity
+                    .entry(identity)
+                    .or_default();
+                for previous in new_bucket.iter() {
                     validate_texture_usage_pair_lenient(current, previous)?;
+                }
+
+                let matches_accumulated = accumulated_bucket.is_some_and(|bucket| {
+                    bucket
+                        .iter()
+                        .any(|previous| texture_scope_uses_identical(current, previous))
+                });
+                let matches_new = new_bucket
+                    .iter()
+                    .any(|previous| texture_scope_uses_identical(current, previous));
+                if !matches_accumulated && !matches_new {
+                    new_bucket.push(current.clone());
                 }
             }
 
-            let new_bucket = new_uses_by_identity.entry(identity).or_default();
-            for previous in new_bucket.iter() {
-                validate_texture_usage_pair_lenient(current, previous)?;
+            for (identity, access) in self.batch_buffer_accesses.drain() {
+                self.buffer_accesses.entry(identity).or_insert(access);
             }
+            for (identity, new_uses) in self.batch_texture_uses_by_identity.drain() {
+                self.texture_uses_by_identity
+                    .entry(identity)
+                    .or_default()
+                    .extend(new_uses);
+            }
+            Ok(())
+        })();
 
-            let matches_accumulated = accumulated_bucket.is_some_and(|bucket| {
-                bucket
-                    .iter()
-                    .any(|previous| texture_scope_uses_identical(current, previous))
-            });
-            let matches_new = new_bucket
-                .iter()
-                .any(|previous| texture_scope_uses_identical(current, previous));
-            if !matches_accumulated && !matches_new {
-                new_bucket.push(current.clone());
-            }
-        }
-        Ok(new_uses_by_identity)
+        // A rejected batch must never participate in the next call. These
+        // clears are intentionally unconditional; on success the drains above
+        // already left the maps empty while retaining their table capacity.
+        self.batch_buffer_accesses.clear();
+        self.batch_texture_uses_by_identity.clear();
+        result
     }
 }
 
@@ -444,12 +499,12 @@ pub(crate) enum RenderDrawKind {
 
 /// Validates render draw state and returns a descriptive error on failure.
 pub(crate) fn validate_render_draw_state(
-    state: &PassEncoderState,
+    state: &mut PassEncoderState,
     kind: RenderDrawKind,
     limits: Limits,
 ) -> Result<(), String> {
     let pipeline = validate_render_draw_base_state(state, limits, kind.is_indexed())?;
-    validate_strip_index_format(pipeline, state, kind.is_indexed())?;
+    validate_strip_index_format(&pipeline, state, kind.is_indexed())?;
     match kind {
         RenderDrawKind::Direct {
             vertex_count,
@@ -457,7 +512,7 @@ pub(crate) fn validate_render_draw_state(
             first_vertex,
             first_instance,
         } => validate_vertex_buffer_oob(
-            pipeline,
+            &pipeline,
             state,
             Some((first_vertex, vertex_count)),
             first_instance,
@@ -470,7 +525,7 @@ pub(crate) fn validate_render_draw_state(
             first_instance,
         } => {
             validate_index_buffer_oob(state, first_index, index_count)?;
-            validate_vertex_buffer_oob(pipeline, state, None, first_instance, instance_count)
+            validate_vertex_buffer_oob(&pipeline, state, None, first_instance, instance_count)
         }
         RenderDrawKind::Indirect | RenderDrawKind::IndexedIndirect => Ok(()),
     }
@@ -488,18 +543,18 @@ impl RenderDrawKind {
 
 /// Validates render draw base state and returns a descriptive error on failure.
 pub(crate) fn validate_render_draw_base_state(
-    state: &PassEncoderState,
+    state: &mut PassEncoderState,
     limits: Limits,
     indexed: bool,
-) -> Result<&Arc<RenderPipeline>, String> {
-    let Some(pipeline) = &state.render_pipeline else {
+) -> Result<Arc<RenderPipeline>, String> {
+    let Some(pipeline) = state.render_pipeline.clone() else {
         return Err("render pass draw requires a render pipeline".to_owned());
     };
     if pipeline.is_error() {
         return Err("render pass draw requires a valid render pipeline".to_owned());
     }
     validate_draw_time_bind_groups_plus_vertex_buffers(state, limits)?;
-    validate_pipeline_bind_groups(pipeline.bind_group_layouts(), &state.bind_groups, limits)?;
+    validate_pipeline_bind_groups_memoized(state, pipeline.bind_group_layouts(), limits)?;
     debug_assert_eq!(
         pipeline.vertex_buffer_layouts().len(),
         pipeline.required_vertex_buffer_count()
@@ -835,6 +890,18 @@ pub(crate) struct BufferScopeUse {
     pub(crate) access: ResourceAccess,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PrecomputedBufferScopeUse {
+    pub(crate) scope_use: BufferScopeUse,
+    pub(crate) dynamic_offset_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PrecomputedBindGroupUsage {
+    pub(crate) buffer_uses: Vec<PrecomputedBufferScopeUse>,
+    pub(crate) texture_uses: Vec<TextureScopeUse>,
+}
+
 /// Stores texture scope use data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub(crate) struct TextureScopeUse {
@@ -985,11 +1052,35 @@ pub(crate) fn validate_resource_usage_scope_lenient(
 
 /// Returns collect bind group usage.
 pub(crate) fn collect_bind_group_usage(
-    layout: &BindGroupLayout,
+    _layout: &BindGroupLayout,
     bound: &BoundBindGroup,
     buffer_uses: &mut Vec<BufferScopeUse>,
     texture_uses: &mut Vec<TextureScopeUse>,
 ) -> Result<(), String> {
+    for precomputed in &bound.group.precomputed_usage().buffer_uses {
+        let mut scope_use = precomputed.scope_use.clone();
+        if let Some(dynamic_offset_index) = precomputed.dynamic_offset_index {
+            let dynamic_offset = bound
+                .dynamic_offsets
+                .get(dynamic_offset_index)
+                .copied()
+                .unwrap_or(0);
+            scope_use.offset = scope_use
+                .offset
+                .checked_add(u64::from(dynamic_offset))
+                .ok_or_else(|| "usage scope buffer offset overflows".to_owned())?;
+            scope_use.size = scope_use.size.saturating_sub(u64::from(dynamic_offset));
+        }
+        buffer_uses.push(scope_use);
+    }
+    texture_uses.extend_from_slice(&bound.group.precomputed_usage().texture_uses);
+    Ok(())
+}
+
+pub(crate) fn precompute_bind_group_usage(
+    layout: &BindGroupLayout,
+    entries: &[BindGroupEntry],
+) -> PrecomputedBindGroupUsage {
     let layout_entries = layout
         .entries()
         .iter()
@@ -1010,7 +1101,8 @@ pub(crate) fn collect_bind_group_usage(
         .map(|entry| entry.binding)
         .collect::<Vec<_>>();
 
-    for entry in bound.group.entries() {
+    let mut usage = PrecomputedBindGroupUsage::default();
+    for entry in entries {
         let Some(layout_entry) = layout_entries.get(&entry.binding).copied() else {
             continue;
         };
@@ -1038,25 +1130,22 @@ pub(crate) fn collect_bind_group_usage(
                     } => ResourceAccess::Write,
                     _ => unreachable!("buffer resource must have buffer binding layout"),
                 };
-                let dynamic_offset = dynamic_entries
+                let dynamic_offset_index = dynamic_entries
                     .iter()
-                    .position(|binding| *binding == entry.binding)
-                    .and_then(|dynamic_index| bound.dynamic_offsets.get(dynamic_index))
-                    .copied()
-                    .unwrap_or(0);
-                let offset = offset
-                    .checked_add(u64::from(dynamic_offset))
-                    .ok_or_else(|| "usage scope buffer offset overflows".to_owned())?;
+                    .position(|binding| *binding == entry.binding);
                 let size = if *size == u64::MAX {
-                    buffer.size().saturating_sub(offset)
+                    buffer.size().saturating_sub(*offset)
                 } else {
-                    size.saturating_sub(u64::from(dynamic_offset))
+                    *size
                 };
-                buffer_uses.push(BufferScopeUse {
-                    buffer: Arc::clone(buffer),
-                    offset,
-                    size,
-                    access,
+                usage.buffer_uses.push(PrecomputedBufferScopeUse {
+                    scope_use: BufferScopeUse {
+                        buffer: Arc::clone(buffer),
+                        offset: *offset,
+                        size,
+                        access,
+                    },
+                    dynamic_offset_index,
                 });
             }
             (
@@ -1079,12 +1168,14 @@ pub(crate) fn collect_bind_group_usage(
                     } => TextureAccess::ReadWriteStorage,
                     _ => unreachable!("texture resource must have texture binding layout"),
                 };
-                texture_uses.push(texture_scope_use(texture_view, access));
+                usage
+                    .texture_uses
+                    .push(texture_scope_use(texture_view, access));
             }
             _ => {}
         }
     }
-    Ok(())
+    usage
 }
 
 /// Validates buffer usage scope and returns a descriptive error on failure.
@@ -1304,6 +1395,29 @@ pub(crate) fn validate_pipeline_bind_groups(
     bound_groups: &BTreeMap<u32, BoundBindGroup>,
     limits: Limits,
 ) -> Result<(), String> {
+    validate_pipeline_bind_group_compatibility(required_layouts, bound_groups)?;
+    validate_pipeline_dynamic_offsets(required_layouts, bound_groups, limits)
+}
+
+pub(crate) fn validate_pipeline_bind_groups_memoized(
+    state: &mut PassEncoderState,
+    required_layouts: &[Arc<BindGroupLayout>],
+    limits: Limits,
+) -> Result<(), String> {
+    if state.pipeline_bind_group_compatibility_dirty {
+        validate_pipeline_bind_groups(required_layouts, &state.bind_groups, limits)?;
+        state.pipeline_bind_group_compatibility_dirty = false;
+        return Ok(());
+    }
+    // Dynamic offsets are intentionally validated on every draw/dispatch;
+    // only the immutable pipeline-layout ↔ bind-group-layout verdict is cached.
+    validate_pipeline_dynamic_offsets(required_layouts, &state.bind_groups, limits)
+}
+
+fn validate_pipeline_bind_group_compatibility(
+    required_layouts: &[Arc<BindGroupLayout>],
+    bound_groups: &BTreeMap<u32, BoundBindGroup>,
+) -> Result<(), String> {
     for (index, required_layout) in required_layouts.iter().enumerate() {
         if pipeline_bind_group_layout_is_implicitly_satisfied(required_layout) {
             continue;
@@ -1313,7 +1427,31 @@ pub(crate) fn validate_pipeline_bind_groups(
         let Some(bound) = bound_groups.get(&index) else {
             return Err("pipeline requires a missing bind group".to_owned());
         };
-        validate_bound_bind_group(required_layout, bound, limits)?;
+        validate_bound_bind_group_compatibility(required_layout, bound)?;
+    }
+    Ok(())
+}
+
+fn validate_pipeline_dynamic_offsets(
+    required_layouts: &[Arc<BindGroupLayout>],
+    bound_groups: &BTreeMap<u32, BoundBindGroup>,
+    limits: Limits,
+) -> Result<(), String> {
+    for (index, required_layout) in required_layouts.iter().enumerate() {
+        if pipeline_bind_group_layout_is_implicitly_satisfied(required_layout) {
+            continue;
+        }
+        let index = u32::try_from(index)
+            .map_err(|_| "pipeline bind group index is too large".to_owned())?;
+        let Some(bound) = bound_groups.get(&index) else {
+            return Err("pipeline requires a missing bind group".to_owned());
+        };
+        validate_dynamic_offsets(
+            required_layout,
+            &bound.group,
+            &bound.dynamic_offsets,
+            limits,
+        )?;
     }
     Ok(())
 }
@@ -1339,10 +1477,9 @@ fn pipeline_bind_group_layout_is_implicitly_satisfied(layout: &BindGroupLayout) 
 }
 
 /// Validates a single bound bind group against its required layout.
-fn validate_bound_bind_group(
+fn validate_bound_bind_group_compatibility(
     required_layout: &Arc<BindGroupLayout>,
     bound: &BoundBindGroup,
-    limits: Limits,
 ) -> Result<(), String> {
     if bound.group.is_error() {
         return Err("pipeline cannot use an error bind group".to_owned());
@@ -1350,12 +1487,7 @@ fn validate_bound_bind_group(
     if !bind_group_layouts_compatible(required_layout, bound.group.layout()) {
         return Err("pipeline bind group layout is incompatible".to_owned());
     }
-    validate_dynamic_offsets(
-        required_layout,
-        &bound.group,
-        &bound.dynamic_offsets,
-        limits,
-    )
+    Ok(())
 }
 
 /// Returns bind group layouts compatible.
@@ -1745,7 +1877,7 @@ mod tests {
         pipeline: Arc<RenderPipeline>,
     ) -> PassEncoderState {
         let mut state = empty_pass_state(device);
-        state.render_pipeline = Some(pipeline);
+        state.set_render_pipeline(pipeline);
         state
     }
 
@@ -2070,6 +2202,169 @@ mod tests {
 
         assert_eq!(state.scope_buffer_uses.len(), BIND_COUNT);
         assert_eq!(state.scope_usage_index.buffer_accesses.len(), 1);
+    }
+
+    #[test]
+    fn precomputed_bind_group_usage_matches_dynamic_bind_time_collection() {
+        let device = noop_device();
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 7,
+                visibility: 4,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: 16,
+                }),
+            }],
+            error: None,
+        }));
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::UNIFORM,
+            size: 1024,
+            mapped_at_creation: false,
+        }));
+        let group = Arc::new(device.create_bind_group(
+            Arc::clone(&layout),
+            vec![BindGroupEntry {
+                binding: 7,
+                resource: BindGroupResource::Buffer {
+                    buffer: Arc::clone(&buffer),
+                    device: Arc::new(device.clone()),
+                    offset: 0,
+                    size: 512,
+                },
+            }],
+        ));
+        let precomputed = group.precomputed_usage();
+        assert_eq!(precomputed.buffer_uses.len(), 1);
+        assert_eq!(precomputed.buffer_uses[0].scope_use.offset, 0);
+        assert_eq!(precomputed.buffer_uses[0].scope_use.size, 512);
+        assert_eq!(
+            precomputed.buffer_uses[0].scope_use.access,
+            ResourceAccess::Read
+        );
+        assert_eq!(precomputed.buffer_uses[0].dynamic_offset_index, Some(0));
+
+        let bound = BoundBindGroup {
+            group,
+            dynamic_offsets: vec![256],
+        };
+        let mut buffer_uses = Vec::new();
+        let mut texture_uses = Vec::new();
+        assert_eq!(
+            collect_bind_group_usage(&layout, &bound, &mut buffer_uses, &mut texture_uses,),
+            Ok(())
+        );
+        assert!(texture_uses.is_empty());
+        assert_eq!(buffer_uses.len(), 1);
+        assert!(buffer_uses[0].buffer.same(&buffer));
+        assert_eq!(buffer_uses[0].offset, 256);
+        assert_eq!(buffer_uses[0].size, 256);
+        assert_eq!(buffer_uses[0].access, ResourceAccess::Read);
+    }
+
+    #[test]
+    fn memoized_compatibility_still_validates_dynamic_offsets_every_draw() {
+        let device = noop_device();
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: 4,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: 16,
+                }),
+            }],
+            error: None,
+        }));
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::UNIFORM,
+            size: 1024,
+            mapped_at_creation: false,
+        }));
+        let group = Arc::new(device.create_bind_group(
+            Arc::clone(&layout),
+            vec![BindGroupEntry {
+                binding: 0,
+                resource: BindGroupResource::Buffer {
+                    buffer,
+                    device: Arc::new(device.clone()),
+                    offset: 0,
+                    size: 512,
+                },
+            }],
+        ));
+        let mut state = empty_pass_state(&device);
+        state.set_bind_group(
+            0,
+            BoundBindGroup {
+                group: Arc::clone(&group),
+                dynamic_offsets: vec![256],
+            },
+        );
+        assert_eq!(
+            validate_pipeline_bind_groups_memoized(
+                &mut state,
+                std::slice::from_ref(&layout),
+                device.limits(),
+            ),
+            Ok(())
+        );
+        assert!(!state.pipeline_bind_group_compatibility_dirty);
+
+        state.set_bind_group(
+            0,
+            BoundBindGroup {
+                group,
+                dynamic_offsets: vec![1],
+            },
+        );
+        assert!(!state.pipeline_bind_group_compatibility_dirty);
+        assert_eq!(
+            validate_pipeline_bind_groups_memoized(
+                &mut state,
+                std::slice::from_ref(&layout),
+                device.limits(),
+            ),
+            Err("bind group dynamic offset is not aligned".to_owned())
+        );
+    }
+
+    #[test]
+    fn incremental_scope_clears_reusable_batch_scratch_after_error() {
+        let device = noop_device();
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE | BufferUsage::UNIFORM,
+            size: 64,
+            mapped_at_creation: false,
+        }));
+        let mut index = LenientUsageScopeIndex::default();
+        let conflicting = [
+            buffer_scope_use(Arc::clone(&buffer), 0, 16, ResourceAccess::Read),
+            buffer_scope_use(Arc::clone(&buffer), 0, 16, ResourceAccess::Write),
+        ];
+        assert_eq!(
+            index.validate_and_record(&conflicting, &[]),
+            Err(
+                "usage scope cannot read and write or write the same buffer range twice".to_owned()
+            )
+        );
+        assert!(index.batch_buffer_accesses.is_empty());
+        assert!(index.batch_texture_uses_by_identity.is_empty());
+        assert!(index.buffer_accesses.is_empty());
+
+        assert_eq!(
+            index.validate_and_record(
+                &[buffer_scope_use(buffer, 0, 16, ResourceAccess::Write)],
+                &[],
+            ),
+            Ok(())
+        );
+        assert_eq!(index.buffer_accesses.len(), 1);
     }
 
     #[test]
@@ -2721,7 +3016,7 @@ mod tests {
             .insert(7, vertex_buffer_binding(instance_buffer, 16));
 
         assert_eq!(
-            validate_render_draw_base_state(&state, device.limits(), false).map(|_| ()),
+            validate_render_draw_base_state(&mut state, device.limits(), false).map(|_| ()),
             Ok(())
         );
         assert_eq!(
@@ -2746,7 +3041,7 @@ mod tests {
             .insert(0, vertex_buffer_binding(vertex_buffer, 16));
 
         assert_eq!(
-            validate_render_draw_base_state(&state, device.limits(), false)
+            validate_render_draw_base_state(&mut state, device.limits(), false)
                 .map(|_| ())
                 .expect_err("missing contiguous vertex slot"),
             "render pass draw requires all declared vertex buffers to be set"

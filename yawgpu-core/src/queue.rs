@@ -4999,6 +4999,79 @@ fn fs() -> @location(0) vec4<f32> {
 
     // --- F-079: destroyed bind-group resources / timestamp query sets must error at submit ----
 
+    #[test]
+    fn referenced_buffer_dedup_preserves_destroyed_and_mapped_submit_validation() {
+        let device = noop_device();
+        let encode_repeated_bind = |buffer: Arc<Buffer>| {
+            let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+                entries: vec![BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: SHADER_STAGE_COMPUTE,
+                    binding_array_size: 0,
+                    kind: Some(BindingLayoutKind::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: 0,
+                    }),
+                }],
+                error: None,
+            }));
+            let group = Arc::new(device.create_bind_group(
+                layout,
+                vec![BindGroupEntry {
+                    binding: 0,
+                    resource: BindGroupResource::Buffer {
+                        buffer,
+                        device: Arc::new(device.clone()),
+                        offset: 0,
+                        size: 16,
+                    },
+                }],
+            ));
+            let encoder = device.create_command_encoder();
+            let (pass, error) = encoder.begin_compute_pass();
+            assert_eq!(error, None);
+            assert_eq!(
+                pass.set_bind_group(0, Some(Arc::clone(&group)), Vec::new(), device.limits(),),
+                None
+            );
+            assert_eq!(
+                pass.set_bind_group(0, Some(group), Vec::new(), device.limits()),
+                None
+            );
+            assert_eq!(pass.end(), None);
+            let (command_buffer, error) = encoder.finish();
+            assert_eq!(error, None);
+            assert_eq!(command_buffer.referenced_buffers().len(), 1);
+            command_buffer
+        };
+
+        let destroyed = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::UNIFORM,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let destroyed_command_buffer = encode_repeated_bind(Arc::clone(&destroyed));
+        destroyed.destroy();
+        let error = device
+            .queue()
+            .submit(&[Arc::new(destroyed_command_buffer)])
+            .expect("deduplicated destroyed buffer must still fail submit");
+        assert_eq!(error.message, "queue submit cannot use a destroyed buffer");
+
+        let mapped = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::UNIFORM,
+            size: 16,
+            mapped_at_creation: true,
+        }));
+        let mapped_command_buffer = encode_repeated_bind(mapped);
+        let error = device
+            .queue()
+            .submit(&[Arc::new(mapped_command_buffer)])
+            .expect("deduplicated mapped buffer must still fail submit");
+        assert_eq!(error.message, "queue submit cannot use a mapped buffer");
+    }
+
     /// A bind group containing a destroyed uniform buffer must not cause an error at
     /// create_bind_group, set_bind_group, or finish(). The validation error must fire
     /// exclusively at queue.submit (WebGPU spec §17.3 "Queue submit validation").

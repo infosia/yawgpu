@@ -393,10 +393,54 @@ CTS, Run 4 trees: Metal `pass=175738 skip=47 fail=0 crash=0`;
 Vulkan/MoltenVK `pass=175729 fail=9` with the failure set identical case for
 case to Run 4 (the 9 pre-existing MoltenVK artifacts).
 
+## Run 6 — 2026-08-08, after the P-004 constant-factor pass
+
+The ~4× rebind constant was profiled with `sample` on the release bench.
+Of ~3900 in-pass samples: `validate_pipeline_bind_groups` ~740 — building,
+comparing and dropping `BTreeMap`s **on every draw** for a verdict that only
+changes when the pipeline or a bound group changes; `collect_bind_group_usage`
+~500 — `BTreeMap::from_iter` per bind for an immutable bind group; SipHash on
+the scope index's `usize` identity keys ~250; per-call batch `HashMap`
+construction ~200; `record_referenced_buffers` append growth ~190.
+
+Fixes, in that order: the pipeline↔bind-group compatibility verdict is
+memoized behind a dirty flag set by every pipeline/bind-group identity change
+(bundle replay included; the error still surfaces at draw time with the same
+message, and a failed validation leaves the flag dirty so the next draw errs
+again); per-bind-group scope uses are precomputed at bind-group creation, with
+only dynamic-offset resolution left per bind (`BufferScopeUse` carries resolved
+offset/size, so dynamic bindings add a cheap offset add at bind time); the
+scope index uses an in-repo identity hasher (full-entropy address keys,
+HashDoS irrelevant); batch maps became reusable scratch cleared on both
+success and error; referenced-buffer recording dedups by identity (readers are
+membership-only: submit-time destroyed/mapped checks).
+
+| case | run 5 ns | now ns | dawn ns | ratio |
+|---|---|---|---|---|
+| `encode/render_bind_draw` | 399 | **224** | 99 | 2.27× |
+| `bindgroup/create_destroy` | 170 | 240 | 130 | 1.85× |
+| `encode/render_draw` | 49 | 52 | 44 | 1.19× |
+| `submit/render_100_draws_wait` | 178292 | 199466 | 185985 | 1.07× |
+
+`bindgroup/create_destroy` +70 ns is the deliberate side of the trade: the
+per-bind-group precompute moved cost from every bind to one-time creation.
+`submit/render_100_draws_wait` looked regressed in the full run (1.07×) but
+three isolated back-to-back runs put yawgpu and Dawn both at ~240 µs — the
+case is thermally sensitive and the delta is machine state, not code. Same
+verdict for `encode/render_draw` (+3 ns).
+
+CTS: Metal `pass=175738 fail=0`; Vulkan/MoltenVK the identical 9-case
+pre-existing failure set. All 98 real-Metal e2e tests pass.
+
+What remains of the gap (224 vs 99) is the honest per-command cost: bound-group
+clone into the command, usage-scope index probes, and the per-draw command
+build. No single >30% lever is visible in the profile any more; further
+narrowing would be diffuse micro-work, recorded here as low-priority.
+
 ## Status
 
-P-004 **resolved** (encode-time; a ~4× linear constant on rebind remains as a
-candidate). All three findings from Run 1 are **resolved**: P-001 and P-002 in Block 96,
+P-004 **resolved**, including the constant-factor follow-up (399 → 224 ns,
+2.27× of Dawn, no superlinearity). All three findings from Run 1 are **resolved**: P-001 and P-002 in Block 96,
 P-003 in Block 97. The remaining gaps against Dawn are small and none is
 structural: `queue/write_buffer_then_wait` 1.53×, `bindgroup/create_destroy`
 1.33×, `encode/compute_1_dispatch` 1.14×, `encode/render_draw` 1.16×.

@@ -7,6 +7,7 @@ use crate::device::*;
 use crate::external_texture::*;
 use crate::format::*;
 use crate::limits::*;
+use crate::pass::{precompute_bind_group_usage, PrecomputedBindGroupUsage};
 use crate::sampler::*;
 use crate::texture::*;
 use crate::texture_view::*;
@@ -71,6 +72,7 @@ pub struct BindGroup {
 pub(crate) struct BindGroupInner {
     pub(crate) _layout: Arc<BindGroupLayout>,
     pub(crate) _entries: Vec<BindGroupEntry>,
+    pub(crate) precomputed_usage: PrecomputedBindGroupUsage,
     pub(crate) is_error: bool,
     pub(crate) error_message: Option<String>,
 }
@@ -83,10 +85,12 @@ impl BindGroup {
         is_error: bool,
         error_message: Option<String>,
     ) -> Self {
+        let precomputed_usage = precompute_bind_group_usage(&layout, &entries);
         Self {
             inner: Arc::new(BindGroupInner {
                 _layout: layout,
                 _entries: entries,
+                precomputed_usage,
                 is_error,
                 error_message,
             }),
@@ -115,6 +119,10 @@ impl BindGroup {
     #[must_use]
     pub fn entries(&self) -> &[BindGroupEntry] {
         &self.inner._entries
+    }
+
+    pub(crate) fn precomputed_usage(&self) -> &PrecomputedBindGroupUsage {
+        &self.inner.precomputed_usage
     }
 }
 

@@ -239,7 +239,7 @@ impl RenderBundleEncoder {
     pub fn set_pipeline(&self, pipeline: Arc<RenderPipeline>) -> Option<String> {
         self.record_bundle_command(|state| {
             validate_render_bundle_pipeline(&self.inner.descriptor, &pipeline)?;
-            state.render_pipeline = Some(Arc::clone(&pipeline));
+            state.set_render_pipeline(Arc::clone(&pipeline));
             Ok(Some(RenderCommand::SetPipeline(pipeline)))
         })
     }
@@ -266,13 +266,13 @@ impl RenderBundleEncoder {
                     dynamic_offsets,
                 };
                 record_bind_group_usage_scope(state, &bound)?;
-                state.bind_groups.insert(index, bound.clone());
+                state.set_bind_group(index, bound.clone());
                 Ok(Some(RenderCommand::SetBindGroup {
                     index,
                     group: Some(bound),
                 }))
             } else {
-                state.bind_groups.remove(&index);
+                state.clear_bind_group(index);
                 Ok(Some(RenderCommand::SetBindGroup { index, group: None }))
             }
         })

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -10,6 +10,7 @@ use crate::copy::*;
 use crate::device::{Device, FeatureSet};
 use crate::extent::*;
 use crate::format::*;
+use crate::identity_hash::IdentityBuildHasher;
 use crate::limits::*;
 use crate::pass::*;
 use crate::query_set::*;
@@ -46,6 +47,7 @@ pub(crate) struct CommandEncoderState {
     pub(crate) debug_group_depth: u32,
     pub(crate) has_recorded_command: bool,
     pub(crate) referenced_buffers: Vec<Arc<Buffer>>,
+    referenced_buffer_identities: HashSet<usize, IdentityBuildHasher>,
     pub(crate) referenced_textures: Vec<Texture>,
     pub(crate) referenced_query_sets: Vec<QuerySet>,
     pub(crate) command_ops: Vec<CommandExecution>,
@@ -358,6 +360,7 @@ impl CommandEncoder {
                     debug_group_depth: 0,
                     has_recorded_command: false,
                     referenced_buffers: Vec::new(),
+                    referenced_buffer_identities: HashSet::default(),
                     referenced_textures: Vec::new(),
                     referenced_query_sets: Vec::new(),
                     command_ops: Vec::new(),
@@ -644,7 +647,7 @@ impl CommandEncoder {
             self.record_referenced_query_set((*query_set).clone());
             let mut state = self.inner.state.lock();
             state.has_recorded_command = true;
-            state.referenced_buffers.push(Arc::clone(&destination));
+            record_referenced_buffer_locked(&mut state, Arc::clone(&destination));
             state
                 .command_ops
                 .push(CommandExecution::ResolveQuerySet(ResolveQuerySetCommand {
@@ -835,7 +838,7 @@ impl CommandEncoder {
         } else {
             let mut state = self.inner.state.lock();
             state.has_recorded_command = true;
-            state.referenced_buffers.extend(referenced_buffers);
+            record_referenced_buffers_locked(&mut state, referenced_buffers);
             if let Some(copy) = buffer_copy {
                 state
                     .command_ops
@@ -931,12 +934,12 @@ impl CommandEncoder {
 
     /// Tracks a buffer referenced by the encoder so it stays alive until submit.
     pub(crate) fn record_referenced_buffer(&self, buffer: Arc<Buffer>) {
-        self.inner.state.lock().referenced_buffers.push(buffer);
+        record_referenced_buffer_locked(&mut self.inner.state.lock(), buffer);
     }
 
     /// Tracks several buffers referenced by the encoder.
     pub(crate) fn record_referenced_buffers(&self, buffers: Vec<Arc<Buffer>>) {
-        self.inner.state.lock().referenced_buffers.extend(buffers);
+        record_referenced_buffers_locked(&mut self.inner.state.lock(), buffers);
     }
 
     /// Tracks several textures referenced by the encoder.
@@ -2138,6 +2141,22 @@ pub(crate) fn record_first_error_locked(
 ) {
     if state.first_error.is_none() {
         state.first_error = Some(message.into());
+    }
+}
+
+fn record_referenced_buffer_locked(state: &mut CommandEncoderState, buffer: Arc<Buffer>) {
+    let identity = Arc::as_ptr(&buffer.inner).cast::<()>() as usize;
+    if state.referenced_buffer_identities.insert(identity) {
+        state.referenced_buffers.push(buffer);
+    }
+}
+
+fn record_referenced_buffers_locked(
+    state: &mut CommandEncoderState,
+    buffers: impl IntoIterator<Item = Arc<Buffer>>,
+) {
+    for buffer in buffers {
+        record_referenced_buffer_locked(state, buffer);
     }
 }
 

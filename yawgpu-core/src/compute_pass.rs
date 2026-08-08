@@ -40,7 +40,7 @@ impl ComputePassEncoder {
             if pipeline.is_error() {
                 return Err("compute pass requires a valid compute pipeline".to_owned());
             }
-            state.compute_pipeline = Some(pipeline);
+            state.set_compute_pipeline(pipeline);
             Ok(())
         })
     }
@@ -67,7 +67,7 @@ impl ComputePassEncoder {
                 self.inner
                     .parent
                     .record_referenced_textures(bind_group_texture_resources(&group));
-                state.bind_groups.insert(
+                state.set_bind_group(
                     index,
                     BoundBindGroup {
                         group,
@@ -75,7 +75,7 @@ impl ComputePassEncoder {
                     },
                 );
             } else {
-                state.bind_groups.remove(&index);
+                state.clear_bind_group(index);
             }
             Ok(())
         })
@@ -181,16 +181,16 @@ impl ComputePassEncoder {
 
 /// Validates compute dispatch state and returns a descriptive error on failure.
 pub(crate) fn validate_compute_dispatch_state(
-    state: &PassEncoderState,
+    state: &mut PassEncoderState,
     limits: Limits,
 ) -> Result<(), String> {
-    let Some(pipeline) = &state.compute_pipeline else {
+    let Some(pipeline) = state.compute_pipeline.clone() else {
         return Err("compute dispatch requires a compute pipeline".to_owned());
     };
     if pipeline.is_error() {
         return Err("compute dispatch requires a valid compute pipeline".to_owned());
     }
-    validate_pipeline_bind_groups(pipeline.bind_group_layouts(), &state.bind_groups, limits)?;
+    validate_pipeline_bind_groups_memoized(state, pipeline.bind_group_layouts(), limits)?;
     validate_usage_scope(pipeline.bind_group_layouts(), &state.bind_groups, None)?;
     validate_required_immediate_data(
         pipeline.immediate_required_mask(),

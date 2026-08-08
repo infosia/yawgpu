@@ -142,7 +142,7 @@ impl RenderPassEncoder {
                 return Err("render pass requires a valid render pipeline".to_owned());
             }
             validate_pipeline_attachment_compatibility(state, &pipeline)?;
-            state.render_pipeline = Some(Arc::clone(&pipeline));
+            state.set_render_pipeline(Arc::clone(&pipeline));
             state
                 .render_commands
                 .push(RenderCommand::SetPipeline(pipeline));
@@ -177,13 +177,13 @@ impl RenderPassEncoder {
                     dynamic_offsets,
                 };
                 record_bind_group_usage_scope(state, &bound)?;
-                state.bind_groups.insert(index, bound.clone());
+                state.set_bind_group(index, bound.clone());
                 state.render_commands.push(RenderCommand::SetBindGroup {
                     index,
                     group: Some(bound),
                 });
             } else {
-                state.bind_groups.remove(&index);
+                state.clear_bind_group(index);
                 state
                     .render_commands
                     .push(RenderCommand::SetBindGroup { index, group: None });
@@ -880,6 +880,157 @@ fn fs() -> @location(0) vec4f {
                 .depth_slice,
             0
         );
+    }
+
+    #[test]
+    fn render_draw_compatibility_cache_revalidates_after_binding_identity_changes() {
+        let device = noop_device();
+        let pipeline = storage_write_render_pipeline(&device);
+        let incompatible_pipeline = uniform_read_render_pipeline(&device);
+        let storage_buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let uniform_buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::UNIFORM,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let compatible_group = buffer_bind_group(
+            &device,
+            pipeline.bind_group_layouts()[0].clone(),
+            storage_buffer,
+            0,
+        );
+        let incompatible_group = buffer_bind_group(
+            &device,
+            incompatible_pipeline.bind_group_layouts()[0].clone(),
+            uniform_buffer,
+            0,
+        );
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_render_pass(&noop_render_pass_descriptor(
+            noop_render_attachment(&device),
+            None,
+        ));
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(
+            pass.set_bind_group(
+                0,
+                Some(Arc::clone(&compatible_group)),
+                Vec::new(),
+                device.limits(),
+            ),
+            None
+        );
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert!(
+            !pass
+                .inner
+                .state
+                .lock()
+                .pipeline_bind_group_compatibility_dirty
+        );
+
+        // A redundant set still records and pays normal bind-time validation,
+        // but it does not change the immutable compatibility input.
+        assert_eq!(
+            pass.set_bind_group(
+                0,
+                Some(Arc::clone(&compatible_group)),
+                Vec::new(),
+                device.limits(),
+            ),
+            None
+        );
+        assert!(
+            !pass
+                .inner
+                .state
+                .lock()
+                .pipeline_bind_group_compatibility_dirty
+        );
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+
+        assert_eq!(
+            pass.set_bind_group(0, Some(incompatible_group), Vec::new(), device.limits()),
+            None
+        );
+        assert!(
+            pass.inner
+                .state
+                .lock()
+                .pipeline_bind_group_compatibility_dirty
+        );
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert!(
+            pass.inner
+                .state
+                .lock()
+                .pipeline_bind_group_compatibility_dirty
+        );
+
+        assert_eq!(
+            pass.set_bind_group(0, Some(compatible_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        let state = pass.inner.state.lock();
+        assert!(!state.pipeline_bind_group_compatibility_dirty);
+        assert_eq!(state.draw_count, 3);
+        drop(state);
+        assert_eq!(pass.end(), None);
+
+        let (_, error) = encoder.finish();
+        assert_eq!(
+            error,
+            Some("pipeline bind group layout is incompatible".to_owned())
+        );
+    }
+
+    #[test]
+    fn render_pass_execute_bundles_invalidates_pipeline_bind_group_compatibility_cache() {
+        let device = noop_device();
+        let pipeline = noop_render_pipeline(&device);
+        let (bundle_encoder, error) = RenderBundleEncoder::new(
+            render_bundle_encoder_descriptor(),
+            device.limits(),
+            device.features(),
+        );
+        assert_eq!(error, None);
+        let (bundle, error) = bundle_encoder.finish();
+        assert_eq!(error, None);
+
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_render_pass(&noop_render_pass_descriptor(
+            noop_render_attachment(&device),
+            None,
+        ));
+        assert_eq!(begin_error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert!(
+            !pass
+                .inner
+                .state
+                .lock()
+                .pipeline_bind_group_compatibility_dirty
+        );
+
+        assert_eq!(pass.execute_bundles(&[Arc::new(bundle)]), None);
+        assert!(
+            pass.inner
+                .state
+                .lock()
+                .pipeline_bind_group_compatibility_dirty
+        );
+        assert_eq!(pass.end(), None);
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
     }
 
     #[test]

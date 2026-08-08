@@ -15,6 +15,7 @@ mod extent;
 mod external_texture;
 mod format;
 mod future;
+mod identity_hash;
 mod instance;
 mod limits;
 mod pass;
