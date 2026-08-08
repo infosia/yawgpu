@@ -8,7 +8,6 @@ use crate::bind_group_layout::*;
 use crate::buffer::*;
 use crate::command_encoder::*;
 use crate::compute_pipeline::*;
-use crate::copy::{LoadOp, StoreOp};
 use crate::extent::*;
 use crate::limits::*;
 use crate::query_set::*;
@@ -43,12 +42,13 @@ pub(crate) struct PassEncoderState {
     pub(crate) attachment_texture_uses: Vec<TextureScopeUse>,
     pub(crate) render_color_attachments: Vec<Option<RenderPassColorExecution>>,
     pub(crate) render_depth_stencil_attachment: Option<RenderPassDepthStencilExecution>,
-    pub(crate) render_pass_recorded: bool,
+    pub(crate) render_commands: Vec<RenderCommand>,
     pub(crate) blend_constant: [f32; 4],
     pub(crate) stencil_reference: u32,
     pub(crate) occlusion_query_set: Option<QuerySet>,
     pub(crate) open_occlusion_query: Option<u32>,
     pub(crate) used_occlusion_queries: BTreeSet<u32>,
+    pub(crate) written_occlusion_queries: BTreeSet<u32>,
     pub(crate) command_referenced_buffers: Vec<Arc<Buffer>>,
     pub(crate) scope_buffer_uses: Vec<BufferScopeUse>,
     pub(crate) scope_texture_uses: Vec<TextureScopeUse>,
@@ -112,12 +112,13 @@ impl PassEncoderState {
             attachment_texture_uses: Vec::new(),
             render_color_attachments: init.render_color_attachments,
             render_depth_stencil_attachment: init.render_depth_stencil_attachment,
-            render_pass_recorded: false,
+            render_commands: Vec::new(),
             blend_constant: [0.0; 4],
             stencil_reference: 0,
             occlusion_query_set: init.occlusion_query_set,
             open_occlusion_query: None,
             used_occlusion_queries: BTreeSet::new(),
+            written_occlusion_queries: BTreeSet::new(),
             command_referenced_buffers: Vec::new(),
             scope_buffer_uses: Vec::new(),
             scope_texture_uses: Vec::new(),
@@ -152,34 +153,6 @@ impl PassEncoderState {
         self.attachment_texture_uses = uses.clone();
         self.scope_texture_uses.extend(uses);
         Ok(())
-    }
-
-    pub(crate) fn load_attachments_for_draw(
-        &mut self,
-    ) -> (
-        Vec<Option<RenderPassColorExecution>>,
-        Option<RenderPassDepthStencilExecution>,
-    ) {
-        let mut color_attachments = self.render_color_attachments.clone();
-        let mut depth_stencil_attachment = self.render_depth_stencil_attachment.clone();
-        for attachment in color_attachments.iter_mut().flatten() {
-            attachment.store_op = StoreOp::Store;
-        }
-        if let Some(attachment) = &mut depth_stencil_attachment {
-            attachment.depth_store_op = StoreOp::Store;
-            attachment.stencil_store_op = StoreOp::Store;
-        }
-        if self.render_pass_recorded {
-            for attachment in color_attachments.iter_mut().flatten() {
-                attachment.load_op = LoadOp::Load;
-            }
-            if let Some(attachment) = &mut depth_stencil_attachment {
-                attachment.depth_load_op = LoadOp::Load;
-                attachment.stencil_load_op = LoadOp::Load;
-            }
-        }
-        self.render_pass_recorded = true;
-        (color_attachments, depth_stencil_attachment)
     }
 }
 
@@ -237,47 +210,16 @@ impl PassEncoderInner {
         let unbalanced_debug_groups = state.debug_group_depth != 0;
         let open_occlusion_query = state.open_occlusion_query.is_some();
         let draw_count_exceeded = state.draw_count > state.max_draw_count;
-        let restore_store_ops = if state.render_pass_recorded && state.draw_count > 0 {
-            Some((
-                state
-                    .render_color_attachments
-                    .iter()
-                    .map(|attachment| attachment.as_ref().map(|attachment| attachment.store_op))
-                    .collect::<Vec<_>>(),
-                state
-                    .render_depth_stencil_attachment
-                    .as_ref()
-                    .map(|attachment| attachment.depth_store_op),
-                state
-                    .render_depth_stencil_attachment
-                    .as_ref()
-                    .map(|attachment| attachment.stencil_store_op),
-            ))
-        } else {
-            None
-        };
-        let render_pass_command = if !state.render_pass_recorded
-            && (!state.render_color_attachments.is_empty()
-                || state.render_depth_stencil_attachment.is_some())
+        let render_pass_command = if !state.render_color_attachments.is_empty()
+            || state.render_depth_stencil_attachment.is_some()
         {
-            state.render_pass_recorded = true;
             Some(RenderPassCommand {
-                pipeline: state.render_pipeline.clone(),
                 color_attachments: state.render_color_attachments.clone(),
                 depth_stencil_attachment: state.render_depth_stencil_attachment.clone(),
                 attachment_textures: state.attachment_textures.clone(),
-                bind_groups: state.bind_groups.clone(),
-                vertex_buffers: state.vertex_buffers.clone(),
-                index_buffer: state.index_buffer.clone(),
-                indirect_buffer: None,
-                viewport: state.viewport,
-                scissor_rect: state.scissor_rect,
-                blend_constant: state.blend_constant,
-                stencil_reference: state.stencil_reference,
-                occlusion_query_set: None,
-                occlusion_query_index: None,
-                draw: None,
-                immediate_data: state.immediate_data.clone(),
+                occlusion_query_set: state.occlusion_query_set.clone(),
+                written_occlusion_queries: state.written_occlusion_queries.clone(),
+                commands: std::mem::take(&mut state.render_commands),
             })
         } else {
             None
@@ -286,13 +228,6 @@ impl PassEncoderInner {
 
         if let Some(command) = render_pass_command {
             self.parent.record_render_pass(command);
-        }
-        if let Some((color_store_ops, depth_store_op, stencil_store_op)) = restore_store_ops {
-            self.parent.patch_last_render_pass_store_ops(
-                &color_store_ops,
-                depth_store_op,
-                stencil_store_op,
-            );
         }
         self.parent.end_pass(self.token);
         if unbalanced_debug_groups {

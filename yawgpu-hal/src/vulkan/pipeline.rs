@@ -1467,7 +1467,9 @@ pub(super) fn allocate_render_descriptor_sets(
 pub(super) fn update_render_descriptor_sets(
     device: &ash::Device,
     pipeline: &VulkanRenderPipeline,
-    pass: &HalRenderPass,
+    bind_buffers: &[HalBoundBuffer],
+    bind_textures: &[HalBoundTexture],
+    bind_samplers: &[HalBoundSampler],
     color_attachment_views: &[Option<vk::ImageView>],
     descriptor_sets: &[vk::DescriptorSet],
 ) -> Result<Vec<vk::ImageView>, HalError> {
@@ -1504,9 +1506,9 @@ pub(super) fn update_render_descriptor_sets(
                     }
                     _ => descriptor_info(
                         descriptor,
-                        &pass.bind_buffers,
-                        &pass.bind_textures,
-                        &pass.bind_samplers,
+                        bind_buffers,
+                        bind_textures,
+                        bind_samplers,
                         &mut scratch,
                         "render",
                     )?,

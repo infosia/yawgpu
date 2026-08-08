@@ -299,6 +299,16 @@ impl NoopQueue {
                         .write(resolve.destination_offset, &zeros)?;
                 }
                 HalCopy::ClearTexture(_) => {}
+                HalCopy::RenderPassCommandStream(pass) => {
+                    self.submitted_render_pass_command_streams
+                        .lock()
+                        .map_err(|_| HalError::QueueSubmissionFailed {
+                            backend: "noop",
+                            message: "submitted render pass command streams lock poisoned"
+                                .to_string(),
+                        })?
+                        .push(pass.clone());
+                }
                 _ => {}
             }
         }
@@ -865,7 +875,10 @@ mod tests {
                     samplers: Vec::new(),
                     external_textures: Vec::new(),
                 },
-                HalRenderPassCommand::SetVertexBuffer(vertex_buffer),
+                HalRenderPassCommand::SetVertexBuffer {
+                    slot: 3,
+                    buffer: Some(vertex_buffer),
+                },
                 HalRenderPassCommand::SetIndexBuffer(index_buffer),
                 HalRenderPassCommand::SetViewport(HalViewport {
                     x: 1.0,
@@ -935,7 +948,10 @@ mod tests {
         ));
         assert!(matches!(
             recorded.commands[2],
-            HalRenderPassCommand::SetVertexBuffer(_)
+            HalRenderPassCommand::SetVertexBuffer {
+                slot: 3,
+                buffer: Some(_)
+            }
         ));
         assert!(matches!(
             recorded.commands[3],

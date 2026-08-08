@@ -286,7 +286,66 @@ Fixing it is a structural change, not a micro-optimisation: the render-pass
 representation has to become one pass plus a stream of draw commands carrying
 only what changed, across `yawgpu-core` and every backend encoder.
 
+## Run 4 — 2026-08-06, after Block 97 S2 (P-003 fixed)
+
+Same machine, `--reps 9`, both binaries back to back on an idle machine.
+
+| case | yawgpu ns | dawn ns | ratio |
+|---|---|---|---|
+| `buffer/create_destroy` | 1812 | 1925 | 0.94× |
+| `buffer/create_mapped_unmap` | 1803 | 4390 | 0.41× |
+| `bindgroup/create_destroy` | 173 | 130 | 1.33× |
+| `queue/write_buffer_4kb` | 680 | 633 | 1.07× |
+| `queue/write_buffer_then_wait` | 931 | 609 | 1.53× |
+| `frame/10writes_dispatch_submit_wait` | 149754 | 156132 | 0.96× |
+| `shader/create_cached` | 135 | 658 | 0.20× |
+| `shader/create_unique` | 16362 | 20840 | 0.79× |
+| `pipeline/compute_cached` | 67 | 357 | 0.19× |
+| `pipeline/compute_unique` | 85047 | 87572 | 0.97× |
+| `pipeline/render_unique` | 118127 | 133459 | 0.89× |
+| `encode/empty_encoder_finish` | 160 | 177 | 0.90× |
+| `encode/compute_1_dispatch` | 759 | 667 | 1.14× |
+| `encode/render_pass_empty` | 813 | 922 | 0.88× |
+| `encode/render_draw` | 48 | 41 | **1.16×** |
+| `submit/empty` | 1656 | 3208 | 0.52× |
+| `submit/compute_1_dispatch` | 25344 | 25308 | 1.00× |
+| `submit/render_100_draws_wait` | 174955 | 189312 | **0.92×** |
+| `submit/compute_wait_idle` | 140665 | 140754 | 1.00× |
+
+**P-003 is resolved.** `submit/render_100_draws_wait` went 5143693 ns →
+174955 ns, a **29× speedup**, and now sits at 0.92× of Dawn. The CPU-side
+`encode/render_draw` went 148 ns → 48 ns, from 3.50× to 1.16×.
+
+The GPU figure is the one that matters: a 100-draw pass is now one GPU render
+pass rather than 100, so the attachment load/store happens once.
+
+### CTS
+
+Metal, Block 96 baseline trees plus `api,operation,{rendering,render_pass,
+render_pipeline}`: `pass=175738 skip=47 fail=0 crash=0`.
+
+Vulkan/MoltenVK, same trees: `pass=175729 skip=47 fail=9 crash=0`. Those 9 are
+**pre-existing** — the same failure set, case for case, at `a2b7d41` (before S2)
+and after. Seven are `rendering,3d_texture_slices` reporting "attachment image
+view creation failed" and two are `rendering,depth_clip_clamp`, the documented
+MoltenVK artifacts. They live in the `rendering` tree, which the Block 96
+baseline did not cover, which is why they appear here for the first time.
+
+Taking that baseline mattered: the raw result reads as "S2 broke 9 Vulkan
+cases". Diffing the failure sets before and after is what showed the change is
+clean. Never attribute a count to a change without the before.
+
 ## Status
+
+All three findings from Run 1 are **resolved**: P-001 and P-002 in Block 96,
+P-003 in Block 97. The remaining gaps against Dawn are small and none is
+structural: `queue/write_buffer_then_wait` 1.53×, `bindgroup/create_destroy`
+1.33×, `encode/compute_1_dispatch` 1.14×, `encode/render_draw` 1.16×.
+
+Block 97 **S3** (delete the now-unused per-draw `HalRenderPass` path) and **S4**
+are still open, as is moving GLES off the legacy path.
+
+## Superseded status notes
 
 **P-001 and P-002 resolved** (Block 96). **P-003 open** — `encode/render_draw`
 at 3.50×, caused by `RenderPass::draw` snapshotting the whole pass state per

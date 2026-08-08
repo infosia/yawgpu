@@ -168,6 +168,8 @@ pub enum HalCopy {
     ComputePass(HalComputePass),
     /// Render pass variant.
     RenderPass(HalRenderPass),
+    /// Render pass command-stream variant.
+    RenderPassCommandStream(HalRenderPassCommandStream),
     #[cfg(feature = "tiled")]
     /// Subpass render pass variant.
     SubpassRenderPass(HalSubpassRenderPassCommand),
@@ -525,8 +527,13 @@ pub enum HalRenderPassCommand {
         /// External-texture bindings supplied by the bind group.
         external_textures: Vec<HalBoundExternalTexture>,
     },
-    /// Sets one vertex buffer; [`HalBoundBuffer::binding`] is the vertex slot.
-    SetVertexBuffer(HalBoundBuffer),
+    /// Sets or clears one vertex buffer.
+    SetVertexBuffer {
+        /// Vertex buffer slot.
+        slot: u32,
+        /// Bound buffer, or `None` to clear the slot.
+        buffer: Option<HalBoundBuffer>,
+    },
     /// Sets the index buffer and index format.
     SetIndexBuffer(HalBoundIndexBuffer),
     /// Sets the viewport.

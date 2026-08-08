@@ -33,10 +33,11 @@ use crate::{
     HalCopy, HalCullMode, HalDepthStencilState, HalDescriptorBinding, HalDraw, HalError,
     HalExtent3d, HalFilterMode, HalFrontFace, HalIndexFormat, HalLimits, HalMipmapFilterMode,
     HalMslBufferSizeBinding, HalMslImmediates, HalPresentMode, HalPrimitiveTopology, HalQueryKind,
-    HalQuerySet, HalRenderLoadOp, HalRenderPass, HalRenderPipelineDescriptor, HalResolveQuerySet,
-    HalSampler, HalSamplerDescriptor, HalShaderSource, HalStencilFaceState, HalStencilOperation,
-    HalSurfaceConfiguration, HalTexture, HalTextureClear, HalTextureCopy, HalTextureDescriptor,
-    HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode, SubmissionIndex,
+    HalQuerySet, HalRenderLoadOp, HalRenderPass, HalRenderPassCommand, HalRenderPassCommandStream,
+    HalRenderPipelineDescriptor, HalResolveQuerySet, HalSampler, HalSamplerDescriptor,
+    HalShaderSource, HalStencilFaceState, HalStencilOperation, HalSurfaceConfiguration, HalTexture,
+    HalTextureClear, HalTextureCopy, HalTextureDescriptor, HalTextureFormat, HalTextureUsage,
+    HalVertexFormat, HalVertexStepMode, SubmissionIndex,
 };
 #[cfg(feature = "tiled")]
 use crate::{HalSubpassAttachmentResource, HalSubpassRenderPassCommand};

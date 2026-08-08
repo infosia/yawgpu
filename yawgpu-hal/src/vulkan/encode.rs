@@ -104,6 +104,16 @@ pub(super) fn record_and_submit_copies(
                         render_passes.push(render_pass);
                     }
                 }
+                HalCopy::RenderPassCommandStream(pass) => {
+                    let temps =
+                        encode_render_pass_command_stream(&queue.device, command_buffer, pass)?;
+                    descriptor_pools.extend(temps.descriptor_pools);
+                    framebuffers.push(temps.framebuffer);
+                    image_views.extend(temps.image_views);
+                    if let Some(render_pass) = temps.render_pass {
+                        render_passes.push(render_pass);
+                    }
+                }
                 #[cfg(feature = "tiled")]
                 HalCopy::SubpassRenderPass(pass) => {
                     let temps = encode_subpass_render_pass(&queue.device, command_buffer, pass)?;
@@ -479,8 +489,71 @@ fn retain_copy_resources(copy: &HalCopy, retained: &mut Vec<RetainedResource>) {
                 retain_hal_buffer(&indirect_buffer.buffer, retained);
             }
         }
+        HalCopy::RenderPassCommandStream(pass) => {
+            if let Some(query_set) = &pass.occlusion_query_set {
+                retain_hal_query_set(query_set, retained);
+            }
+            for color_target in pass.color_targets.iter().flatten() {
+                retain_hal_texture(&color_target.texture, retained);
+                if let Some(resolve_target) = &color_target.resolve_target {
+                    retain_hal_texture(resolve_target, retained);
+                }
+            }
+            if let Some(depth_stencil_attachment) = &pass.depth_stencil_attachment {
+                retain_hal_texture(&depth_stencil_attachment.texture, retained);
+            }
+            retain_render_stream_command_resources(&pass.commands, retained);
+        }
         #[cfg(feature = "tiled")]
         HalCopy::SubpassRenderPass(pass) => retain_subpass_resources(pass, retained),
+    }
+}
+
+fn retain_render_stream_command_resources(
+    commands: &[HalRenderPassCommand],
+    retained: &mut Vec<RetainedResource>,
+) {
+    for command in commands {
+        match command {
+            HalRenderPassCommand::SetPipeline(pipeline) => {
+                retain_hal_render_pipeline(pipeline, retained);
+            }
+            HalRenderPassCommand::SetBindGroup {
+                buffers,
+                textures,
+                samplers,
+                external_textures,
+                ..
+            } => {
+                for bound in buffers {
+                    retain_hal_buffer(&bound.buffer, retained);
+                }
+                for bound in textures {
+                    retain_hal_texture(&bound.texture, retained);
+                }
+                for bound in samplers {
+                    retain_hal_sampler(&bound.sampler, retained);
+                }
+                for bound in external_textures {
+                    retain_hal_external_texture(bound, retained);
+                }
+            }
+            HalRenderPassCommand::SetVertexBuffer {
+                buffer: Some(bound),
+                ..
+            } => retain_hal_buffer(&bound.buffer, retained),
+            HalRenderPassCommand::SetIndexBuffer(bound) => {
+                retain_hal_buffer(&bound.buffer, retained);
+            }
+            HalRenderPassCommand::DrawIndirect { indirect_buffer }
+            | HalRenderPassCommand::DrawIndexedIndirect { indirect_buffer } => {
+                retain_hal_buffer(&indirect_buffer.buffer, retained);
+            }
+            HalRenderPassCommand::ExecuteRenderBundle(bundle) => {
+                retain_render_stream_command_resources(&bundle.commands, retained);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -631,6 +704,16 @@ fn surface_pending_from_copy(copy: &HalCopy) -> Option<Arc<Mutex<SurfacePendingS
                     .and_then(surface_pending_from_hal_texture)
             })
         }),
+        HalCopy::RenderPassCommandStream(pass) => {
+            pass.color_targets.iter().flatten().find_map(|target| {
+                surface_pending_from_hal_texture(&target.texture).or_else(|| {
+                    target
+                        .resolve_target
+                        .as_ref()
+                        .and_then(surface_pending_from_hal_texture)
+                })
+            })
+        }
     }
 }
 
@@ -2002,6 +2085,53 @@ pub(super) fn encode_render_pass(
     command_buffer: vk::CommandBuffer,
     pass: &HalRenderPass,
 ) -> Result<RenderPassTemps, HalError> {
+    encode_render_pass_impl(device, command_buffer, pass, None)
+}
+
+pub(super) fn encode_render_pass_command_stream(
+    device: &VulkanDeviceInner,
+    command_buffer: vk::CommandBuffer,
+    pass: &HalRenderPassCommandStream,
+) -> Result<RenderPassTemps, HalError> {
+    let mut bind_buffers = Vec::new();
+    let mut bind_textures = Vec::new();
+    let mut bind_samplers = Vec::new();
+    collect_vulkan_stream_bindings(
+        &pass.commands,
+        &mut bind_buffers,
+        &mut bind_textures,
+        &mut bind_samplers,
+    );
+    let setup = HalRenderPass {
+        pipeline: None,
+        color_targets: pass.color_targets.clone(),
+        framebuffer_fetch_color_slots: pass.framebuffer_fetch_color_slots.clone(),
+        depth_stencil_attachment: pass.depth_stencil_attachment.clone(),
+        bind_buffers,
+        bind_textures,
+        bind_samplers,
+        bind_external_textures: Vec::new(),
+        vertex_buffers: Vec::new(),
+        index_buffer: None,
+        indirect_buffer: None,
+        viewport: None,
+        scissor_rect: None,
+        blend_constant: [0.0; 4],
+        stencil_reference: 0,
+        occlusion_query_set: pass.occlusion_query_set.clone(),
+        occlusion_query_index: None,
+        draw: None,
+        immediate_data: Vec::new(),
+    };
+    encode_render_pass_impl(device, command_buffer, &setup, Some(&pass.commands))
+}
+
+fn encode_render_pass_impl(
+    device: &VulkanDeviceInner,
+    command_buffer: vk::CommandBuffer,
+    pass: &HalRenderPass,
+    stream_commands: Option<&[HalRenderPassCommand]>,
+) -> Result<RenderPassTemps, HalError> {
     let vk_device = &device.device;
     let color_textures = vulkan_render_color_textures(pass)?;
     let resolve_textures = vulkan_render_resolve_textures(pass)?;
@@ -2013,6 +2143,22 @@ pub(super) fn encode_render_pass(
     if let Some((query_set, query_index)) = active_query {
         unsafe {
             vk_device.cmd_reset_query_pool(command_buffer, query_set.pool(), query_index, 1);
+        }
+    }
+    if let Some(commands) = stream_commands {
+        let query_set = vulkan_stream_query_set(pass)?;
+        if let Some(query_set) = query_set {
+            for query_index in vulkan_stream_query_indices(commands) {
+                query_set.validate_query(query_index)?;
+                unsafe {
+                    vk_device.cmd_reset_query_pool(
+                        command_buffer,
+                        query_set.pool(),
+                        query_index,
+                        1,
+                    );
+                }
+            }
         }
     }
     for (slot, texture) in color_textures
@@ -2156,7 +2302,9 @@ pub(super) fn encode_render_pass(
         match update_render_descriptor_sets(
             vk_device,
             pipeline,
-            pass,
+            &pass.bind_buffers,
+            &pass.bind_textures,
+            &pass.bind_samplers,
             &color_attachment_views,
             &descriptor_sets,
         ) {
@@ -2203,7 +2351,21 @@ pub(super) fn encode_render_pass(
             );
         }
     }
-    if let (Some(crate::HalRenderPipeline::Vulkan(pipeline)), Some(draw)) =
+    let mut stream_temps = VulkanRenderStreamTemps::default();
+    if let Some(commands) = stream_commands {
+        let query_set = vulkan_stream_query_set(pass)?;
+        let mut state = VulkanRenderStreamState::new(render_area, width, height, query_set);
+        encode_vulkan_render_commands(
+            device,
+            command_buffer,
+            commands,
+            &color_attachment_views,
+            &pass.color_targets,
+            pass.depth_stencil_attachment.as_ref(),
+            &mut state,
+            &mut stream_temps,
+        )?;
+    } else if let (Some(crate::HalRenderPipeline::Vulkan(pipeline)), Some(draw)) =
         (&pass.pipeline, pass.draw)
     {
         unsafe {
@@ -2376,9 +2538,15 @@ pub(super) fn encode_render_pass(
         }
     }
     Ok(RenderPassTemps {
-        descriptor_pools: descriptor_pool.into_iter().collect(),
+        descriptor_pools: descriptor_pool
+            .into_iter()
+            .chain(stream_temps.descriptor_pools)
+            .collect(),
         framebuffer,
-        image_views,
+        image_views: image_views
+            .into_iter()
+            .chain(stream_temps.image_views)
+            .collect(),
         render_pass: temporary_render_pass,
     })
 }
@@ -2447,6 +2615,473 @@ fn encode_render_draw(
             Ok(())
         }
     }
+}
+
+fn collect_vulkan_stream_bindings(
+    commands: &[HalRenderPassCommand],
+    buffers: &mut Vec<HalBoundBuffer>,
+    textures: &mut Vec<HalBoundTexture>,
+    samplers: &mut Vec<HalBoundSampler>,
+) {
+    for command in commands {
+        match command {
+            HalRenderPassCommand::SetBindGroup {
+                buffers: command_buffers,
+                textures: command_textures,
+                samplers: command_samplers,
+                ..
+            } => {
+                buffers.extend(command_buffers.iter().cloned());
+                textures.extend(command_textures.iter().cloned());
+                samplers.extend(command_samplers.iter().cloned());
+            }
+            HalRenderPassCommand::ExecuteRenderBundle(bundle) => {
+                collect_vulkan_stream_bindings(&bundle.commands, buffers, textures, samplers);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn vulkan_stream_query_set(pass: &HalRenderPass) -> Result<Option<&VulkanQuerySet>, HalError> {
+    match &pass.occlusion_query_set {
+        Some(HalQuerySet::Vulkan(query_set)) => Ok(Some(query_set)),
+        Some(_) => Err(buffer_error("occlusion query set is not Vulkan-backed")),
+        None => Ok(None),
+    }
+}
+
+fn vulkan_stream_query_indices(commands: &[HalRenderPassCommand]) -> Vec<u32> {
+    let mut indices = Vec::new();
+    for command in commands {
+        match command {
+            HalRenderPassCommand::BeginOcclusionQuery { index } => indices.push(*index),
+            HalRenderPassCommand::ExecuteRenderBundle(bundle) => {
+                indices.extend(vulkan_stream_query_indices(&bundle.commands));
+            }
+            _ => {}
+        }
+    }
+    indices
+}
+
+#[derive(Default)]
+struct VulkanRenderStreamTemps {
+    descriptor_pools: Vec<vk::DescriptorPool>,
+    image_views: Vec<vk::ImageView>,
+}
+
+struct VulkanRenderStreamState<'a> {
+    pipeline: Option<crate::HalRenderPipeline>,
+    bind_buffers: Vec<HalBoundBuffer>,
+    bind_textures: Vec<HalBoundTexture>,
+    bind_samplers: Vec<HalBoundSampler>,
+    vertex_buffers: Vec<HalBoundBuffer>,
+    index_buffer: Option<HalBoundIndexBuffer>,
+    viewport: vk::Viewport,
+    scissor: vk::Rect2D,
+    immediate_data: Vec<u8>,
+    query_set: Option<&'a VulkanQuerySet>,
+    active_query_index: Option<u32>,
+    descriptors_dirty: bool,
+    initialized: bool,
+}
+
+impl<'a> VulkanRenderStreamState<'a> {
+    fn new(
+        render_area: vk::Rect2D,
+        width: u32,
+        height: u32,
+        query_set: Option<&'a VulkanQuerySet>,
+    ) -> Self {
+        Self {
+            pipeline: None,
+            bind_buffers: Vec::new(),
+            bind_textures: Vec::new(),
+            bind_samplers: Vec::new(),
+            vertex_buffers: Vec::new(),
+            index_buffer: None,
+            viewport: vk::Viewport {
+                x: 0.0,
+                y: height as f32,
+                width: width as f32,
+                height: -(height as f32),
+                min_depth: 0.0,
+                max_depth: 1.0,
+            },
+            scissor: render_area,
+            immediate_data: vec![0; 64],
+            query_set,
+            active_query_index: None,
+            descriptors_dirty: true,
+            initialized: false,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_vulkan_render_commands(
+    device: &VulkanDeviceInner,
+    command_buffer: vk::CommandBuffer,
+    commands: &[HalRenderPassCommand],
+    color_attachment_views: &[Option<vk::ImageView>],
+    _color_targets: &[Option<HalRenderColorTarget>],
+    _depth_stencil_attachment: Option<&HalRenderDepthStencilAttachment>,
+    state: &mut VulkanRenderStreamState<'_>,
+    temps: &mut VulkanRenderStreamTemps,
+) -> Result<(), HalError> {
+    let vk_device = &device.device;
+    if !state.initialized {
+        unsafe {
+            vk_device.cmd_set_viewport(command_buffer, 0, &[state.viewport]);
+            vk_device.cmd_set_scissor(command_buffer, 0, &[state.scissor]);
+            vk_device.cmd_set_blend_constants(command_buffer, &[0.0; 4]);
+            vk_device.cmd_set_stencil_reference(
+                command_buffer,
+                vk::StencilFaceFlags::FRONT_AND_BACK,
+                0,
+            );
+        }
+        state.initialized = true;
+    }
+    for command in commands {
+        match command {
+            HalRenderPassCommand::SetPipeline(pipeline) => {
+                let crate::HalRenderPipeline::Vulkan(pipeline) = pipeline else {
+                    return Err(shader_error("render pipeline is not Vulkan-backed"));
+                };
+                unsafe {
+                    vk_device.cmd_bind_pipeline(
+                        command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        pipeline.inner.pipeline,
+                    );
+                }
+                state.pipeline = Some(crate::HalRenderPipeline::Vulkan(pipeline.clone()));
+                state.descriptors_dirty = true;
+            }
+            HalRenderPassCommand::SetBindGroup {
+                index,
+                buffers,
+                textures,
+                samplers,
+                ..
+            } => {
+                state.bind_buffers.retain(|binding| binding.group != *index);
+                state
+                    .bind_textures
+                    .retain(|binding| binding.group != *index);
+                state
+                    .bind_samplers
+                    .retain(|binding| binding.group != *index);
+                state.bind_buffers.extend(buffers.iter().cloned());
+                state.bind_textures.extend(textures.iter().cloned());
+                state.bind_samplers.extend(samplers.iter().cloned());
+                state.descriptors_dirty = true;
+            }
+            HalRenderPassCommand::SetVertexBuffer { slot, buffer } => {
+                state
+                    .vertex_buffers
+                    .retain(|binding| binding.binding != *slot);
+                if let Some(bound) = buffer {
+                    let crate::HalBuffer::Vulkan(buffer) = &bound.buffer else {
+                        return Err(buffer_error("vertex buffer is not Vulkan-backed"));
+                    };
+                    validate_bound_buffer_range(bound)?;
+                    unsafe {
+                        vk_device.cmd_bind_vertex_buffers(
+                            command_buffer,
+                            *slot,
+                            &[buffer.inner()?.buffer],
+                            &[bound.offset],
+                        );
+                    }
+                    state.vertex_buffers.push(bound.clone());
+                }
+            }
+            HalRenderPassCommand::SetIndexBuffer(bound) => {
+                let crate::HalBuffer::Vulkan(buffer) = &bound.buffer else {
+                    return Err(buffer_error("render index buffer is not Vulkan-backed"));
+                };
+                buffer.validate_range(bound.offset, bound.size)?;
+                unsafe {
+                    vk_device.cmd_bind_index_buffer(
+                        command_buffer,
+                        buffer.inner()?.buffer,
+                        bound.offset,
+                        vk_index_type(bound.format),
+                    );
+                }
+                state.index_buffer = Some(bound.clone());
+            }
+            HalRenderPassCommand::SetViewport(viewport) => {
+                state.viewport = vk::Viewport {
+                    x: viewport.x,
+                    y: viewport.y + viewport.height,
+                    width: viewport.width,
+                    height: -viewport.height,
+                    min_depth: viewport.min_depth,
+                    max_depth: viewport.max_depth,
+                };
+                unsafe {
+                    vk_device.cmd_set_viewport(command_buffer, 0, &[state.viewport]);
+                }
+            }
+            HalRenderPassCommand::SetScissorRect(rect) => {
+                state.scissor = vk::Rect2D {
+                    offset: vk::Offset2D {
+                        x: rect.x as i32,
+                        y: rect.y as i32,
+                    },
+                    extent: vk::Extent2D {
+                        width: rect.width,
+                        height: rect.height,
+                    },
+                };
+                unsafe {
+                    vk_device.cmd_set_scissor(command_buffer, 0, &[state.scissor]);
+                }
+            }
+            HalRenderPassCommand::SetBlendConstant(color) => unsafe {
+                vk_device.cmd_set_blend_constants(command_buffer, color);
+            },
+            HalRenderPassCommand::SetStencilReference(reference) => unsafe {
+                vk_device.cmd_set_stencil_reference(
+                    command_buffer,
+                    vk::StencilFaceFlags::FRONT_AND_BACK,
+                    *reference,
+                );
+            },
+            HalRenderPassCommand::SetImmediates { offset, data } => {
+                let start = usize::try_from(*offset)
+                    .map_err(|_| buffer_error("render immediates offset exceeds usize"))?;
+                let end = start
+                    .checked_add(data.len())
+                    .ok_or_else(|| buffer_error("render immediates range overflows"))?;
+                state
+                    .immediate_data
+                    .get_mut(start..end)
+                    .ok_or_else(|| buffer_error("render immediates range exceeds scratch"))?
+                    .copy_from_slice(data);
+            }
+            HalRenderPassCommand::BeginOcclusionQuery { index } => {
+                let query_set = state
+                    .query_set
+                    .ok_or_else(|| buffer_error("active occlusion query has no query set"))?;
+                unsafe {
+                    vk_device.cmd_begin_query(
+                        command_buffer,
+                        query_set.pool(),
+                        *index,
+                        if device.occlusion_query_precise {
+                            vk::QueryControlFlags::PRECISE
+                        } else {
+                            vk::QueryControlFlags::empty()
+                        },
+                    );
+                }
+                state.active_query_index = Some(*index);
+            }
+            HalRenderPassCommand::EndOcclusionQuery => {
+                let query_set = state
+                    .query_set
+                    .ok_or_else(|| buffer_error("active occlusion query has no query set"))?;
+                let Some(index) = state.active_query_index.take() else {
+                    return Err(buffer_error("render occlusion query end has no begin"));
+                };
+                unsafe {
+                    vk_device.cmd_end_query(command_buffer, query_set.pool(), index);
+                }
+            }
+            HalRenderPassCommand::Draw {
+                vertex_count,
+                instance_count,
+                first_vertex,
+                first_instance,
+            } => {
+                prepare_vulkan_render_draw(
+                    vk_device,
+                    command_buffer,
+                    color_attachment_views,
+                    state,
+                    temps,
+                )?;
+                unsafe {
+                    vk_device.cmd_draw(
+                        command_buffer,
+                        *vertex_count,
+                        *instance_count,
+                        *first_vertex,
+                        *first_instance,
+                    );
+                }
+            }
+            HalRenderPassCommand::DrawIndexed {
+                index_count,
+                instance_count,
+                first_index,
+                base_vertex,
+                first_instance,
+            } => {
+                if state.index_buffer.is_none() {
+                    return Err(buffer_error("render index buffer is missing"));
+                }
+                prepare_vulkan_render_draw(
+                    vk_device,
+                    command_buffer,
+                    color_attachment_views,
+                    state,
+                    temps,
+                )?;
+                unsafe {
+                    vk_device.cmd_draw_indexed(
+                        command_buffer,
+                        *index_count,
+                        *instance_count,
+                        *first_index,
+                        *base_vertex,
+                        *first_instance,
+                    );
+                }
+            }
+            HalRenderPassCommand::DrawIndirect { indirect_buffer } => {
+                prepare_vulkan_render_draw(
+                    vk_device,
+                    command_buffer,
+                    color_attachment_views,
+                    state,
+                    temps,
+                )?;
+                let crate::HalBuffer::Vulkan(buffer) = &indirect_buffer.buffer else {
+                    return Err(buffer_error("render indirect buffer is not Vulkan-backed"));
+                };
+                unsafe {
+                    vk_device.cmd_draw_indirect(
+                        command_buffer,
+                        buffer.inner()?.buffer,
+                        indirect_buffer.offset,
+                        1,
+                        16,
+                    );
+                }
+            }
+            HalRenderPassCommand::DrawIndexedIndirect { indirect_buffer } => {
+                if state.index_buffer.is_none() {
+                    return Err(buffer_error("render index buffer is missing"));
+                }
+                prepare_vulkan_render_draw(
+                    vk_device,
+                    command_buffer,
+                    color_attachment_views,
+                    state,
+                    temps,
+                )?;
+                let crate::HalBuffer::Vulkan(buffer) = &indirect_buffer.buffer else {
+                    return Err(buffer_error("render indirect buffer is not Vulkan-backed"));
+                };
+                unsafe {
+                    vk_device.cmd_draw_indexed_indirect(
+                        command_buffer,
+                        buffer.inner()?.buffer,
+                        indirect_buffer.offset,
+                        1,
+                        20,
+                    );
+                }
+            }
+            HalRenderPassCommand::ExecuteRenderBundle(bundle) => {
+                encode_vulkan_render_commands(
+                    device,
+                    command_buffer,
+                    &bundle.commands,
+                    color_attachment_views,
+                    _color_targets,
+                    _depth_stencil_attachment,
+                    state,
+                    temps,
+                )?;
+                state.pipeline = None;
+                state.bind_buffers.clear();
+                state.bind_textures.clear();
+                state.bind_samplers.clear();
+                state.vertex_buffers.clear();
+                state.index_buffer = None;
+                state.descriptors_dirty = true;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn prepare_vulkan_render_draw(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    color_attachment_views: &[Option<vk::ImageView>],
+    state: &mut VulkanRenderStreamState<'_>,
+    temps: &mut VulkanRenderStreamTemps,
+) -> Result<(), HalError> {
+    let Some(crate::HalRenderPipeline::Vulkan(pipeline)) = &state.pipeline else {
+        return Err(shader_error("render draw has no Vulkan pipeline"));
+    };
+    if state.descriptors_dirty {
+        let descriptor_pool = create_render_descriptor_pool(device, pipeline)?;
+        let descriptor_sets = if let Some(pool) = descriptor_pool {
+            match allocate_render_descriptor_sets(device, pool, pipeline) {
+                Ok(sets) => sets,
+                Err(error) => {
+                    unsafe {
+                        device.destroy_descriptor_pool(pool, None);
+                    }
+                    return Err(error);
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let image_views = match update_render_descriptor_sets(
+            device,
+            pipeline,
+            &state.bind_buffers,
+            &state.bind_textures,
+            &state.bind_samplers,
+            color_attachment_views,
+            &descriptor_sets,
+        ) {
+            Ok(views) => views,
+            Err(error) => {
+                if let Some(pool) = descriptor_pool {
+                    unsafe {
+                        device.destroy_descriptor_pool(pool, None);
+                    }
+                }
+                return Err(error);
+            }
+        };
+        bind_render_descriptor_sets(device, command_buffer, pipeline, &descriptor_sets);
+        if let Some(pool) = descriptor_pool {
+            temps.descriptor_pools.push(pool);
+        }
+        temps.image_views.extend(image_views);
+        state.descriptors_dirty = false;
+    }
+    if let Some(immediates) = pipeline.inner.immediates {
+        let block = crate::immediates::compose_immediates_block(
+            &state.immediate_data,
+            immediates.block_size,
+            immediates.depth_range_offset,
+            [state.viewport.min_depth, state.viewport.max_depth],
+        );
+        unsafe {
+            device.cmd_push_constants(
+                command_buffer,
+                pipeline.inner.pipeline_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                &block,
+            );
+        }
+    }
+    Ok(())
 }
 
 fn vulkan_active_occlusion_query(

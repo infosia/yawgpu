@@ -12,15 +12,17 @@ use super::texture::GlesTextureMeta;
 use super::BACKEND;
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
 use crate::{
-    HalBlendFactor, HalBlendOperation, HalBoundSampler, HalBoundTexture, HalBuffer,
+    HalBlendFactor, HalBlendOperation, HalBoundBuffer, HalBoundExternalTexture,
+    HalBoundIndexBuffer, HalBoundIndirectBuffer, HalBoundSampler, HalBoundTexture, HalBuffer,
     HalBufferBindingKind, HalBufferClear, HalBufferCopy, HalBufferTextureCopy, HalColorTargetState,
     HalCompareFunction, HalComputeDispatch, HalComputePass, HalComputePipeline, HalCopy,
     HalCullMode, HalDepthStencilState, HalDescriptorBinding, HalDescriptorBindingKind, HalDraw,
     HalError, HalFrontFace, HalGlesBindingClass, HalGlesBindingRemap, HalIndexFormat,
-    HalRenderLoadOp, HalRenderPass, HalRenderPipeline, HalSampler, HalStencilFaceState,
-    HalStencilOperation, HalStorageTextureAccess, HalTexture, HalTextureAspect, HalTextureClear,
-    HalTextureCopy, HalTextureFormat, HalTextureMetadataSlot, HalTextureViewDimension,
-    HalVertexStepMode, SubmissionIndex,
+    HalRenderLoadOp, HalRenderPass, HalRenderPassCommand, HalRenderPassCommandStream,
+    HalRenderPipeline, HalSampler, HalStencilFaceState, HalStencilOperation,
+    HalStorageTextureAccess, HalTexture, HalTextureAspect, HalTextureClear, HalTextureCopy,
+    HalTextureFormat, HalTextureMetadataSlot, HalTextureViewDimension, HalVertexStepMode,
+    SubmissionIndex,
 };
 
 /// Stores GLES queue data used by validation and backend submission.
@@ -153,6 +155,24 @@ impl GlesQueue {
                                 sample_mask_i,
                             };
                             submit_render_pass(
+                                gl,
+                                pass,
+                                render_caps,
+                                placeholder_sampler,
+                                TextureViewCaps {
+                                    supports_texture_view,
+                                    supports_cube_map_array,
+                                    texture_view,
+                                },
+                            )?;
+                        }
+                        HalCopy::RenderPassCommandStream(pass) => {
+                            let render_caps = RenderDrawCaps {
+                                supports_base_vertex,
+                                supports_vertex_array_bgra,
+                                sample_mask_i,
+                            };
+                            submit_render_pass_command_stream_gles(
                                 gl,
                                 pass,
                                 render_caps,
@@ -1126,6 +1146,322 @@ struct RenderDrawCaps {
     supports_base_vertex: bool,
     supports_vertex_array_bgra: bool,
     sample_mask_i: Option<super::device::GlesSampleMaskIFn>,
+}
+
+#[derive(Default)]
+struct GlesRenderStreamState {
+    pipeline: Option<HalRenderPipeline>,
+    bind_buffers: Vec<HalBoundBuffer>,
+    bind_textures: Vec<HalBoundTexture>,
+    bind_samplers: Vec<HalBoundSampler>,
+    bind_external_textures: Vec<HalBoundExternalTexture>,
+    vertex_buffers: Vec<HalBoundBuffer>,
+    index_buffer: Option<HalBoundIndexBuffer>,
+    viewport: Option<crate::HalViewport>,
+    scissor_rect: Option<crate::HalScissorRect>,
+    blend_constant: [f32; 4],
+    stencil_reference: u32,
+    occlusion_query_index: Option<u32>,
+    immediate_data: Vec<u8>,
+    draw_index: usize,
+}
+
+fn submit_render_pass_command_stream_gles(
+    gl: &glow::Context,
+    stream: &HalRenderPassCommandStream,
+    caps: RenderDrawCaps,
+    placeholder_sampler: glow::Sampler,
+    texture_view_caps: TextureViewCaps,
+) -> Result<(), HalError> {
+    let draw_count = gles_render_stream_draw_count(&stream.commands);
+    if draw_count == 0 {
+        let pass =
+            gles_stream_draw_pass(stream, &GlesRenderStreamState::default(), None, true, true);
+        return submit_render_pass(gl, &pass, caps, placeholder_sampler, texture_view_caps);
+    }
+    let mut state = GlesRenderStreamState {
+        immediate_data: vec![0; 64],
+        ..Default::default()
+    };
+    replay_gles_render_stream(
+        gl,
+        stream,
+        &stream.commands,
+        draw_count,
+        &mut state,
+        caps,
+        placeholder_sampler,
+        texture_view_caps,
+    )
+}
+
+fn gles_render_stream_draw_count(commands: &[HalRenderPassCommand]) -> usize {
+    commands
+        .iter()
+        .map(|command| match command {
+            HalRenderPassCommand::Draw { .. }
+            | HalRenderPassCommand::DrawIndexed { .. }
+            | HalRenderPassCommand::DrawIndirect { .. }
+            | HalRenderPassCommand::DrawIndexedIndirect { .. } => 1,
+            HalRenderPassCommand::ExecuteRenderBundle(bundle) => {
+                gles_render_stream_draw_count(&bundle.commands)
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn replay_gles_render_stream(
+    gl: &glow::Context,
+    stream: &HalRenderPassCommandStream,
+    commands: &[HalRenderPassCommand],
+    draw_count: usize,
+    state: &mut GlesRenderStreamState,
+    caps: RenderDrawCaps,
+    placeholder_sampler: glow::Sampler,
+    texture_view_caps: TextureViewCaps,
+) -> Result<(), HalError> {
+    for command in commands {
+        match command {
+            HalRenderPassCommand::SetPipeline(pipeline) => {
+                state.pipeline = Some(pipeline.clone());
+            }
+            HalRenderPassCommand::SetBindGroup {
+                index,
+                buffers,
+                textures,
+                samplers,
+                external_textures,
+            } => {
+                state.bind_buffers.retain(|binding| binding.group != *index);
+                state
+                    .bind_textures
+                    .retain(|binding| binding.group != *index);
+                state
+                    .bind_samplers
+                    .retain(|binding| binding.group != *index);
+                state
+                    .bind_external_textures
+                    .retain(|binding| binding.group != *index);
+                state.bind_buffers.extend(buffers.iter().cloned());
+                state.bind_textures.extend(textures.iter().cloned());
+                state.bind_samplers.extend(samplers.iter().cloned());
+                state
+                    .bind_external_textures
+                    .extend(external_textures.iter().cloned());
+            }
+            HalRenderPassCommand::SetVertexBuffer { slot, buffer } => {
+                state
+                    .vertex_buffers
+                    .retain(|binding| binding.binding != *slot);
+                if let Some(buffer) = buffer {
+                    state.vertex_buffers.push(buffer.clone());
+                }
+            }
+            HalRenderPassCommand::SetIndexBuffer(buffer) => {
+                state.index_buffer = Some(buffer.clone());
+            }
+            HalRenderPassCommand::SetViewport(viewport) => state.viewport = Some(*viewport),
+            HalRenderPassCommand::SetScissorRect(rect) => state.scissor_rect = Some(*rect),
+            HalRenderPassCommand::SetBlendConstant(color) => state.blend_constant = *color,
+            HalRenderPassCommand::SetStencilReference(reference) => {
+                state.stencil_reference = *reference;
+            }
+            HalRenderPassCommand::SetImmediates { offset, data } => {
+                let start =
+                    usize::try_from(*offset).map_err(|_| HalError::BufferOperationFailed {
+                        backend: BACKEND,
+                        message: "render immediates offset exceeds usize",
+                    })?;
+                let end = start
+                    .checked_add(data.len())
+                    .ok_or(HalError::BufferOperationFailed {
+                        backend: BACKEND,
+                        message: "render immediates range overflows",
+                    })?;
+                state
+                    .immediate_data
+                    .get_mut(start..end)
+                    .ok_or(HalError::BufferOperationFailed {
+                        backend: BACKEND,
+                        message: "render immediates range exceeds scratch",
+                    })?
+                    .copy_from_slice(data);
+            }
+            HalRenderPassCommand::BeginOcclusionQuery { index } => {
+                state.occlusion_query_index = Some(*index);
+            }
+            HalRenderPassCommand::EndOcclusionQuery => state.occlusion_query_index = None,
+            HalRenderPassCommand::Draw {
+                vertex_count,
+                instance_count,
+                first_vertex,
+                first_instance,
+            } => submit_gles_stream_draw(
+                gl,
+                stream,
+                state,
+                draw_count,
+                HalDraw::Direct {
+                    vertex_count: *vertex_count,
+                    instance_count: *instance_count,
+                    first_vertex: *first_vertex,
+                    first_instance: *first_instance,
+                },
+                None,
+                caps,
+                placeholder_sampler,
+                texture_view_caps,
+            )?,
+            HalRenderPassCommand::DrawIndexed {
+                index_count,
+                instance_count,
+                first_index,
+                base_vertex,
+                first_instance,
+            } => submit_gles_stream_draw(
+                gl,
+                stream,
+                state,
+                draw_count,
+                HalDraw::Indexed {
+                    index_count: *index_count,
+                    instance_count: *instance_count,
+                    first_index: *first_index,
+                    base_vertex: *base_vertex,
+                    first_instance: *first_instance,
+                },
+                None,
+                caps,
+                placeholder_sampler,
+                texture_view_caps,
+            )?,
+            HalRenderPassCommand::DrawIndirect { indirect_buffer } => submit_gles_stream_draw(
+                gl,
+                stream,
+                state,
+                draw_count,
+                HalDraw::Indirect {
+                    offset: indirect_buffer.offset,
+                },
+                Some(indirect_buffer),
+                caps,
+                placeholder_sampler,
+                texture_view_caps,
+            )?,
+            HalRenderPassCommand::DrawIndexedIndirect { indirect_buffer } => {
+                submit_gles_stream_draw(
+                    gl,
+                    stream,
+                    state,
+                    draw_count,
+                    HalDraw::IndexedIndirect {
+                        offset: indirect_buffer.offset,
+                    },
+                    Some(indirect_buffer),
+                    caps,
+                    placeholder_sampler,
+                    texture_view_caps,
+                )?;
+            }
+            HalRenderPassCommand::ExecuteRenderBundle(bundle) => {
+                replay_gles_render_stream(
+                    gl,
+                    stream,
+                    &bundle.commands,
+                    draw_count,
+                    state,
+                    caps,
+                    placeholder_sampler,
+                    texture_view_caps,
+                )?;
+                state.pipeline = None;
+                state.bind_buffers.clear();
+                state.bind_textures.clear();
+                state.bind_samplers.clear();
+                state.bind_external_textures.clear();
+                state.vertex_buffers.clear();
+                state.index_buffer = None;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn submit_gles_stream_draw(
+    gl: &glow::Context,
+    stream: &HalRenderPassCommandStream,
+    state: &mut GlesRenderStreamState,
+    draw_count: usize,
+    draw: HalDraw,
+    indirect_buffer: Option<&HalBoundIndirectBuffer>,
+    caps: RenderDrawCaps,
+    placeholder_sampler: glow::Sampler,
+    texture_view_caps: TextureViewCaps,
+) -> Result<(), HalError> {
+    let first = state.draw_index == 0;
+    let last = state.draw_index + 1 == draw_count;
+    let pass = gles_stream_draw_pass(stream, state, Some((draw, indirect_buffer)), first, last);
+    submit_render_pass(gl, &pass, caps, placeholder_sampler, texture_view_caps)?;
+    state.draw_index += 1;
+    Ok(())
+}
+
+fn gles_stream_draw_pass(
+    stream: &HalRenderPassCommandStream,
+    state: &GlesRenderStreamState,
+    draw: Option<(HalDraw, Option<&HalBoundIndirectBuffer>)>,
+    first: bool,
+    last: bool,
+) -> HalRenderPass {
+    let mut color_targets = stream.color_targets.clone();
+    for target in color_targets.iter_mut().flatten() {
+        if !first {
+            target.load_op = HalRenderLoadOp::Load;
+        }
+        // Tier-2 compatibility only: GLES still executes the legacy one-draw
+        // `HalRenderPass` path in S2, so intermediate legacy passes must store
+        // for the following legacy pass to load. Metal and Vulkan never enter
+        // this adapter and honor the user's store op once on their one encoder.
+        if !last {
+            target.store = true;
+        }
+    }
+    let mut depth_stencil_attachment = stream.depth_stencil_attachment.clone();
+    if let Some(attachment) = &mut depth_stencil_attachment {
+        if !first {
+            attachment.depth_load_op = HalRenderLoadOp::Load;
+            attachment.stencil_load_op = HalRenderLoadOp::Load;
+        }
+        if !last {
+            attachment.depth_store = true;
+            attachment.stencil_store = true;
+        }
+    }
+    let (draw, indirect_buffer) = draw.unzip();
+    HalRenderPass {
+        pipeline: state.pipeline.clone(),
+        color_targets,
+        framebuffer_fetch_color_slots: stream.framebuffer_fetch_color_slots.clone(),
+        depth_stencil_attachment,
+        bind_buffers: state.bind_buffers.clone(),
+        bind_textures: state.bind_textures.clone(),
+        bind_samplers: state.bind_samplers.clone(),
+        bind_external_textures: state.bind_external_textures.clone(),
+        vertex_buffers: state.vertex_buffers.clone(),
+        index_buffer: state.index_buffer.clone().map(Box::new),
+        indirect_buffer: indirect_buffer.flatten().cloned().map(Box::new),
+        viewport: state.viewport,
+        scissor_rect: state.scissor_rect,
+        blend_constant: state.blend_constant,
+        stencil_reference: state.stencil_reference,
+        occlusion_query_set: stream.occlusion_query_set.clone(),
+        occlusion_query_index: state.occlusion_query_index,
+        draw,
+        immediate_data: state.immediate_data.clone(),
+    }
 }
 
 fn submit_render_pass(

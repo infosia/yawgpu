@@ -6,15 +6,16 @@ use yawgpu_hal::{
     HalBoundBuffer, HalBoundExternalTexture, HalBoundIndexBuffer, HalBoundIndirectBuffer,
     HalBoundSampler, HalBoundTexture, HalBuffer, HalBufferClear, HalBufferCopy,
     HalBufferTextureCopy, HalBufferTextureLayout, HalBufferUsage, HalComputeDispatch,
-    HalComputePass, HalCopy, HalDevice, HalDraw, HalIndexFormat, HalQueue, HalRenderColorTarget,
-    HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass, HalResolveQuerySet,
-    HalScissorRect, HalTextureAspect, HalTextureClear, HalTextureComponentSwizzle, HalTextureCopy,
-    HalTextureViewDimension, HalViewport, SubmissionIndex,
+    HalComputePass, HalCopy, HalDevice, HalIndexFormat, HalQueue, HalRenderBundle,
+    HalRenderColorTarget, HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPassCommand,
+    HalRenderPassCommandStream, HalResolveQuerySet, HalScissorRect, HalTextureAspect,
+    HalTextureClear, HalTextureComponentSwizzle, HalTextureCopy, HalTextureViewDimension,
+    HalViewport, SubmissionIndex,
 };
 #[cfg(feature = "tiled")]
 use yawgpu_hal::{
-    HalSubpassAttachmentResource, HalSubpassColorAttachment, HalSubpassDepthStencilAttachment,
-    HalSubpassDraw, HalSubpassRenderPassCommand,
+    HalDraw, HalSubpassAttachmentResource, HalSubpassColorAttachment,
+    HalSubpassDepthStencilAttachment, HalSubpassDraw, HalSubpassRenderPassCommand,
 };
 
 use crate::bind_group::*;
@@ -1031,7 +1032,7 @@ fn append_hal_command_execution(
             }
         }
         CommandExecution::RenderPass(pass) => {
-            append_writable_storage_texture_init_clears(copies, &pass.bind_groups);
+            append_render_stream_storage_texture_init_clears(copies, &pass.commands);
             append_render_pass_color_attachment_init_clears(copies, pass);
             if let Some(copy) = hal_render_pass_execution(pass) {
                 copies.push(copy);
@@ -1074,9 +1075,11 @@ fn resolve_written_occlusion_queries(
             if !query_set.same(&resolve.query_set) {
                 return None;
             }
-            let query_index = pass.occlusion_query_index?;
-            (resolve.first_query <= query_index && query_index < end_query).then_some(query_index)
+            Some(&pass.written_occlusion_queries)
         })
+        .flatten()
+        .copied()
+        .filter(|&query_index| resolve.first_query <= query_index && query_index < end_query)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
@@ -1485,6 +1488,27 @@ fn append_render_pass_color_attachment_init_clears(
     }
 }
 
+fn append_render_stream_storage_texture_init_clears(
+    copies: &mut Vec<HalCopy>,
+    commands: &[RenderCommand],
+) {
+    for command in commands {
+        match command {
+            RenderCommand::SetBindGroup {
+                index,
+                group: Some(group),
+            } => {
+                let groups = BTreeMap::from([(*index, group.clone())]);
+                append_writable_storage_texture_init_clears(copies, &groups);
+            }
+            RenderCommand::ExecuteRenderBundle(bundle) => {
+                append_render_stream_storage_texture_init_clears(copies, bundle.commands());
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(feature = "tiled")]
 fn append_subpass_attachment_init_clears(
     copies: &mut Vec<HalCopy>,
@@ -1565,95 +1589,226 @@ fn hal_compute_dispatch(dispatch: &ComputeDispatch) -> Option<HalComputeDispatch
 
 /// Returns HAL render pass execution.
 pub(crate) fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalCopy> {
-    let (
-        pipeline,
-        bind_buffers,
-        bind_textures,
-        bind_samplers,
-        bind_external_textures,
-        vertex_buffers,
-        index_buffer,
-        indirect_buffer,
-        draw,
-    ) = if let (Some(pipeline), Some(draw)) = (&pass.pipeline, pass.draw) {
-        let bindings = hal_bind_resources(
-            pipeline.bind_group_layouts(),
-            pipeline.metal_bindings(),
-            &pass.bind_groups,
-        )?;
-        let mut vertex_buffers = Vec::new();
-        for binding in pipeline.vertex_buffer_bindings() {
-            let bound = pass.vertex_buffers.get(&binding.slot)?;
-            vertex_buffers.push(HalBoundBuffer {
-                group: 0,
-                binding: binding.slot,
-                metal_index: binding.metal_index,
-                vertex_metal_index: None,
-                fragment_metal_index: None,
-                buffer: bound.buffer.hal()?,
-                offset: bound.offset,
-                size: bound.size,
-            });
+    let mut state = RenderCommandLoweringState::default();
+    let commands = hal_render_commands(&pass.commands, &mut state)?;
+    let mut stream = HalRenderPassCommandStream::default();
+    stream.color_targets = hal_render_color_targets(&pass.color_attachments)?;
+    stream.framebuffer_fetch_color_slots = render_stream_framebuffer_fetch_slots(&pass.commands);
+    stream.depth_stencil_attachment =
+        hal_render_depth_stencil_attachment(pass.depth_stencil_attachment.as_ref())?;
+    stream.occlusion_query_set = pass.occlusion_query_set.as_ref().and_then(QuerySet::hal);
+    stream.commands = commands;
+    Some(HalCopy::RenderPassCommandStream(stream))
+}
+
+#[derive(Default)]
+struct RenderCommandLoweringState {
+    pipeline: Option<Arc<RenderPipeline>>,
+    bind_groups: BTreeMap<u32, BoundBindGroup>,
+    vertex_buffers: BTreeMap<u32, BoundVertexBuffer>,
+}
+
+fn hal_render_commands(
+    commands: &[RenderCommand],
+    state: &mut RenderCommandLoweringState,
+) -> Option<Vec<HalRenderPassCommand>> {
+    let mut lowered = Vec::new();
+    for command in commands {
+        match command {
+            RenderCommand::SetPipeline(pipeline) => {
+                state.pipeline = Some(Arc::clone(pipeline));
+                lowered.push(HalRenderPassCommand::SetPipeline(pipeline.hal()?));
+                for (&index, group) in &state.bind_groups {
+                    lowered.push(hal_set_bind_group(pipeline, index, Some(group))?);
+                }
+                for (&slot, buffer) in &state.vertex_buffers {
+                    if let Some(command) = hal_set_vertex_buffer(pipeline, slot, Some(buffer))? {
+                        lowered.push(command);
+                    }
+                }
+            }
+            RenderCommand::SetBindGroup { index, group } => {
+                match group {
+                    Some(group) => {
+                        state.bind_groups.insert(*index, group.clone());
+                    }
+                    None => {
+                        state.bind_groups.remove(index);
+                    }
+                }
+                if let Some(pipeline) = &state.pipeline {
+                    lowered.push(hal_set_bind_group(pipeline, *index, group.as_ref())?);
+                }
+            }
+            RenderCommand::SetVertexBuffer { slot, buffer } => {
+                match buffer {
+                    Some(buffer) => {
+                        state.vertex_buffers.insert(*slot, buffer.clone());
+                    }
+                    None => {
+                        state.vertex_buffers.remove(slot);
+                    }
+                }
+                if let Some(pipeline) = &state.pipeline {
+                    if let Some(command) = hal_set_vertex_buffer(pipeline, *slot, buffer.as_ref())?
+                    {
+                        lowered.push(command);
+                    }
+                }
+            }
+            RenderCommand::SetIndexBuffer(buffer) => lowered.push(
+                HalRenderPassCommand::SetIndexBuffer(hal_bound_index_buffer(buffer)?),
+            ),
+            RenderCommand::SetViewport(viewport) => {
+                lowered.push(HalRenderPassCommand::SetViewport(hal_viewport(*viewport)));
+            }
+            RenderCommand::SetScissorRect(rect) => lowered.push(
+                HalRenderPassCommand::SetScissorRect(hal_scissor_rect(*rect)),
+            ),
+            RenderCommand::SetBlendConstant(color) => {
+                lowered.push(HalRenderPassCommand::SetBlendConstant(*color));
+            }
+            RenderCommand::SetStencilReference(reference) => {
+                lowered.push(HalRenderPassCommand::SetStencilReference(reference & 0xFF))
+            }
+            RenderCommand::SetImmediates { offset, data } => {
+                lowered.push(HalRenderPassCommand::SetImmediates {
+                    offset: *offset,
+                    data: data.clone(),
+                })
+            }
+            RenderCommand::BeginOcclusionQuery { index } => {
+                lowered.push(HalRenderPassCommand::BeginOcclusionQuery { index: *index })
+            }
+            RenderCommand::EndOcclusionQuery => {
+                lowered.push(HalRenderPassCommand::EndOcclusionQuery);
+            }
+            RenderCommand::Draw(draw) => lowered.push(hal_render_draw_command(draw)?),
+            RenderCommand::ExecuteRenderBundle(bundle) => {
+                let mut bundle_state = RenderCommandLoweringState::default();
+                let commands = hal_render_commands(bundle.commands(), &mut bundle_state)?;
+                let mut hal_bundle = HalRenderBundle::default();
+                hal_bundle.commands = commands;
+                lowered.push(HalRenderPassCommand::ExecuteRenderBundle(hal_bundle));
+                state.pipeline = None;
+                state.bind_groups.clear();
+                state.vertex_buffers.clear();
+            }
         }
-        let index_buffer = match &pass.index_buffer {
-            Some(bound) => Some(Box::new(hal_bound_index_buffer(bound)?)),
-            None => None,
-        };
-        let indirect_buffer = match &pass.indirect_buffer {
-            Some(bound) => Some(Box::new(hal_bound_indirect_buffer(bound)?)),
-            None => None,
-        };
-        (
-            Some(pipeline.hal()?),
-            bindings.buffers,
-            bindings.textures,
-            bindings.samplers,
-            bindings.external_textures,
-            vertex_buffers,
-            index_buffer,
-            indirect_buffer,
-            Some(hal_draw(draw)),
-        )
-    } else {
-        (
-            None,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            None,
-            None,
-            None,
-        )
+    }
+    Some(lowered)
+}
+
+fn hal_set_bind_group(
+    pipeline: &RenderPipeline,
+    index: u32,
+    group: Option<&BoundBindGroup>,
+) -> Option<HalRenderPassCommand> {
+    let Some(group) = group else {
+        return Some(HalRenderPassCommand::SetBindGroup {
+            index,
+            buffers: Vec::new(),
+            textures: Vec::new(),
+            samplers: Vec::new(),
+            external_textures: Vec::new(),
+        });
     };
-    Some(HalCopy::RenderPass(HalRenderPass {
-        pipeline,
-        color_targets: hal_render_color_targets(&pass.color_attachments)?,
-        framebuffer_fetch_color_slots: pass
-            .pipeline
-            .as_ref()
-            .map(|pipeline| pipeline.inner.framebuffer_fetch_color_slots.clone())
-            .unwrap_or_default(),
-        depth_stencil_attachment: hal_render_depth_stencil_attachment(
-            pass.depth_stencil_attachment.as_ref(),
-        )?,
-        bind_buffers,
-        bind_textures,
-        bind_samplers,
-        bind_external_textures,
-        vertex_buffers,
-        index_buffer,
-        indirect_buffer,
-        viewport: pass.viewport.map(hal_viewport),
-        scissor_rect: pass.scissor_rect.map(hal_scissor_rect),
-        blend_constant: pass.blend_constant,
-        stencil_reference: pass.stencil_reference & 0xFF,
-        occlusion_query_set: pass.occlusion_query_set.as_ref().and_then(QuerySet::hal),
-        occlusion_query_index: pass.occlusion_query_index,
-        draw,
-        immediate_data: pass.immediate_data.clone(),
-    }))
+    let bindings = pipeline
+        .metal_bindings()
+        .iter()
+        .copied()
+        .filter(|binding| binding.group == index)
+        .collect::<Vec<_>>();
+    let groups = BTreeMap::from([(index, group.clone())]);
+    let resources = hal_bind_resources(pipeline.bind_group_layouts(), &bindings, &groups)?;
+    Some(HalRenderPassCommand::SetBindGroup {
+        index,
+        buffers: resources.buffers,
+        textures: resources.textures,
+        samplers: resources.samplers,
+        external_textures: resources.external_textures,
+    })
+}
+
+fn hal_set_vertex_buffer(
+    pipeline: &RenderPipeline,
+    slot: u32,
+    buffer: Option<&BoundVertexBuffer>,
+) -> Option<Option<HalRenderPassCommand>> {
+    let Some(binding) = pipeline
+        .vertex_buffer_bindings()
+        .iter()
+        .find(|binding| binding.slot == slot)
+    else {
+        return Some(None);
+    };
+    let buffer = match buffer {
+        Some(bound) => Some(HalBoundBuffer {
+            group: 0,
+            binding: slot,
+            metal_index: binding.metal_index,
+            vertex_metal_index: None,
+            fragment_metal_index: None,
+            buffer: bound.buffer.hal()?,
+            offset: bound.offset,
+            size: bound.size,
+        }),
+        None => None,
+    };
+    Some(Some(HalRenderPassCommand::SetVertexBuffer { slot, buffer }))
+}
+
+fn hal_render_draw_command(draw: &RenderDrawExecution) -> Option<HalRenderPassCommand> {
+    Some(match draw {
+        RenderDrawExecution::Direct {
+            vertex_count,
+            instance_count,
+            first_vertex,
+            first_instance,
+        } => HalRenderPassCommand::Draw {
+            vertex_count: *vertex_count,
+            instance_count: *instance_count,
+            first_vertex: *first_vertex,
+            first_instance: *first_instance,
+        },
+        RenderDrawExecution::Indexed {
+            index_count,
+            instance_count,
+            first_index,
+            base_vertex,
+            first_instance,
+        } => HalRenderPassCommand::DrawIndexed {
+            index_count: *index_count,
+            instance_count: *instance_count,
+            first_index: *first_index,
+            base_vertex: *base_vertex,
+            first_instance: *first_instance,
+        },
+        RenderDrawExecution::Indirect { indirect_buffer } => HalRenderPassCommand::DrawIndirect {
+            indirect_buffer: hal_bound_indirect_buffer(indirect_buffer)?,
+        },
+        RenderDrawExecution::IndexedIndirect { indirect_buffer } => {
+            HalRenderPassCommand::DrawIndexedIndirect {
+                indirect_buffer: hal_bound_indirect_buffer(indirect_buffer)?,
+            }
+        }
+    })
+}
+
+fn render_stream_framebuffer_fetch_slots(commands: &[RenderCommand]) -> Vec<u32> {
+    let mut slots = BTreeSet::new();
+    for command in commands {
+        match command {
+            RenderCommand::SetPipeline(pipeline) => {
+                slots.extend(pipeline.inner.framebuffer_fetch_color_slots.iter().copied());
+            }
+            RenderCommand::ExecuteRenderBundle(bundle) => {
+                slots.extend(render_stream_framebuffer_fetch_slots(bundle.commands()));
+            }
+            _ => {}
+        }
+    }
+    slots.into_iter().collect()
 }
 
 fn hal_viewport(viewport: Viewport) -> HalViewport {
@@ -1676,6 +1831,7 @@ fn hal_scissor_rect(rect: ScissorRect) -> HalScissorRect {
     }
 }
 
+#[cfg(feature = "tiled")]
 fn hal_draw(draw: RenderDrawExecution) -> HalDraw {
     match draw {
         RenderDrawExecution::Direct {
@@ -1702,8 +1858,12 @@ fn hal_draw(draw: RenderDrawExecution) -> HalDraw {
             base_vertex,
             first_instance,
         },
-        RenderDrawExecution::Indirect { offset } => HalDraw::Indirect { offset },
-        RenderDrawExecution::IndexedIndirect { offset } => HalDraw::IndexedIndirect { offset },
+        RenderDrawExecution::Indirect { indirect_buffer } => HalDraw::Indirect {
+            offset: indirect_buffer.offset,
+        },
+        RenderDrawExecution::IndexedIndirect { indirect_buffer } => HalDraw::IndexedIndirect {
+            offset: indirect_buffer.offset,
+        },
     }
 }
 
@@ -3020,23 +3180,27 @@ fn fs() -> @location(0) vec4<f32> {
         // flat `metal_index` is the vertex-stage value in both cases.
         assert!(matches!(
             submitted.as_slice(),
-            [HalCopy::ClearTexture(_), HalCopy::RenderPass(pass)]
-                if pass.bind_textures.len() == 1
-                    && pass.bind_textures[0].group == 0
-                    && pass.bind_textures[0].binding == 0
-                    && pass.bind_textures[0].metal_index == 0
-                    && pass.bind_textures[0].format == yawgpu_hal::HalTextureFormat::Rgba8Unorm
-                    && pass.bind_textures[0].dimension == HalTextureViewDimension::D2
-                    && pass.bind_textures[0].base_mip_level == 0
-                    && pass.bind_textures[0].mip_level_count == 1
-                    && pass.bind_textures[0].base_array_layer == 1
-                    && pass.bind_textures[0].array_layer_count == 1
-                    && pass.bind_textures[0].aspect == HalTextureAspect::All
-                    && pass.bind_textures[0].storage_access.is_none()
-                    && pass.bind_samplers.len() == 1
-                    && pass.bind_samplers[0].group == 0
-                    && pass.bind_samplers[0].binding == 1
-                    && pass.bind_samplers[0].metal_index == 0
+            [HalCopy::ClearTexture(_), HalCopy::RenderPassCommandStream(pass)]
+                if matches!(pass.commands.as_slice(), [
+                    HalRenderPassCommand::SetPipeline(_),
+                    HalRenderPassCommand::SetBindGroup { textures, samplers, .. },
+                    HalRenderPassCommand::Draw { .. },
+                ] if textures.len() == 1
+                    && textures[0].group == 0
+                    && textures[0].binding == 0
+                    && textures[0].metal_index == 0
+                    && textures[0].format == yawgpu_hal::HalTextureFormat::Rgba8Unorm
+                    && textures[0].dimension == HalTextureViewDimension::D2
+                    && textures[0].base_mip_level == 0
+                    && textures[0].mip_level_count == 1
+                    && textures[0].base_array_layer == 1
+                    && textures[0].array_layer_count == 1
+                    && textures[0].aspect == HalTextureAspect::All
+                    && textures[0].storage_access.is_none()
+                    && samplers.len() == 1
+                    && samplers[0].group == 0
+                    && samplers[0].binding == 1
+                    && samplers[0].metal_index == 0)
         ));
     }
 
@@ -3066,7 +3230,12 @@ fn fs() -> @location(0) vec4<f32> {
         submitted
             .iter()
             .find_map(|copy| match copy {
-                HalCopy::RenderPass(pass) => Some(pass.stencil_reference),
+                HalCopy::RenderPassCommandStream(pass) => {
+                    pass.commands.iter().find_map(|command| match command {
+                        HalRenderPassCommand::SetStencilReference(reference) => Some(*reference),
+                        _ => None,
+                    })
+                }
                 _ => None,
             })
             .expect("render pass should be submitted")
@@ -3118,7 +3287,7 @@ fn fs() -> @location(0) vec4<f32> {
         assert!(matches!(
             command_buffer.command_ops(),
             [CommandExecution::RenderPass(pass), CommandExecution::ResolveQuerySet(resolve)]
-                if pass.occlusion_query_index == Some(0)
+                if pass.written_occlusion_queries.contains(&0)
                     && pass.occlusion_query_set.as_ref().is_some_and(|set| set.same(&query_set))
                     && resolve.query_set.same(&query_set)
                     && resolve.destination.same(&destination)
@@ -3137,9 +3306,14 @@ fn fs() -> @location(0) vec4<f32> {
         let mut written_queries = None;
         for copy in submitted {
             match copy {
-                HalCopy::RenderPass(pass) => {
-                    saw_render_query_index |=
-                        pass.occlusion_query_index == Some(0) && pass.occlusion_query_set.is_some();
+                HalCopy::RenderPassCommandStream(pass) => {
+                    saw_render_query_index |= pass.occlusion_query_set.is_some()
+                        && pass.commands.iter().any(|command| {
+                            matches!(
+                                command,
+                                HalRenderPassCommand::BeginOcclusionQuery { index: 0 }
+                            )
+                        });
                 }
                 HalCopy::ResolveQuerySet(resolve) => {
                     written_queries = Some(resolve.written_queries);
@@ -3188,9 +3362,9 @@ fn fs() -> @location(0) vec4<f32> {
         assert!(matches!(
             command_buffer.command_ops(),
             [CommandExecution::RenderPass(pass), CommandExecution::ResolveQuerySet(resolve)]
-                if pass.occlusion_query_set.is_none()
-                    && pass.occlusion_query_index.is_none()
-                    && pass.draw.is_none()
+                if pass.occlusion_query_set.as_ref().is_some_and(|set| set.same(&query_set))
+                    && pass.written_occlusion_queries.is_empty()
+                    && !pass.commands.iter().any(|command| matches!(command, RenderCommand::Draw(_)))
                     && resolve.query_set.same(&query_set)
                     && resolve.destination.same(&destination)
                     && resolve.first_query == 0
@@ -3297,7 +3471,7 @@ fn fs() -> @location(0) vec4<f32> {
             [CommandExecution::RenderPass(pass)]
                 if pass.color_attachments.is_empty()
                     && pass.depth_stencil_attachment.is_some()
-                    && pass.draw.is_some()
+                    && pass.commands.iter().any(|command| matches!(command, RenderCommand::Draw(_)))
         ));
     }
 
@@ -3323,7 +3497,7 @@ fn fs() -> @location(0) vec4<f32> {
         let pass = submitted
             .iter()
             .find_map(|copy| match copy {
-                HalCopy::RenderPass(pass) => Some(pass),
+                HalCopy::RenderPassCommandStream(pass) => Some(pass),
                 _ => None,
             })
             .expect("depth-only pass should submit a render pass");
@@ -3337,7 +3511,7 @@ fn fs() -> @location(0) vec4<f32> {
             yawgpu_hal::HalTextureFormat::Depth32Float
         );
         assert!((attachment.depth_clear_value - 0.5).abs() < f32::EPSILON);
-        assert!(pass.draw.is_none());
+        assert!(pass.commands.is_empty());
     }
 
     #[test]
@@ -3366,7 +3540,7 @@ fn fs() -> @location(0) vec4<f32> {
             let pass = submitted
                 .iter()
                 .find_map(|copy| match copy {
-                    HalCopy::RenderPass(pass) => Some(pass),
+                    HalCopy::RenderPassCommandStream(pass) => Some(pass),
                     _ => None,
                 })
                 .expect("sparse color pass should submit a render pass");
@@ -3374,7 +3548,10 @@ fn fs() -> @location(0) vec4<f32> {
             assert_eq!(pass.color_targets.len(), 2);
             assert!(pass.color_targets[real_slot].is_some());
             assert!(pass.color_targets[1 - real_slot].is_none());
-            assert!(pass.draw.is_some());
+            assert!(pass
+                .commands
+                .iter()
+                .any(|command| matches!(command, HalRenderPassCommand::Draw { .. })));
         }
     }
 
@@ -4384,7 +4561,7 @@ fn fs() -> @location(0) vec4<f32> {
             submitted.as_slice(),
             [
                 HalCopy::ClearTexture(clear),
-                HalCopy::RenderPass(_),
+                HalCopy::RenderPassCommandStream(_),
                 HalCopy::TextureToBuffer(_)
             ] if clear.mip_level == 0 && clear.base_array_layer == 0
         ));
@@ -4486,7 +4663,7 @@ fn fs() -> @location(0) vec4<f32> {
             submitted.as_slice(),
             [
                 HalCopy::ClearTexture(clear),
-                HalCopy::RenderPass(_),
+                HalCopy::RenderPassCommandStream(_),
                 HalCopy::TextureToBuffer(_)
             ] if clear.mip_level == 0
                 && clear.base_array_layer == 0

@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -55,7 +54,7 @@ pub(crate) struct RenderBundleEncoderState {
     pub(crate) lifecycle: RenderBundleEncoderLifecycle,
     pub(crate) first_error: Option<String>,
     pub(crate) pass_state: PassEncoderState,
-    pub(crate) draws: Vec<RenderBundleDraw>,
+    pub(crate) commands: Vec<RenderCommand>,
 }
 
 /// Enumerates render bundle encoder lifecycle values.
@@ -78,7 +77,8 @@ pub(crate) struct RenderBundleInner {
     pub(crate) referenced_textures: Vec<Texture>,
     pub(crate) buffer_uses: Vec<BufferScopeUse>,
     pub(crate) texture_uses: Vec<TextureScopeUse>,
-    pub(crate) draws: Vec<RenderBundleDraw>,
+    pub(crate) commands: Vec<RenderCommand>,
+    pub(crate) draw_count: u64,
     /// The bundle's user-immediates scratch (Block 94) as it stood when the
     /// encoder finished -- i.e. after replaying every `SetImmediates` call
     /// recorded into the bundle, in order -- paired with
@@ -92,30 +92,6 @@ pub(crate) struct RenderBundleInner {
     /// Which 4-byte words of `final_immediate_data` were explicitly written
     /// by the bundle's `SetImmediates` calls.
     pub(crate) final_immediate_data_written: ImmediateWrittenMask,
-}
-
-/// Stores one render bundle draw with the state snapshotted at record time.
-#[derive(Debug, Clone)]
-pub(crate) struct RenderBundleDraw {
-    pub(crate) pipeline: Arc<RenderPipeline>,
-    pub(crate) bind_groups: BTreeMap<u32, BoundBindGroup>,
-    pub(crate) vertex_buffers: BTreeMap<u32, BoundVertexBuffer>,
-    pub(crate) index_buffer: Option<BoundIndexBuffer>,
-    pub(crate) indirect_buffer: Option<BoundIndirectBuffer>,
-    pub(crate) draw: RenderDrawExecution,
-    /// Snapshot of the bundle's own user-immediates scratch (Block 94) at
-    /// draw time. Unlike `bind_groups` / `vertex_buffers` this snapshot is
-    /// NOT self-contained: only the words flagged in
-    /// `immediate_data_written` are meaningful. At `execute_bundles` replay
-    /// time those words are overlaid onto the outer pass's current scratch,
-    /// so a bundle draw recorded before any bundle-local `SetImmediates`
-    /// sees the OUTER pass's immediates (Dawn: one shared per-pass
-    /// immediates tracker that bundle replay never clears; see the citation
-    /// on `RenderPassEncoder::execute_bundles`).
-    pub(crate) immediate_data: Vec<u8>,
-    /// Which 4-byte words of `immediate_data` had been explicitly written
-    /// by the bundle's own `SetImmediates` calls as of this draw.
-    pub(crate) immediate_data_written: ImmediateWrittenMask,
 }
 
 impl RenderBundleEncoder {
@@ -152,7 +128,7 @@ impl RenderBundleEncoder {
                                 max_draw_count: u64::MAX,
                             },
                         ),
-                        draws: Vec::new(),
+                        commands: Vec::new(),
                     }),
                 }),
             },
@@ -175,6 +151,7 @@ impl RenderBundleEncoder {
                         Vec::new(),
                         Vec::new(),
                         Vec::new(),
+                        0,
                         Vec::new(),
                         0,
                     ),
@@ -191,6 +168,7 @@ impl RenderBundleEncoder {
                         Vec::new(),
                         Vec::new(),
                         Vec::new(),
+                        0,
                         Vec::new(),
                         0,
                     ),
@@ -207,12 +185,12 @@ impl RenderBundleEncoder {
             );
         }
         let error = state.first_error.clone();
-        let referenced_buffers = render_bundle_referenced_buffers(&state.pass_state, &state.draws);
-        let referenced_textures =
-            render_bundle_referenced_textures(&state.pass_state, &state.draws);
+        let referenced_buffers = render_bundle_referenced_buffers(&state.commands);
+        let referenced_textures = render_bundle_referenced_textures(&state.commands);
         let buffer_uses = state.pass_state.scope_buffer_uses.clone();
         let texture_uses = state.pass_state.scope_texture_uses.clone();
-        let draws = state.draws.clone();
+        let commands = state.commands.clone();
+        let draw_count = state.pass_state.draw_count;
         let final_immediate_data = state.pass_state.immediate_data.clone();
         let final_immediate_data_written = state.pass_state.immediate_data_written;
         (
@@ -223,7 +201,8 @@ impl RenderBundleEncoder {
                 referenced_textures,
                 buffer_uses,
                 texture_uses,
-                draws,
+                commands,
+                draw_count,
                 final_immediate_data,
                 final_immediate_data_written,
             ),
@@ -260,8 +239,8 @@ impl RenderBundleEncoder {
     pub fn set_pipeline(&self, pipeline: Arc<RenderPipeline>) -> Option<String> {
         self.record_bundle_command(|state| {
             validate_render_bundle_pipeline(&self.inner.descriptor, &pipeline)?;
-            state.render_pipeline = Some(pipeline);
-            Ok(None)
+            state.render_pipeline = Some(Arc::clone(&pipeline));
+            Ok(Some(RenderCommand::SetPipeline(pipeline)))
         })
     }
 
@@ -287,11 +266,15 @@ impl RenderBundleEncoder {
                     dynamic_offsets,
                 };
                 record_bind_group_usage_scope(state, &bound)?;
-                state.bind_groups.insert(index, bound);
+                state.bind_groups.insert(index, bound.clone());
+                Ok(Some(RenderCommand::SetBindGroup {
+                    index,
+                    group: Some(bound),
+                }))
             } else {
                 state.bind_groups.remove(&index);
+                Ok(Some(RenderCommand::SetBindGroup { index, group: None }))
             }
-            Ok(None)
         })
     }
 
@@ -315,7 +298,10 @@ impl RenderBundleEncoder {
                 return Ok(None);
             }
             record_set_immediates(state, offset, data);
-            Ok(None)
+            Ok(Some(RenderCommand::SetImmediates {
+                offset,
+                data: data.to_vec(),
+            }))
         })
     }
 
@@ -341,19 +327,21 @@ impl RenderBundleEncoder {
                         access: ResourceAccess::Read,
                     },
                 )?;
-                state.vertex_buffers.insert(
+                let bound = BoundVertexBuffer {
+                    buffer,
+                    offset,
+                    size,
+                };
+                state.vertex_buffers.insert(slot, bound.clone());
+                Ok(Some(RenderCommand::SetVertexBuffer {
                     slot,
-                    BoundVertexBuffer {
-                        buffer,
-                        offset,
-                        size,
-                    },
-                );
+                    buffer: Some(bound),
+                }))
             } else {
                 validate_clear_vertex_buffer(offset, size)?;
                 state.vertex_buffers.remove(&slot);
+                Ok(Some(RenderCommand::SetVertexBuffer { slot, buffer: None }))
             }
-            Ok(None)
         })
     }
 
@@ -377,13 +365,14 @@ impl RenderBundleEncoder {
                     access: ResourceAccess::Read,
                 },
             )?;
-            state.index_buffer = Some(BoundIndexBuffer {
+            let bound = BoundIndexBuffer {
                 buffer,
                 format,
                 offset,
                 size,
-            });
-            Ok(None)
+            };
+            state.index_buffer = Some(bound.clone());
+            Ok(Some(RenderCommand::SetIndexBuffer(bound)))
         })
     }
 
@@ -413,19 +402,14 @@ impl RenderBundleEncoder {
                     .as_ref()
                     .ok_or_else(|| "render bundle requires a render pipeline".to_owned())?,
             );
-            let bind_group_layouts = pipeline.bind_group_layouts().to_vec();
-            record_pipeline_usage_scope(state, &bind_group_layouts, &[])?;
-            Ok(Some(render_bundle_draw_snapshot(
-                state,
-                pipeline,
-                None,
-                RenderDrawExecution::Direct {
-                    vertex_count,
-                    instance_count,
-                    first_vertex,
-                    first_instance,
-                },
-            )))
+            record_pipeline_usage_scope(state, pipeline.bind_group_layouts(), &[])?;
+            state.draw_count = state.draw_count.saturating_add(1);
+            Ok(Some(RenderCommand::Draw(RenderDrawExecution::Direct {
+                vertex_count,
+                instance_count,
+                first_vertex,
+                first_instance,
+            })))
         })
     }
 
@@ -456,20 +440,15 @@ impl RenderBundleEncoder {
                     .as_ref()
                     .ok_or_else(|| "render bundle requires a render pipeline".to_owned())?,
             );
-            let bind_group_layouts = pipeline.bind_group_layouts().to_vec();
-            record_pipeline_usage_scope(state, &bind_group_layouts, &[])?;
-            Ok(Some(render_bundle_draw_snapshot(
-                state,
-                pipeline,
-                None,
-                RenderDrawExecution::Indexed {
-                    index_count,
-                    instance_count,
-                    first_index,
-                    base_vertex,
-                    first_instance,
-                },
-            )))
+            record_pipeline_usage_scope(state, pipeline.bind_group_layouts(), &[])?;
+            state.draw_count = state.draw_count.saturating_add(1);
+            Ok(Some(RenderCommand::Draw(RenderDrawExecution::Indexed {
+                index_count,
+                instance_count,
+                first_index,
+                base_vertex,
+                first_instance,
+            })))
         })
     }
 
@@ -488,7 +467,6 @@ impl RenderBundleEncoder {
                     .as_ref()
                     .ok_or_else(|| "render bundle requires a render pipeline".to_owned())?,
             );
-            let bind_group_layouts = pipeline.bind_group_layouts().to_vec();
             validate_indirect_buffer(&indirect_buffer, indirect_offset, 16, "draw indirect")?;
             record_buffer_usage_scope_use(
                 state,
@@ -499,21 +477,17 @@ impl RenderBundleEncoder {
                     access: ResourceAccess::Read,
                 },
             )?;
-            record_pipeline_usage_scope(state, &bind_group_layouts, &[])?;
+            record_pipeline_usage_scope(state, pipeline.bind_group_layouts(), &[])?;
             state
                 .command_referenced_buffers
                 .push(Arc::clone(&indirect_buffer));
-            Ok(Some(render_bundle_draw_snapshot(
-                state,
-                pipeline,
-                Some(BoundIndirectBuffer {
+            state.draw_count = state.draw_count.saturating_add(1);
+            Ok(Some(RenderCommand::Draw(RenderDrawExecution::Indirect {
+                indirect_buffer: BoundIndirectBuffer {
                     buffer: indirect_buffer,
                     offset: indirect_offset,
-                }),
-                RenderDrawExecution::Indirect {
-                    offset: indirect_offset,
                 },
-            )))
+            })))
         })
     }
 
@@ -532,7 +506,6 @@ impl RenderBundleEncoder {
                     .as_ref()
                     .ok_or_else(|| "render bundle requires a render pipeline".to_owned())?,
             );
-            let bind_group_layouts = pipeline.bind_group_layouts().to_vec();
             validate_indirect_buffer(
                 &indirect_buffer,
                 indirect_offset,
@@ -548,19 +521,17 @@ impl RenderBundleEncoder {
                     access: ResourceAccess::Read,
                 },
             )?;
-            record_pipeline_usage_scope(state, &bind_group_layouts, &[])?;
+            record_pipeline_usage_scope(state, pipeline.bind_group_layouts(), &[])?;
             state
                 .command_referenced_buffers
                 .push(Arc::clone(&indirect_buffer));
-            Ok(Some(render_bundle_draw_snapshot(
-                state,
-                pipeline,
-                Some(BoundIndirectBuffer {
-                    buffer: indirect_buffer,
-                    offset: indirect_offset,
-                }),
+            state.draw_count = state.draw_count.saturating_add(1);
+            Ok(Some(RenderCommand::Draw(
                 RenderDrawExecution::IndexedIndirect {
-                    offset: indirect_offset,
+                    indirect_buffer: BoundIndirectBuffer {
+                        buffer: indirect_buffer,
+                        offset: indirect_offset,
+                    },
                 },
             )))
         })
@@ -569,7 +540,7 @@ impl RenderBundleEncoder {
     /// Records a command into the bundle, validating encoder state first.
     pub(crate) fn record_bundle_command<F>(&self, command: F) -> Option<String>
     where
-        F: FnOnce(&mut PassEncoderState) -> Result<Option<RenderBundleDraw>, String>,
+        F: FnOnce(&mut PassEncoderState) -> Result<Option<RenderCommand>, String>,
     {
         let mut state = self.inner.state.lock();
         match state.lifecycle {
@@ -580,7 +551,7 @@ impl RenderBundleEncoder {
             }
         }
         match command(&mut state.pass_state) {
-            Ok(Some(draw)) => state.draws.push(draw),
+            Ok(Some(command)) => state.commands.push(command),
             Ok(None) => {}
             Err(message) => record_first_error_option(&mut state.first_error, message),
         }
@@ -598,7 +569,8 @@ impl RenderBundle {
         referenced_textures: Vec<Texture>,
         buffer_uses: Vec<BufferScopeUse>,
         texture_uses: Vec<TextureScopeUse>,
-        draws: Vec<RenderBundleDraw>,
+        commands: Vec<RenderCommand>,
+        draw_count: u64,
         final_immediate_data: Vec<u8>,
         final_immediate_data_written: ImmediateWrittenMask,
     ) -> Self {
@@ -610,7 +582,8 @@ impl RenderBundle {
                 referenced_textures,
                 buffer_uses,
                 texture_uses,
-                draws,
+                commands,
+                draw_count,
                 final_immediate_data,
                 final_immediate_data_written,
             }),
@@ -647,8 +620,12 @@ impl RenderBundle {
         &self.inner.texture_uses
     }
 
-    pub(crate) fn draws(&self) -> &[RenderBundleDraw] {
-        &self.inner.draws
+    pub(crate) fn commands(&self) -> &[RenderCommand] {
+        &self.inner.commands
+    }
+
+    pub(crate) fn draw_count(&self) -> u64 {
+        self.inner.draw_count
     }
 
     /// Returns the bundle's user-immediates scratch as it stood when the
@@ -664,66 +641,35 @@ impl RenderBundle {
     }
 }
 
-fn render_bundle_draw_snapshot(
-    state: &PassEncoderState,
-    pipeline: Arc<RenderPipeline>,
-    indirect_buffer: Option<BoundIndirectBuffer>,
-    draw: RenderDrawExecution,
-) -> RenderBundleDraw {
-    RenderBundleDraw {
-        pipeline,
-        bind_groups: state.bind_groups.clone(),
-        vertex_buffers: state.vertex_buffers.clone(),
-        index_buffer: state.index_buffer.clone(),
-        indirect_buffer,
-        draw,
-        immediate_data: state.immediate_data.clone(),
-        immediate_data_written: state.immediate_data_written,
-    }
-}
-
-fn render_bundle_referenced_buffers(
-    state: &PassEncoderState,
-    draws: &[RenderBundleDraw],
-) -> Vec<Arc<Buffer>> {
+fn render_bundle_referenced_buffers(commands: &[RenderCommand]) -> Vec<Arc<Buffer>> {
     let mut buffers = Vec::new();
-    for bound in state.bind_groups.values() {
-        buffers.extend(bind_group_buffer_resources(&bound.group));
-    }
-    for bound in state.vertex_buffers.values() {
-        buffers.push(Arc::clone(&bound.buffer));
-    }
-    if let Some(bound) = &state.index_buffer {
-        buffers.push(Arc::clone(&bound.buffer));
-    }
-    buffers.extend(state.command_referenced_buffers.iter().cloned());
-    for draw in draws {
-        for bound in draw.bind_groups.values() {
-            buffers.extend(bind_group_buffer_resources(&bound.group));
-        }
-        for bound in draw.vertex_buffers.values() {
-            buffers.push(Arc::clone(&bound.buffer));
-        }
-        if let Some(bound) = &draw.index_buffer {
-            buffers.push(Arc::clone(&bound.buffer));
-        }
-        if let Some(bound) = &draw.indirect_buffer {
-            buffers.push(Arc::clone(&bound.buffer));
+    for command in commands {
+        match command {
+            RenderCommand::SetBindGroup {
+                group: Some(bound), ..
+            } => buffers.extend(bind_group_buffer_resources(&bound.group)),
+            RenderCommand::SetVertexBuffer {
+                buffer: Some(bound),
+                ..
+            } => buffers.push(Arc::clone(&bound.buffer)),
+            RenderCommand::SetIndexBuffer(bound) => buffers.push(Arc::clone(&bound.buffer)),
+            RenderCommand::Draw(RenderDrawExecution::Indirect { indirect_buffer })
+            | RenderCommand::Draw(RenderDrawExecution::IndexedIndirect { indirect_buffer }) => {
+                buffers.push(Arc::clone(&indirect_buffer.buffer));
+            }
+            _ => {}
         }
     }
     buffers
 }
 
-fn render_bundle_referenced_textures(
-    state: &PassEncoderState,
-    draws: &[RenderBundleDraw],
-) -> Vec<Texture> {
+fn render_bundle_referenced_textures(commands: &[RenderCommand]) -> Vec<Texture> {
     let mut textures = Vec::new();
-    for bound in state.bind_groups.values() {
-        textures.extend(bind_group_texture_resources(&bound.group));
-    }
-    for draw in draws {
-        for bound in draw.bind_groups.values() {
+    for command in commands {
+        if let RenderCommand::SetBindGroup {
+            group: Some(bound), ..
+        } = command
+        {
             textures.extend(bind_group_texture_resources(&bound.group));
         }
     }
@@ -906,11 +852,15 @@ mod tests {
         assert_eq!(error, None);
         assert!(!bundle.is_error());
 
-        assert_eq!(bundle.draws().len(), 1);
-        assert_eq!(bundle.draws()[0].immediate_data.len(), 64);
-        assert_eq!(&bundle.draws()[0].immediate_data[0..4], &[1, 2, 3, 4]);
-        // Only word 0 (bytes 0..4) was explicitly written.
-        assert_eq!(bundle.draws()[0].immediate_data_written, 0b1);
+        assert!(matches!(
+            bundle.commands(),
+            [
+                RenderCommand::SetPipeline(_),
+                RenderCommand::SetImmediates { offset: 0, data },
+                RenderCommand::Draw(RenderDrawExecution::Direct { .. }),
+            ] if data == &[1, 2, 3, 4]
+        ));
+        assert_eq!(bundle.draw_count(), 1);
         assert_eq!(bundle.final_immediate_data().len(), 64);
         assert_eq!(&bundle.final_immediate_data()[0..4], &[1, 2, 3, 4]);
         assert_eq!(bundle.final_immediate_data_written(), 0b1);

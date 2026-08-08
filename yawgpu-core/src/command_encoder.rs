@@ -13,6 +13,7 @@ use crate::format::*;
 use crate::limits::*;
 use crate::pass::*;
 use crate::query_set::*;
+use crate::render_bundle::*;
 use crate::render_pass::*;
 use crate::render_pipeline::*;
 #[cfg(feature = "tiled")]
@@ -198,25 +199,41 @@ pub(crate) enum ComputeDispatch {
 /// Stores the data needed to replay a RenderPassCommand.
 #[derive(Debug, Clone)]
 pub(crate) struct RenderPassCommand {
-    pub(crate) pipeline: Option<Arc<RenderPipeline>>,
     pub(crate) color_attachments: Vec<Option<RenderPassColorExecution>>,
     pub(crate) depth_stencil_attachment: Option<RenderPassDepthStencilExecution>,
     pub(crate) attachment_textures: Vec<Texture>,
-    pub(crate) bind_groups: BTreeMap<u32, BoundBindGroup>,
-    pub(crate) vertex_buffers: BTreeMap<u32, BoundVertexBuffer>,
-    pub(crate) index_buffer: Option<BoundIndexBuffer>,
-    pub(crate) indirect_buffer: Option<BoundIndirectBuffer>,
-    pub(crate) viewport: Option<Viewport>,
-    pub(crate) scissor_rect: Option<ScissorRect>,
-    pub(crate) blend_constant: [f32; 4],
-    pub(crate) stencil_reference: u32,
     pub(crate) occlusion_query_set: Option<QuerySet>,
-    pub(crate) occlusion_query_index: Option<u32>,
-    pub(crate) draw: Option<RenderDrawExecution>,
-    /// Snapshot of the pass's user-immediates scratch (Block 94) at draw
-    /// time -- always [`crate::pass::MAX_IMMEDIATE_DATA_BYTES`] bytes long.
-    /// Threaded to the HAL as `HalRenderPass::immediate_data`.
-    pub(crate) immediate_data: Vec<u8>,
+    pub(crate) written_occlusion_queries: BTreeSet<u32>,
+    pub(crate) commands: Vec<RenderCommand>,
+}
+
+/// Stores one state delta or draw inside a render pass or render bundle.
+#[derive(Debug, Clone)]
+pub(crate) enum RenderCommand {
+    SetPipeline(Arc<RenderPipeline>),
+    SetBindGroup {
+        index: u32,
+        group: Option<BoundBindGroup>,
+    },
+    SetVertexBuffer {
+        slot: u32,
+        buffer: Option<BoundVertexBuffer>,
+    },
+    SetIndexBuffer(BoundIndexBuffer),
+    SetViewport(Viewport),
+    SetScissorRect(ScissorRect),
+    SetBlendConstant([f32; 4]),
+    SetStencilReference(u32),
+    SetImmediates {
+        offset: u32,
+        data: Vec<u8>,
+    },
+    BeginOcclusionQuery {
+        index: u32,
+    },
+    EndOcclusionQuery,
+    Draw(RenderDrawExecution),
+    ExecuteRenderBundle(Arc<RenderBundle>),
 }
 
 /// Stores the data needed to replay a subpass render pass.
@@ -295,7 +312,7 @@ pub(crate) struct RenderPassDepthStencilExecution {
 }
 
 /// Stores render draw execution data used by validation and backend submission.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) enum RenderDrawExecution {
     Direct {
         vertex_count: u32,
@@ -311,10 +328,10 @@ pub(crate) enum RenderDrawExecution {
         first_instance: u32,
     },
     Indirect {
-        offset: u64,
+        indirect_buffer: BoundIndirectBuffer,
     },
     IndexedIndirect {
-        offset: u64,
+        indirect_buffer: BoundIndirectBuffer,
     },
 }
 
@@ -971,36 +988,6 @@ impl CommandEncoder {
             .lock()
             .command_ops
             .push(CommandExecution::SubpassRenderPass(command));
-    }
-
-    /// Restores user store ops on the most recently recorded render-pass command.
-    pub(crate) fn patch_last_render_pass_store_ops(
-        &self,
-        color_store_ops: &[Option<StoreOp>],
-        depth_store_op: Option<StoreOp>,
-        stencil_store_op: Option<StoreOp>,
-    ) {
-        let mut state = self.inner.state.lock();
-        let Some(CommandExecution::RenderPass(command)) = state.command_ops.last_mut() else {
-            return;
-        };
-        for (attachment, store_op) in command
-            .color_attachments
-            .iter_mut()
-            .zip(color_store_ops.iter().copied())
-        {
-            if let (Some(attachment), Some(store_op)) = (attachment, store_op) {
-                attachment.store_op = store_op;
-            }
-        }
-        if let Some(attachment) = &mut command.depth_stencil_attachment {
-            if let Some(store_op) = depth_store_op {
-                attachment.depth_store_op = store_op;
-            }
-            if let Some(store_op) = stencil_store_op {
-                attachment.stencil_store_op = store_op;
-            }
-        }
     }
 
     /// Returns true when this object is finished.

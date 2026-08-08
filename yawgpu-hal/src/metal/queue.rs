@@ -317,6 +317,19 @@ impl MetalQueue {
                         encoder.endEncoding();
                         result?;
                     }
+                    HalCopy::RenderPassCommandStream(pass) => {
+                        let descriptor = render_pass_command_stream_descriptor(pass)?;
+                        let encoder = command_buffer
+                            .renderCommandEncoderWithDescriptor(&descriptor)
+                            .ok_or_else(|| {
+                                queue_submission_error(
+                                    "render command encoder creation returned nil",
+                                )
+                            })?;
+                        let result = encode_render_pass_command_stream(&encoder, pass);
+                        encoder.endEncoding();
+                        result?;
+                    }
                     #[cfg(feature = "tiled")]
                     HalCopy::SubpassRenderPass(pass) => {
                         let descriptor = subpass_render_pass_descriptor(pass)?;

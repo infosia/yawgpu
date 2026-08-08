@@ -13,17 +13,17 @@ use ash::vk;
 #[cfg(feature = "tiled")]
 use crate::HalSubpassPassLayout;
 use crate::{
-    HalAddressMode, HalBlendFactor, HalBlendOperation, HalBoundBuffer, HalBoundSampler,
-    HalBoundTexture, HalBuffer, HalBufferBindingKind, HalBufferClear, HalBufferCopy,
-    HalBufferTextureCopy, HalBufferUsage, HalColorClearKind, HalColorTargetState,
+    HalAddressMode, HalBlendFactor, HalBlendOperation, HalBoundBuffer, HalBoundIndexBuffer,
+    HalBoundSampler, HalBoundTexture, HalBuffer, HalBufferBindingKind, HalBufferClear,
+    HalBufferCopy, HalBufferTextureCopy, HalBufferUsage, HalColorClearKind, HalColorTargetState,
     HalCompareFunction, HalComputeDispatch, HalComputePass, HalCopy, HalCullMode,
     HalDepthStencilState, HalDescriptorBinding, HalDescriptorBindingKind, HalDraw, HalError,
     HalExtent3d, HalFilterMode, HalFrontFace, HalIndexFormat, HalLimits, HalMipmapFilterMode,
     HalPrimitiveTopology, HalQueryKind, HalQuerySet, HalRenderLoadOp, HalRenderPass,
-    HalRenderPipelineDescriptor, HalResolveQuerySet, HalSampler, HalSamplerDescriptor,
-    HalShaderSource, HalStencilOperation, HalSurfaceConfiguration, HalTexture, HalTextureCopy,
-    HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
-    SubmissionIndex,
+    HalRenderPassCommand, HalRenderPassCommandStream, HalRenderPipelineDescriptor,
+    HalResolveQuerySet, HalSampler, HalSamplerDescriptor, HalShaderSource, HalStencilOperation,
+    HalSurfaceConfiguration, HalTexture, HalTextureCopy, HalTextureDescriptor, HalTextureFormat,
+    HalTextureUsage, HalVertexFormat, HalVertexStepMode, SubmissionIndex,
 };
 
 const BACKEND: &str = "vulkan";

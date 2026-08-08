@@ -720,8 +720,30 @@ fn bound_buffer_size(bound: &HalBoundBuffer) -> Result<u64, HalError> {
 pub(super) fn render_pass_descriptor(
     pass: &HalRenderPass,
 ) -> Result<Retained<MTLRenderPassDescriptor>, HalError> {
+    render_pass_descriptor_parts(
+        &pass.color_targets,
+        pass.depth_stencil_attachment.as_ref(),
+        pass.occlusion_query_set.as_ref(),
+    )
+}
+
+pub(super) fn render_pass_command_stream_descriptor(
+    pass: &HalRenderPassCommandStream,
+) -> Result<Retained<MTLRenderPassDescriptor>, HalError> {
+    render_pass_descriptor_parts(
+        &pass.color_targets,
+        pass.depth_stencil_attachment.as_ref(),
+        pass.occlusion_query_set.as_ref(),
+    )
+}
+
+fn render_pass_descriptor_parts(
+    color_targets: &[Option<crate::HalRenderColorTarget>],
+    depth_stencil_attachment: Option<&crate::HalRenderDepthStencilAttachment>,
+    occlusion_query_set: Option<&HalQuerySet>,
+) -> Result<Retained<MTLRenderPassDescriptor>, HalError> {
     let descriptor = MTLRenderPassDescriptor::renderPassDescriptor();
-    for (index, color_target) in pass.color_targets.iter().enumerate() {
+    for (index, color_target) in color_targets.iter().enumerate() {
         let Some(color_target) = color_target else {
             continue;
         };
@@ -763,7 +785,7 @@ pub(super) fn render_pass_descriptor(
             alpha: a,
         });
     }
-    if let Some(depth_stencil) = &pass.depth_stencil_attachment {
+    if let Some(depth_stencil) = depth_stencil_attachment {
         let HalTexture::Metal(texture) = &depth_stencil.texture else {
             return Err(texture_error(
                 "depth-stencil attachment is not Metal-backed",
@@ -788,7 +810,7 @@ pub(super) fn render_pass_descriptor(
             stencil_attachment.setClearStencil(depth_stencil.stencil_clear_value);
         }
     }
-    match &pass.occlusion_query_set {
+    match occlusion_query_set {
         Some(HalQuerySet::Metal(query_set)) => {
             descriptor.setVisibilityResultBuffer(Some(query_set.buffer()?));
         }
@@ -935,6 +957,266 @@ pub(super) fn encode_render_pass(
         immediate_data: &pass.immediate_data,
     };
     encode_render_state(encoder, &state)
+}
+
+pub(super) fn encode_render_pass_command_stream(
+    encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+    pass: &HalRenderPassCommandStream,
+) -> Result<(), HalError> {
+    let mut state = MetalRenderStreamState::default();
+    encode_metal_render_commands(encoder, &pass.commands, &mut state)
+}
+
+#[derive(Default)]
+struct MetalRenderStreamState {
+    pipeline: Option<crate::HalRenderPipeline>,
+    bind_buffers: Vec<HalBoundBuffer>,
+    bind_textures: Vec<HalBoundTexture>,
+    bind_external_textures: Vec<HalBoundExternalTexture>,
+    bind_samplers: Vec<HalBoundSampler>,
+    vertex_buffers: Vec<HalBoundBuffer>,
+    index_buffer: Option<HalBoundIndexBuffer>,
+    viewport: Option<HalViewport>,
+    scissor_rect: Option<HalScissorRect>,
+    blend_constant: [f32; 4],
+    stencil_reference: u32,
+    immediate_data: Vec<u8>,
+}
+
+fn encode_metal_render_commands(
+    encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+    commands: &[HalRenderPassCommand],
+    state: &mut MetalRenderStreamState,
+) -> Result<(), HalError> {
+    if state.immediate_data.is_empty() {
+        state.immediate_data.resize(64, 0);
+    }
+    for command in commands {
+        match command {
+            HalRenderPassCommand::SetPipeline(pipeline) => {
+                let crate::HalRenderPipeline::Metal(pipeline) = pipeline else {
+                    return Err(shader_error(
+                        "render pipeline is not Metal-backed".to_owned(),
+                    ));
+                };
+                encoder.setRenderPipelineState(&pipeline.inner);
+                encoder.setDepthStencilState(Some(&pipeline.depth_stencil_state));
+                encoder.setFrontFacingWinding(mtl_front_face(pipeline.front_face));
+                encoder.setCullMode(mtl_cull_mode(pipeline.cull_mode));
+                encoder.setDepthClipMode(if pipeline.unclipped_depth {
+                    MTLDepthClipMode::Clamp
+                } else {
+                    MTLDepthClipMode::Clip
+                });
+                encoder.setDepthBias_slopeScale_clamp(
+                    pipeline.depth_bias as f32,
+                    pipeline.depth_bias_slope_scale,
+                    pipeline.depth_bias_clamp,
+                );
+                state.pipeline = Some(command_pipeline_clone(pipeline));
+            }
+            HalRenderPassCommand::SetBindGroup {
+                index,
+                buffers,
+                textures,
+                samplers,
+                external_textures,
+            } => {
+                state.bind_buffers.retain(|binding| binding.group != *index);
+                state
+                    .bind_textures
+                    .retain(|binding| binding.group != *index);
+                state
+                    .bind_samplers
+                    .retain(|binding| binding.group != *index);
+                state
+                    .bind_external_textures
+                    .retain(|binding| binding.group != *index);
+                for binding in buffers {
+                    encode_render_bind_buffer(encoder, binding)?;
+                }
+                for binding in textures {
+                    encode_render_bind_texture(encoder, binding)?;
+                }
+                for binding in external_textures {
+                    encode_render_bind_external_texture(encoder, binding)?;
+                }
+                for binding in samplers {
+                    encode_render_bind_sampler(encoder, binding)?;
+                }
+                state.bind_buffers.extend(buffers.iter().cloned());
+                state.bind_textures.extend(textures.iter().cloned());
+                state.bind_samplers.extend(samplers.iter().cloned());
+                state
+                    .bind_external_textures
+                    .extend(external_textures.iter().cloned());
+            }
+            HalRenderPassCommand::SetVertexBuffer { slot, buffer } => {
+                state
+                    .vertex_buffers
+                    .retain(|binding| binding.binding != *slot);
+                if let Some(buffer) = buffer {
+                    encode_render_vertex_buffer(encoder, buffer)?;
+                    state.vertex_buffers.push(buffer.clone());
+                }
+            }
+            HalRenderPassCommand::SetIndexBuffer(buffer) => {
+                state.index_buffer = Some(buffer.clone());
+            }
+            HalRenderPassCommand::SetViewport(viewport) => {
+                encoder.setViewport(MTLViewport {
+                    originX: f64::from(viewport.x),
+                    originY: f64::from(viewport.y),
+                    width: f64::from(viewport.width),
+                    height: f64::from(viewport.height),
+                    znear: f64::from(viewport.min_depth),
+                    zfar: f64::from(viewport.max_depth),
+                });
+                state.viewport = Some(*viewport);
+            }
+            HalRenderPassCommand::SetScissorRect(rect) => {
+                encoder.setScissorRect(MTLScissorRect {
+                    x: to_ns(u64::from(rect.x))?,
+                    y: to_ns(u64::from(rect.y))?,
+                    width: to_ns(u64::from(rect.width))?,
+                    height: to_ns(u64::from(rect.height))?,
+                });
+                state.scissor_rect = Some(*rect);
+            }
+            HalRenderPassCommand::SetBlendConstant(color) => {
+                encoder.setBlendColorRed_green_blue_alpha(color[0], color[1], color[2], color[3]);
+                state.blend_constant = *color;
+            }
+            HalRenderPassCommand::SetStencilReference(reference) => {
+                encoder.setStencilReferenceValue(*reference);
+                state.stencil_reference = *reference;
+            }
+            HalRenderPassCommand::SetImmediates { offset, data } => {
+                let start = usize::try_from(*offset)
+                    .map_err(|_| buffer_error("render immediates offset exceeds usize"))?;
+                let end = start
+                    .checked_add(data.len())
+                    .ok_or_else(|| buffer_error("render immediates range overflows"))?;
+                let destination = state
+                    .immediate_data
+                    .get_mut(start..end)
+                    .ok_or_else(|| buffer_error("render immediates range exceeds scratch"))?;
+                destination.copy_from_slice(data);
+            }
+            HalRenderPassCommand::BeginOcclusionQuery { index } => {
+                encoder.setVisibilityResultMode_offset(
+                    MTLVisibilityResultMode::Counting,
+                    to_ns(u64::from(*index) * 8)?,
+                );
+            }
+            HalRenderPassCommand::EndOcclusionQuery => {
+                encoder.setVisibilityResultMode_offset(MTLVisibilityResultMode::Disabled, 0);
+            }
+            HalRenderPassCommand::Draw {
+                vertex_count,
+                instance_count,
+                first_vertex,
+                first_instance,
+            } => encode_metal_stream_draw(
+                encoder,
+                state,
+                HalDraw::Direct {
+                    vertex_count: *vertex_count,
+                    instance_count: *instance_count,
+                    first_vertex: *first_vertex,
+                    first_instance: *first_instance,
+                },
+                None,
+            )?,
+            HalRenderPassCommand::DrawIndexed {
+                index_count,
+                instance_count,
+                first_index,
+                base_vertex,
+                first_instance,
+            } => encode_metal_stream_draw(
+                encoder,
+                state,
+                HalDraw::Indexed {
+                    index_count: *index_count,
+                    instance_count: *instance_count,
+                    first_index: *first_index,
+                    base_vertex: *base_vertex,
+                    first_instance: *first_instance,
+                },
+                None,
+            )?,
+            HalRenderPassCommand::DrawIndirect { indirect_buffer } => encode_metal_stream_draw(
+                encoder,
+                state,
+                HalDraw::Indirect {
+                    offset: indirect_buffer.offset,
+                },
+                Some(indirect_buffer),
+            )?,
+            HalRenderPassCommand::DrawIndexedIndirect { indirect_buffer } => {
+                encode_metal_stream_draw(
+                    encoder,
+                    state,
+                    HalDraw::IndexedIndirect {
+                        offset: indirect_buffer.offset,
+                    },
+                    Some(indirect_buffer),
+                )?;
+            }
+            HalRenderPassCommand::ExecuteRenderBundle(bundle) => {
+                encode_metal_render_commands(encoder, &bundle.commands, state)?;
+                state.pipeline = None;
+                state.bind_buffers.clear();
+                state.bind_textures.clear();
+                state.bind_external_textures.clear();
+                state.bind_samplers.clear();
+                state.vertex_buffers.clear();
+                state.index_buffer = None;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn command_pipeline_clone(pipeline: &MetalRenderPipeline) -> crate::HalRenderPipeline {
+    crate::HalRenderPipeline::Metal(pipeline.clone())
+}
+
+fn encode_metal_stream_draw(
+    encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+    state: &MetalRenderStreamState,
+    draw: HalDraw,
+    indirect_buffer: Option<&HalBoundIndirectBuffer>,
+) -> Result<(), HalError> {
+    let Some(crate::HalRenderPipeline::Metal(pipeline)) = &state.pipeline else {
+        return Err(shader_error("render draw has no Metal pipeline".to_owned()));
+    };
+    encode_render_buffer_sizes(
+        encoder,
+        pipeline,
+        &state.bind_buffers,
+        &state.vertex_buffers,
+    )?;
+    encode_render_immediates(encoder, pipeline, &state.immediate_data, state.viewport)?;
+    let draw_state = RenderEncodeState {
+        pipeline,
+        bind_buffers: &state.bind_buffers,
+        bind_textures: &state.bind_textures,
+        bind_external_textures: &state.bind_external_textures,
+        bind_samplers: &state.bind_samplers,
+        vertex_buffers: &state.vertex_buffers,
+        index_buffer: state.index_buffer.as_ref(),
+        indirect_buffer,
+        viewport: state.viewport,
+        scissor_rect: state.scissor_rect,
+        blend_constant: state.blend_constant,
+        stencil_reference: state.stencil_reference,
+        occlusion_query_index: None,
+        draw,
+        immediate_data: &state.immediate_data,
+    };
+    encode_render_draw(encoder, &draw_state, pipeline.primitive_topology, draw)
 }
 
 /// Records subpass encode into the command stream.

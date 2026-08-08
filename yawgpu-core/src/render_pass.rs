@@ -142,7 +142,10 @@ impl RenderPassEncoder {
                 return Err("render pass requires a valid render pipeline".to_owned());
             }
             validate_pipeline_attachment_compatibility(state, &pipeline)?;
-            state.render_pipeline = Some(pipeline);
+            state.render_pipeline = Some(Arc::clone(&pipeline));
+            state
+                .render_commands
+                .push(RenderCommand::SetPipeline(pipeline));
             Ok(())
         })
     }
@@ -174,9 +177,16 @@ impl RenderPassEncoder {
                     dynamic_offsets,
                 };
                 record_bind_group_usage_scope(state, &bound)?;
-                state.bind_groups.insert(index, bound);
+                state.bind_groups.insert(index, bound.clone());
+                state.render_commands.push(RenderCommand::SetBindGroup {
+                    index,
+                    group: Some(bound),
+                });
             } else {
                 state.bind_groups.remove(&index);
+                state
+                    .render_commands
+                    .push(RenderCommand::SetBindGroup { index, group: None });
             }
             Ok(())
         })
@@ -207,17 +217,22 @@ impl RenderPassEncoder {
                         access: ResourceAccess::Read,
                     },
                 )?;
-                state.vertex_buffers.insert(
+                let bound = BoundVertexBuffer {
+                    buffer,
+                    offset,
+                    size,
+                };
+                state.vertex_buffers.insert(slot, bound.clone());
+                state.render_commands.push(RenderCommand::SetVertexBuffer {
                     slot,
-                    BoundVertexBuffer {
-                        buffer,
-                        offset,
-                        size,
-                    },
-                );
+                    buffer: Some(bound),
+                });
             } else {
                 validate_clear_vertex_buffer(offset, size)?;
                 state.vertex_buffers.remove(&slot);
+                state
+                    .render_commands
+                    .push(RenderCommand::SetVertexBuffer { slot, buffer: None });
             }
             Ok(())
         })
@@ -246,12 +261,16 @@ impl RenderPassEncoder {
                     access: ResourceAccess::Read,
                 },
             )?;
-            state.index_buffer = Some(BoundIndexBuffer {
+            let bound = BoundIndexBuffer {
                 buffer,
                 format,
                 offset,
                 size,
-            });
+            };
+            state.index_buffer = Some(bound.clone());
+            state
+                .render_commands
+                .push(RenderCommand::SetIndexBuffer(bound));
             Ok(())
         })
     }
@@ -282,37 +301,24 @@ impl RenderPassEncoder {
                     .as_ref()
                     .ok_or_else(|| "render pass requires a render pipeline".to_owned())?,
             );
-            let bind_group_layouts = pipeline.bind_group_layouts().to_vec();
-            let attachment_uses = state.attachment_texture_uses.clone();
-            record_pipeline_usage_scope(state, &bind_group_layouts, &attachment_uses)?;
+            record_pipeline_usage_scope(state, pipeline.bind_group_layouts(), &[])?;
             state.draw_count = state.draw_count.saturating_add(1);
-            let (color_attachments, depth_stencil_attachment) = state.load_attachments_for_draw();
-            if color_attachments.is_empty() && depth_stencil_attachment.is_none() {
+            if state.render_color_attachments.is_empty()
+                && state.render_depth_stencil_attachment.is_none()
+            {
                 return Err("render pass requires at least one attachment".to_owned());
             }
-            self.inner.parent.record_render_pass(RenderPassCommand {
-                pipeline: Some(pipeline),
-                color_attachments,
-                depth_stencil_attachment,
-                attachment_textures: state.attachment_textures.clone(),
-                bind_groups: state.bind_groups.clone(),
-                vertex_buffers: state.vertex_buffers.clone(),
-                index_buffer: state.index_buffer.clone(),
-                indirect_buffer: None,
-                viewport: state.viewport,
-                scissor_rect: state.scissor_rect,
-                blend_constant: state.blend_constant,
-                stencil_reference: state.stencil_reference,
-                occlusion_query_set: state.occlusion_query_set.clone(),
-                occlusion_query_index: state.open_occlusion_query,
-                draw: Some(RenderDrawExecution::Direct {
+            if let Some(query_index) = state.open_occlusion_query {
+                state.written_occlusion_queries.insert(query_index);
+            }
+            state
+                .render_commands
+                .push(RenderCommand::Draw(RenderDrawExecution::Direct {
                     vertex_count,
                     instance_count,
                     first_vertex,
                     first_instance,
-                }),
-                immediate_data: state.immediate_data.clone(),
-            });
+                }));
             Ok(())
         })
     }
@@ -344,42 +350,28 @@ impl RenderPassEncoder {
                     .as_ref()
                     .ok_or_else(|| "render pass requires a render pipeline".to_owned())?,
             );
-            let bind_group_layouts = pipeline.bind_group_layouts().to_vec();
-            let attachment_uses = state.attachment_texture_uses.clone();
-            record_pipeline_usage_scope(state, &bind_group_layouts, &attachment_uses)?;
+            record_pipeline_usage_scope(state, pipeline.bind_group_layouts(), &[])?;
             state.draw_count = state.draw_count.saturating_add(1);
-            let (color_attachments, depth_stencil_attachment) = state.load_attachments_for_draw();
-            if color_attachments.is_empty() && depth_stencil_attachment.is_none() {
+            if state.render_color_attachments.is_empty()
+                && state.render_depth_stencil_attachment.is_none()
+            {
                 return Err("render pass requires at least one attachment".to_owned());
             }
-            let index_buffer = state
-                .index_buffer
-                .clone()
-                .ok_or_else(|| "render pass requires an index buffer".to_owned())?;
-            self.inner.parent.record_render_pass(RenderPassCommand {
-                pipeline: Some(pipeline),
-                color_attachments,
-                depth_stencil_attachment,
-                attachment_textures: state.attachment_textures.clone(),
-                bind_groups: state.bind_groups.clone(),
-                vertex_buffers: state.vertex_buffers.clone(),
-                index_buffer: Some(index_buffer),
-                indirect_buffer: None,
-                viewport: state.viewport,
-                scissor_rect: state.scissor_rect,
-                blend_constant: state.blend_constant,
-                stencil_reference: state.stencil_reference,
-                occlusion_query_set: state.occlusion_query_set.clone(),
-                occlusion_query_index: state.open_occlusion_query,
-                draw: Some(RenderDrawExecution::Indexed {
+            if state.index_buffer.is_none() {
+                return Err("render pass requires an index buffer".to_owned());
+            }
+            if let Some(query_index) = state.open_occlusion_query {
+                state.written_occlusion_queries.insert(query_index);
+            }
+            state
+                .render_commands
+                .push(RenderCommand::Draw(RenderDrawExecution::Indexed {
                     index_count,
                     instance_count,
                     first_index,
                     base_vertex,
                     first_instance,
-                }),
-                immediate_data: state.immediate_data.clone(),
-            });
+                }));
             Ok(())
         })
     }
@@ -399,8 +391,6 @@ impl RenderPassEncoder {
                     .as_ref()
                     .ok_or_else(|| "render pass requires a render pipeline".to_owned())?,
             );
-            let bind_group_layouts = pipeline.bind_group_layouts().to_vec();
-            let attachment_uses = state.attachment_texture_uses.clone();
             validate_indirect_buffer(&indirect_buffer, indirect_offset, 16, "draw indirect")?;
             record_buffer_usage_scope_use(
                 state,
@@ -411,38 +401,27 @@ impl RenderPassEncoder {
                     access: ResourceAccess::Read,
                 },
             )?;
-            record_pipeline_usage_scope(state, &bind_group_layouts, &attachment_uses)?;
+            record_pipeline_usage_scope(state, pipeline.bind_group_layouts(), &[])?;
             self.inner
                 .parent
                 .record_referenced_buffer(Arc::clone(&indirect_buffer));
             state.draw_count = state.draw_count.saturating_add(1);
-            let (color_attachments, depth_stencil_attachment) = state.load_attachments_for_draw();
-            if color_attachments.is_empty() && depth_stencil_attachment.is_none() {
+            if state.render_color_attachments.is_empty()
+                && state.render_depth_stencil_attachment.is_none()
+            {
                 return Err("render pass requires at least one attachment".to_owned());
             }
-            self.inner.parent.record_render_pass(RenderPassCommand {
-                pipeline: Some(pipeline),
-                color_attachments,
-                depth_stencil_attachment,
-                attachment_textures: state.attachment_textures.clone(),
-                bind_groups: state.bind_groups.clone(),
-                vertex_buffers: state.vertex_buffers.clone(),
-                index_buffer: state.index_buffer.clone(),
-                indirect_buffer: Some(BoundIndirectBuffer {
-                    buffer: indirect_buffer,
-                    offset: indirect_offset,
-                }),
-                viewport: state.viewport,
-                scissor_rect: state.scissor_rect,
-                blend_constant: state.blend_constant,
-                stencil_reference: state.stencil_reference,
-                occlusion_query_set: state.occlusion_query_set.clone(),
-                occlusion_query_index: state.open_occlusion_query,
-                draw: Some(RenderDrawExecution::Indirect {
-                    offset: indirect_offset,
-                }),
-                immediate_data: state.immediate_data.clone(),
-            });
+            if let Some(query_index) = state.open_occlusion_query {
+                state.written_occlusion_queries.insert(query_index);
+            }
+            state
+                .render_commands
+                .push(RenderCommand::Draw(RenderDrawExecution::Indirect {
+                    indirect_buffer: BoundIndirectBuffer {
+                        buffer: indirect_buffer,
+                        offset: indirect_offset,
+                    },
+                }));
             Ok(())
         })
     }
@@ -462,8 +441,6 @@ impl RenderPassEncoder {
                     .as_ref()
                     .ok_or_else(|| "render pass requires a render pipeline".to_owned())?,
             );
-            let bind_group_layouts = pipeline.bind_group_layouts().to_vec();
-            let attachment_uses = state.attachment_texture_uses.clone();
             validate_indirect_buffer(
                 &indirect_buffer,
                 indirect_offset,
@@ -479,42 +456,30 @@ impl RenderPassEncoder {
                     access: ResourceAccess::Read,
                 },
             )?;
-            record_pipeline_usage_scope(state, &bind_group_layouts, &attachment_uses)?;
+            record_pipeline_usage_scope(state, pipeline.bind_group_layouts(), &[])?;
             self.inner
                 .parent
                 .record_referenced_buffer(Arc::clone(&indirect_buffer));
             state.draw_count = state.draw_count.saturating_add(1);
-            let (color_attachments, depth_stencil_attachment) = state.load_attachments_for_draw();
-            if color_attachments.is_empty() && depth_stencil_attachment.is_none() {
+            if state.render_color_attachments.is_empty()
+                && state.render_depth_stencil_attachment.is_none()
+            {
                 return Err("render pass requires at least one attachment".to_owned());
             }
-            let index_buffer = state
-                .index_buffer
-                .clone()
-                .ok_or_else(|| "render pass requires an index buffer".to_owned())?;
-            self.inner.parent.record_render_pass(RenderPassCommand {
-                pipeline: Some(pipeline),
-                color_attachments,
-                depth_stencil_attachment,
-                attachment_textures: state.attachment_textures.clone(),
-                bind_groups: state.bind_groups.clone(),
-                vertex_buffers: state.vertex_buffers.clone(),
-                index_buffer: Some(index_buffer),
-                indirect_buffer: Some(BoundIndirectBuffer {
-                    buffer: indirect_buffer,
-                    offset: indirect_offset,
-                }),
-                viewport: state.viewport,
-                scissor_rect: state.scissor_rect,
-                blend_constant: state.blend_constant,
-                stencil_reference: state.stencil_reference,
-                occlusion_query_set: state.occlusion_query_set.clone(),
-                occlusion_query_index: state.open_occlusion_query,
-                draw: Some(RenderDrawExecution::IndexedIndirect {
-                    offset: indirect_offset,
-                }),
-                immediate_data: state.immediate_data.clone(),
-            });
+            if state.index_buffer.is_none() {
+                return Err("render pass requires an index buffer".to_owned());
+            }
+            if let Some(query_index) = state.open_occlusion_query {
+                state.written_occlusion_queries.insert(query_index);
+            }
+            state
+                .render_commands
+                .push(RenderCommand::Draw(RenderDrawExecution::IndexedIndirect {
+                    indirect_buffer: BoundIndirectBuffer {
+                        buffer: indirect_buffer,
+                        offset: indirect_offset,
+                    },
+                }));
             Ok(())
         })
     }
@@ -540,6 +505,16 @@ impl RenderPassEncoder {
                 min_depth,
                 max_depth,
             });
+            state
+                .render_commands
+                .push(RenderCommand::SetViewport(Viewport {
+                    x,
+                    y,
+                    width,
+                    height,
+                    min_depth,
+                    max_depth,
+                }));
             Ok(())
         })
     }
@@ -558,6 +533,14 @@ impl RenderPassEncoder {
                 width,
                 height,
             });
+            state
+                .render_commands
+                .push(RenderCommand::SetScissorRect(ScissorRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                }));
             Ok(())
         })
     }
@@ -570,6 +553,9 @@ impl RenderPassEncoder {
                 return Err("render pass blend constant components must be finite".to_owned());
             }
             state.blend_constant = components.map(|component| component as f32);
+            state
+                .render_commands
+                .push(RenderCommand::SetBlendConstant(state.blend_constant));
             Ok(())
         })
     }
@@ -578,6 +564,9 @@ impl RenderPassEncoder {
     pub fn set_stencil_reference(&self, reference: u32) -> Option<String> {
         self.inner.record_pass_command(|state| {
             state.stencil_reference = reference;
+            state
+                .render_commands
+                .push(RenderCommand::SetStencilReference(reference));
             Ok(())
         })
     }
@@ -601,6 +590,10 @@ impl RenderPassEncoder {
                 return Ok(());
             }
             record_set_immediates(state, offset, data);
+            state.render_commands.push(RenderCommand::SetImmediates {
+                offset,
+                data: data.to_vec(),
+            });
             Ok(())
         })
     }
@@ -644,44 +637,11 @@ impl RenderPassEncoder {
                 state
                     .scope_texture_uses
                     .extend_from_slice(bundle.texture_uses());
-                for draw in bundle.draws() {
-                    state.draw_count = state.draw_count.saturating_add(1);
-                    let (color_attachments, depth_stencil_attachment) =
-                        state.load_attachments_for_draw();
-                    // Block 94: Dawn replays a bundle's `SetImmediates`
-                    // commands into the SAME per-pass immediates object the
-                    // outer pass uses (see the citation on the post-loop
-                    // overlay below), so a bundle draw's effective
-                    // immediates are the outer pass's current scratch with
-                    // the bundle's own writes up to this draw overlaid --
-                    // NOT a self-contained snapshot like `bind_groups` /
-                    // `vertex_buffers`. A draw recorded before any
-                    // bundle-local `SetImmediates` therefore sees the outer
-                    // pass's content unchanged.
-                    let mut effective_immediate_data = state.immediate_data.clone();
-                    overlay_written_immediates(
-                        &mut effective_immediate_data,
-                        &draw.immediate_data,
-                        draw.immediate_data_written,
-                    );
-                    self.inner.parent.record_render_pass(RenderPassCommand {
-                        pipeline: Some(Arc::clone(&draw.pipeline)),
-                        color_attachments,
-                        depth_stencil_attachment,
-                        attachment_textures: state.attachment_textures.clone(),
-                        bind_groups: draw.bind_groups.clone(),
-                        vertex_buffers: draw.vertex_buffers.clone(),
-                        index_buffer: draw.index_buffer.clone(),
-                        indirect_buffer: draw.indirect_buffer.clone(),
-                        viewport: state.viewport,
-                        scissor_rect: state.scissor_rect,
-                        blend_constant: state.blend_constant,
-                        stencil_reference: state.stencil_reference,
-                        occlusion_query_set: state.occlusion_query_set.clone(),
-                        occlusion_query_index: state.open_occlusion_query,
-                        draw: Some(draw.draw),
-                        immediate_data: effective_immediate_data,
-                    });
+                state.draw_count = state.draw_count.saturating_add(bundle.draw_count());
+                if bundle.draw_count() != 0 {
+                    if let Some(query_index) = state.open_occlusion_query {
+                        state.written_occlusion_queries.insert(query_index);
+                    }
                 }
                 // Dawn replays a bundle's `SetImmediates` commands into the
                 // SAME per-pass immediates object the outer pass uses: one
@@ -706,6 +666,9 @@ impl RenderPassEncoder {
                     bundle.final_immediate_data(),
                     bundle.final_immediate_data_written(),
                 );
+                state
+                    .render_commands
+                    .push(RenderCommand::ExecuteRenderBundle(Arc::clone(bundle)));
             }
             state.clear_render_state();
             state.immediate_data_written = 0;
@@ -729,6 +692,9 @@ impl RenderPassEncoder {
                 return Err("render pass occlusion query index was already used".to_owned());
             }
             state.open_occlusion_query = Some(query_index);
+            state
+                .render_commands
+                .push(RenderCommand::BeginOcclusionQuery { index: query_index });
             Ok(())
         })
     }
@@ -739,6 +705,7 @@ impl RenderPassEncoder {
             if state.open_occlusion_query.take().is_none() {
                 return Err("render pass has no open occlusion query".to_owned());
             }
+            state.render_commands.push(RenderCommand::EndOcclusionQuery);
             Ok(())
         })
     }
@@ -759,6 +726,49 @@ mod tests {
         TextureSampleType, TextureUsage, TextureView, TextureViewDimension, VertexAttribute,
         VertexBufferLayout, VertexFormat, VertexStepMode,
     };
+
+    fn only_render_pass(command_buffer: &CommandBuffer) -> &RenderPassCommand {
+        let [CommandExecution::RenderPass(pass)] = command_buffer.command_ops() else {
+            panic!("expected exactly one render pass command");
+        };
+        pass
+    }
+
+    fn render_immediate_snapshots(pass: &RenderPassCommand) -> Vec<Vec<u8>> {
+        fn replay(commands: &[RenderCommand], scratch: &mut [u8], snapshots: &mut Vec<Vec<u8>>) {
+            for command in commands {
+                match command {
+                    RenderCommand::SetImmediates { offset, data } => {
+                        let start = *offset as usize;
+                        scratch[start..start + data.len()].copy_from_slice(data);
+                    }
+                    RenderCommand::Draw(_) => snapshots.push(scratch.to_vec()),
+                    RenderCommand::ExecuteRenderBundle(bundle) => {
+                        replay(bundle.commands(), scratch, snapshots);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut scratch = vec![0; MAX_IMMEDIATE_DATA_BYTES];
+        let mut snapshots = Vec::new();
+        replay(&pass.commands, &mut scratch, &mut snapshots);
+        snapshots
+    }
+
+    fn render_command_draw_count(commands: &[RenderCommand]) -> usize {
+        commands
+            .iter()
+            .map(|command| match command {
+                RenderCommand::Draw(_) => 1,
+                RenderCommand::ExecuteRenderBundle(bundle) => {
+                    render_command_draw_count(bundle.commands())
+                }
+                _ => 0,
+            })
+            .sum()
+    }
 
     use std::sync::Arc;
 
@@ -857,17 +867,19 @@ fn fs() -> @location(0) vec4f {
         let CommandExecution::RenderPass(command) = &command_buffer.command_ops()[0] else {
             panic!("expected render pass command");
         };
-        assert!(matches!(
-            command.draw,
-            Some(RenderDrawExecution::Direct {
+        assert!(command.commands.iter().any(|command| matches!(
+            command,
+            RenderCommand::Draw(RenderDrawExecution::Direct {
                 vertex_count: 3,
                 instance_count: 1,
                 first_vertex: 0,
                 first_instance: 0,
             })
-        ));
-        assert_eq!(command.blend_constant, [0.0; 4]);
-        assert_eq!(command.stencil_reference, 0);
+        )));
+        assert!(!command.commands.iter().any(|command| matches!(
+            command,
+            RenderCommand::SetBlendConstant(_) | RenderCommand::SetStencilReference(_)
+        )));
         assert_eq!(
             command.color_attachments[0]
                 .as_ref()
@@ -941,21 +953,23 @@ fn fs() -> @location(0) vec4f {
         let (command_buffer, error) = encoder.finish();
         assert_eq!(error, None);
         assert!(!command_buffer.is_error());
-        assert_eq!(command_buffer.command_ops().len(), 2);
-        for command in command_buffer.command_ops() {
-            let CommandExecution::RenderPass(command) = command else {
-                panic!("expected render pass command");
-            };
-            assert!(matches!(
-                command.draw,
-                Some(RenderDrawExecution::Direct {
-                    vertex_count: 3,
-                    instance_count: 1,
-                    first_vertex: 0,
-                    first_instance: 0,
-                })
-            ));
-        }
+        let command = only_render_pass(&command_buffer);
+        assert_eq!(
+            command
+                .commands
+                .iter()
+                .filter(|command| matches!(
+                    command,
+                    RenderCommand::Draw(RenderDrawExecution::Direct {
+                        vertex_count: 3,
+                        instance_count: 1,
+                        first_vertex: 0,
+                        first_instance: 0,
+                    })
+                ))
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -1538,14 +1552,12 @@ fn fs() -> @location(0) vec4f {
         let (command_buffer, error) = encoder.finish();
         assert_eq!(error, None);
         assert!(!command_buffer.is_error());
-        assert_eq!(command_buffer.command_ops().len(), 2);
-        for op in command_buffer.command_ops() {
-            let CommandExecution::RenderPass(command) = op else {
-                panic!("expected render pass command");
-            };
-            assert_eq!(command.immediate_data.len(), 64);
-            assert_eq!(&command.immediate_data[0..4], &[1, 2, 3, 4]);
-            assert!(command.immediate_data[4..].iter().all(|byte| *byte == 0));
+        let snapshots = render_immediate_snapshots(only_render_pass(&command_buffer));
+        assert_eq!(snapshots.len(), 2);
+        for snapshot in snapshots {
+            assert_eq!(snapshot.len(), 64);
+            assert_eq!(&snapshot[0..4], &[1, 2, 3, 4]);
+            assert!(snapshot[4..].iter().all(|byte| *byte == 0));
         }
     }
 
@@ -1624,10 +1636,9 @@ fn fs() -> @location(0) vec4f {
         assert_eq!(pass.end(), None);
         let (command_buffer, error) = encoder.finish();
         assert_eq!(error, None);
-        let CommandExecution::RenderPass(command) = &command_buffer.command_ops()[0] else {
-            panic!("expected render pass command");
-        };
-        assert!(command.immediate_data.iter().all(|byte| *byte == 0));
+        let snapshots = render_immediate_snapshots(only_render_pass(&command_buffer));
+        assert_eq!(snapshots.len(), 1);
+        assert!(snapshots[0].iter().all(|byte| *byte == 0));
 
         let view = noop_render_attachment(&device);
         let encoder = device.create_command_encoder();
@@ -1793,17 +1804,32 @@ fn fs() -> @location(0) vec4f {
         let (command_buffer, error) = encoder.finish();
         assert_eq!(error, None);
         assert!(!command_buffer.is_error());
-        assert_eq!(command_buffer.command_ops().len(), 2);
-
-        let CommandExecution::RenderPass(bundle_draw) = &command_buffer.command_ops()[0] else {
-            panic!("expected bundle-replayed render pass command");
+        let recorded_pass = only_render_pass(&command_buffer);
+        assert!(matches!(
+            recorded_pass.commands.as_slice(),
+            [
+                RenderCommand::ExecuteRenderBundle(_),
+                RenderCommand::SetPipeline(_),
+                RenderCommand::Draw(RenderDrawExecution::Direct { .. })
+            ]
+        ));
+        let Some(yawgpu_hal::HalCopy::RenderPassCommandStream(lowered_pass)) =
+            crate::queue::hal_render_pass_execution(recorded_pass)
+        else {
+            panic!("expected lowered render pass command stream");
         };
-        assert_eq!(&bundle_draw.immediate_data[0..4], &[9, 9, 9, 9]);
-
-        let CommandExecution::RenderPass(outer_draw) = &command_buffer.command_ops()[1] else {
-            panic!("expected outer render pass command");
-        };
-        assert_eq!(&outer_draw.immediate_data[0..4], &[9, 9, 9, 9]);
+        assert!(matches!(
+            lowered_pass.commands.as_slice(),
+            [
+                yawgpu_hal::HalRenderPassCommand::ExecuteRenderBundle(_),
+                yawgpu_hal::HalRenderPassCommand::SetPipeline(_),
+                yawgpu_hal::HalRenderPassCommand::Draw { .. }
+            ]
+        ));
+        let snapshots = render_immediate_snapshots(recorded_pass);
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(&snapshots[0][0..4], &[9, 9, 9, 9]);
+        assert_eq!(&snapshots[1][0..4], &[9, 9, 9, 9]);
     }
 
     /// Block 94 bundle-immediates inheritance (Dawn shared-tracker overlay
@@ -1842,23 +1868,12 @@ fn fs() -> @location(0) vec4f {
         let (command_buffer, error) = encoder.finish();
         assert_eq!(error, None);
         assert!(!command_buffer.is_error());
-        assert_eq!(command_buffer.command_ops().len(), 2);
-
-        // The bundle draw inherits the outer pass's immediates.
-        let CommandExecution::RenderPass(bundle_draw) = &command_buffer.command_ops()[0] else {
-            panic!("expected bundle-replayed render pass command");
-        };
-        assert_eq!(&bundle_draw.immediate_data[0..4], &[7, 7, 7, 7]);
-        assert!(bundle_draw.immediate_data[4..]
-            .iter()
-            .all(|byte| *byte == 0));
-
-        // The outer scratch survives the bundle untouched.
-        let CommandExecution::RenderPass(outer_draw) = &command_buffer.command_ops()[1] else {
-            panic!("expected outer render pass command");
-        };
-        assert_eq!(&outer_draw.immediate_data[0..4], &[7, 7, 7, 7]);
-        assert!(outer_draw.immediate_data[4..].iter().all(|byte| *byte == 0));
+        let snapshots = render_immediate_snapshots(only_render_pass(&command_buffer));
+        assert_eq!(snapshots.len(), 2);
+        for snapshot in snapshots {
+            assert_eq!(&snapshot[0..4], &[7, 7, 7, 7]);
+            assert!(snapshot[4..].iter().all(|byte| *byte == 0));
+        }
     }
 
     /// Block 94 bundle-immediates overlay: outer sets bytes `0..4`, the
@@ -1901,23 +1916,13 @@ fn fs() -> @location(0) vec4f {
         let (command_buffer, error) = encoder.finish();
         assert_eq!(error, None);
         assert!(!command_buffer.is_error());
-        assert_eq!(command_buffer.command_ops().len(), 2);
-
-        // The replayed bundle draw sees outer 0..4 AND bundle 8..12.
-        let CommandExecution::RenderPass(bundle_draw) = &command_buffer.command_ops()[0] else {
-            panic!("expected bundle-replayed render pass command");
-        };
-        assert_eq!(&bundle_draw.immediate_data[0..4], &[1, 2, 3, 4]);
-        assert_eq!(&bundle_draw.immediate_data[4..8], &[0, 0, 0, 0]);
-        assert_eq!(&bundle_draw.immediate_data[8..12], &[9, 9, 9, 9]);
-
-        // The outer scratch after execute retains 0..4 and gains 8..12.
-        let CommandExecution::RenderPass(outer_draw) = &command_buffer.command_ops()[1] else {
-            panic!("expected outer render pass command");
-        };
-        assert_eq!(&outer_draw.immediate_data[0..4], &[1, 2, 3, 4]);
-        assert_eq!(&outer_draw.immediate_data[4..8], &[0, 0, 0, 0]);
-        assert_eq!(&outer_draw.immediate_data[8..12], &[9, 9, 9, 9]);
+        let snapshots = render_immediate_snapshots(only_render_pass(&command_buffer));
+        assert_eq!(snapshots.len(), 2);
+        for snapshot in snapshots {
+            assert_eq!(&snapshot[0..4], &[1, 2, 3, 4]);
+            assert_eq!(&snapshot[4..8], &[0, 0, 0, 0]);
+            assert_eq!(&snapshot[8..12], &[9, 9, 9, 9]);
+        }
     }
 
     /// Block 94 bundle-immediates chaining: two bundles executed in one
@@ -1967,31 +1972,16 @@ fn fs() -> @location(0) vec4f {
         let (command_buffer, error) = encoder.finish();
         assert_eq!(error, None);
         assert!(!command_buffer.is_error());
-        assert_eq!(command_buffer.command_ops().len(), 3);
-
-        // Bundle A's draw: outer 0..4 + A's 4..8, nothing at 8..12 yet.
-        let CommandExecution::RenderPass(draw_a) = &command_buffer.command_ops()[0] else {
-            panic!("expected bundle A render pass command");
-        };
-        assert_eq!(&draw_a.immediate_data[0..4], &[1, 1, 1, 1]);
-        assert_eq!(&draw_a.immediate_data[4..8], &[5, 5, 5, 5]);
-        assert_eq!(&draw_a.immediate_data[8..12], &[0, 0, 0, 0]);
-
-        // Bundle B's draw: composes over A's overlay in list order.
-        let CommandExecution::RenderPass(draw_b) = &command_buffer.command_ops()[1] else {
-            panic!("expected bundle B render pass command");
-        };
-        assert_eq!(&draw_b.immediate_data[0..4], &[1, 1, 1, 1]);
-        assert_eq!(&draw_b.immediate_data[4..8], &[5, 5, 5, 5]);
-        assert_eq!(&draw_b.immediate_data[8..12], &[6, 6, 6, 6]);
-
-        // The outer scratch ends with all three layered.
-        let CommandExecution::RenderPass(outer_draw) = &command_buffer.command_ops()[2] else {
-            panic!("expected outer render pass command");
-        };
-        assert_eq!(&outer_draw.immediate_data[0..4], &[1, 1, 1, 1]);
-        assert_eq!(&outer_draw.immediate_data[4..8], &[5, 5, 5, 5]);
-        assert_eq!(&outer_draw.immediate_data[8..12], &[6, 6, 6, 6]);
+        let snapshots = render_immediate_snapshots(only_render_pass(&command_buffer));
+        assert_eq!(snapshots.len(), 3);
+        assert_eq!(&snapshots[0][0..4], &[1, 1, 1, 1]);
+        assert_eq!(&snapshots[0][4..8], &[5, 5, 5, 5]);
+        assert_eq!(&snapshots[0][8..12], &[0, 0, 0, 0]);
+        for snapshot in &snapshots[1..] {
+            assert_eq!(&snapshot[0..4], &[1, 1, 1, 1]);
+            assert_eq!(&snapshot[4..8], &[5, 5, 5, 5]);
+            assert_eq!(&snapshot[8..12], &[6, 6, 6, 6]);
+        }
     }
 
     #[test]
@@ -2026,10 +2016,8 @@ fn fs() -> @location(0) vec4f {
         let (command_buffer, error) = encoder.finish();
         assert_eq!(error, None);
         assert!(!command_buffer.is_error());
-        assert_eq!(command_buffer.command_ops().len(), 2);
-        for command in command_buffer.command_ops() {
-            assert_direct_render_pass_command(command, [0.25, 0.5, 0.75, 1.0], 13);
-        }
+        let pass = only_render_pass(&command_buffer);
+        assert_direct_render_pass_command(pass, [0.25, 0.5, 0.75, 1.0], 13);
     }
 
     #[test]
@@ -2062,14 +2050,12 @@ fn fs() -> @location(0) vec4f {
         let (command_buffer, error) = encoder.finish();
         assert_eq!(error, None);
         assert!(!command_buffer.is_error());
-        assert_eq!(command_buffer.command_ops().len(), 2);
-        for command in command_buffer.command_ops() {
-            assert_direct_render_pass_command(command, [0.0; 4], 0);
-        }
+        let command = only_render_pass(&command_buffer);
+        assert_eq!(render_command_draw_count(&command.commands), 2);
     }
 
     #[test]
-    fn render_pass_encoder_loads_after_first_draw_and_clear_only_keeps_clear() {
+    fn render_pass_encoder_keeps_attachment_ops_once_for_multi_draw_and_clear_only_passes() {
         let device = noop_device();
         let pipeline = depth_stencil_render_pipeline(&device);
         let view_a = noop_render_attachment(&device);
@@ -2107,15 +2093,16 @@ fn fs() -> @location(0) vec4f {
         let (command_buffer, error) = encoder.finish();
         assert_eq!(error, None);
         assert!(!command_buffer.is_error());
-        assert_eq!(command_buffer.command_ops().len(), 2);
-        let CommandExecution::RenderPass(first) = &command_buffer.command_ops()[0] else {
-            panic!("expected first render pass command");
-        };
-        let CommandExecution::RenderPass(second) = &command_buffer.command_ops()[1] else {
-            panic!("expected second render pass command");
-        };
-        assert_render_pass_attachment_ops(first, LoadOp::Clear, StoreOp::Store);
-        assert_render_pass_attachment_ops(second, LoadOp::Load, StoreOp::Discard);
+        let command = only_render_pass(&command_buffer);
+        assert_render_pass_attachment_ops(command, LoadOp::Clear, StoreOp::Discard);
+        assert_eq!(
+            command
+                .commands
+                .iter()
+                .filter(|command| matches!(command, RenderCommand::Draw(_)))
+                .count(),
+            2
+        );
 
         let clear_encoder = device.create_command_encoder();
         let (clear_pass, begin_error) = clear_encoder.begin_render_pass(&descriptor);
@@ -2128,7 +2115,7 @@ fn fs() -> @location(0) vec4f {
         else {
             panic!("expected clear-only render pass command");
         };
-        assert!(clear_only.draw.is_none());
+        assert!(clear_only.commands.is_empty());
         assert_render_pass_attachment_ops(clear_only, LoadOp::Clear, StoreOp::Discard);
     }
 
@@ -2165,7 +2152,7 @@ fn fs() -> @location(0) vec4f {
     }
 
     #[test]
-    fn render_pass_encoder_two_draws_force_intermediate_store_and_preserve_final_store_op() {
+    fn render_pass_encoder_two_draws_preserve_single_pass_store_op() {
         let device = noop_device();
         let pipeline = noop_render_pipeline(&device);
         let view = noop_render_attachment(&device);
@@ -2185,27 +2172,22 @@ fn fs() -> @location(0) vec4f {
 
         let (command_buffer, error) = encoder.finish();
         assert_eq!(error, None);
-        assert_eq!(command_buffer.command_ops().len(), 2);
-        let CommandExecution::RenderPass(first) = &command_buffer.command_ops()[0] else {
-            panic!("expected first render pass command");
-        };
-        let CommandExecution::RenderPass(last) = &command_buffer.command_ops()[1] else {
-            panic!("expected last render pass command");
-        };
+        let pass = only_render_pass(&command_buffer);
         assert_eq!(
-            first.color_attachments[0]
-                .as_ref()
-                .expect("color attachment")
-                .store_op,
-            StoreOp::Store
-        );
-        assert_eq!(
-            last.color_attachments[0]
+            pass.color_attachments[0]
                 .as_ref()
                 .expect("color attachment")
                 .store_op,
             StoreOp::Discard
         );
+        assert!(matches!(
+            pass.commands.as_slice(),
+            [
+                RenderCommand::SetPipeline(_),
+                RenderCommand::Draw(RenderDrawExecution::Direct { .. }),
+                RenderCommand::Draw(RenderDrawExecution::Direct { .. })
+            ]
+        ));
     }
 
     #[test]
@@ -2272,7 +2254,10 @@ fn fs() -> @location(0) vec4f {
         };
         assert_eq!(command.color_attachments.len(), 2);
         assert!(command.depth_stencil_attachment.is_none());
-        assert!(command.draw.is_some());
+        assert!(command
+            .commands
+            .iter()
+            .any(|command| matches!(command, RenderCommand::Draw(_))));
     }
 
     #[test]
@@ -2587,26 +2572,37 @@ fn fs() -> @location(0) vec4f {
     }
 
     fn assert_direct_render_pass_command(
-        command: &CommandExecution,
+        command: &RenderPassCommand,
         blend_constant: [f32; 4],
         stencil_reference: u32,
     ) {
-        let CommandExecution::RenderPass(command) = command else {
-            panic!("expected render pass command");
-        };
         assert_eq!(command.color_attachments.len(), 1);
         assert!(command.depth_stencil_attachment.is_none());
-        assert_eq!(command.blend_constant, blend_constant);
-        assert_eq!(command.stencil_reference, stencil_reference);
-        assert!(matches!(
-            command.draw,
-            Some(RenderDrawExecution::Direct {
+        assert!(command.commands.iter().any(|command| matches!(
+            command,
+            RenderCommand::SetBlendConstant(color) if *color == blend_constant
+        )));
+        assert!(command.commands.iter().any(|command| matches!(
+            command,
+            RenderCommand::SetStencilReference(reference) if *reference == stencil_reference
+        )));
+        let RenderCommand::ExecuteRenderBundle(bundle) = command
+            .commands
+            .iter()
+            .find(|command| matches!(command, RenderCommand::ExecuteRenderBundle(_)))
+            .expect("execute bundle command")
+        else {
+            panic!("expected execute bundle command");
+        };
+        assert!(bundle.commands().iter().any(|command| matches!(
+            command,
+            RenderCommand::Draw(RenderDrawExecution::Direct {
                 vertex_count: 3,
                 instance_count: 1,
                 first_vertex: 0,
                 first_instance: 0,
             })
-        ));
+        )));
     }
 
     #[test]
@@ -3277,7 +3273,10 @@ fn fs() -> @location(0) vec4<f32> {
         let CommandExecution::RenderPass(command) = &command_buffer.command_ops()[0] else {
             panic!("expected render pass command");
         };
-        assert_eq!(command.blend_constant, [0.25, 0.5, 0.75, 1.0]);
+        assert!(command.commands.iter().any(|command| matches!(
+            command,
+            RenderCommand::SetBlendConstant([0.25, 0.5, 0.75, 1.0])
+        )));
     }
 
     #[test]
@@ -3300,7 +3299,10 @@ fn fs() -> @location(0) vec4<f32> {
         let CommandExecution::RenderPass(command) = &command_buffer.command_ops()[0] else {
             panic!("expected render pass command");
         };
-        assert_eq!(command.stencil_reference, 37);
+        assert!(command
+            .commands
+            .iter()
+            .any(|command| matches!(command, RenderCommand::SetStencilReference(37))));
     }
 
     #[test]
@@ -3401,40 +3403,22 @@ fn fs() -> @location(0) vec4<f32> {
         let (command_buffer, error) = encoder.finish();
         assert_eq!(error, None);
         assert!(!command_buffer.is_error());
-        assert_eq!(command_buffer.command_ops().len(), 3);
-        let CommandExecution::RenderPass(indexed) = &command_buffer.command_ops()[0] else {
-            panic!("expected indexed render pass command");
-        };
-        assert!(indexed.index_buffer.is_some());
-        assert!(indexed.indirect_buffer.is_none());
-        assert!(matches!(
-            indexed.draw,
-            Some(RenderDrawExecution::Indexed {
+        let pass = only_render_pass(&command_buffer);
+        assert!(matches!(pass.commands.as_slice(), [
+            RenderCommand::SetPipeline(_),
+            RenderCommand::SetIndexBuffer(_),
+            RenderCommand::Draw(RenderDrawExecution::Indexed {
                 index_count: 3,
                 instance_count: 1,
                 first_index: 0,
                 base_vertex: -2,
                 first_instance: 0,
-            })
-        ));
-        let CommandExecution::RenderPass(indirect_draw) = &command_buffer.command_ops()[1] else {
-            panic!("expected indirect render pass command");
-        };
-        assert!(indirect_draw.indirect_buffer.is_some());
-        assert!(matches!(
-            indirect_draw.draw,
-            Some(RenderDrawExecution::Indirect { offset: 0 })
-        ));
-        let CommandExecution::RenderPass(indexed_indirect) = &command_buffer.command_ops()[2]
-        else {
-            panic!("expected indexed indirect render pass command");
-        };
-        assert!(indexed_indirect.index_buffer.is_some());
-        assert!(indexed_indirect.indirect_buffer.is_some());
-        assert!(matches!(
-            indexed_indirect.draw,
-            Some(RenderDrawExecution::IndexedIndirect { offset: 0 })
-        ));
+            }),
+            RenderCommand::Draw(RenderDrawExecution::Indirect { indirect_buffer }),
+            RenderCommand::Draw(RenderDrawExecution::IndexedIndirect {
+                indirect_buffer: indexed_indirect,
+            }),
+        ] if indirect_buffer.offset == 0 && indexed_indirect.offset == 0));
     }
 
     #[test]
