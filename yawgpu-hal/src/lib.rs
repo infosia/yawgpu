@@ -17,9 +17,10 @@ pub use command::{
     HalBoundBuffer, HalBoundExternalTexture, HalBoundIndexBuffer, HalBoundIndirectBuffer,
     HalBoundSampler, HalBoundTexture, HalBufferBindingKind, HalBufferClear, HalBufferCopy,
     HalBufferTextureCopy, HalBufferTextureLayout, HalComputeDispatch, HalComputePass, HalCopy,
-    HalDescriptorBinding, HalDescriptorBindingKind, HalDraw, HalIndexFormat, HalRenderColorTarget,
-    HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass, HalResolveQuerySet,
-    HalScissorRect, HalStorageTextureAccess, HalTextureAspect, HalTextureClear, HalTextureCopy,
+    HalDescriptorBinding, HalDescriptorBindingKind, HalDraw, HalIndexFormat, HalRenderBundle,
+    HalRenderColorTarget, HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPass,
+    HalRenderPassCommand, HalRenderPassCommandStream, HalResolveQuerySet, HalScissorRect,
+    HalStorageTextureAccess, HalTextureAspect, HalTextureClear, HalTextureCopy,
     HalTextureViewDimension, HalViewport,
 };
 #[cfg(feature = "tiled")]

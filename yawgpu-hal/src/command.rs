@@ -475,6 +475,120 @@ pub struct HalRenderPass {
     pub immediate_data: Vec<u8>,
 }
 
+/// Stores one render pass as pass-level state plus an ordered command stream.
+///
+/// Attachment slots remain sparse: each `None` entry in [`Self::color_targets`]
+/// represents an empty color-attachment slot and must not be compacted.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct HalRenderPassCommandStream {
+    /// Color targets in attachment slot order; `None` is an empty slot.
+    pub color_targets: Vec<Option<HalRenderColorTarget>>,
+    /// Color attachment slots read as framebuffer-fetch input attachments.
+    pub framebuffer_fetch_color_slots: Vec<u32>,
+    /// Optional depth-stencil attachment.
+    pub depth_stencil_attachment: Option<HalRenderDepthStencilAttachment>,
+    /// Optional occlusion query set available to commands in this render pass.
+    pub occlusion_query_set: Option<HalQuerySet>,
+    /// Commands executed in order inside the render pass.
+    pub commands: Vec<HalRenderPassCommand>,
+}
+
+/// Stores commands recorded inside a render bundle.
+///
+/// The bundle wrapper preserves the execution boundary so a backend can apply
+/// render-bundle state invalidation after replaying [`Self::commands`].
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct HalRenderBundle {
+    /// Commands executed in order when the bundle is replayed.
+    pub commands: Vec<HalRenderPassCommand>,
+}
+
+/// Enumerates commands executed inside a HAL render pass.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum HalRenderPassCommand {
+    /// Sets the active render pipeline.
+    SetPipeline(HalRenderPipeline),
+    /// Sets one bind group after dynamic offsets and backend binding slots have
+    /// been resolved.
+    SetBindGroup {
+        /// Bind group index.
+        index: u32,
+        /// Buffer bindings supplied by the bind group.
+        buffers: Vec<HalBoundBuffer>,
+        /// Texture bindings supplied by the bind group.
+        textures: Vec<HalBoundTexture>,
+        /// Sampler bindings supplied by the bind group.
+        samplers: Vec<HalBoundSampler>,
+        /// External-texture bindings supplied by the bind group.
+        external_textures: Vec<HalBoundExternalTexture>,
+    },
+    /// Sets one vertex buffer; [`HalBoundBuffer::binding`] is the vertex slot.
+    SetVertexBuffer(HalBoundBuffer),
+    /// Sets the index buffer and index format.
+    SetIndexBuffer(HalBoundIndexBuffer),
+    /// Sets the viewport.
+    SetViewport(HalViewport),
+    /// Sets the scissor rectangle.
+    SetScissorRect(HalScissorRect),
+    /// Sets the blend constant.
+    SetBlendConstant([f32; 4]),
+    /// Sets the stencil reference.
+    SetStencilReference(u32),
+    /// Overwrites a range in the render pass's persistent immediates scratch.
+    SetImmediates {
+        /// Byte offset into the user-immediates block.
+        offset: u32,
+        /// Replacement bytes.
+        data: Vec<u8>,
+    },
+    /// Begins an occlusion query using the pass-level query set.
+    BeginOcclusionQuery {
+        /// Query index.
+        index: u32,
+    },
+    /// Ends the active occlusion query.
+    EndOcclusionQuery,
+    /// Executes a direct non-indexed draw.
+    Draw {
+        /// Vertex count.
+        vertex_count: u32,
+        /// Instance count.
+        instance_count: u32,
+        /// First vertex.
+        first_vertex: u32,
+        /// First instance.
+        first_instance: u32,
+    },
+    /// Executes a direct indexed draw using the current index buffer.
+    DrawIndexed {
+        /// Index count.
+        index_count: u32,
+        /// Instance count.
+        instance_count: u32,
+        /// First index.
+        first_index: u32,
+        /// Base vertex.
+        base_vertex: i32,
+        /// First instance.
+        first_instance: u32,
+    },
+    /// Executes a non-indexed indirect draw.
+    DrawIndirect {
+        /// Buffer and byte offset containing the indirect arguments.
+        indirect_buffer: HalBoundIndirectBuffer,
+    },
+    /// Executes an indexed indirect draw using the current index buffer.
+    DrawIndexedIndirect {
+        /// Buffer and byte offset containing the indirect arguments.
+        indirect_buffer: HalBoundIndirectBuffer,
+    },
+    /// Executes a render bundle and preserves its state-reset boundary.
+    ExecuteRenderBundle(HalRenderBundle),
+}
+
 /// Stores HAL viewport state.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HalViewport {

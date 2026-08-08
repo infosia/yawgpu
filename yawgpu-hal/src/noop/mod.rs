@@ -2,8 +2,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    HalBufferUsage, HalCopy, HalError, HalLimits, HalQueryKind, HalTextureDescriptor,
-    HalTextureDimension, SubmissionIndex,
+    HalBufferUsage, HalCopy, HalError, HalLimits, HalQueryKind, HalRenderPassCommandStream,
+    HalTextureDescriptor, HalTextureDimension, SubmissionIndex,
 };
 
 /// Stores noop instance data used by validation and backend submission.
@@ -252,6 +252,7 @@ impl Default for NoopDevice {
 #[derive(Debug, Clone)]
 pub struct NoopQueue {
     submitted_copies: Arc<Mutex<Vec<HalCopy>>>,
+    submitted_render_pass_command_streams: Arc<Mutex<Vec<HalRenderPassCommandStream>>>,
     last_submission_index: Arc<AtomicU64>,
 }
 
@@ -261,6 +262,7 @@ impl NoopQueue {
     pub fn new() -> Self {
         Self {
             submitted_copies: Arc::new(Mutex::new(Vec::new())),
+            submitted_render_pass_command_streams: Arc::new(Mutex::new(Vec::new())),
             last_submission_index: Arc::new(AtomicU64::new(SubmissionIndex::NONE.0)),
         }
     }
@@ -310,6 +312,21 @@ impl NoopQueue {
         crate::next_submission_index(&self.last_submission_index, "noop")
     }
 
+    /// Records render-pass command streams for Noop unit-test inspection.
+    pub fn submit_render_pass_command_streams(
+        &self,
+        passes: &[HalRenderPassCommandStream],
+    ) -> Result<SubmissionIndex, HalError> {
+        self.submitted_render_pass_command_streams
+            .lock()
+            .map_err(|_| HalError::QueueSubmissionFailed {
+                backend: "noop",
+                message: "submitted render pass command streams lock poisoned".to_string(),
+            })?
+            .extend(passes.iter().cloned());
+        crate::next_submission_index(&self.last_submission_index, "noop")
+    }
+
     /// Returns the highest submission index proven complete without blocking.
     pub fn completed_submission_index(&self) -> Result<SubmissionIndex, HalError> {
         Ok(SubmissionIndex(
@@ -341,6 +358,15 @@ impl NoopQueue {
         self.submitted_copies
             .lock()
             .map(|copies| copies.clone())
+            .unwrap_or_default()
+    }
+
+    /// Returns render-pass command streams recorded by this queue.
+    #[must_use]
+    pub fn submitted_render_pass_command_streams(&self) -> Vec<HalRenderPassCommandStream> {
+        self.submitted_render_pass_command_streams
+            .lock()
+            .map(|passes| passes.clone())
             .unwrap_or_default()
     }
 }
@@ -511,7 +537,12 @@ pub struct NoopSampler;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{HalTextureFormat, HalTextureUsage};
+    use crate::{
+        HalBoundBuffer, HalBoundIndexBuffer, HalBoundIndirectBuffer, HalBuffer, HalIndexFormat,
+        HalQuerySet, HalRenderBundle, HalRenderColorTarget, HalRenderDepthStencilAttachment,
+        HalRenderLoadOp, HalRenderPassCommand, HalRenderPipeline, HalScissorRect, HalTexture,
+        HalTextureFormat, HalTextureUsage, HalViewport,
+    };
 
     fn texture_descriptor() -> HalTextureDescriptor {
         HalTextureDescriptor {
@@ -753,6 +784,239 @@ mod tests {
         assert!(first < second);
         assert!(second < third);
         Ok(())
+    }
+
+    #[test]
+    fn noop_queue_submit_render_pass_command_streams_records_sparse_state_and_command_order(
+    ) -> Result<(), HalError> {
+        let device = NoopDevice::new();
+        let queue = NoopQueue::new();
+        let buffer = HalBuffer::Noop(device.create_buffer(256, HalBufferUsage::default())?);
+        let color_texture = HalTexture::Noop(device.create_texture(&texture_descriptor())?);
+        let mut depth_descriptor = texture_descriptor();
+        depth_descriptor.format = HalTextureFormat::Depth32Float;
+        let depth_texture = HalTexture::Noop(device.create_texture(&depth_descriptor)?);
+        let color_target = HalRenderColorTarget {
+            texture: color_texture,
+            view_format: HalTextureFormat::Rgba8Unorm,
+            resolve_target: None,
+            resolve_view_format: None,
+            mip_level: 0,
+            array_layer: 0,
+            depth_slice: 0,
+            resolve_mip_level: 0,
+            resolve_array_layer: 0,
+            load_op: HalRenderLoadOp::Clear,
+            store: true,
+            clear_color: [0.25, 0.5, 0.75, 1.0],
+        };
+        let vertex_buffer = HalBoundBuffer {
+            group: 0,
+            binding: 3,
+            metal_index: 7,
+            vertex_metal_index: None,
+            fragment_metal_index: None,
+            buffer: buffer.clone(),
+            offset: 16,
+            size: 128,
+        };
+        let index_buffer = HalBoundIndexBuffer {
+            buffer: buffer.clone(),
+            format: HalIndexFormat::Uint32,
+            offset: 32,
+            size: 96,
+        };
+        let indirect_buffer = HalBoundIndirectBuffer { buffer, offset: 64 };
+        let bundle = HalRenderBundle {
+            commands: vec![
+                HalRenderPassCommand::SetPipeline(HalRenderPipeline::Noop),
+                HalRenderPassCommand::Draw {
+                    vertex_count: 1,
+                    instance_count: 1,
+                    first_vertex: 0,
+                    first_instance: 0,
+                },
+            ],
+        };
+        let pass = HalRenderPassCommandStream {
+            color_targets: vec![Some(color_target.clone()), None, Some(color_target)],
+            framebuffer_fetch_color_slots: vec![2],
+            depth_stencil_attachment: Some(HalRenderDepthStencilAttachment {
+                texture: depth_texture,
+                format: HalTextureFormat::Depth32Float,
+                mip_level: 0,
+                array_layer: 0,
+                depth_load_op: HalRenderLoadOp::Load,
+                depth_store: true,
+                depth_clear_value: 1.0,
+                depth_read_only: false,
+                stencil_load_op: HalRenderLoadOp::Load,
+                stencil_store: false,
+                stencil_clear_value: 0,
+                stencil_read_only: true,
+            }),
+            occlusion_query_set: Some(HalQuerySet::Noop { count: 4 }),
+            commands: vec![
+                HalRenderPassCommand::SetPipeline(HalRenderPipeline::Noop),
+                HalRenderPassCommand::SetBindGroup {
+                    index: 1,
+                    buffers: Vec::new(),
+                    textures: Vec::new(),
+                    samplers: Vec::new(),
+                    external_textures: Vec::new(),
+                },
+                HalRenderPassCommand::SetVertexBuffer(vertex_buffer),
+                HalRenderPassCommand::SetIndexBuffer(index_buffer),
+                HalRenderPassCommand::SetViewport(HalViewport {
+                    x: 1.0,
+                    y: 2.0,
+                    width: 3.0,
+                    height: 4.0,
+                    min_depth: 0.25,
+                    max_depth: 0.75,
+                }),
+                HalRenderPassCommand::SetScissorRect(HalScissorRect {
+                    x: 1,
+                    y: 2,
+                    width: 3,
+                    height: 4,
+                }),
+                HalRenderPassCommand::SetBlendConstant([0.1, 0.2, 0.3, 0.4]),
+                HalRenderPassCommand::SetStencilReference(0x7f),
+                HalRenderPassCommand::SetImmediates {
+                    offset: 4,
+                    data: vec![1, 2, 3, 4],
+                },
+                HalRenderPassCommand::BeginOcclusionQuery { index: 2 },
+                HalRenderPassCommand::Draw {
+                    vertex_count: 3,
+                    instance_count: 2,
+                    first_vertex: 1,
+                    first_instance: 4,
+                },
+                HalRenderPassCommand::DrawIndexed {
+                    index_count: 6,
+                    instance_count: 2,
+                    first_index: 1,
+                    base_vertex: -2,
+                    first_instance: 3,
+                },
+                HalRenderPassCommand::DrawIndirect {
+                    indirect_buffer: indirect_buffer.clone(),
+                },
+                HalRenderPassCommand::DrawIndexedIndirect { indirect_buffer },
+                HalRenderPassCommand::ExecuteRenderBundle(bundle),
+                HalRenderPassCommand::EndOcclusionQuery,
+            ],
+        };
+
+        let empty_submission = queue.submit_render_pass_command_streams(&[])?;
+        let pass_submission = queue.submit_render_pass_command_streams(&[pass])?;
+        assert!(empty_submission < pass_submission);
+
+        let recorded = queue.submitted_render_pass_command_streams();
+        assert_eq!(recorded.len(), 1);
+        let recorded = &recorded[0];
+        assert_eq!(recorded.color_targets.len(), 3);
+        assert!(recorded.color_targets[0].is_some());
+        assert!(recorded.color_targets[1].is_none());
+        assert!(recorded.color_targets[2].is_some());
+        assert_eq!(recorded.framebuffer_fetch_color_slots, vec![2]);
+        assert!(recorded.depth_stencil_attachment.is_some());
+        assert!(recorded.occlusion_query_set.is_some());
+        assert_eq!(recorded.commands.len(), 16);
+        assert!(matches!(
+            recorded.commands[0],
+            HalRenderPassCommand::SetPipeline(HalRenderPipeline::Noop)
+        ));
+        assert!(matches!(
+            recorded.commands[1],
+            HalRenderPassCommand::SetBindGroup { index: 1, .. }
+        ));
+        assert!(matches!(
+            recorded.commands[2],
+            HalRenderPassCommand::SetVertexBuffer(_)
+        ));
+        assert!(matches!(
+            recorded.commands[3],
+            HalRenderPassCommand::SetIndexBuffer(_)
+        ));
+        assert!(matches!(
+            recorded.commands[4],
+            HalRenderPassCommand::SetViewport(_)
+        ));
+        assert!(matches!(
+            recorded.commands[5],
+            HalRenderPassCommand::SetScissorRect(_)
+        ));
+        assert!(matches!(
+            recorded.commands[6],
+            HalRenderPassCommand::SetBlendConstant(_)
+        ));
+        assert!(matches!(
+            recorded.commands[7],
+            HalRenderPassCommand::SetStencilReference(0x7f)
+        ));
+        assert!(matches!(
+            &recorded.commands[8],
+            HalRenderPassCommand::SetImmediates { offset: 4, data }
+                if data == &[1, 2, 3, 4]
+        ));
+        assert!(matches!(
+            recorded.commands[9],
+            HalRenderPassCommand::BeginOcclusionQuery { index: 2 }
+        ));
+        assert!(matches!(
+            recorded.commands[10],
+            HalRenderPassCommand::Draw {
+                vertex_count: 3,
+                ..
+            }
+        ));
+        assert!(matches!(
+            recorded.commands[11],
+            HalRenderPassCommand::DrawIndexed { index_count: 6, .. }
+        ));
+        assert!(matches!(
+            recorded.commands[12],
+            HalRenderPassCommand::DrawIndirect { .. }
+        ));
+        assert!(matches!(
+            recorded.commands[13],
+            HalRenderPassCommand::DrawIndexedIndirect { .. }
+        ));
+        assert!(matches!(
+            &recorded.commands[14],
+            HalRenderPassCommand::ExecuteRenderBundle(bundle) if bundle.commands.len() == 2
+        ));
+        assert!(matches!(
+            recorded.commands[15],
+            HalRenderPassCommand::EndOcclusionQuery
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn noop_queue_submit_render_pass_command_streams_reports_poisoned_recorder() {
+        let queue = NoopQueue::new();
+        let recorder = Arc::clone(&queue.submitted_render_pass_command_streams);
+        let poisoned = std::thread::spawn(move || {
+            let _guard = recorder.lock().expect("recorder lock starts healthy");
+            panic!("poison render pass command stream recorder");
+        });
+        assert!(poisoned.join().is_err());
+
+        let error = queue
+            .submit_render_pass_command_streams(&[])
+            .expect_err("poisoned recorder must reject submission");
+        assert!(matches!(
+            error,
+            HalError::QueueSubmissionFailed {
+                backend: "noop",
+                message
+            } if message == "submitted render pass command streams lock poisoned"
+        ));
+        assert!(queue.submitted_render_pass_command_streams().is_empty());
     }
 
     #[test]
