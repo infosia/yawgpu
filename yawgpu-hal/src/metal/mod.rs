@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,8 +11,8 @@ use objc2_foundation::{NSArray, NSRange, NSString};
 use objc2_metal::{
     MTLBlendFactor, MTLBlendOperation, MTLBlitCommandEncoder, MTLBlitOption,
     MTLBuffer as MTLBufferTrait, MTLClearColor, MTLColorWriteMask, MTLCommandBuffer,
-    MTLCommandEncoder, MTLCommandQueue, MTLCompareFunction, MTLCompileOptions,
-    MTLComputeCommandEncoder, MTLComputePipelineState, MTLCopyAllDevices,
+    MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue, MTLCompareFunction,
+    MTLCompileOptions, MTLComputeCommandEncoder, MTLComputePipelineState, MTLCopyAllDevices,
     MTLCreateSystemDefaultDevice, MTLCullMode, MTLDepthClipMode, MTLDepthStencilDescriptor,
     MTLDepthStencilState, MTLDevice, MTLDrawable, MTLFunction, MTLGPUFamily, MTLIndexType,
     MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType,
@@ -449,9 +450,8 @@ impl MetalAdapter {
             allocations: AtomicU64::new(0),
             queue: MetalQueue {
                 inner: queue,
-                last_submission_index: Arc::new(AtomicU64::new(SubmissionIndex::NONE.0)),
-                completed_submission_index: Arc::new(AtomicU64::new(SubmissionIndex::NONE.0)),
                 submission_lock: Arc::new(Mutex::new(())),
+                submissions: Arc::new(Mutex::new(queue::MetalSubmissionTracker::new())),
             },
         })
     }

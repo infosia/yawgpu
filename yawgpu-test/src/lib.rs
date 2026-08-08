@@ -375,14 +375,30 @@ macro_rules! assert_device_error {
 ///
 /// `instance` must be a non-null live yawgpu instance handle.
 pub unsafe fn wait_for_future(instance: native::WGPUInstance, future: native::WGPUFuture) {
+    // A single non-blocking pass is not enough once queue submission is
+    // asynchronous: `wgpuInstanceWaitAny` with a zero timeout is a poll, and a
+    // future gated on GPU completion legitimately reports TimedOut until the
+    // submission finishes. Drive the event loop the way a real consumer (and
+    // the CTS harness) does, rather than assuming one pass suffices.
+    //
+    // The deadline bounds futures that are never expected to complete — some
+    // tests call this purely to give a callback the chance to fire — so a
+    // timeout returns quietly instead of hanging the suite.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     unsafe {
-        yawgpu::wgpuInstanceProcessEvents(instance);
-        let mut wait_info = native::WGPUFutureWaitInfo {
-            future,
-            completed: 0,
-        };
-        let status = yawgpu::wgpuInstanceWaitAny(instance, 1, &mut wait_info, 0);
-        assert_ne!(status, native::WGPUWaitStatus_Error);
+        loop {
+            yawgpu::wgpuInstanceProcessEvents(instance);
+            let mut wait_info = native::WGPUFutureWaitInfo {
+                future,
+                completed: 0,
+            };
+            let status = yawgpu::wgpuInstanceWaitAny(instance, 1, &mut wait_info, 0);
+            assert_ne!(status, native::WGPUWaitStatus_Error);
+            if wait_info.completed != 0 || std::time::Instant::now() >= deadline {
+                return;
+            }
+            std::thread::yield_now();
+        }
     }
 }
 

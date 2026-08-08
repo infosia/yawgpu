@@ -185,8 +185,76 @@ alternative measured earlier made Vulkan submission synchronous, which is a
 regression on a Tier 1 backend. Block 96 **Q17** removes the cost by keying
 recycling on the completion index Slice B introduces.
 
+## Run 3 — 2026-08-06, after Block 96 Slice B (P-001 fixed)
+
+Same machine, `--reps 9`, both binaries run back to back on an idle machine.
+Slice B is B1 (`4cb1fe7`, submission index in the HAL), B3 (`abbf19c`,
+callbacks gated on completion) and B2 (Metal submission made asynchronous).
+
+| case | yawgpu ns | dawn ns | ratio |
+|---|---|---|---|
+| `buffer/create_destroy` | 1789 | 1925 | 0.93× |
+| `buffer/create_mapped_unmap` | 1823 | 4409 | 0.41× |
+| `bindgroup/create_destroy` | 170 | 130 | 1.31× |
+| `queue/write_buffer_4kb` | 661 | 636 | 1.04× |
+| `queue/write_buffer_then_wait` | 853 | 598 | 1.43× |
+| `frame/10writes_dispatch_submit_wait` | 148131 | 156938 | 0.94× |
+| `shader/create_cached` | 137 | 659 | 0.21× |
+| `shader/create_unique` | 16379 | 20632 | 0.79× |
+| `pipeline/compute_cached` | 66 | 376 | 0.18× |
+| `pipeline/compute_unique` | 85583 | 87409 | 0.98× |
+| `pipeline/render_unique` | 118759 | 133046 | 0.89× |
+| `encode/empty_encoder_finish` | 160 | 177 | 0.90× |
+| `encode/compute_1_dispatch` | 753 | 673 | 1.12× |
+| `encode/render_pass_empty` | 826 | 918 | 0.90× |
+| `encode/render_draw` | 148 | 42 | **3.50×** |
+| `submit/empty` | 1682 | 3234 | 0.52× |
+| `submit/compute_1_dispatch` | 25173 | 25253 | **1.00×** |
+| `submit/compute_wait_idle` | 122626 | 135783 | 0.90× |
+
+**P-001 is resolved.** `submit/compute_1_dispatch` went 155875 ns → 25173 ns
+against Dawn's 25253 ns — exact parity, from 6.23×.
+
+The decisive evidence is the *decoupling*, not the absolute number. Run 1
+recorded submit (155875) and submit-then-drain (149310) as the same figure,
+which is what a blocking submit looks like: adding an explicit drain cost
+nothing because the submit had already drained. They are now 25173 and 122626,
+a 4.9× gap — the same shape Dawn has always had.
+
+`submit/empty` is no longer a fake win. Run 1's 193 ns came from
+`MetalQueue::submit_copies` short-circuiting an empty slice; it now commits a
+tracked command buffer like Dawn does and measures 1682 ns against 3234 ns.
+The earlier "not like-for-like" caveat on that row no longer applies.
+
+**P-003 is now the only substantial gap left**: `encode/render_draw` at 3.50×,
+unchanged and untouched by this block.
+
+CTS over the same trees as the baseline: `pass=171474 skip=37 fail=0 crash=0`
+on Metal, identical to the pre-block baseline, with 171k cases exercising the
+new asynchronous resource-retention path.
+
+### What B2 changed for consumers
+
+Making Metal submission asynchronous changed one observable characteristic:
+a future gated on GPU completion now requires the caller to actually pump the
+event loop. `wgpuInstanceWaitAny` with a zero timeout is a poll and may report
+TimedOut until the submission finishes.
+
+This surfaced as 72 failing real-Metal e2e tests. The cause was not the library
+— `yawgpu-test`'s `wait_for_future` did one `ProcessEvents` plus one zero-timeout
+`WaitAny`, which sufficed only because the old Metal submit blocked. It now
+loops to a deadline, the way any real consumer and the CTS harness's `pumpUntil`
+already did, and all 98 real-Metal e2e tests pass.
+
+Worth remembering as a class: a synchronous implementation lets callers get away
+with a single event-loop pass, and every such caller becomes a latent failure
+the moment the implementation becomes asynchronous. The failures all showed up
+as a status field left at its *initialising* value (`WGPUMapAsyncStatus_Error`),
+which reads like an error being raised rather than a callback never firing.
+
 ## Status
 
-**P-002 resolved** (Block 96 Slice A). **P-001 and P-003 open.** Re-run the
-harness and add a new "Run" section rather than editing an earlier one in
-place.
+**P-001 and P-002 resolved** (Block 96). **P-003 open** — `encode/render_draw`
+at 3.50×, caused by `RenderPass::draw` snapshotting the whole pass state per
+draw. Re-run the harness and add a new "Run" section rather than editing an
+earlier one in place.
