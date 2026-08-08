@@ -12,7 +12,10 @@ use crate::{
 };
 
 /// Records submit into the command stream.
-pub(super) fn submit_copies(queue: &VulkanQueueInner, copies: &[HalCopy]) -> Result<(), HalError> {
+pub(super) fn submit_copies(
+    queue: &VulkanQueueInner,
+    copies: &[HalCopy],
+) -> Result<SubmissionIndex, HalError> {
     let command_pool_info = vk::CommandPoolCreateInfo::default()
         .flags(vk::CommandPoolCreateFlags::TRANSIENT)
         .queue_family_index(queue.device.queue_family_index);
@@ -31,7 +34,7 @@ pub(super) fn record_and_submit_copies(
     queue: &VulkanQueueInner,
     command_pool: vk::CommandPool,
     copies: &[HalCopy],
-) -> Result<(), HalError> {
+) -> Result<SubmissionIndex, HalError> {
     let mut descriptor_pools = Vec::new();
     let mut framebuffers = Vec::new();
     let mut image_views = Vec::new();
@@ -150,11 +153,34 @@ pub(super) fn record_and_submit_copies(
                 .wait_dst_stage_mask(&wait_stages)
                 .command_buffers(&command_buffers)
                 .signal_semaphores(&signal_semaphores);
-            queue
-                .device
-                .device
-                .queue_submit(queue.queue, &[submit_info], created_fence)
-                .map_err(|error| queue_submission_error("vkQueueSubmit", error))?;
+            let (submission_index, tracked_submission) = {
+                // Vulkan queues require externally synchronized submission.
+                // Queue access serializes all host queue operations, while
+                // holding the timeline lock through vkQueueSubmit makes index
+                // order match Vulkan queue order.
+                let _queue_access = queue
+                    .queue_access
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut submissions = queue
+                    .submissions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let submission_index = submissions.reserve()?;
+                queue
+                    .device
+                    .device
+                    .queue_submit(queue.queue, &[submit_info], created_fence)
+                    .map_err(|error| queue_submission_error("vkQueueSubmit", error))?;
+                submissions.register_fence(submission_index, created_fence);
+                (
+                    submission_index,
+                    TrackedSubmission {
+                        index: submission_index,
+                        tracker: Arc::clone(&queue.submissions),
+                    },
+                )
+            };
             fence = None;
             let retire_fence = created_fence;
             let retained = collect_retained_resources(copies);
@@ -170,22 +196,30 @@ pub(super) fn record_and_submit_copies(
                 let mut pending_state = pending_state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                pending_state.retire.retire(
+                pending_state.retire.retire_tracked(
                     &queue.device.device,
                     retire_fence,
                     cleanup,
                     retained,
                     true,
+                    Some(tracked_submission),
                 )?;
             } else {
                 let mut retire = queue
                     .retire
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                retire.retire(&queue.device.device, retire_fence, cleanup, retained, true)?;
+                retire.retire_tracked(
+                    &queue.device.device,
+                    retire_fence,
+                    cleanup,
+                    retained,
+                    true,
+                    Some(tracked_submission),
+                )?;
             }
+            Ok(submission_index)
         }
-        Ok(())
     })();
     if result.is_err() {
         unsafe {
@@ -305,15 +339,22 @@ pub(super) fn transition_swapchain_image_to_present(
                 .wait_dst_stage_mask(&wait_stages)
                 .command_buffers(&command_buffers)
                 .signal_semaphores(&signal_semaphores);
-            queue
-                .inner
-                .device
-                .device
-                .queue_submit(queue.inner.queue, &[submit_info], fence)
-                .map_err(|_| HalError::PresentFailed {
-                    backend: BACKEND,
-                    message: "queue submit failed",
-                })?;
+            {
+                let _queue_access = queue
+                    .inner
+                    .queue_access
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                queue
+                    .inner
+                    .device
+                    .device
+                    .queue_submit(queue.inner.queue, &[submit_info], fence)
+                    .map_err(|_| HalError::PresentFailed {
+                        backend: BACKEND,
+                        message: "queue submit failed",
+                    })?;
+            }
             pending_state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)

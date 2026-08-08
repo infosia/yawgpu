@@ -1,5 +1,6 @@
 #[cfg(feature = "tiled")]
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::fmt;
 use std::ptr::NonNull;
@@ -22,6 +23,7 @@ use crate::{
     HalRenderPipelineDescriptor, HalResolveQuerySet, HalSampler, HalSamplerDescriptor,
     HalShaderSource, HalStencilOperation, HalSurfaceConfiguration, HalTexture, HalTextureCopy,
     HalTextureDescriptor, HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
+    SubmissionIndex,
 };
 
 const BACKEND: &str = "vulkan";
@@ -933,7 +935,9 @@ impl VulkanAdapter {
                 inner: Arc::new(VulkanQueueInner {
                     device: inner,
                     queue,
+                    queue_access: Mutex::new(()),
                     retire: Mutex::new(RetireRing::new(RETIRE_RING_SIZE)),
+                    submissions: Arc::new(Mutex::new(SubmissionTracker::new())),
                 }),
             },
         })

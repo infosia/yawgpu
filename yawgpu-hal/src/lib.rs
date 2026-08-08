@@ -48,6 +48,35 @@ pub use shader::{
     HalMslImmediates, HalShaderSource, HalShaderStage, HalTextureMetadataSlot,
 };
 
+/// Identifies one submission on a HAL queue timeline.
+///
+/// [`SubmissionIndex::NONE`] is the value before the queue has received any
+/// submissions. Real submissions start at one and increase monotonically.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SubmissionIndex(u64);
+
+impl SubmissionIndex {
+    /// The pre-submission queue timeline value.
+    pub const NONE: Self = Self(0);
+}
+
+fn next_submission_index(
+    last_issued: &std::sync::atomic::AtomicU64,
+    backend: &'static str,
+) -> Result<SubmissionIndex, HalError> {
+    last_issued
+        .fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |index| index.checked_add(1),
+        )
+        .map(|index| SubmissionIndex(index + 1))
+        .map_err(|_| HalError::QueueSubmissionFailed {
+            backend,
+            message: "submission index exhausted".to_string(),
+        })
+}
+
 /// Stores backend-reported supported adapter limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1247,16 +1276,50 @@ pub enum HalQueue {
 
 impl HalQueue {
     /// Submits an empty command buffer to flush the queue.
-    pub fn submit_empty(&self) -> Result<(), HalError> {
+    pub fn submit_empty(&self) -> Result<SubmissionIndex, HalError> {
         match self {
             #[cfg(feature = "noop")]
-            Self::Noop(_) => Ok(()),
+            Self::Noop(queue) => queue.submit_empty(),
             #[cfg(feature = "vulkan")]
             Self::Vulkan(queue) => queue.submit_empty(),
             #[cfg(feature = "metal")]
             Self::Metal(queue) => queue.submit_empty(),
             #[cfg(feature = "gles")]
             Self::Gles(queue) => queue.submit_empty(),
+        }
+    }
+
+    /// Returns the highest submission index proven complete without blocking.
+    ///
+    /// Returns [`SubmissionIndex::NONE`] when no submission has been issued.
+    pub fn completed_submission_index(&self) -> Result<SubmissionIndex, HalError> {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(queue) => queue.completed_submission_index(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(queue) => queue.completed_submission_index(),
+            #[cfg(feature = "metal")]
+            Self::Metal(queue) => queue.completed_submission_index(),
+            #[cfg(feature = "gles")]
+            Self::Gles(queue) => queue.completed_submission_index(),
+        }
+    }
+
+    /// Blocks until the requested submission index has completed.
+    ///
+    /// [`SubmissionIndex::NONE`] always succeeds, including before the first
+    /// submission. A never-issued index returns an error instead of waiting
+    /// indefinitely.
+    pub fn wait_for_submission(&self, index: SubmissionIndex) -> Result<(), HalError> {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(queue) => queue.wait_for_submission(index),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(queue) => queue.wait_for_submission(index),
+            #[cfg(feature = "metal")]
+            Self::Metal(queue) => queue.wait_for_submission(index),
+            #[cfg(feature = "gles")]
+            Self::Gles(queue) => queue.wait_for_submission(index),
         }
     }
 
@@ -1275,7 +1338,7 @@ impl HalQueue {
     }
 
     /// Records and submits the given buffer/texture copy operations.
-    pub fn submit_copies(&self, copies: &[HalCopy]) -> Result<(), HalError> {
+    pub fn submit_copies(&self, copies: &[HalCopy]) -> Result<SubmissionIndex, HalError> {
         #[cfg(not(any(feature = "noop", feature = "metal", feature = "vulkan")))]
         let _ = copies;
         match self {
@@ -1489,6 +1552,12 @@ pub enum HalRenderPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn submission_index_none_is_pre_submission_value() {
+        assert_eq!(SubmissionIndex::default(), SubmissionIndex::NONE);
+        assert!(SubmissionIndex::NONE <= SubmissionIndex::default());
+    }
 
     fn noop_device() -> Result<HalDevice, HalError> {
         let instance = HalInstance::new_noop();
@@ -1804,7 +1873,8 @@ mod tests {
         let queue = device.queue();
 
         assert!(matches!(queue, HalQueue::Noop(_)));
-        queue.submit_empty()
+        queue.submit_empty()?;
+        Ok(())
     }
 
     #[test]
@@ -1963,7 +2033,36 @@ mod tests {
         let device = noop_device()?;
         let queue = device.queue();
 
-        queue.submit_empty()
+        let index = queue.submit_empty()?;
+
+        assert!(index > SubmissionIndex::NONE);
+        Ok(())
+    }
+
+    #[test]
+    fn hal_queue_completed_submission_index_noop_tracks_monotonic_submissions(
+    ) -> Result<(), HalError> {
+        let device = noop_device()?;
+        let queue = device.queue();
+
+        assert_eq!(queue.completed_submission_index()?, SubmissionIndex::NONE);
+        let first = queue.submit_empty()?;
+        let second = queue.submit_empty()?;
+        let third = queue.submit_copies(&[])?;
+
+        assert!(first < second);
+        assert!(second < third);
+        assert_eq!(queue.completed_submission_index()?, third);
+        Ok(())
+    }
+
+    #[test]
+    fn hal_queue_wait_for_submission_noop_returns_for_completed_index() -> Result<(), HalError> {
+        let device = noop_device()?;
+        let queue = device.queue();
+        let submitted = queue.submit_empty()?;
+
+        queue.wait_for_submission(submitted)
     }
 
     #[test]
@@ -1995,7 +2094,8 @@ mod tests {
         });
 
         queue.submit_copies(&[])?;
-        queue.submit_copies(&[copy, clear])
+        queue.submit_copies(&[copy, clear])?;
+        Ok(())
     }
 
     #[test]

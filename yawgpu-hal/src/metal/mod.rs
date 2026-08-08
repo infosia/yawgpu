@@ -1,6 +1,7 @@
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::ProtocolObject;
@@ -34,7 +35,7 @@ use crate::{
     HalQuerySet, HalRenderLoadOp, HalRenderPass, HalRenderPipelineDescriptor, HalResolveQuerySet,
     HalSampler, HalSamplerDescriptor, HalShaderSource, HalStencilFaceState, HalStencilOperation,
     HalSurfaceConfiguration, HalTexture, HalTextureClear, HalTextureCopy, HalTextureDescriptor,
-    HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode,
+    HalTextureFormat, HalTextureUsage, HalVertexFormat, HalVertexStepMode, SubmissionIndex,
 };
 #[cfg(feature = "tiled")]
 use crate::{HalSubpassAttachmentResource, HalSubpassRenderPassCommand};
@@ -446,7 +447,12 @@ impl MetalAdapter {
         Ok(MetalDevice {
             device: self.device.clone(),
             allocations: AtomicU64::new(0),
-            queue: MetalQueue { inner: queue },
+            queue: MetalQueue {
+                inner: queue,
+                last_submission_index: Arc::new(AtomicU64::new(SubmissionIndex::NONE.0)),
+                completed_submission_index: Arc::new(AtomicU64::new(SubmissionIndex::NONE.0)),
+                submission_lock: Arc::new(Mutex::new(())),
+            },
         })
     }
 }

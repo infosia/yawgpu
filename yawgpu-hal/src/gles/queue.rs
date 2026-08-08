@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use glow::HasContext;
@@ -19,13 +20,14 @@ use crate::{
     HalRenderLoadOp, HalRenderPass, HalRenderPipeline, HalSampler, HalStencilFaceState,
     HalStencilOperation, HalStorageTextureAccess, HalTexture, HalTextureAspect, HalTextureClear,
     HalTextureCopy, HalTextureFormat, HalTextureMetadataSlot, HalTextureViewDimension,
-    HalVertexStepMode,
+    HalVertexStepMode, SubmissionIndex,
 };
 
 /// Stores GLES queue data used by validation and backend submission.
 #[derive(Clone)]
 pub struct GlesQueue {
     inner: Arc<GlesDeviceInner>,
+    last_submission_index: Arc<AtomicU64>,
 }
 
 // SAFETY: Queue submission calls into `GlesDeviceInner::with_current_context`,
@@ -43,14 +45,18 @@ impl std::fmt::Debug for GlesQueue {
 
 impl GlesQueue {
     pub(super) fn new(inner: Arc<GlesDeviceInner>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            last_submission_index: Arc::new(AtomicU64::new(SubmissionIndex::NONE.0)),
+        }
     }
 
     /// Submits an empty command buffer to flush the queue.
-    pub fn submit_empty(&self) -> Result<(), HalError> {
+    pub fn submit_empty(&self) -> Result<SubmissionIndex, HalError> {
         self.inner.with_current_context(|gl| unsafe {
             gl.flush();
-        })
+        })?;
+        crate::next_submission_index(&self.last_submission_index, BACKEND)
     }
 
     /// Waits until all submitted queue work has completed.
@@ -60,10 +66,33 @@ impl GlesQueue {
         })
     }
 
+    /// Returns the highest submission index proven complete without blocking.
+    pub fn completed_submission_index(&self) -> Result<SubmissionIndex, HalError> {
+        // The current GLES submission model has no retained asynchronous work:
+        // each submission ends with its existing `flush()`. Preserve that
+        // model in B1 and treat the index as complete without changing the
+        // flush to a blocking `finish()`.
+        Ok(SubmissionIndex(
+            self.last_submission_index.load(Ordering::Acquire),
+        ))
+    }
+
+    /// Blocks until the requested submission index has completed.
+    pub fn wait_for_submission(&self, index: SubmissionIndex) -> Result<(), HalError> {
+        if index <= self.completed_submission_index()? {
+            Ok(())
+        } else {
+            Err(HalError::QueueSubmissionFailed {
+                backend: BACKEND,
+                message: "submission index has not been issued".to_string(),
+            })
+        }
+    }
+
     /// Records and submits the given buffer/texture copy operations.
-    pub fn submit_copies(&self, copies: &[HalCopy]) -> Result<(), HalError> {
+    pub fn submit_copies(&self, copies: &[HalCopy]) -> Result<SubmissionIndex, HalError> {
         if copies.is_empty() {
-            return Ok(());
+            return crate::next_submission_index(&self.last_submission_index, BACKEND);
         }
 
         let supports_base_vertex = self.inner.supports_base_vertex();
@@ -149,7 +178,8 @@ impl GlesQueue {
                     gl.flush();
                 }
                 Ok(())
-            })?
+            })??;
+        crate::next_submission_index(&self.last_submission_index, BACKEND)
     }
 }
 
@@ -819,19 +849,17 @@ fn bind_storage_textures(
                     meta.target,
                     texture_view_caps.supports_cube_map_array,
                 )?;
-                let view =
-                    create_transient_texture_view(gl, raw_texture, target, meta, texture, texture_view)?;
+                let view = create_transient_texture_view(
+                    gl,
+                    raw_texture,
+                    target,
+                    meta,
+                    texture,
+                    texture_view,
+                )?;
                 transient_views.push(view);
                 unsafe {
-                    gl.bind_image_texture(
-                        flat_binding,
-                        view,
-                        0,
-                        true,
-                        0,
-                        access,
-                        internal_format,
-                    );
+                    gl.bind_image_texture(flat_binding, view, 0, true, 0, access, internal_format);
                 }
             }
         }
@@ -3785,6 +3813,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn gles_queue_completion_index_tracks_flushed_submissions() {
+        let Some(device) = gles_device_or_skip("GLES queue completion-index test") else {
+            return;
+        };
+        let queue = device.queue();
+
+        assert_eq!(
+            queue
+                .completed_submission_index()
+                .expect("query initial completion"),
+            SubmissionIndex::NONE
+        );
+        let first = queue.submit_empty().expect("submit first empty work");
+        let second = queue.submit_empty().expect("submit second empty work");
+
+        assert!(first < second);
+        assert_eq!(
+            queue
+                .completed_submission_index()
+                .expect("query flushed completion"),
+            second
+        );
+        queue
+            .wait_for_submission(second)
+            .expect("wait for completed submission");
+    }
+
+    #[test]
     fn submit_copies_resolve_query_set_completes_and_writes_zeroes() {
         // Regression test for T-G4: the ResolveQuerySet arm used to call
         // `GlesBuffer::write` from inside `with_current_context`, re-acquiring
@@ -4044,8 +4100,8 @@ mod tests {
         let bytes = read_back_rgba8_slices(&device, &texture, 0, layer_count);
         let green = [0u8, 255, 0, 255];
         for layer in 0..layer_count {
-            let slice = &bytes[(layer * RGBA8_SLICE_BYTES) as usize
-                ..((layer + 1) * RGBA8_SLICE_BYTES) as usize];
+            let slice = &bytes
+                [(layer * RGBA8_SLICE_BYTES) as usize..((layer + 1) * RGBA8_SLICE_BYTES) as usize];
             if layer == target_layer {
                 for pixel in slice.chunks_exact(4) {
                     assert_eq!(pixel, green, "cleared layer {layer} must be opaque green");
@@ -4088,8 +4144,8 @@ mod tests {
         let bytes = read_back_rgba8_slices(&device, &texture, 0, depth);
         let blue = [0u8, 0, 255, 255];
         for slice in 0..depth {
-            let bytes_slice = &bytes[(slice * RGBA8_SLICE_BYTES) as usize
-                ..((slice + 1) * RGBA8_SLICE_BYTES) as usize];
+            let bytes_slice = &bytes
+                [(slice * RGBA8_SLICE_BYTES) as usize..((slice + 1) * RGBA8_SLICE_BYTES) as usize];
             if slice == target_slice {
                 for pixel in bytes_slice.chunks_exact(4) {
                     assert_eq!(pixel, blue, "cleared z-slice {slice} must be opaque blue");
@@ -4519,7 +4575,7 @@ mod tests {
                float y = float((gl_VertexID & 2) << 1) - 1.0;\n\
                gl_Position = vec4(x, y, 0.0, 1.0);\n\
              }\n"
-            .to_owned();
+        .to_owned();
         let fragment = "#version 310 es\n\
              precision highp float;\n\
              precision highp int;\n\
@@ -4533,7 +4589,7 @@ mod tests {
                frag_color = vec4(float(v_vertex_levels) / 255.0,\n\
                                  float(fragment_levels) / 255.0, 0.0, 1.0);\n\
              }\n"
-            .to_owned();
+        .to_owned();
 
         let pipeline = device
             .create_render_pipeline(
@@ -5261,6 +5317,7 @@ mod tests {
                     depth_or_array_layers: case.layers,
                 },
             })])
+            .map(|_| ())
     }
 
     fn submit_matrix_texture_to_buffer(
@@ -7886,12 +7943,7 @@ mod tests {
         // base = 1, count = 2 of a 4-layer 2d-array storage texture: the
         // shader's view-relative layers 0/1 must land on ABSOLUTE layers 1/2,
         // the untouched layers 0/3 keep their sentinel, and imageSize().z == 2.
-        run_storage_array_subrange_test(
-            "GLES storage-array subrange (base=1,count=2)",
-            1,
-            2,
-            4,
-        );
+        run_storage_array_subrange_test("GLES storage-array subrange (base=1,count=2)", 1, 2, 4);
     }
 
     #[test]
@@ -7899,12 +7951,7 @@ mod tests {
         // base = 0, count = 3 of a 4-layer texture: view-relative layers 0/1/2
         // land on absolute layers 0/1/2, layer 3 keeps its sentinel, and
         // imageSize().z == 3.
-        run_storage_array_subrange_test(
-            "GLES storage-array subrange (base=0,count=3)",
-            0,
-            3,
-            4,
-        );
+        run_storage_array_subrange_test("GLES storage-array subrange (base=0,count=3)", 0, 3, 4);
     }
 
     fn run_storage_array_subrange_test(label: &str, base: u32, count: u32, total: u32) {
@@ -7964,7 +8011,11 @@ mod tests {
                     format,
                     aspect: crate::HalTextureAspect::All,
                     mip_level: 0,
-                    origin: crate::HalOrigin3d { x: 0, y: 0, z: layer },
+                    origin: crate::HalOrigin3d {
+                        x: 0,
+                        y: 0,
+                        z: layer,
+                    },
                     extent: crate::HalExtent3d {
                         width: 2,
                         height: 2,
@@ -8085,7 +8136,11 @@ mod tests {
                 format,
                 aspect: crate::HalTextureAspect::All,
                 mip_level: 0,
-                origin: crate::HalOrigin3d { x: 0, y: 0, z: layer },
+                origin: crate::HalOrigin3d {
+                    x: 0,
+                    y: 0,
+                    z: layer,
+                },
                 extent: crate::HalExtent3d {
                     width: 2,
                     height: 2,

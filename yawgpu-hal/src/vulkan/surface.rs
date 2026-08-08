@@ -96,6 +96,7 @@ pub(super) struct InFlightFrame {
     cleanup: Vec<RetireOp>,
     retained: Vec<RetainedResource>,
     destroy_fence: bool,
+    tracked_submission: Option<TrackedSubmission>,
 }
 
 #[derive(Debug)]
@@ -122,12 +123,25 @@ impl RetireRing {
         retained: Vec<RetainedResource>,
         destroy_fence: bool,
     ) -> Result<(), HalError> {
+        self.retire_tracked(device, fence, cleanup, retained, destroy_fence, None)
+    }
+
+    pub(super) fn retire_tracked(
+        &mut self,
+        device: &ash::Device,
+        fence: vk::Fence,
+        cleanup: Vec<RetireOp>,
+        retained: Vec<RetainedResource>,
+        destroy_fence: bool,
+        tracked_submission: Option<TrackedSubmission>,
+    ) -> Result<(), HalError> {
         self.drain_ready_overflow(device);
         let new_frame = InFlightFrame {
             fence,
             cleanup,
             retained,
             destroy_fence,
+            tracked_submission,
         };
         if self.frames.is_empty() {
             if let Err(error) = wait_for_frame(device, &new_frame) {
@@ -211,11 +225,26 @@ fn cleanup_frame(device: &ash::Device, frame: InFlightFrame) {
         cleanup,
         retained,
         destroy_fence,
+        tracked_submission,
     } = frame;
     unsafe {
         cleanup_retire_ops(device, cleanup);
         drop(retained);
-        if destroy_fence {
+        if let Some(tracked_submission) = tracked_submission {
+            let mut tracker = tracked_submission
+                .tracker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            tracker.mark_completed(tracked_submission.index);
+            let removed_fence = tracker.remove_fence(tracked_submission.index);
+            debug_assert_eq!(removed_fence, Some(fence));
+            // If every waiter unpinned first, retirement owns and destroys the
+            // fence here. If retirement wins the race, it defers destruction;
+            // the last waiter owns destruction after dropping its final pin.
+            if destroy_fence && !tracker.defer_destroy_if_pinned(fence) {
+                device.destroy_fence(fence, None);
+            }
+        } else if destroy_fence {
             device.destroy_fence(fence, None);
         }
     }
@@ -460,10 +489,17 @@ impl VulkanSurface {
             .wait_semaphores(&wait_semaphores)
             .swapchains(&swapchains)
             .image_indices(&image_indices);
-        unsafe {
-            swapchain
-                .loader
-                .queue_present(queue.inner.queue, &present_info)
+        {
+            let _queue_access = queue
+                .inner
+                .queue_access
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            unsafe {
+                swapchain
+                    .loader
+                    .queue_present(queue.inner.queue, &present_info)
+            }
         }
         .map_err(|_| HalError::PresentFailed {
             backend: BACKEND,
@@ -951,6 +987,7 @@ mod tests {
             cleanup: Vec::new(),
             retained: Vec::new(),
             destroy_fence: true,
+            tracked_submission: None,
         });
         let slot_count = retire.frames.len();
         let replacement_fence = signaled_fence(&device);
@@ -984,6 +1021,7 @@ mod tests {
             cleanup: Vec::new(),
             retained: Vec::new(),
             destroy_fence: true,
+            tracked_submission: None,
         });
 
         retire

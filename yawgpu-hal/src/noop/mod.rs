@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::{
     HalBufferUsage, HalCopy, HalError, HalLimits, HalQueryKind, HalTextureDescriptor,
-    HalTextureDimension,
+    HalTextureDimension, SubmissionIndex,
 };
 
 /// Stores noop instance data used by validation and backend submission.
@@ -252,6 +252,7 @@ impl Default for NoopDevice {
 #[derive(Debug, Clone)]
 pub struct NoopQueue {
     submitted_copies: Arc<Mutex<Vec<HalCopy>>>,
+    last_submission_index: Arc<AtomicU64>,
 }
 
 impl NoopQueue {
@@ -260,7 +261,13 @@ impl NoopQueue {
     pub fn new() -> Self {
         Self {
             submitted_copies: Arc::new(Mutex::new(Vec::new())),
+            last_submission_index: Arc::new(AtomicU64::new(SubmissionIndex::NONE.0)),
         }
+    }
+
+    /// Submits an empty command buffer to flush the queue.
+    pub fn submit_empty(&self) -> Result<SubmissionIndex, HalError> {
+        crate::next_submission_index(&self.last_submission_index, "noop")
     }
 
     /// Records submitted copy commands for Noop unit-test inspection.
@@ -269,7 +276,7 @@ impl NoopQueue {
     /// map-reads on the destination buffer observe the written bytes (mirrors
     /// the real-GPU semantics where the copy completes before any following
     /// `mapAsync` resolves).
-    pub fn submit_copies(&self, copies: &[HalCopy]) -> Result<(), HalError> {
+    pub fn submit_copies(&self, copies: &[HalCopy]) -> Result<SubmissionIndex, HalError> {
         for copy in copies {
             match copy {
                 HalCopy::Buffer(buf_copy) => {
@@ -300,7 +307,27 @@ impl NoopQueue {
                 message: "submitted copies lock poisoned".to_string(),
             })?
             .extend(copies.iter().cloned());
-        Ok(())
+        crate::next_submission_index(&self.last_submission_index, "noop")
+    }
+
+    /// Returns the highest submission index proven complete without blocking.
+    pub fn completed_submission_index(&self) -> Result<SubmissionIndex, HalError> {
+        Ok(SubmissionIndex(
+            self.last_submission_index.load(Ordering::Acquire),
+        ))
+    }
+
+    /// Blocks until the requested submission index has completed.
+    pub fn wait_for_submission(&self, index: SubmissionIndex) -> Result<(), HalError> {
+        let completed = self.completed_submission_index()?;
+        if index <= completed {
+            Ok(())
+        } else {
+            Err(HalError::QueueSubmissionFailed {
+                backend: "noop",
+                message: "submission index has not been issued".to_string(),
+            })
+        }
     }
 
     /// Waits until all submitted queue work has completed.
@@ -711,6 +738,52 @@ mod tests {
     fn noop_queue_new_matches_default_smoke() {
         let _queue = NoopQueue::new();
         let _default_queue = NoopQueue::default();
+    }
+
+    #[test]
+    fn noop_queue_submission_indices_are_monotonic() -> Result<(), HalError> {
+        let queue = NoopQueue::new();
+
+        assert_eq!(queue.completed_submission_index()?, SubmissionIndex::NONE);
+        let first = queue.submit_empty()?;
+        let second = queue.submit_copies(&[])?;
+        let third = queue.submit_empty()?;
+
+        assert!(SubmissionIndex::NONE < first);
+        assert!(first < second);
+        assert!(second < third);
+        Ok(())
+    }
+
+    #[test]
+    fn noop_queue_completed_submission_index_tracks_completed_submission() -> Result<(), HalError> {
+        let queue = NoopQueue::new();
+        let submitted = queue.submit_empty()?;
+
+        assert_eq!(queue.completed_submission_index()?, submitted);
+        Ok(())
+    }
+
+    #[test]
+    fn noop_queue_wait_for_already_completed_submission_returns_promptly() -> Result<(), HalError> {
+        let queue = NoopQueue::new();
+        let submitted = queue.submit_empty()?;
+        let started = std::time::Instant::now();
+
+        queue.wait_for_submission(submitted)?;
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        Ok(())
+    }
+
+    #[test]
+    fn noop_queue_wait_for_unissued_submission_returns_error() -> Result<(), HalError> {
+        let queue = NoopQueue::new();
+        let unissued = queue.submit_empty()?;
+        let unissued = SubmissionIndex(unissued.0 + 1);
+
+        assert!(queue.wait_for_submission(unissued).is_err());
+        Ok(())
     }
 
     #[test]

@@ -657,7 +657,8 @@ impl Queue {
                 self.inner.hal.submit_empty()
             } else {
                 self.inner.hal.submit_copies(&copies)
-            };
+            }
+            .map(|_| ());
             return self.finish_pending_submission(chunks, result);
         }
         let PendingWriteSubmission { mut copies, chunks } = self.take_pending_writes();
@@ -668,7 +669,7 @@ impl Queue {
         for (op_index, op) in all_ops.iter().enumerate() {
             append_hal_command_execution(&mut copies, op, &all_ops[..=op_index]);
         }
-        let result = self.inner.hal.submit_copies(&copies);
+        let result = self.inner.hal.submit_copies(&copies).map(|_| ());
         self.finish_pending_submission(chunks, result)
     }
 
@@ -678,7 +679,7 @@ impl Queue {
             self.inner.pending_writes.lock().retire(chunks);
             return None;
         }
-        let result = self.inner.hal.submit_copies(&copies);
+        let result = self.inner.hal.submit_copies(&copies).map(|_| ());
         self.finish_pending_submission(chunks, result)
     }
 

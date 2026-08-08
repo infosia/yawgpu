@@ -4,6 +4,9 @@ use super::*;
 #[derive(Clone)]
 pub struct MetalQueue {
     pub(super) inner: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+    pub(super) last_submission_index: Arc<AtomicU64>,
+    pub(super) completed_submission_index: Arc<AtomicU64>,
+    pub(super) submission_lock: Arc<Mutex<()>>,
 }
 
 impl std::fmt::Debug for MetalQueue {
@@ -26,8 +29,40 @@ impl MetalQueue {
     }
 
     /// Submits an empty command buffer to flush the queue.
-    pub fn submit_empty(&self) -> Result<(), HalError> {
-        self.wait_idle()
+    pub fn submit_empty(&self) -> Result<SubmissionIndex, HalError> {
+        autoreleasepool(|_| {
+            let command_buffer = self.inner.commandBuffer().ok_or_else(|| {
+                queue_submission_error("submit-empty command buffer creation returned nil")
+            })?;
+            let _submission = self
+                .submission_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let index = crate::next_submission_index(&self.last_submission_index, BACKEND)?;
+            command_buffer.commit();
+            command_buffer.waitUntilCompleted();
+            self.completed_submission_index
+                .store(index.0, Ordering::Release);
+            Ok(index)
+        })
+    }
+
+    /// Returns the highest submission index proven complete without blocking.
+    pub fn completed_submission_index(&self) -> Result<SubmissionIndex, HalError> {
+        Ok(SubmissionIndex(
+            self.completed_submission_index.load(Ordering::Acquire),
+        ))
+    }
+
+    /// Blocks until the requested submission index has completed.
+    pub fn wait_for_submission(&self, index: SubmissionIndex) -> Result<(), HalError> {
+        if index <= self.completed_submission_index()? {
+            Ok(())
+        } else {
+            Err(queue_submission_error(
+                "submission index has not been issued",
+            ))
+        }
     }
 
     /// Waits until all submitted queue work has completed.
@@ -36,6 +71,10 @@ impl MetalQueue {
             let command_buffer = self.inner.commandBuffer().ok_or_else(|| {
                 queue_submission_error("wait-idle command buffer creation returned nil")
             })?;
+            let _submission = self
+                .submission_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             command_buffer.commit();
             command_buffer.waitUntilCompleted();
             Ok(())
@@ -43,9 +82,16 @@ impl MetalQueue {
     }
 
     /// Records and submits the given buffer/texture copy operations.
-    pub fn submit_copies(&self, copies: &[HalCopy]) -> Result<(), HalError> {
+    pub fn submit_copies(&self, copies: &[HalCopy]) -> Result<SubmissionIndex, HalError> {
         if copies.is_empty() {
-            return Ok(());
+            let _submission = self
+                .submission_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let index = crate::next_submission_index(&self.last_submission_index, BACKEND)?;
+            self.completed_submission_index
+                .store(index.0, Ordering::Release);
+            return Ok(index);
         }
 
         autoreleasepool(|_| {
@@ -159,9 +205,18 @@ impl MetalQueue {
                     }
                 }
             }
+            let _submission = self
+                .submission_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let index = crate::next_submission_index(&self.last_submission_index, BACKEND)?;
             command_buffer.commit();
+            // Keep B1 behavior unchanged: Metal still blocks here. B2 moves
+            // completion tracking to a command-buffer completion handler.
             command_buffer.waitUntilCompleted();
-            Ok(())
+            self.completed_submission_index
+                .store(index.0, Ordering::Release);
+            Ok(index)
         })
     }
 }
@@ -187,6 +242,34 @@ mod tests {
             .queue()
             .submit_empty()
             .expect("submit empty queue work");
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_queue_completion_index_tracks_synchronous_submissions() {
+        let device = metal_device();
+        let queue = device.queue();
+
+        assert_eq!(
+            queue
+                .completed_submission_index()
+                .expect("query initial completion"),
+            SubmissionIndex::NONE
+        );
+        let first = queue.submit_empty().expect("submit first empty work");
+        let second = queue.submit_empty().expect("submit second empty work");
+
+        assert!(first < second);
+        assert_eq!(
+            queue
+                .completed_submission_index()
+                .expect("query completed submission"),
+            second
+        );
+        queue
+            .wait_for_submission(second)
+            .expect("wait for completed submission");
     }
 
     #[test]
