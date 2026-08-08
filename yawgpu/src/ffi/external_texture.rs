@@ -65,8 +65,10 @@ pub unsafe extern "C" fn wgpuExternalTextureSetLabel(
     label: native::WGPUStringView,
 ) {
     let external_texture = borrow_handle(external_texture, "WGPUExternalTexture");
-    *external_texture.label.lock().expect("label lock must not poison") =
-        label_from_string_view(label);
+    *external_texture
+        .label
+        .lock()
+        .expect("label lock must not poison") = label_from_string_view(label);
 }
 
 /// Adds one owned reference to an external texture handle.

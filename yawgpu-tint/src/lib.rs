@@ -3177,7 +3177,11 @@ fn fs() -> @location(0) vec4f {
         let fs = program.generate_glsl("fs", &bindings, &[], None).unwrap();
 
         // Every slot's offset equals its resolved binding, in both stages.
-        for slot in vs.texture_metadata_slots.iter().chain(&fs.texture_metadata_slots) {
+        for slot in vs
+            .texture_metadata_slots
+            .iter()
+            .chain(&fs.texture_metadata_slots)
+        {
             assert_eq!(
                 slot.offset, slot.binding,
                 "slot offset must equal resolved binding: {slot:?}"
