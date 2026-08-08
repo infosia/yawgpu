@@ -125,14 +125,24 @@ De-risks the whole yawgpu plumbing against capability that already exists.
   `S = bind_group_count`, `binding = N`; VkRenderPass self-read input refs in
   GENERAL layout + by-region self-dependency; INPUT_ATTACHMENT descriptor; shared
   render-pass construction between pipeline-time and draw-time passes).
-  **Spec-valid (Vulkan validation clean).**
+  **Spec-valid (Vulkan validation clean).** **Pixel-verified on native Vulkan
+  (2026-08-08, Windows/NVIDIA):** `e2e_vulkan_framebuffer_fetch` is green — the
+  fragment reads the cleared attachment through `@color(0)` and the triangle comes
+  back exactly 0.5 red above the background. This closes the "pixel-unverified"
+  caveat below; 1.4 is now verified, not merely correct-by-construction.
+  - The first native-Vulkan run failed on an off-by-one, not on the feature: the
+    clear channels land on exact rgba8unorm tie midpoints (`0.1 * 255 = 25.5`,
+    `0.3 * 255 = 76.5`), which is device-defined, and NVIDIA truncates where the
+    test's constants assumed rounding. The triangle inherits the same ULP because
+    it reads the stored value back and adds 0.5, landing on a tie again. Fixed by
+    giving the assertions the ±1 per-channel tolerance the sibling tiled e2e tests
+    already use — same reasoning as `e2e_vulkan_tiled.rs`'s 127-vs-128 note.
   - **MoltenVK GAP (finding):** MoltenVK does not map the input-attachment self-read
     (color attachment == input attachment) to Metal's tile read — it returns zero.
-    The setup is validation-clean and the native-Metal `[[color(N)]]` analog (1.3)
-    is verified, so the Vulkan path is **correct-by-construction but pixel-unverified
-    on this Mac** (no native Vulkan HW). `e2e_vulkan_framebuffer_fetch` **skips on
-    macOS/MoltenVK** and runs+verifies on native Vulkan (Linux/Windows). Consistent
-    with [[moltenvk-shader-execution-limits]] (MoltenVK is not an authoritative oracle).
+    `e2e_vulkan_framebuffer_fetch` therefore **skips on macOS/MoltenVK** and runs on
+    native Vulkan (Linux/Windows), which is where the verification above came from.
+    Consistent with [[moltenvk-shader-execution-limits]] (MoltenVK is not an
+    authoritative oracle).
 
 ### Slice 2 — `input_attachment<T>` multi-subpass deferred (Dawn fork landed 2026-06-30)
 **UNBLOCKED** (pin at `a05085e54f`). Restores transient attachments, multi-subpass

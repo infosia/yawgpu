@@ -75,15 +75,23 @@ fn vulkan_framebuffer_fetch_reads_cleared_attachment() {
         let pixels = read_unpacked_texture_buffer(instance, readback);
 
         // Background = clear color (0.1, 0.2, 0.3, 1.0).
+        // The clear channels land on exact rgba8unorm tie midpoints — 0.1 * 255 =
+        // 25.5 and 0.3 * 255 = 76.5 — so each is device-defined as either the
+        // truncated or the rounded neighbour (native NVIDIA truncates to 25/76;
+        // a rounding device gives 26/77). The triangle inherits that ULP because
+        // it reads the stored value back and adds 0.5, landing on a tie again
+        // (25/255 + 0.5 → 152.5). Accept a ±1 per-channel tolerance, matching
+        // e2e_vulkan_tiled / e2e_metal_tiled.
         assert!(
-            contains_pixel(&pixels, [26, 51, 77, 255]),
-            "expected cleared background pixel"
+            approx_contains_pixel(&pixels, [26, 51, 77, 255], 1),
+            "expected cleared background pixel [26, 51, 77, 255] (±1); distinct = {:?}",
+            distinct_pixels(&pixels)
         );
         // Triangle = prev + 0.5 red = (0.6, 0.2, 0.3, 1.0): proves the fragment
         // read the cleared attachment value via @color(0) input-attachment.
         assert!(
-            contains_pixel(&pixels, [153, 51, 77, 255]),
-            "expected framebuffer-fetch (clear + red) pixel; got {:?}",
+            approx_contains_pixel(&pixels, [153, 51, 77, 255], 1),
+            "expected framebuffer-fetch (clear + red) pixel [153, 51, 77, 255] (±1); got {:?}",
             distinct_pixels(&pixels)
         );
         assert!(
@@ -424,10 +432,14 @@ fn texture_extent() -> native::WGPUExtent3D {
     }
 }
 
-fn contains_pixel(pixels: &[u8], rgba: [u8; 4]) -> bool {
-    pixels
-        .chunks_exact(BYTES_PER_PIXEL)
-        .any(|pixel| pixel == rgba)
+/// Returns true when any pixel matches `expected` within `tol` per channel.
+fn approx_contains_pixel(pixels: &[u8], expected: [u8; 4], tol: u8) -> bool {
+    pixels.chunks_exact(BYTES_PER_PIXEL).any(|pixel| {
+        pixel
+            .iter()
+            .zip(expected.iter())
+            .all(|(&actual, &want)| actual.abs_diff(want) <= tol)
+    })
 }
 
 fn distinct_pixels(pixels: &[u8]) -> Vec<[u8; 4]> {
