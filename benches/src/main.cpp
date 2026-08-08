@@ -640,6 +640,27 @@ std::vector<Case> makeCases() {
         wgpuCommandEncoderRelease(e);
     }});
 
+    // Executes a render pass containing `kDrawsPerPass` draws. Unlike
+    // `encode/render_draw` this submits and drains, so it prices what the
+    // implementation actually asks the GPU to do for a multi-draw pass — an
+    // implementation that starts a fresh GPU render pass per draw pays for an
+    // attachment load/store each time, which recording alone cannot reveal.
+    cases.push_back({"submit/render_100_draws_wait", 200, [](Fixture& f, uint64_t) {
+        WGPUCommandEncoder e = wgpuDeviceCreateCommandEncoder(f.device, nullptr);
+        WGPURenderPassEncoder p = beginColorPass(e, f.colorView);
+        wgpuRenderPassEncoderSetPipeline(p, f.renderPipeline);
+        for (uint64_t d = 0; d < kDrawsPerPass; ++d) {
+            wgpuRenderPassEncoderDraw(p, 3, 1, 0, 0);
+        }
+        wgpuRenderPassEncoderEnd(p);
+        wgpuRenderPassEncoderRelease(p);
+        WGPUCommandBuffer c = wgpuCommandEncoderFinish(e, nullptr);
+        wgpuQueueSubmit(f.queue, 1, &c);
+        wgpuCommandBufferRelease(c);
+        wgpuCommandEncoderRelease(e);
+        waitForQueue(f);
+    }});
+
     // Includes the GPU round trip and the event-loop wakeup: a latency figure,
     // not a pure CPU-overhead one.
     cases.push_back({"submit/compute_wait_idle", 500, [](Fixture& f, uint64_t) {

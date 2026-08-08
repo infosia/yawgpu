@@ -252,6 +252,40 @@ the moment the implementation becomes asynchronous. The failures all showed up
 as a status field left at its *initialising* value (`WGPUMapAsyncStatus_Error`),
 which reads like an error being raised rather than a callback never firing.
 
+## P-003 is much worse than Run 1 suggested — 2026-08-06
+
+Run 1 recorded P-003 as `encode/render_draw` at 3.5×, and framed it as per-draw
+*recording* overhead: `RenderPass::draw` cloning the whole pass state. That
+framing was incomplete, and the CPU number understated the problem by an order
+of magnitude.
+
+`HalRenderPass` (`yawgpu-hal/src/command.rs:426`) is a **whole-pass-plus-one-draw**
+struct: it carries the colour targets, depth-stencil attachment, bind groups,
+vertex buffers, viewport, scissor and exactly one optional `draw`. Core emits one
+per draw, and no backend merges them — `MetalQueue::submit_copies`
+(`yawgpu-hal/src/metal/queue.rs:307`) builds a descriptor, creates a
+`renderCommandEncoderWithDescriptor`, encodes, and calls `endEncoding` for
+**every** `HalCopy::RenderPass`.
+
+So a WebGPU render pass with N draws becomes N GPU render passes, each with its
+own attachment load and store. On a tiled GPU that resolves tile memory once per
+draw. `encode/render_draw` never showed this because it stops at
+`wgpuCommandEncoderFinish` and never submits.
+
+A new case, `submit/render_100_draws_wait`, submits and drains a 100-draw pass:
+
+| | yawgpu ns | dawn ns | ratio |
+|---|---|---|---|
+| `submit/render_100_draws_wait` | 5143693 | 252045 | **20.4×** |
+
+5.1 ms against Dawn's 0.25 ms — about 51 µs of GPU-side cost per draw. This is
+the real P-003, and the existing render-pass-per-draw `storeOp` forcing noted in
+the CTS work is a symptom of the same shape.
+
+Fixing it is a structural change, not a micro-optimisation: the render-pass
+representation has to become one pass plus a stream of draw commands carrying
+only what changed, across `yawgpu-core` and every backend encoder.
+
 ## Status
 
 **P-001 and P-002 resolved** (Block 96). **P-003 open** — `encode/render_draw`
