@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -52,6 +52,7 @@ pub(crate) struct PassEncoderState {
     pub(crate) command_referenced_buffers: Vec<Arc<Buffer>>,
     pub(crate) scope_buffer_uses: Vec<BufferScopeUse>,
     pub(crate) scope_texture_uses: Vec<TextureScopeUse>,
+    scope_usage_index: LenientUsageScopeIndex,
     pub(crate) draw_count: u64,
     pub(crate) max_draw_count: u64,
     pub(crate) immediate_data: Vec<u8>,
@@ -122,6 +123,7 @@ impl PassEncoderState {
             command_referenced_buffers: Vec::new(),
             scope_buffer_uses: Vec::new(),
             scope_texture_uses: Vec::new(),
+            scope_usage_index: LenientUsageScopeIndex::default(),
             draw_count: 0,
             max_draw_count: init.max_draw_count,
             // Dawn: `ImmediateDataContent::mData` is zero-initialized
@@ -147,13 +149,119 @@ impl PassEncoderState {
         &mut self,
         uses: Vec<TextureScopeUse>,
     ) -> Result<(), String> {
-        let mut scoped_texture_uses = self.scope_texture_uses.clone();
-        scoped_texture_uses.extend(uses.iter().cloned());
-        validate_texture_usage_scope_lenient(&scoped_texture_uses)?;
-        self.attachment_texture_uses = uses.clone();
-        self.scope_texture_uses.extend(uses);
+        record_resource_usage_scope_uses(self, Vec::new(), uses.clone())?;
+        self.attachment_texture_uses = uses;
         Ok(())
     }
+}
+
+/// Incremental index for the already-valid lenient render usage scope.
+//
+// Identity keys are backing `Arc` addresses, matching each resource's `same`
+// method. Every successful index insertion has a corresponding owning handle
+// in the scope history, so an address cannot be reused while its key exists.
+#[derive(Debug, Default)]
+struct LenientUsageScopeIndex {
+    buffer_accesses: HashMap<usize, ResourceAccess>,
+    texture_uses_by_identity: HashMap<usize, Vec<TextureScopeUse>>,
+}
+
+impl LenientUsageScopeIndex {
+    fn validate_and_record(
+        &mut self,
+        buffer_uses: &[BufferScopeUse],
+        texture_uses: &[TextureScopeUse],
+    ) -> Result<(), String> {
+        let new_buffer_accesses = self.validate_buffer_uses(buffer_uses)?;
+        let new_texture_uses = self.validate_texture_uses(texture_uses)?;
+
+        for (identity, access) in new_buffer_accesses {
+            self.buffer_accesses.entry(identity).or_insert(access);
+        }
+        for (identity, new_uses) in new_texture_uses {
+            let bucket = self.texture_uses_by_identity.entry(identity).or_default();
+            bucket.extend(new_uses);
+        }
+        Ok(())
+    }
+
+    fn validate_buffer_uses(
+        &self,
+        buffer_uses: &[BufferScopeUse],
+    ) -> Result<HashMap<usize, ResourceAccess>, String> {
+        let mut new_accesses = HashMap::new();
+        for current in buffer_uses {
+            let identity = buffer_identity(current);
+            if self
+                .buffer_accesses
+                .get(&identity)
+                .is_some_and(|previous| *previous != current.access)
+                || new_accesses
+                    .get(&identity)
+                    .is_some_and(|previous| *previous != current.access)
+            {
+                return Err(
+                    "usage scope cannot read and write or write the same buffer range twice"
+                        .to_owned(),
+                );
+            }
+            new_accesses.entry(identity).or_insert(current.access);
+        }
+        Ok(new_accesses)
+    }
+
+    fn validate_texture_uses(
+        &self,
+        texture_uses: &[TextureScopeUse],
+    ) -> Result<HashMap<usize, Vec<TextureScopeUse>>, String> {
+        let mut new_uses_by_identity: HashMap<usize, Vec<TextureScopeUse>> = HashMap::new();
+        for current in texture_uses {
+            let identity = texture_identity(current);
+            let accumulated_bucket = self.texture_uses_by_identity.get(&identity);
+            if let Some(bucket) = accumulated_bucket {
+                for previous in bucket {
+                    validate_texture_usage_pair_lenient(current, previous)?;
+                }
+            }
+
+            let new_bucket = new_uses_by_identity.entry(identity).or_default();
+            for previous in new_bucket.iter() {
+                validate_texture_usage_pair_lenient(current, previous)?;
+            }
+
+            let matches_accumulated = accumulated_bucket.is_some_and(|bucket| {
+                bucket
+                    .iter()
+                    .any(|previous| texture_scope_uses_identical(current, previous))
+            });
+            let matches_new = new_bucket
+                .iter()
+                .any(|previous| texture_scope_uses_identical(current, previous));
+            if !matches_accumulated && !matches_new {
+                new_bucket.push(current.clone());
+            }
+        }
+        Ok(new_uses_by_identity)
+    }
+}
+
+fn buffer_identity(buffer_use: &BufferScopeUse) -> usize {
+    Arc::as_ptr(&buffer_use.buffer.inner).cast::<()>() as usize
+}
+
+fn texture_identity(texture_use: &TextureScopeUse) -> usize {
+    Arc::as_ptr(&texture_use.texture.inner).cast::<()>() as usize
+}
+
+fn texture_scope_uses_identical(a: &TextureScopeUse, b: &TextureScopeUse) -> bool {
+    a.texture.same(&b.texture)
+        && a.base_mip_level == b.base_mip_level
+        && a.mip_level_count == b.mip_level_count
+        && a.base_array_layer == b.base_array_layer
+        && a.array_layer_count == b.array_layer_count
+        && a.depth_slice == b.depth_slice
+        && a.aspects == b.aspects
+        && a.access == b.access
 }
 
 /// Stores bound bind group data used by validation and backend submission.
@@ -838,17 +946,21 @@ fn record_buffer_usage_scope_uses(
     record_resource_usage_scope_uses(state, buffer_uses, Vec::new())
 }
 
-fn record_resource_usage_scope_uses(
+/// Incrementally validates and records resource uses in the render usage scope.
+pub(crate) fn record_resource_usage_scope_uses(
     state: &mut PassEncoderState,
     buffer_uses: Vec<BufferScopeUse>,
     texture_uses: Vec<TextureScopeUse>,
 ) -> Result<(), String> {
-    let mut scoped_buffer_uses = state.scope_buffer_uses.clone();
-    scoped_buffer_uses.extend(buffer_uses.iter().cloned());
-    validate_buffer_usage_scope_lenient(&scoped_buffer_uses)?;
-    let mut scoped_texture_uses = state.scope_texture_uses.clone();
-    scoped_texture_uses.extend(texture_uses.iter().cloned());
-    validate_texture_usage_scope_lenient(&scoped_texture_uses)?;
+    // The index contains only already-valid uses. One access therefore fully
+    // represents a buffer, while textures need per-resource subresource
+    // buckets. Identical bucket entries add no information to pairwise,
+    // symmetric validation, so they are recorded once; this keeps repeated
+    // binding of the same group O(1) amortized. The history vectors retain
+    // every use in original order for their non-validation consumers.
+    state
+        .scope_usage_index
+        .validate_and_record(&buffer_uses, &texture_uses)?;
     state.scope_buffer_uses.extend(buffer_uses);
     state.scope_texture_uses.extend(texture_uses);
     Ok(())
@@ -1041,19 +1153,25 @@ pub(crate) fn validate_texture_usage_scope_lenient(
 ) -> Result<(), String> {
     for (index, current) in texture_uses.iter().enumerate() {
         for previous in &texture_uses[..index] {
-            if !current.texture.same(&previous.texture)
-                || !texture_subresource_ranges_overlap(current, previous)
-                || !current.aspects.intersects(previous.aspects)
-            {
-                continue;
-            }
-            if !current.access.compatible_in_render_scope(previous.access) {
-                return Err(
-                    "usage scope cannot read and write or write the same texture subresource twice"
-                        .to_owned(),
-                );
-            }
+            validate_texture_usage_pair_lenient(current, previous)?;
         }
+    }
+    Ok(())
+}
+
+fn validate_texture_usage_pair_lenient(
+    current: &TextureScopeUse,
+    previous: &TextureScopeUse,
+) -> Result<(), String> {
+    if current.texture.same(&previous.texture)
+        && texture_subresource_ranges_overlap(current, previous)
+        && current.aspects.intersects(previous.aspects)
+        && !current.access.compatible_in_render_scope(previous.access)
+    {
+        return Err(
+            "usage scope cannot read and write or write the same texture subresource twice"
+                .to_owned(),
+        );
     }
     Ok(())
 }
@@ -1626,7 +1744,13 @@ mod tests {
         device: &Device,
         pipeline: Arc<RenderPipeline>,
     ) -> PassEncoderState {
-        let mut state = PassEncoderState::new(
+        let mut state = empty_pass_state(device);
+        state.render_pipeline = Some(pipeline);
+        state
+    }
+
+    fn empty_pass_state(device: &Device) -> PassEncoderState {
+        PassEncoderState::new(
             device.limits(),
             PassEncoderInit {
                 attachment_signature: None,
@@ -1637,9 +1761,7 @@ mod tests {
                 occlusion_query_set: None,
                 max_draw_count: u64::MAX,
             },
-        );
-        state.render_pipeline = Some(pipeline);
-        state
+        )
     }
 
     fn vertex_buffer_binding(buffer: Arc<Buffer>, size: u64) -> BoundVertexBuffer {
@@ -1758,6 +1880,48 @@ mod tests {
         }
     }
 
+    fn buffer_bound_bind_group(
+        device: &Device,
+        buffer: &Arc<Buffer>,
+        binding_types: &[BufferBindingType],
+    ) -> BoundBindGroup {
+        let layout_entries = binding_types
+            .iter()
+            .enumerate()
+            .map(|(binding, ty)| BindGroupLayoutEntry {
+                binding: binding as u32,
+                visibility: 2,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::Buffer {
+                    ty: *ty,
+                    has_dynamic_offset: false,
+                    min_binding_size: 16,
+                }),
+            })
+            .collect();
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: layout_entries,
+            error: None,
+        }));
+        let entries = binding_types
+            .iter()
+            .enumerate()
+            .map(|(binding, _)| BindGroupEntry {
+                binding: binding as u32,
+                resource: BindGroupResource::Buffer {
+                    buffer: Arc::clone(buffer),
+                    device: Arc::new(device.clone()),
+                    offset: 0,
+                    size: 16,
+                },
+            })
+            .collect();
+        BoundBindGroup {
+            group: Arc::new(device.create_bind_group(layout, entries)),
+            dynamic_offsets: Vec::new(),
+        }
+    }
+
     #[test]
     fn validate_buffer_usage_scope_uses_whole_buffer_access() {
         let device = noop_device();
@@ -1825,6 +1989,226 @@ mod tests {
                 buffer_scope_use(buffer, 32, 16, ResourceAccess::Write),
             ]),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn incremental_buffer_scope_rejects_read_write_across_bind_groups() {
+        let device = noop_device();
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE | BufferUsage::UNIFORM,
+            size: 64,
+            mapped_at_creation: false,
+        }));
+        let read_group =
+            buffer_bound_bind_group(&device, &buffer, &[BufferBindingType::ReadOnlyStorage]);
+        let write_group = buffer_bound_bind_group(&device, &buffer, &[BufferBindingType::Storage]);
+        let mut state = empty_pass_state(&device);
+        let expected = validate_buffer_usage_scope_lenient(&[
+            buffer_scope_use(Arc::clone(&buffer), 0, 16, ResourceAccess::Read),
+            buffer_scope_use(Arc::clone(&buffer), 0, 16, ResourceAccess::Write),
+        ]);
+
+        assert_eq!(
+            record_bind_group_usage_scope(&mut state, &read_group),
+            Ok(())
+        );
+        assert_eq!(
+            record_bind_group_usage_scope(&mut state, &write_group),
+            expected
+        );
+        assert_eq!(state.scope_buffer_uses.len(), 1);
+    }
+
+    #[test]
+    fn incremental_buffer_scope_rejects_conflict_inside_one_bind_group() {
+        let device = noop_device();
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE | BufferUsage::UNIFORM,
+            size: 64,
+            mapped_at_creation: false,
+        }));
+        let conflicting_group = buffer_bound_bind_group(
+            &device,
+            &buffer,
+            &[
+                BufferBindingType::ReadOnlyStorage,
+                BufferBindingType::Storage,
+            ],
+        );
+        let mut state = empty_pass_state(&device);
+        let expected = validate_buffer_usage_scope_lenient(&[
+            buffer_scope_use(Arc::clone(&buffer), 0, 16, ResourceAccess::Read),
+            buffer_scope_use(Arc::clone(&buffer), 0, 16, ResourceAccess::Write),
+        ]);
+
+        assert_eq!(
+            record_bind_group_usage_scope(&mut state, &conflicting_group),
+            expected
+        );
+        assert!(state.scope_buffer_uses.is_empty());
+        assert!(state.scope_usage_index.buffer_accesses.is_empty());
+    }
+
+    #[test]
+    fn incremental_buffer_scope_records_many_identical_bind_groups() {
+        const BIND_COUNT: usize = 10_000;
+
+        let device = noop_device();
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::UNIFORM,
+            size: 64,
+            mapped_at_creation: false,
+        }));
+        let group = buffer_bound_bind_group(&device, &buffer, &[BufferBindingType::Uniform]);
+        let mut state = empty_pass_state(&device);
+
+        for _ in 0..BIND_COUNT {
+            record_bind_group_usage_scope(&mut state, &group)
+                .expect("repeated identical bind group use should remain valid");
+        }
+
+        assert_eq!(state.scope_buffer_uses.len(), BIND_COUNT);
+        assert_eq!(state.scope_usage_index.buffer_accesses.len(), 1);
+    }
+
+    #[test]
+    fn incremental_texture_scope_matches_lenient_overlap_and_aspect_semantics() {
+        let device = noop_device();
+        let texture = noop_texture();
+        let write_color_mip_0 = texture_use(
+            &texture,
+            0,
+            1,
+            0,
+            1,
+            TextureAspectMask::COLOR,
+            TextureAccess::WriteOnlyStorage,
+        );
+        let read_stencil_mip_0 = texture_use(
+            &texture,
+            0,
+            1,
+            0,
+            1,
+            TextureAspectMask::STENCIL,
+            TextureAccess::Read,
+        );
+        let read_color_mip_1 = texture_use(
+            &texture,
+            1,
+            1,
+            0,
+            1,
+            TextureAspectMask::COLOR,
+            TextureAccess::Read,
+        );
+        let read_color_mip_0 = texture_use(
+            &texture,
+            0,
+            1,
+            0,
+            1,
+            TextureAspectMask::COLOR,
+            TextureAccess::Read,
+        );
+        let mut state = empty_pass_state(&device);
+
+        assert_eq!(
+            record_resource_usage_scope_uses(
+                &mut state,
+                Vec::new(),
+                vec![write_color_mip_0.clone()],
+            ),
+            validate_texture_usage_scope_lenient(std::slice::from_ref(&write_color_mip_0))
+        );
+        assert_eq!(
+            record_resource_usage_scope_uses(
+                &mut state,
+                Vec::new(),
+                vec![read_stencil_mip_0.clone(), read_color_mip_1.clone()],
+            ),
+            validate_texture_usage_scope_lenient(&[
+                write_color_mip_0.clone(),
+                read_stencil_mip_0,
+                read_color_mip_1,
+            ])
+        );
+        assert_eq!(
+            record_resource_usage_scope_uses(
+                &mut state,
+                Vec::new(),
+                vec![read_color_mip_0.clone()],
+            ),
+            validate_texture_usage_scope_lenient(&[write_color_mip_0, read_color_mip_0])
+        );
+        assert_eq!(state.scope_texture_uses.len(), 3);
+    }
+
+    #[test]
+    fn incremental_texture_scope_rejects_conflict_inside_one_batch() {
+        let device = noop_device();
+        let texture = noop_texture();
+        let write = texture_use(
+            &texture,
+            0,
+            1,
+            0,
+            1,
+            TextureAspectMask::COLOR,
+            TextureAccess::WriteOnlyStorage,
+        );
+        let read = texture_use(
+            &texture,
+            0,
+            1,
+            0,
+            1,
+            TextureAspectMask::COLOR,
+            TextureAccess::Read,
+        );
+        let uses = vec![write, read];
+        let mut state = empty_pass_state(&device);
+
+        assert_eq!(
+            record_resource_usage_scope_uses(&mut state, Vec::new(), uses.clone()),
+            validate_texture_usage_scope_lenient(&uses)
+        );
+        assert!(state.scope_texture_uses.is_empty());
+        assert!(state.scope_usage_index.texture_uses_by_identity.is_empty());
+    }
+
+    #[test]
+    fn incremental_texture_scope_deduplicates_identical_index_entries() {
+        let device = noop_device();
+        let texture = noop_texture();
+        let texture_use = texture_use(
+            &texture,
+            0,
+            1,
+            0,
+            1,
+            TextureAspectMask::COLOR,
+            TextureAccess::Read,
+        );
+        let mut state = empty_pass_state(&device);
+
+        for _ in 0..100 {
+            record_resource_usage_scope_uses(&mut state, Vec::new(), vec![texture_use.clone()])
+                .expect("repeated identical texture use should remain valid");
+        }
+
+        assert_eq!(state.scope_texture_uses.len(), 100);
+        assert_eq!(state.scope_usage_index.texture_uses_by_identity.len(), 1);
+        assert_eq!(
+            state
+                .scope_usage_index
+                .texture_uses_by_identity
+                .values()
+                .next()
+                .expect("texture bucket should exist")
+                .len(),
+            1
         );
     }
 

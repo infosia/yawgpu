@@ -625,18 +625,11 @@ impl RenderPassEncoder {
                 self.inner
                     .parent
                     .record_referenced_textures(bundle.referenced_textures().to_vec());
-                let mut scoped_buffer_uses = state.scope_buffer_uses.clone();
-                scoped_buffer_uses.extend_from_slice(bundle.buffer_uses());
-                let mut scoped_texture_uses = state.scope_texture_uses.clone();
-                scoped_texture_uses.extend_from_slice(bundle.texture_uses());
-                validate_buffer_usage_scope_lenient(&scoped_buffer_uses)?;
-                validate_texture_usage_scope_lenient(&scoped_texture_uses)?;
-                state
-                    .scope_buffer_uses
-                    .extend_from_slice(bundle.buffer_uses());
-                state
-                    .scope_texture_uses
-                    .extend_from_slice(bundle.texture_uses());
+                record_resource_usage_scope_uses(
+                    state,
+                    bundle.buffer_uses().to_vec(),
+                    bundle.texture_uses().to_vec(),
+                )?;
                 state.draw_count = state.draw_count.saturating_add(bundle.draw_count());
                 if bundle.draw_count() != 0 {
                     if let Some(query_index) = state.open_occlusion_query {

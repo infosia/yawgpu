@@ -335,9 +335,68 @@ Taking that baseline mattered: the raw result reads as "S2 broke 9 Vulkan
 cases". Diffing the failure sets before and after is what showed the change is
 clean. Never attribute a count to a change without the before.
 
+## P-004 — usage-scope validation was superlinear in binds per pass
+
+Reported 2026-08-08 by an external workload (the subscript-gpu encode
+benchmark, via `HANDOFF.md`): one render pass doing `setBindGroup` + `draw`
+× 1000 cost ~82 µs *per draw* at encode time, with a `sample` profile putting
+~97% of samples inside `wgpuRenderPassEncoderSetBindGroup`.
+
+Verified against source: `record_resource_usage_scope_uses`
+(`yawgpu-core/src/pass.rs`) cloned the full accumulated scope on every bind and
+re-validated it from zero through an all-pairs O(k²) loop — bind k cost O(k²),
+a pass with N binds O(N³). None of the existing bench cases could see it:
+`encode/render_draw` never calls `setBindGroup` inside the pass, so the usage
+scope stayed empty. The same blind-spot lesson as P-003, one layer up — a
+bench that skips a per-draw call cannot price that call's accumulation.
+
+New case `encode/render_bind_draw` (setBindGroup + draw × `kDrawsPerPass`,
+finish, no submit, ns per draw):
+
+| kDrawsPerPass | before ns/draw | after ns/draw |
+|---|---|---|
+| 100 | 1501 | 396 |
+| 1000 | 81622 | 384 |
+
+54× growth for 10× N before; flat after. The reporter's 82 µs figure at
+N=1000 reproduced exactly.
+
+Fix: incremental validation (`LenientUsageScopeIndex`). A bind's uses are
+checked against an identity-keyed index of the already-valid scope — buffers
+as one access per identity (sound because a valid scope is access-uniform per
+buffer), textures as per-identity buckets with the pairwise
+overlap/aspect/compatibility rule — plus new-vs-new pairs within the batch,
+then appended. Identical texture uses are not re-added to the index, keeping
+same-group rebinding O(1) amortized. The `scope_buffer_uses` /
+`scope_texture_uses` history vectors still receive every use un-deduped in
+original order for their non-validation readers, and the strict compute-path
+validators and all error strings are untouched. The render-bundle path was
+folded onto the same helper.
+
+## Run 5 — 2026-08-08, after the P-004 fix
+
+| case | yawgpu ns | dawn ns | ratio |
+|---|---|---|---|
+| `encode/render_bind_draw` | 399 | 100 | **3.99×** |
+| `encode/render_draw` | 49 | 41 | 1.18× |
+| `submit/render_100_draws_wait` | 178292 | 190882 | 0.93× |
+| `submit/compute_1_dispatch` | 24256 | 24400 | 0.99× |
+| `frame/10writes_dispatch_submit_wait` | 147904 | 156801 | 0.94× |
+| `queue/write_buffer_4kb` | 612 | 673 | 0.91× |
+
+Every other case is within noise of Run 4. The superlinearity is gone; what
+remains on `encode/render_bind_draw` is a ~4× constant factor per rebind
+(~300 ns: bind-group usage collection plus the per-draw command build), which
+is a further candidate but a different, linear problem.
+
+CTS, Run 4 trees: Metal `pass=175738 skip=47 fail=0 crash=0`;
+Vulkan/MoltenVK `pass=175729 fail=9` with the failure set identical case for
+case to Run 4 (the 9 pre-existing MoltenVK artifacts).
+
 ## Status
 
-All three findings from Run 1 are **resolved**: P-001 and P-002 in Block 96,
+P-004 **resolved** (encode-time; a ~4× linear constant on rebind remains as a
+candidate). All three findings from Run 1 are **resolved**: P-001 and P-002 in Block 96,
 P-003 in Block 97. The remaining gaps against Dawn are small and none is
 structural: `queue/write_buffer_then_wait` 1.53×, `bindgroup/create_destroy`
 1.33×, `encode/compute_1_dispatch` 1.14×, `encode/render_draw` 1.16×.

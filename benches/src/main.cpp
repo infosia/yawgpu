@@ -216,6 +216,18 @@ const char* kRenderWgsl = R"(
 }
 )";
 
+// Same triangle, but the fragment reads a uniform so a bind group is required
+// and every setBindGroup adds a buffer use to the pass's usage scope.
+const char* kRenderBindWgsl = R"(
+@group(0) @binding(0) var<uniform> tint_color: vec4f;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+    return vec4f(f32(i) * 0.1, 0.0, 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4f {
+    return tint_color;
+}
+)";
+
 std::string uniqueRenderWgsl(uint64_t i) {
     return "@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {\n"
            "    return vec4f(f32(i) * " + std::to_string(0.1 + static_cast<double>(i)) + ", 0.0, 0.0, 1.0);\n"
@@ -256,6 +268,9 @@ struct Fixture {
     WGPUShaderModule renderModule = nullptr;
     WGPUComputePipeline computePipeline = nullptr;
     WGPURenderPipeline renderPipeline = nullptr;
+    WGPUShaderModule renderBindModule = nullptr;
+    WGPUBindGroup renderBindGroup = nullptr;
+    WGPURenderPipeline renderBindPipeline = nullptr;
     WGPUTexture colorTexture = nullptr;
     WGPUTextureView colorView = nullptr;
 
@@ -365,6 +380,38 @@ void buildFixture(Fixture& f) {
     renderDescriptor.fragment = &fragment;
     f.renderPipeline = wgpuDeviceCreateRenderPipeline(f.device, &renderDescriptor);
 
+    f.renderBindModule = makeShaderModule(f.device, kRenderBindWgsl);
+    WGPUColorTargetState bindTarget = WGPU_COLOR_TARGET_STATE_INIT;
+    bindTarget.format = WGPUTextureFormat_RGBA8Unorm;
+    WGPUFragmentState bindFragment = WGPU_FRAGMENT_STATE_INIT;
+    bindFragment.module = f.renderBindModule;
+    bindFragment.entryPoint = sv("fs");
+    bindFragment.targetCount = 1;
+    bindFragment.targets = &bindTarget;
+    WGPURenderPipelineDescriptor bindRenderDescriptor = WGPU_RENDER_PIPELINE_DESCRIPTOR_INIT;
+    bindRenderDescriptor.layout = nullptr; // auto layout
+    bindRenderDescriptor.vertex.module = f.renderBindModule;
+    bindRenderDescriptor.vertex.entryPoint = sv("vs");
+    bindRenderDescriptor.primitive.topology = WGPUPrimitiveTopology_TriangleList;
+    bindRenderDescriptor.fragment = &bindFragment;
+    f.renderBindPipeline = wgpuDeviceCreateRenderPipeline(f.device, &bindRenderDescriptor);
+    if (f.renderBindPipeline == nullptr) {
+        fail("createRenderPipeline (bind variant) returned NULL");
+    }
+    WGPUBindGroupLayout bindPipelineLayout0 =
+        wgpuRenderPipelineGetBindGroupLayout(f.renderBindPipeline, 0);
+    WGPUBindGroupEntry renderBindEntry = WGPU_BIND_GROUP_ENTRY_INIT;
+    renderBindEntry.binding = 0;
+    renderBindEntry.buffer = f.uniformBuffer;
+    renderBindEntry.offset = 0;
+    renderBindEntry.size = 16;
+    WGPUBindGroupDescriptor renderBindDescriptor = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
+    renderBindDescriptor.layout = bindPipelineLayout0;
+    renderBindDescriptor.entryCount = 1;
+    renderBindDescriptor.entries = &renderBindEntry;
+    f.renderBindGroup = wgpuDeviceCreateBindGroup(f.device, &renderBindDescriptor);
+    wgpuBindGroupLayoutRelease(bindPipelineLayout0);
+
     WGPUTextureDescriptor textureDescriptor = WGPU_TEXTURE_DESCRIPTOR_INIT;
     textureDescriptor.dimension = WGPUTextureDimension_2D;
     textureDescriptor.size = {256, 256, 1};
@@ -377,7 +424,8 @@ void buildFixture(Fixture& f) {
 
     if (f.storageBuffer == nullptr || f.uniformBuffer == nullptr || f.bindGroupLayout == nullptr ||
         f.pipelineLayout == nullptr || f.bindGroup == nullptr || f.computePipeline == nullptr ||
-        f.renderPipeline == nullptr || f.colorTexture == nullptr || f.colorView == nullptr) {
+        f.renderPipeline == nullptr || f.renderBindGroup == nullptr ||
+        f.renderBindPipeline == nullptr || f.colorTexture == nullptr || f.colorView == nullptr) {
         fail("fixture construction produced a NULL object");
     }
 }
@@ -385,6 +433,9 @@ void buildFixture(Fixture& f) {
 void destroyFixture(Fixture& f) {
     wgpuTextureViewRelease(f.colorView);
     wgpuTextureRelease(f.colorTexture);
+    wgpuRenderPipelineRelease(f.renderBindPipeline);
+    wgpuBindGroupRelease(f.renderBindGroup);
+    wgpuShaderModuleRelease(f.renderBindModule);
     wgpuRenderPipelineRelease(f.renderPipeline);
     wgpuComputePipelineRelease(f.computePipeline);
     wgpuShaderModuleRelease(f.renderModule);
@@ -604,6 +655,25 @@ std::vector<Case> makeCases() {
         wgpuCommandEncoderRelease(e);
     }});
 
+    // Rebinds the group before every draw, the way a real frame does.
+    // `encode/render_draw` keeps the usage scope empty (no setBindGroup inside
+    // the pass), so a superlinear scope-validation cost is invisible to it —
+    // this case exists to price exactly that path (finding P-004).
+    cases.push_back({"encode/render_bind_draw", 2000, [](Fixture& f, uint64_t) {
+        WGPUCommandEncoder e = wgpuDeviceCreateCommandEncoder(f.device, nullptr);
+        WGPURenderPassEncoder p = beginColorPass(e, f.colorView);
+        wgpuRenderPassEncoderSetPipeline(p, f.renderBindPipeline);
+        for (uint64_t d = 0; d < kDrawsPerPass; ++d) {
+            wgpuRenderPassEncoderSetBindGroup(p, 0, f.renderBindGroup, 0, nullptr);
+            wgpuRenderPassEncoderDraw(p, 3, 1, 0, 0);
+        }
+        wgpuRenderPassEncoderEnd(p);
+        wgpuRenderPassEncoderRelease(p);
+        WGPUCommandBuffer c = wgpuCommandEncoderFinish(e, nullptr);
+        wgpuCommandBufferRelease(c);
+        wgpuCommandEncoderRelease(e);
+    }});
+
     cases.push_back({"encode/render_draw", 2000, [](Fixture& f, uint64_t) {
         WGPUCommandEncoder e = wgpuDeviceCreateCommandEncoder(f.device, nullptr);
         WGPURenderPassEncoder p = beginColorPass(e, f.colorView);
@@ -737,7 +807,7 @@ int main(int argc, char** argv) {
             continue;
         }
         Result result = run(options, name, c.iters, [&](uint64_t i) { c.body(fixture, i); });
-        if (name == "encode/render_draw") {
+        if (name == "encode/render_draw" || name == "encode/render_bind_draw") {
             result.minNsPerOp /= static_cast<double>(kDrawsPerPass);
             result.medianNsPerOp /= static_cast<double>(kDrawsPerPass);
             result.iters *= kDrawsPerPass;
