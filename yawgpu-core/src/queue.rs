@@ -1137,7 +1137,7 @@ fn hal_subpass_draw_execution(draw: &SubpassDrawExecution) -> Option<HalSubpassD
         vertex_buffers,
         viewport: draw.viewport.map(hal_viewport),
         scissor_rect: draw.scissor_rect.map(hal_scissor_rect),
-        draw: hal_draw(draw.draw),
+        draw: hal_draw(&draw.draw),
     })
 }
 
@@ -1832,7 +1832,7 @@ fn hal_scissor_rect(rect: ScissorRect) -> HalScissorRect {
 }
 
 #[cfg(feature = "tiled")]
-fn hal_draw(draw: RenderDrawExecution) -> HalDraw {
+fn hal_draw(draw: &RenderDrawExecution) -> HalDraw {
     match draw {
         RenderDrawExecution::Direct {
             vertex_count,
@@ -1840,10 +1840,10 @@ fn hal_draw(draw: RenderDrawExecution) -> HalDraw {
             first_vertex,
             first_instance,
         } => HalDraw::Direct {
-            vertex_count,
-            instance_count,
-            first_vertex,
-            first_instance,
+            vertex_count: *vertex_count,
+            instance_count: *instance_count,
+            first_vertex: *first_vertex,
+            first_instance: *first_instance,
         },
         RenderDrawExecution::Indexed {
             index_count,
@@ -1852,11 +1852,11 @@ fn hal_draw(draw: RenderDrawExecution) -> HalDraw {
             base_vertex,
             first_instance,
         } => HalDraw::Indexed {
-            index_count,
-            instance_count,
-            first_index,
-            base_vertex,
-            first_instance,
+            index_count: *index_count,
+            instance_count: *instance_count,
+            first_index: *first_index,
+            base_vertex: *base_vertex,
+            first_instance: *first_instance,
         },
         RenderDrawExecution::Indirect { indirect_buffer } => HalDraw::Indirect {
             offset: indirect_buffer.offset,
