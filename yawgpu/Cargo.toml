@@ -24,3 +24,12 @@ bindgen = "0.72"
 [dev-dependencies]
 yawgpu-test = { path = "../yawgpu-test" }
 yawgpu-hal = { path = "../yawgpu-hal" }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+# Standalone CAMetalLayer construction for the real-Metal surface e2e test.
+objc2-quartz-core = { workspace = true, features = [
+    "CALayer",
+    "CAMetalLayer",
+    "objc2-core-foundation",
+    "objc2-metal",
+] }

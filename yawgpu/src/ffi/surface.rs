@@ -89,6 +89,8 @@ pub unsafe extern "C" fn wgpuSurfaceConfigure(
         device.dispatch_error(core::ErrorKind::Validation, message);
         return;
     }
+    let present_mode = resolved_present_mode(config.presentMode);
+    let alpha_mode = resolved_alpha_mode(config.alphaMode);
     let view_formats = if config.viewFormatCount == 0 {
         Vec::new()
     } else if config.viewFormats.is_null() {
@@ -111,7 +113,7 @@ pub unsafe extern "C" fn wgpuSurfaceConfigure(
             hal_surface_usage(config.usage),
             config.width,
             config.height,
-            hal_present_mode(config.presentMode),
+            hal_present_mode(present_mode),
         );
         if let Err(error) = hal.configure(device.core.hal(), hal_config) {
             device.dispatch_error(core::ErrorKind::Internal, error.to_string());
@@ -128,8 +130,8 @@ pub unsafe extern "C" fn wgpuSurfaceConfigure(
         width: config.width,
         height: config.height,
         view_formats,
-        _present_mode: config.presentMode,
-        _alpha_mode: config.alphaMode,
+        _present_mode: present_mode,
+        _alpha_mode: alpha_mode,
     });
 }
 

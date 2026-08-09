@@ -175,6 +175,36 @@ fn current_texture_reports_unconfigured_and_noop_presentation_boundary() {
     }
 }
 
+#[test]
+fn configure_accepts_init_mode_defaults_and_rejects_explicit_unsupported_modes() {
+    let test = ValidationTest::new();
+    unsafe {
+        let surface = create_surface(test.instance());
+
+        let mut unsupported_present_mode = valid_config(test.device());
+        unsupported_present_mode.presentMode = native::WGPUPresentMode_Immediate;
+        assert_configure_error(&test, surface, &unsupported_present_mode);
+
+        let mut unsupported_alpha_mode = valid_config(test.device());
+        unsupported_alpha_mode.alphaMode = native::WGPUCompositeAlphaMode_Premultiplied;
+        assert_configure_error(&test, surface, &unsupported_alpha_mode);
+
+        test.clear_errors();
+        let mut config = valid_config(test.device());
+        config.presentMode = native::WGPUPresentMode_Undefined;
+        config.alphaMode = native::WGPUCompositeAlphaMode_Auto;
+        yawgpu::wgpuSurfaceConfigure(surface, &config);
+        assert!(
+            test.errors().is_empty(),
+            "unexpected errors: {:?}",
+            test.errors()
+        );
+        assert_current_texture_status(surface, native::WGPUSurfaceGetCurrentTextureStatus_Lost);
+
+        yawgpu::wgpuSurfaceRelease(surface);
+    }
+}
+
 unsafe fn assert_configure_error(
     test: &ValidationTest,
     surface: native::WGPUSurface,

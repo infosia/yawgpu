@@ -62,6 +62,21 @@ Status: ☐ ◐ ☑ ✗(N/A).
   vs reported capabilities, `GetCurrentTexture` on an unconfigured
   surface ⇒ error. Real presentation is out of scope (no swapchain
   on Noop; revisit with a real backend + window later — recorded).
+  - **Sentinel resolution (2026-08-09, externally reported):**
+    `Configure` resolves the header's zero sentinels *before* the
+    capability membership check — `WGPUPresentMode_Undefined` →
+    `Fifo` (per the header's documented default) and
+    `WGPUCompositeAlphaMode_Auto` → the first element of the
+    reported `alphaModes` (the header defines `Auto` as an alias
+    for it; currently `Opaque`). A configuration filled from
+    `WGPU_SURFACE_CONFIGURATION_INIT` plus device/format/usage/size
+    must therefore succeed. Explicit unsupported modes
+    (`Immediate`, `Mailbox`, `FifoRelaxed`, `Premultiplied`,
+    `Unpremultiplied`, `Inherit`, out-of-range) still fail with the
+    existing messages. `GetCapabilities` keeps reporting concrete
+    modes only — sentinels are configure inputs, never
+    capabilities. The stored configuration records the *resolved*
+    modes.
 
 ## Rules (grouped → slices)
 

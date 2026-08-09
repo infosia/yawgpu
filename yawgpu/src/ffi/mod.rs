@@ -1218,6 +1218,22 @@ fn hal_surface_usage(usage: native::WGPUTextureUsage) -> HalTextureUsage {
     }
 }
 
+fn resolved_present_mode(mode: native::WGPUPresentMode) -> native::WGPUPresentMode {
+    if mode == native::WGPUPresentMode_Undefined {
+        native::WGPUPresentMode_Fifo
+    } else {
+        mode
+    }
+}
+
+fn resolved_alpha_mode(mode: native::WGPUCompositeAlphaMode) -> native::WGPUCompositeAlphaMode {
+    if mode == native::WGPUCompositeAlphaMode_Auto {
+        SURFACE_ALPHA_MODES[0]
+    } else {
+        mode
+    }
+}
+
 fn hal_present_mode(mode: native::WGPUPresentMode) -> HalPresentMode {
     match mode {
         native::WGPUPresentMode_Immediate => HalPresentMode::Immediate,
@@ -1244,10 +1260,10 @@ fn surface_configuration_error(
     if config.width == 0 || config.height == 0 {
         return Some("surface configuration size must be non-zero");
     }
-    if !SURFACE_PRESENT_MODES.contains(&config.presentMode) {
+    if !SURFACE_PRESENT_MODES.contains(&resolved_present_mode(config.presentMode)) {
         return Some("surface configuration present mode is not supported");
     }
-    if !SURFACE_ALPHA_MODES.contains(&config.alphaMode) {
+    if !SURFACE_ALPHA_MODES.contains(&resolved_alpha_mode(config.alphaMode)) {
         return Some("surface configuration alpha mode is not supported");
     }
     None
@@ -4165,6 +4181,74 @@ mod tests {
             hal_present_mode(native::WGPUPresentMode_Undefined),
             HalPresentMode::Fifo
         ));
+    }
+
+    #[test]
+    fn surface_mode_resolvers_replace_sentinels_and_preserve_concrete_modes() {
+        assert_eq!(
+            resolved_present_mode(native::WGPUPresentMode_Undefined),
+            native::WGPUPresentMode_Fifo
+        );
+        assert_eq!(
+            resolved_present_mode(native::WGPUPresentMode_Fifo),
+            native::WGPUPresentMode_Fifo
+        );
+        assert_eq!(
+            resolved_present_mode(native::WGPUPresentMode_Immediate),
+            native::WGPUPresentMode_Immediate
+        );
+        assert_eq!(
+            resolved_alpha_mode(native::WGPUCompositeAlphaMode_Auto),
+            native::WGPUCompositeAlphaMode_Opaque
+        );
+        assert_eq!(
+            resolved_alpha_mode(native::WGPUCompositeAlphaMode_Opaque),
+            native::WGPUCompositeAlphaMode_Opaque
+        );
+        assert_eq!(
+            resolved_alpha_mode(native::WGPUCompositeAlphaMode_Premultiplied),
+            native::WGPUCompositeAlphaMode_Premultiplied
+        );
+    }
+
+    #[test]
+    fn surface_configuration_accepts_sentinels_and_rejects_unsupported_modes() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let device_handle = borrow_handle(device, "WGPUDevice");
+            let mut config = valid_surface_config(device);
+            config.presentMode = native::WGPUPresentMode_Undefined;
+            config.alphaMode = native::WGPUCompositeAlphaMode_Auto;
+            assert_eq!(surface_configuration_error(device_handle, &config), None);
+
+            config.alphaMode = native::WGPUCompositeAlphaMode_Opaque;
+            for present_mode in [
+                native::WGPUPresentMode_Immediate,
+                native::WGPUPresentMode_Mailbox,
+                native::WGPUPresentMode_FifoRelaxed,
+            ] {
+                config.presentMode = present_mode;
+                assert_eq!(
+                    surface_configuration_error(device_handle, &config),
+                    Some("surface configuration present mode is not supported")
+                );
+            }
+
+            config.presentMode = native::WGPUPresentMode_Fifo;
+            for alpha_mode in [
+                native::WGPUCompositeAlphaMode_Premultiplied,
+                native::WGPUCompositeAlphaMode_Unpremultiplied,
+                native::WGPUCompositeAlphaMode_Inherit,
+            ] {
+                config.alphaMode = alpha_mode;
+                assert_eq!(
+                    surface_configuration_error(device_handle, &config),
+                    Some("surface configuration alpha mode is not supported")
+                );
+            }
+
+            release_handles(instance, adapter, device);
+        }
     }
 
     #[test]
