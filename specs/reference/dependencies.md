@@ -50,6 +50,24 @@
     `cargo test`/`cargo run` and the cdylib consumers; shipped applications must
     distribute `tint_shim.dll` next to the yawgpu `.dll`.
 
+  **ELF consumers — `$ORIGIN` rpath on the cdylib (added 2026-08-10).**
+  `DT_RUNPATH` is not transitive: it resolves only the `NEEDED` entries of the
+  object that carries it, so a consumer's own `RUNPATH` never helps
+  `libyawgpu.so` find its `NEEDED libtint_shim.so`. On ELF targets
+  (Linux/Android — `unix` family, non-Apple) `yawgpu/build.rs` therefore emits
+  `cargo:rustc-cdylib-link-arg=-Wl,-rpath,$ORIGIN`, so the cdylib resolves the
+  sibling shim that `copy_runtime_shim` already places beside it, with no
+  `LD_LIBRARY_PATH`. The rule must live in `yawgpu`'s own build script
+  (`cargo:rustc-*link-arg` does not propagate from a dependency's build
+  script), select on the *target* via `CARGO_CFG_TARGET_*` (never host `cfg!`),
+  and write `$ORIGIN` literally (cargo passes the argument to rustc directly;
+  no shell expands it). Apple targets keep the shim's `@loader_path` install
+  name; Windows keeps the DLL copy (`link.exe` rejects `-Wl` flags). The
+  runtime-resolution matrix is therefore: Apple = install name, Windows =
+  image-directory DLL copy, ELF = `$ORIGIN` RUNPATH. Guarded by
+  `yawgpu/tests/linkage_elf.rs` (Linux-only): a RUNPATH assertion on the built
+  cdylib and a fresh-process load test with `LD_LIBRARY_PATH` unset.
+
   Target detection uses `CARGO_CFG_TARGET_OS` (the build target), not `cfg!`
   (the build-script host). Verified on Windows: `yawgpu-tint` unit tests pass, the
   full Noop workspace suite passes, and the real-GPU `e2e_vulkan_*` suite passes

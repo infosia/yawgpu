@@ -41,6 +41,10 @@ fn main() {
     // CARGO_CFG_TARGET_VENDOR, never `cfg!(target_vendor)` (which is the host).
     if env::var("CARGO_CFG_TARGET_VENDOR").as_deref() == Ok("apple") {
         println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/libyawgpu.dylib");
+    } else if env::var("CARGO_CFG_TARGET_FAMILY").as_deref() == Ok("unix") {
+        // DT_RUNPATH is not transitive, so a consumer's own RUNPATH cannot
+        // resolve the cdylib's NEEDED libtint_shim.so.
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-rpath,$ORIGIN");
     }
 
     let mut builder = bindgen::Builder::default()
