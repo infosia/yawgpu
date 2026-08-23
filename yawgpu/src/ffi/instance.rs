@@ -390,7 +390,8 @@ pub unsafe extern "C" fn wgpuInstanceCreateSurface(
 /// Requests an adapter from an instance.
 ///
 /// When the instance exposes no adapters (a legitimate spec-level outcome on
-/// real backends — e.g. GLES display loss), the callback is delivered with
+/// real backends — e.g. GLES display loss), or when no adapter matches the
+/// requested backend type, the callback is delivered with
 /// `WGPURequestAdapterStatus_Unavailable` and a null adapter; this never
 /// panics.
 ///
@@ -410,10 +411,16 @@ pub unsafe extern "C" fn wgpuInstanceRequestAdapter(
         .as_ref()
         .map(|options| map_feature_level(options.featureLevel))
         .unwrap_or(core::FeatureLevel::Core);
+    let requested_backend_type = options
+        .as_ref()
+        .map(|options| options.backendType)
+        .unwrap_or(native::WGPUBackendType_Undefined);
     let result = select_request_adapter(
         instance
             .core
             .enumerate_adapters_with_feature_level(feature_level),
+        requested_backend_type,
+        |adapter| backend_type_from_hal(adapter.backend()),
     )
     .map(|adapter| {
         Arc::new(WGPUAdapterImpl {
@@ -434,14 +441,54 @@ pub unsafe extern "C" fn wgpuInstanceRequestAdapter(
 /// Selects the adapter delivered by `wgpuInstanceRequestAdapter` from an
 /// instance's enumeration.
 ///
-/// Returns the first enumerated adapter, or — when the enumeration is empty —
-/// the failure message delivered to the request-adapter callback with
+/// Returns the first adapter whose mapped backend matches
+/// `requested_backend_type`. An undefined request preserves the original
+/// first-adapter behavior. An empty enumeration or a request with no matching
+/// adapter returns the failure message delivered with
 /// `WGPURequestAdapterStatus_Unavailable` and a null adapter.
-fn select_request_adapter(adapters: Vec<core::Adapter>) -> Result<core::Adapter, String> {
-    adapters
-        .into_iter()
+fn select_request_adapter(
+    adapters: Vec<core::Adapter>,
+    requested_backend_type: native::WGPUBackendType,
+    mut adapter_backend_type: impl FnMut(&core::Adapter) -> native::WGPUBackendType,
+) -> Result<core::Adapter, String> {
+    let mut adapters = adapters.into_iter();
+    let first_adapter = adapters
         .next()
-        .ok_or_else(|| String::from("no adapters available"))
+        .ok_or_else(|| String::from("no adapters available"))?;
+    let instance_backend = first_adapter.backend();
+
+    if requested_backend_type == native::WGPUBackendType_Undefined
+        || adapter_backend_type(&first_adapter) == requested_backend_type
+    {
+        return Ok(first_adapter);
+    }
+
+    adapters
+        .find(|adapter| adapter_backend_type(adapter) == requested_backend_type)
+        .ok_or_else(|| {
+            format!(
+                "no adapter with backendType {} (instance backend: {instance_backend:?})",
+                backend_type_name(requested_backend_type)
+            )
+        })
+}
+
+/// Returns the unprefixed `webgpu.h` constant name for a backend type.
+fn backend_type_name(backend_type: native::WGPUBackendType) -> String {
+    let name = match backend_type {
+        native::WGPUBackendType_Undefined => "Undefined",
+        native::WGPUBackendType_Null => "Null",
+        native::WGPUBackendType_WebGPU => "WebGPU",
+        native::WGPUBackendType_D3D11 => "D3D11",
+        native::WGPUBackendType_D3D12 => "D3D12",
+        native::WGPUBackendType_Metal => "Metal",
+        native::WGPUBackendType_Vulkan => "Vulkan",
+        native::WGPUBackendType_OpenGL => "OpenGL",
+        native::WGPUBackendType_OpenGLES => "OpenGLES",
+        native::WGPUBackendType_Force32 => "Force32",
+        value => return format!("Unknown({value:#x})"),
+    };
+    String::from(name)
 }
 
 /// Processes callbacks whose mode allows process-events delivery.
@@ -517,6 +564,67 @@ pub unsafe extern "C" fn wgpuInstanceWaitAny(
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct RequestAdapterState {
+        fired: u32,
+        status: native::WGPURequestAdapterStatus,
+        adapter: native::WGPUAdapter,
+        message: String,
+    }
+
+    unsafe extern "C" fn request_adapter_callback(
+        status: native::WGPURequestAdapterStatus,
+        adapter: native::WGPUAdapter,
+        message: native::WGPUStringView,
+        userdata1: *mut c_void,
+        _userdata2: *mut c_void,
+    ) {
+        let state = &mut *(userdata1 as *mut RequestAdapterState);
+        state.fired += 1;
+        state.status = status;
+        state.adapter = adapter;
+        state.message = string_view_to_str(message).unwrap_or_default().to_owned();
+    }
+
+    fn request_adapter_options(
+        backend_type: native::WGPUBackendType,
+    ) -> native::WGPURequestAdapterOptions {
+        native::WGPURequestAdapterOptions {
+            nextInChain: std::ptr::null_mut(),
+            featureLevel: native::WGPUFeatureLevel_Undefined,
+            powerPreference: native::WGPUPowerPreference_Undefined,
+            forceFallbackAdapter: 0,
+            backendType: backend_type,
+            compatibleSurface: std::ptr::null(),
+        }
+    }
+
+    unsafe fn request_adapter(
+        instance: native::WGPUInstance,
+        options: *const native::WGPURequestAdapterOptions,
+    ) -> RequestAdapterState {
+        let mut state = RequestAdapterState::default();
+        let callback_info = native::WGPURequestAdapterCallbackInfo {
+            nextInChain: std::ptr::null_mut(),
+            mode: native::WGPUCallbackMode_AllowProcessEvents,
+            callback: Some(request_adapter_callback),
+            userdata1: (&mut state as *mut RequestAdapterState).cast(),
+            userdata2: std::ptr::null_mut(),
+        };
+
+        let future = wgpuInstanceRequestAdapter(instance, options, callback_info);
+        assert_ne!(future.id, 0);
+        wgpuInstanceProcessEvents(instance);
+        assert_eq!(state.fired, 1);
+        state
+    }
+
+    fn noop_adapters(count: usize) -> Vec<core::Adapter> {
+        (0..count)
+            .flat_map(|_| core::Instance::new_noop().enumerate_adapters())
+            .collect()
+    }
+
     #[test]
     fn wgpu_instance_get_wgsl_language_features_reports_canonical_set() {
         unsafe {
@@ -577,18 +685,150 @@ mod tests {
     }
 
     #[test]
-    fn select_request_adapter_returns_first_adapter_when_enumeration_is_non_empty() {
-        let adapters = core::Instance::new_noop().enumerate_adapters();
-        assert_eq!(adapters.len(), 1);
+    fn select_request_adapter_returns_first_matching_adapter() {
+        let adapters = noop_adapters(2);
 
-        assert!(select_request_adapter(adapters).is_ok());
+        let result = select_request_adapter(adapters, native::WGPUBackendType_Null, |adapter| {
+            backend_type_from_hal(adapter.backend())
+        });
+
+        assert_eq!(
+            result.map(|adapter| adapter.backend()),
+            Ok(yawgpu_hal::HalBackend::Noop)
+        );
+    }
+
+    #[test]
+    fn select_request_adapter_returns_second_matching_adapter() {
+        let adapters = noop_adapters(2);
+        let mut mapped_count = 0;
+
+        let result = select_request_adapter(adapters, native::WGPUBackendType_Null, |adapter| {
+            mapped_count += 1;
+            if mapped_count == 1 {
+                native::WGPUBackendType_Vulkan
+            } else {
+                backend_type_from_hal(adapter.backend())
+            }
+        });
+
+        assert_eq!(mapped_count, 2);
+        assert_eq!(
+            result.map(|adapter| adapter.backend()),
+            Ok(yawgpu_hal::HalBackend::Noop)
+        );
+    }
+
+    #[test]
+    fn select_request_adapter_reports_unavailable_when_no_adapter_matches() {
+        let result = select_request_adapter(
+            noop_adapters(2),
+            native::WGPUBackendType_Vulkan,
+            |adapter| backend_type_from_hal(adapter.backend()),
+        );
+
+        assert_eq!(
+            result.err().as_deref(),
+            Some("no adapter with backendType Vulkan (instance backend: Noop)")
+        );
     }
 
     #[test]
     fn select_request_adapter_reports_unavailable_message_on_empty_enumeration() {
-        let result = select_request_adapter(Vec::new());
+        let result = select_request_adapter(Vec::new(), native::WGPUBackendType_Null, |adapter| {
+            backend_type_from_hal(adapter.backend())
+        });
 
         assert_eq!(result.err().as_deref(), Some("no adapters available"));
+    }
+
+    #[test]
+    fn wgpu_instance_request_adapter_null_options_succeeds() {
+        unsafe {
+            let instance = wgpuCreateInstance(std::ptr::null());
+
+            let state = request_adapter(instance, std::ptr::null());
+
+            assert_eq!(state.status, native::WGPURequestAdapterStatus_Success);
+            assert!(!state.adapter.is_null());
+            assert_eq!(state.message, "");
+            wgpuAdapterRelease(state.adapter);
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    #[test]
+    fn wgpu_instance_request_adapter_undefined_backend_succeeds() {
+        unsafe {
+            let instance = wgpuCreateInstance(std::ptr::null());
+            let options = request_adapter_options(native::WGPUBackendType_Undefined);
+
+            let state = request_adapter(instance, &options);
+
+            assert_eq!(state.status, native::WGPURequestAdapterStatus_Success);
+            assert!(!state.adapter.is_null());
+            assert_eq!(state.message, "");
+            wgpuAdapterRelease(state.adapter);
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    #[test]
+    fn wgpu_instance_request_adapter_null_backend_succeeds_and_reports_null() {
+        unsafe {
+            let instance = wgpuCreateInstance(std::ptr::null());
+            let options = request_adapter_options(native::WGPUBackendType_Null);
+
+            let state = request_adapter(instance, &options);
+
+            assert_eq!(state.status, native::WGPURequestAdapterStatus_Success);
+            assert!(!state.adapter.is_null());
+            let mut info = std::mem::zeroed();
+            assert_eq!(
+                wgpuAdapterGetInfo(state.adapter, &mut info),
+                native::WGPUStatus_Success
+            );
+            assert_eq!(info.backendType, native::WGPUBackendType_Null);
+            wgpuAdapterInfoFreeMembers(info);
+            wgpuAdapterRelease(state.adapter);
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    #[test]
+    fn wgpu_instance_request_adapter_vulkan_backend_is_unavailable() {
+        unsafe {
+            let instance = wgpuCreateInstance(std::ptr::null());
+            let options = request_adapter_options(native::WGPUBackendType_Vulkan);
+
+            let state = request_adapter(instance, &options);
+
+            assert_eq!(state.status, native::WGPURequestAdapterStatus_Unavailable);
+            assert!(state.adapter.is_null());
+            assert_eq!(
+                state.message,
+                "no adapter with backendType Vulkan (instance backend: Noop)"
+            );
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    #[test]
+    fn wgpu_instance_request_adapter_d3d12_backend_is_unavailable() {
+        unsafe {
+            let instance = wgpuCreateInstance(std::ptr::null());
+            let options = request_adapter_options(native::WGPUBackendType_D3D12);
+
+            let state = request_adapter(instance, &options);
+
+            assert_eq!(state.status, native::WGPURequestAdapterStatus_Unavailable);
+            assert!(state.adapter.is_null());
+            assert_eq!(
+                state.message,
+                "no adapter with backendType D3D12 (instance backend: Noop)"
+            );
+            wgpuInstanceRelease(instance);
+        }
     }
 
     #[test]

@@ -1470,7 +1470,7 @@ pub(crate) enum PendingCallback {
         callback: native::WGPURequestAdapterCallback,
         /// Result variant: the selected adapter, or the failure message
         /// delivered with `WGPURequestAdapterStatus_Unavailable` and a null
-        /// adapter when the instance exposed no adapters.
+        /// adapter when no enumerated adapter satisfies the request.
         result: Result<Arc<WGPUAdapterImpl>, String>,
         /// Userdata1 variant.
         userdata1: usize,
@@ -2079,25 +2079,23 @@ fn dispatch_optional_device_error(device: &core::Device, error: Option<core::Dev
     }
 }
 
+/// Maps a HAL backend to the corresponding `webgpu.h` backend type.
+fn backend_type_from_hal(backend: yawgpu_hal::HalBackend) -> native::WGPUBackendType {
+    match backend {
+        yawgpu_hal::HalBackend::Noop => native::WGPUBackendType_Null,
+        yawgpu_hal::HalBackend::Vulkan => native::WGPUBackendType_Vulkan,
+        yawgpu_hal::HalBackend::Metal => native::WGPUBackendType_Metal,
+        yawgpu_hal::HalBackend::Gles => native::WGPUBackendType_OpenGLES,
+        _ => native::WGPUBackendType_Undefined,
+    }
+}
+
 fn adapter_info_from_core(adapter: &core::Adapter) -> native::WGPUAdapterInfo {
-    let (backend_type, adapter_type) = match adapter.backend() {
-        yawgpu_hal::HalBackend::Noop => (native::WGPUBackendType_Null, native::WGPUAdapterType_CPU),
-        yawgpu_hal::HalBackend::Vulkan => (
-            native::WGPUBackendType_Vulkan,
-            native::WGPUAdapterType_Unknown,
-        ),
-        yawgpu_hal::HalBackend::Metal => (
-            native::WGPUBackendType_Metal,
-            native::WGPUAdapterType_Unknown,
-        ),
-        yawgpu_hal::HalBackend::Gles => (
-            native::WGPUBackendType_OpenGLES,
-            native::WGPUAdapterType_Unknown,
-        ),
-        _ => (
-            native::WGPUBackendType_Undefined,
-            native::WGPUAdapterType_Unknown,
-        ),
+    let backend = adapter.backend();
+    let backend_type = backend_type_from_hal(backend);
+    let adapter_type = match backend {
+        yawgpu_hal::HalBackend::Noop => native::WGPUAdapterType_CPU,
+        _ => native::WGPUAdapterType_Unknown,
     };
     native::WGPUAdapterInfo {
         nextInChain: std::ptr::null_mut(),

@@ -125,6 +125,46 @@ The same `NULL`-on-strict-failure contract applies regardless of how the
 yawgpu instance descriptor is constructed (with or without the
 `YaWGPUGlesContextBackend` companion chain).
 
+### Adapter request backend filter (`WGPURequestAdapterOptions.backendType`)
+
+The instance owns one HAL backend, fixed by IB1–IB4. A surface binds to
+that backend at creation, so `wgpuInstanceRequestAdapter` cannot change
+the backend. It can refuse a request that names a different one.
+
+- **IB5** `wgpuInstanceRequestAdapter` reads `options->backendType`.
+  `WGPUBackendType_Undefined` (and a NULL `options`) selects the first
+  enumerated adapter (unchanged). Any other value selects the first
+  enumerated adapter whose `wgpuAdapterGetInfo().backendType` equals the
+  requested value. If no adapter matches, the callback fires with
+  `WGPURequestAdapterStatus_Unavailable`, a null adapter, and a message
+  that names the requested value and the instance backend. The mapping
+  from `HalBackend` to `WGPUBackendType` is the one `wgpuAdapterGetInfo`
+  uses: Noop → `Null`, Vulkan → `Vulkan`, Metal → `Metal`, Gles →
+  `OpenGLES`. A value with no HAL mapping (D3D11, D3D12, OpenGL, WebGPU)
+  never matches.
+
+  **Rationale:** webgpu.h states that `backendType`, when set, "requires
+  the adapter to have a particular backend type. If this is not possible,
+  the request returns null." A caller that sets the field and receives an
+  adapter of another backend runs on the wrong GPU path with no signal.
+  IB4 already names `wgpuAdapterGetInfo().backendType` as the detection
+  route. IB5 moves that check into the request.
+
+### Acceptance tests (Noop gate) — IB5
+
+Direct unit tests on `wgpuInstanceRequestAdapter` in
+`yawgpu/src/ffi/instance.rs`, Noop instance:
+
+- `options == NULL` ⇒ `Success`, non-null adapter (existing test).
+- `backendType = Undefined` ⇒ `Success`, non-null adapter.
+- `backendType = Null` ⇒ `Success`, non-null adapter,
+  `wgpuAdapterGetInfo().backendType == Null`.
+- `backendType = Vulkan` ⇒ `Unavailable`, null adapter, message contains
+  `Vulkan` and `Noop`.
+- `backendType = D3D12` ⇒ `Unavailable`, null adapter.
+- `select_request_adapter` unit tests cover the filter directly: match on
+  first, match on second, no match.
+
 ### Acceptance tests (Noop gate)
 
 Direct unit tests on `wgpuCreateInstance` covering each rule, in
