@@ -471,16 +471,55 @@ impl VulkanAdapter {
         true
     }
 
-    /// Returns true when WebGPU texture format tier 1 is supported by this physical device.
-    #[must_use]
-    pub(super) fn supports_texture_formats_tier1(&self) -> bool {
-        true
+    fn supports_texture_formats_tiers(&self) -> bool {
+        let features = unsafe {
+            self.instance
+                .instance
+                .get_physical_device_features(self.physical_device)
+        };
+        if features.shader_storage_image_extended_formats != vk::TRUE {
+            return false;
+        }
+
+        let required_features = vk::FormatFeatureFlags::COLOR_ATTACHMENT
+            | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND;
+        [
+            vk::Format::R16_UNORM,
+            vk::Format::R16_SNORM,
+            vk::Format::R16G16_UNORM,
+            vk::Format::R16G16_SNORM,
+            vk::Format::R16G16B16A16_UNORM,
+            vk::Format::R16G16B16A16_SNORM,
+            vk::Format::R8_SNORM,
+            vk::Format::R8G8_SNORM,
+            vk::Format::R8G8B8A8_SNORM,
+            vk::Format::B10G11R11_UFLOAT_PACK32,
+        ]
+        .into_iter()
+        .all(|format| {
+            let props = unsafe {
+                self.instance
+                    .instance
+                    .get_physical_device_format_properties(self.physical_device, format)
+            };
+            props.optimal_tiling_features.contains(required_features)
+        })
     }
 
-    /// Returns true when WebGPU texture format tier 2 is supported by this physical device.
+    /// Returns true when Vulkan supports extended storage-image formats and all
+    /// formats Dawn requires are color-attachment renderable and blendable. Vulkan
+    /// advertises texture format tiers 1 and 2 together under this rule.
+    #[must_use]
+    pub(super) fn supports_texture_formats_tier1(&self) -> bool {
+        self.supports_texture_formats_tiers()
+    }
+
+    /// Returns true when Vulkan supports extended storage-image formats and all
+    /// formats Dawn requires are color-attachment renderable and blendable. Vulkan
+    /// advertises texture format tiers 1 and 2 together under this rule.
     #[must_use]
     pub(super) fn supports_texture_formats_tier2(&self) -> bool {
-        true
+        self.supports_texture_formats_tiers()
     }
 
     /// Returns true when `Rg11b10Ufloat` is renderable by this physical device.
@@ -784,6 +823,11 @@ impl VulkanAdapter {
         // WebGPU render pipelines can configure blend/write masks per color target.
         // Vulkan requires independentBlend for differing per-attachment blend state.
         let independent_blend = supported_features.independent_blend == vk::TRUE;
+        // Tier 1/2 storage formats are Vulkan extended storage-image formats. Dawn
+        // enables this for TextureFormatsTier1; HAL has no requested feature set,
+        // so enable it whenever the physical device supports it, like its neighbours.
+        let shader_storage_image_extended_formats =
+            supported_features.shader_storage_image_extended_formats == vk::TRUE;
         let dual_src_blend = supported_features.dual_src_blend == vk::TRUE;
         let shader_clip_distance = supported_features.shader_clip_distance == vk::TRUE;
         let geometry_shader = supported_features.geometry_shader == vk::TRUE;
@@ -822,6 +866,9 @@ impl VulkanAdapter {
         }
         if independent_blend {
             enabled_features.independent_blend = vk::TRUE;
+        }
+        if shader_storage_image_extended_formats {
+            enabled_features.shader_storage_image_extended_formats = vk::TRUE;
         }
         if dual_src_blend {
             enabled_features.dual_src_blend = vk::TRUE;
@@ -1301,6 +1348,52 @@ mod tests {
     #[test]
     #[ignore = "manual real Vulkan backend test"]
     #[cfg(feature = "vulkan")]
+    fn vulkan_adapter_texture_formats_tiers_match_dawn_rule() {
+        let adapter = VulkanInstance::new()
+            .expect("create Vulkan instance")
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("at least one Vulkan adapter");
+        let features = unsafe {
+            adapter
+                .instance
+                .instance
+                .get_physical_device_features(adapter.physical_device)
+        };
+        let required_features = vk::FormatFeatureFlags::COLOR_ATTACHMENT
+            | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND;
+        let rule = features.shader_storage_image_extended_formats == vk::TRUE
+            && [
+                vk::Format::R16_UNORM,
+                vk::Format::R16_SNORM,
+                vk::Format::R16G16_UNORM,
+                vk::Format::R16G16_SNORM,
+                vk::Format::R16G16B16A16_UNORM,
+                vk::Format::R16G16B16A16_SNORM,
+                vk::Format::R8_SNORM,
+                vk::Format::R8G8_SNORM,
+                vk::Format::R8G8B8A8_SNORM,
+                vk::Format::B10G11R11_UFLOAT_PACK32,
+            ]
+            .into_iter()
+            .all(|format| {
+                let props = unsafe {
+                    adapter
+                        .instance
+                        .instance
+                        .get_physical_device_format_properties(adapter.physical_device, format)
+                };
+                props.optimal_tiling_features.contains(required_features)
+            });
+
+        assert_eq!(adapter.supports_texture_formats_tier1(), rule);
+        assert_eq!(adapter.supports_texture_formats_tier2(), rule);
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
     fn vulkan_adapter_create_device_returns_zero_allocation_device() {
         let adapter = VulkanInstance::new()
             .expect("create Vulkan instance")
@@ -1351,9 +1444,8 @@ mod tests {
         }
     }
 
-    /// `robust_buffer_access` feature-enable logic: when the physical device
-    /// reports the feature as available (vk::TRUE), it must be forwarded into
-    /// `enabled_features`; when absent, it must remain FALSE.
+    /// Core feature-enable logic forwards each available feature into
+    /// `enabled_features` and leaves each unavailable feature FALSE.
     #[test]
     fn vulkan_create_device_enables_supported_core_features() {
         // Simulate the feature-enable logic in create_device without a real GPU.
@@ -1361,6 +1453,7 @@ mod tests {
             let supported_features = vk::PhysicalDeviceFeatures {
                 robust_buffer_access: supported,
                 independent_blend: supported,
+                shader_storage_image_extended_formats: supported,
                 dual_src_blend: supported,
                 shader_clip_distance: supported,
                 geometry_shader: supported,
@@ -1371,6 +1464,8 @@ mod tests {
             };
             let robust_buffer_access = supported_features.robust_buffer_access == vk::TRUE;
             let independent_blend = supported_features.independent_blend == vk::TRUE;
+            let shader_storage_image_extended_formats =
+                supported_features.shader_storage_image_extended_formats == vk::TRUE;
             let dual_src_blend = supported_features.dual_src_blend == vk::TRUE;
             let shader_clip_distance = supported_features.shader_clip_distance == vk::TRUE;
             let geometry_shader = supported_features.geometry_shader == vk::TRUE;
@@ -1385,6 +1480,9 @@ mod tests {
             }
             if independent_blend {
                 enabled_features.independent_blend = vk::TRUE;
+            }
+            if shader_storage_image_extended_formats {
+                enabled_features.shader_storage_image_extended_formats = vk::TRUE;
             }
             if dual_src_blend {
                 enabled_features.dual_src_blend = vk::TRUE;
@@ -1411,6 +1509,10 @@ mod tests {
             assert_eq!(
                 enabled_features.independent_blend, expected_enabled,
                 "independent_blend should be {expected_enabled} when supported={supported}"
+            );
+            assert_eq!(
+                enabled_features.shader_storage_image_extended_formats, expected_enabled,
+                "shader_storage_image_extended_formats should be {expected_enabled} when supported={supported}"
             );
             assert_eq!(
                 enabled_features.dual_src_blend, expected_enabled,

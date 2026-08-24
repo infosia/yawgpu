@@ -1,6 +1,6 @@
 # Block 72 — `texture-formats-tier2` advertisement is a device query
 
-Status: **Slice 1 (Metal) DONE — real-GPU verified (M2), CTS byte-identical**. Follow-up slice: Vulkan advertisement (see below). Owner: external-report follow-up
+Status: **Slice 1 (Metal) DONE — real-GPU verified (M2), CTS byte-identical**. **Slice 2 (Vulkan) DONE — MoltenVK-verified, CTS byte-identical** (see "Slice 2" below). Owner: external-report follow-up
 (`specs/tracking/external-reports.md`, 2026-08-24 entry).
 
 `texture-formats-tier2` (`WGPUFeatureName_TextureFormatsTier2 = 0x14`) grants
@@ -26,10 +26,7 @@ MSL to a compiler whose device cannot execute it — the failure surfaced late
   `tier == MTLReadWriteTextureTier::Tier2`. Nothing else changes: tier 1
   advertisement, `HalAdapter` dispatch, and `Adapter::features()` are untouched
   (`TextureFormatsTier2 ⇒ TextureFormatsTier1` implication stays in core).
-- Noop, Vulkan and GLES advertisement is unchanged by this slice. The Vulkan
-  analogue (Dawn gates tier 1+2 on `shaderStorageImageExtendedFormats` plus
-  per-format colour-attachment properties) is a known follow-up, not part of
-  this block's Slice 1.
+- Noop and GLES advertisement is unchanged. Vulkan is Slice 2 (below).
 
 ### Rejection below the tier (core, backend-independent)
 
@@ -83,3 +80,52 @@ header. The `Debug` derive stays as is.
   readback matches — the proof that an advertised tier 2 actually executes.
 - **CTS**: `capability_checks,features` + storage-texture validation trees
   must be byte-identical before/after on the M2 (which reports tier 2).
+
+## Slice 2 — Vulkan advertisement + device feature enablement
+
+`VulkanAdapter::supports_texture_formats_tier1()` / `_tier2()` were both an
+unconditional `true`, and `VulkanAdapter::create_device` never enabled
+`shaderStorageImageExtendedFormats` — yet the formats tier 1/2 add to the
+storage set (`r8unorm/uint/sint`, `r16uint/sint/float`, `rg8*`, `rg16*`,
+`rgb10a2*`, `rg11b10ufloat`, …) are Vulkan *extended* storage-image formats,
+which are only legal on a logical device with that feature enabled.
+
+### Advertisement (Dawn `PhysicalDeviceVk.cpp`, verbatim)
+
+Tier 1 and tier 2 are advertised **together** (both true or both false):
+
+- `VkPhysicalDeviceFeatures::shaderStorageImageExtendedFormats == VK_TRUE`, and
+- every format in `{R16_UNORM, R16_SNORM, R16G16_UNORM, R16G16_SNORM,
+  R16G16B16A16_UNORM, R16G16B16A16_SNORM, R8_SNORM, R8G8_SNORM,
+  R8G8B8A8_SNORM, B10G11R11_UFLOAT_PACK32}` has
+  `COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND` in
+  `VkFormatProperties::optimalTilingFeatures`.
+
+Implemented as one private `supports_texture_formats_tiers()` query (same
+`get_physical_device_format_properties` pattern as
+`supports_float32_blendable`) that both public fns return. `HalAdapter`
+dispatch and core are untouched (core already applies `Tier2 ⇒ Tier1`).
+
+### Device creation
+
+`VulkanAdapter::create_device` enables
+`enabled_features.shader_storage_image_extended_formats` whenever the
+physical device supports it — yawgpu's HAL device creation does not receive
+the requested feature set, so the existing enable-if-supported pattern
+(`dual_src_blend`, `shader_clip_distance`, …) applies; Dawn enables it when
+`TextureFormatsTier1` is requested, and enabling it unconditionally-when-
+supported is a harmless superset.
+
+### Tests
+
+- **HAL unit (Vulkan, real GPU, `#[ignore]`)**: recompute Dawn's rule in the
+  test from raw `ash` queries on the first adapter and assert
+  `supports_texture_formats_tier1() == supports_texture_formats_tier2() == rule`.
+- **Real-Vulkan e2e** (Claude-authored,
+  `yawgpu/tests/e2e_vulkan_texture_formats_tier2.rs`, MoltenVK on the M2):
+  device without the feature rejects the `rgba8unorm` `read-write` layout
+  with the tier-naming message; device with the feature executes
+  `texture_storage_2d<rgba8unorm, read_write>` and an extended-format
+  `texture_storage_2d<r8unorm, read_write>` compute pass with matching
+  readback (the second proves the device-level feature enablement).
+- **CTS (Vulkan/MoltenVK)**: the same tree set as Slice 1 before/after.

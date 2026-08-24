@@ -161,10 +161,15 @@ keep the existing generic message. `TextureFormat::name()` (WebGPU IDL
 names, all 102 header formats) was added for the message. Tier 1,
 Noop, Vulkan and GLES advertisement are untouched.
 
-**Known analogue (not fixed here).** `VulkanAdapter::supports_texture_formats_tier2()`
-is also an unconditional `true`; Dawn gates Vulkan tier 1+2 on
-`shaderStorageImageExtendedFormats` plus per-format colour-attachment
-`VkFormatProperties`. Tracked as the Block 72 follow-up slice.
+**Vulkan analogue (Slice 2, fixed in the same session).**
+`VulkanAdapter::supports_texture_formats_tier{1,2}()` were also unconditional
+`true`, and `create_device` never enabled `shaderStorageImageExtendedFormats`
+even though the tier 1/2 storage formats (`r8unorm`, `r16float`, `rg8*`, …)
+are Vulkan extended storage-image formats. Now both tiers return one
+`supports_texture_formats_tiers()` implementing Dawn's `PhysicalDeviceVk`
+rule verbatim (feature bit + 10 formats colour-attachment-renderable and
+blendable in optimal tiling), and device creation enables the feature
+whenever the physical device supports it.
 
 **Verification.**
 
@@ -191,3 +196,11 @@ is also an unconditional `true`; Dawn gates Vulkan tier 1+2 on
   `createBindGroupLayout`, `storage_texture,{read_only,read_write}` —
   `pass=2056 skip=263 warn=0 fail=0 crash=0` before and after, non-pass
   set diff empty.
+- Slice 2 (Vulkan): real-Vulkan HAL unit test recomputes Dawn's rule from raw
+  `ash` queries and asserts both tiers equal it; the create-device unit test
+  covers `shader_storage_image_extended_formats` forwarding; real-Vulkan e2e
+  (`yawgpu/tests/e2e_vulkan_texture_formats_tier2.rs`, MoltenVK on the M2):
+  3/3 — device without the feature rejects the `rgba8unorm` `read-write` layout with the tier-naming message, and a device with the feature executes `read_write` compute passes on `rgba8unorm` and on the extended format `r8unorm` with matching readback (proves the device-level feature enablement); real-Vulkan HAL ignored tests 39/39, full real-Vulkan e2e suite 67 passed / 0 failed. CTS (MoltenVK, same tree set):
+  `pass=2014 skip=305 warn=0 fail=0 crash=0` before and after, non-pass set
+  diff empty (MoltenVK on the M2 satisfies the rule, so the advertisement is
+  unchanged there).
