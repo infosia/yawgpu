@@ -38,6 +38,87 @@ fn sampler_filtering_compatibility_is_validated() {
     }
 }
 
+#[test]
+fn read_write_storage_texture_formats_respect_texture_formats_tier2() {
+    let without_tier2 = ValidationTest::new();
+    let with_tier2 = ValidationTest::with_features(&[native::WGPUFeatureName_TextureFormatsTier2]);
+
+    unsafe {
+        without_tier2.assert_device_error_after(
+            || {
+                let layout = create_storage_texture_layout(
+                    without_tier2.device(),
+                    native::WGPUTextureFormat_RGBA8Unorm,
+                );
+                yawgpu::wgpuBindGroupLayoutRelease(layout);
+            },
+            Some(
+                "rgba8unorm supports read-write storage access only with the texture-formats-tier2 feature",
+            ),
+        );
+
+        with_tier2.expect_no_validation_error(|| {
+            let layout = create_storage_texture_layout(
+                with_tier2.device(),
+                native::WGPUTextureFormat_RGBA8Unorm,
+            );
+            yawgpu::wgpuBindGroupLayoutRelease(layout);
+        });
+
+        with_tier2.assert_device_error_after(
+            || {
+                let layout = create_storage_texture_layout(
+                    with_tier2.device(),
+                    native::WGPUTextureFormat_RG32Float,
+                );
+                yawgpu::wgpuBindGroupLayoutRelease(layout);
+            },
+            Some("must support read-write storage access"),
+        );
+    }
+}
+
+unsafe fn create_storage_texture_layout(
+    device: native::WGPUDevice,
+    format: native::WGPUTextureFormat,
+) -> native::WGPUBindGroupLayout {
+    let entry = native::WGPUBindGroupLayoutEntry {
+        nextInChain: std::ptr::null_mut(),
+        binding: 0,
+        visibility: native::WGPUShaderStage_Compute,
+        bindingArraySize: 0,
+        buffer: native::WGPUBufferBindingLayout {
+            nextInChain: std::ptr::null_mut(),
+            type_: native::WGPUBufferBindingType_BindingNotUsed,
+            hasDynamicOffset: 0,
+            minBindingSize: 0,
+        },
+        sampler: native::WGPUSamplerBindingLayout {
+            nextInChain: std::ptr::null_mut(),
+            type_: native::WGPUSamplerBindingType_BindingNotUsed,
+        },
+        texture: native::WGPUTextureBindingLayout {
+            nextInChain: std::ptr::null_mut(),
+            sampleType: native::WGPUTextureSampleType_BindingNotUsed,
+            viewDimension: native::WGPUTextureViewDimension_Undefined,
+            multisampled: 0,
+        },
+        storageTexture: native::WGPUStorageTextureBindingLayout {
+            nextInChain: std::ptr::null_mut(),
+            access: native::WGPUStorageTextureAccess_ReadWrite,
+            format,
+            viewDimension: native::WGPUTextureViewDimension_2D,
+        },
+    };
+    let descriptor = native::WGPUBindGroupLayoutDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        entryCount: 1,
+        entries: &entry,
+    };
+    yawgpu::wgpuDeviceCreateBindGroupLayout(device, &descriptor)
+}
+
 unsafe fn create_sampler_layout(
     device: native::WGPUDevice,
     ty: native::WGPUSamplerBindingType,

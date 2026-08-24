@@ -33,3 +33,6 @@ objc2-quartz-core = { workspace = true, features = [
     "objc2-core-foundation",
     "objc2-metal",
 ] }
+# Direct `MTLDevice.readWriteTextureSupport` oracle for the real-Metal
+# `texture-formats-tier2` advertisement e2e test.
+objc2-metal = { workspace = true }

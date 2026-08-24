@@ -703,6 +703,7 @@ name = "yawgpu"
 version = "0.1.0"
 dependencies = [
  "bindgen",
+ "objc2-metal",
  "objc2-quartz-core",
  "yawgpu-core",
  "yawgpu-hal",

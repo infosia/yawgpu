@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use crate::adapter::Feature;
 use crate::device::FeatureSet;
 use crate::format::*;
 use crate::limits::*;
@@ -139,6 +140,17 @@ pub(crate) fn validate_bind_group_layout_descriptor(
                     );
                 }
                 if access == StorageTextureAccess::ReadWrite && !caps.read_write_storage_capable {
+                    let mut features_with_tier2 = features.clone();
+                    features_with_tier2.insert(Feature::TextureFormatsTier2);
+                    if format
+                        .caps(&features_with_tier2)
+                        .is_some_and(|caps| caps.read_write_storage_capable)
+                    {
+                        return Some(format!(
+                            "storage texture binding format {} supports read-write storage access only with the texture-formats-tier2 feature, which this device does not have",
+                            format.name()
+                        ));
+                    }
                     return Some(
                         "storage texture binding format must support read-write storage access"
                             .to_owned(),
@@ -467,6 +479,46 @@ mod tests {
                 min_binding_size: 4,
             }),
         }
+    }
+
+    fn storage_texture_entry(access: StorageTextureAccess, format: u32) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding: 0,
+            visibility: SHADER_STAGE_COMPUTE,
+            binding_array_size: 0,
+            kind: Some(BindingLayoutKind::StorageTexture {
+                access,
+                format: TextureFormat::from_raw(format),
+                view_dimension: TextureViewDimension::D2,
+            }),
+        }
+    }
+
+    #[test]
+    fn read_write_storage_texture_validation_names_missing_tier2_feature() {
+        let rgba8unorm =
+            storage_texture_entry(StorageTextureAccess::ReadWrite, TextureFormat::RGBA8_UNORM);
+        let no_features = FeatureSet::new();
+        let error =
+            validate_bind_group_layout_descriptor(&[rgba8unorm], Limits::DEFAULT, &no_features)
+                .expect("rgba8unorm read-write storage should require tier2");
+        assert!(error.contains("rgba8unorm"));
+        assert!(error.contains("texture-formats-tier2"));
+
+        let mut features = FeatureSet::new();
+        features.insert(Feature::TextureFormatsTier2);
+        let rg32float =
+            storage_texture_entry(StorageTextureAccess::ReadWrite, TextureFormat::RG32_FLOAT);
+        assert_eq!(
+            validate_bind_group_layout_descriptor(&[rg32float], Limits::DEFAULT, &features),
+            Some(
+                "storage texture binding format must support read-write storage access".to_owned()
+            )
+        );
+        assert_eq!(
+            validate_bind_group_layout_descriptor(&[rgba8unorm], Limits::DEFAULT, &features),
+            None
+        );
     }
 
     #[test]

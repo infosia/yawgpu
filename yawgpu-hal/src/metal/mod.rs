@@ -16,11 +16,12 @@ use objc2_metal::{
     MTLCreateSystemDefaultDevice, MTLCullMode, MTLDepthClipMode, MTLDepthStencilDescriptor,
     MTLDepthStencilState, MTLDevice, MTLDrawable, MTLFunction, MTLGPUFamily, MTLIndexType,
     MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType,
-    MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineColorAttachmentDescriptor,
-    MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLSamplerAddressMode,
-    MTLSamplerDescriptor, MTLSamplerMinMagFilter, MTLSamplerMipFilter, MTLSamplerState,
-    MTLScissorRect, MTLSize, MTLStencilDescriptor, MTLStencilOperation, MTLStorageMode,
-    MTLStoreAction, MTLTexture as MTLTextureTrait, MTLTextureDescriptor, MTLTextureSwizzle,
+    MTLReadWriteTextureTier, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
+    MTLRenderPipelineColorAttachmentDescriptor, MTLRenderPipelineDescriptor,
+    MTLRenderPipelineState, MTLResourceOptions, MTLSamplerAddressMode, MTLSamplerDescriptor,
+    MTLSamplerMinMagFilter, MTLSamplerMipFilter, MTLSamplerState, MTLScissorRect, MTLSize,
+    MTLStencilDescriptor, MTLStencilOperation, MTLStorageMode, MTLStoreAction,
+    MTLTexture as MTLTextureTrait, MTLTextureDescriptor, MTLTextureSwizzle,
     MTLTextureSwizzleChannels, MTLTextureType, MTLTextureUsage, MTLVertexDescriptor,
     MTLVertexFormat, MTLVertexStepFunction, MTLViewport, MTLVisibilityResultMode, MTLWinding,
 };
@@ -173,6 +174,7 @@ impl MetalInstance {
 pub struct MetalAdapter {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     name: String,
+    read_write_texture_tier: MTLReadWriteTextureTier,
 }
 
 impl std::fmt::Debug for MetalAdapter {
@@ -188,7 +190,12 @@ impl MetalAdapter {
     #[must_use]
     pub fn new(device: Retained<ProtocolObject<dyn MTLDevice>>) -> Self {
         let name = device.name().to_string();
-        Self { device, name }
+        let read_write_texture_tier = device.readWriteTextureSupport();
+        Self {
+            device,
+            name,
+            read_write_texture_tier,
+        }
     }
 
     /// Returns the name.
@@ -349,10 +356,10 @@ impl MetalAdapter {
         true
     }
 
-    /// Returns true when WebGPU texture format tier 2 is supported.
+    /// Returns true when Metal reports read-write texture tier 2, matching Dawn's rule.
     #[must_use]
     pub(super) fn supports_texture_formats_tier2(&self) -> bool {
-        true
+        self.read_write_texture_tier == MTLReadWriteTextureTier::Tier2
     }
 
     /// Returns true when `Rg11b10Ufloat` is renderable.
@@ -583,6 +590,25 @@ mod tests {
             adapter.supports_texture_component_swizzle(),
             adapter.device.supportsFamily(MTLGPUFamily::Mac2)
                 || adapter.device.supportsFamily(MTLGPUFamily::Apple2)
+        );
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_adapter_texture_formats_tier2_matches_cached_device_query() {
+        let adapter = MetalInstance::new()
+            .expect("create Metal instance")
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("at least one Metal adapter");
+        let fresh_tier = adapter.device.readWriteTextureSupport();
+
+        assert_eq!(adapter.read_write_texture_tier, fresh_tier);
+        assert_eq!(
+            adapter.supports_texture_formats_tier2(),
+            fresh_tier == MTLReadWriteTextureTier::Tier2
         );
     }
 

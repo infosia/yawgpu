@@ -224,6 +224,116 @@ impl TextureFormat {
         self.0
     }
 
+    /// Returns the WebGPU IDL name of this texture format.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self.0 {
+            Self::UNDEFINED => "undefined",
+            Self::R8_UNORM => "r8unorm",
+            Self::R8_SNORM => "r8snorm",
+            Self::R8_UINT => "r8uint",
+            Self::R8_SINT => "r8sint",
+            Self::R16_UNORM => "r16unorm",
+            Self::R16_SNORM => "r16snorm",
+            Self::R16_UINT => "r16uint",
+            Self::R16_SINT => "r16sint",
+            Self::R16_FLOAT => "r16float",
+            Self::RG8_UNORM => "rg8unorm",
+            Self::RG8_SNORM => "rg8snorm",
+            Self::RG8_UINT => "rg8uint",
+            Self::RG8_SINT => "rg8sint",
+            Self::R32_FLOAT => "r32float",
+            Self::R32_UINT => "r32uint",
+            Self::R32_SINT => "r32sint",
+            Self::RG16_UNORM => "rg16unorm",
+            Self::RG16_SNORM => "rg16snorm",
+            Self::RG16_UINT => "rg16uint",
+            Self::RG16_SINT => "rg16sint",
+            Self::RG16_FLOAT => "rg16float",
+            Self::RGBA8_UNORM => "rgba8unorm",
+            Self::RGBA8_UNORM_SRGB => "rgba8unorm-srgb",
+            Self::RGBA8_SNORM => "rgba8snorm",
+            Self::RGBA8_UINT => "rgba8uint",
+            Self::RGBA8_SINT => "rgba8sint",
+            Self::BGRA8_UNORM => "bgra8unorm",
+            Self::BGRA8_UNORM_SRGB => "bgra8unorm-srgb",
+            Self::RGB10A2_UINT => "rgb10a2uint",
+            Self::RGB10A2_UNORM => "rgb10a2unorm",
+            Self::RG11B10_UFLOAT => "rg11b10ufloat",
+            Self::RGB9E5_UFLOAT => "rgb9e5ufloat",
+            Self::RG32_FLOAT => "rg32float",
+            Self::RG32_UINT => "rg32uint",
+            Self::RG32_SINT => "rg32sint",
+            Self::RGBA16_UNORM => "rgba16unorm",
+            Self::RGBA16_SNORM => "rgba16snorm",
+            Self::RGBA16_UINT => "rgba16uint",
+            Self::RGBA16_SINT => "rgba16sint",
+            Self::RGBA16_FLOAT => "rgba16float",
+            Self::RGBA32_FLOAT => "rgba32float",
+            Self::RGBA32_UINT => "rgba32uint",
+            Self::RGBA32_SINT => "rgba32sint",
+            Self::STENCIL8 => "stencil8",
+            Self::DEPTH16_UNORM => "depth16unorm",
+            Self::DEPTH24_PLUS => "depth24plus",
+            Self::DEPTH24_PLUS_STENCIL8 => "depth24plus-stencil8",
+            Self::DEPTH32_FLOAT => "depth32float",
+            Self::DEPTH32_FLOAT_STENCIL8 => "depth32float-stencil8",
+            Self::BC1_RGBA_UNORM => "bc1-rgba-unorm",
+            Self::BC1_RGBA_UNORM_SRGB => "bc1-rgba-unorm-srgb",
+            Self::BC2_RGBA_UNORM => "bc2-rgba-unorm",
+            Self::BC2_RGBA_UNORM_SRGB => "bc2-rgba-unorm-srgb",
+            Self::BC3_RGBA_UNORM => "bc3-rgba-unorm",
+            Self::BC3_RGBA_UNORM_SRGB => "bc3-rgba-unorm-srgb",
+            Self::BC4_R_UNORM => "bc4-r-unorm",
+            Self::BC4_R_SNORM => "bc4-r-snorm",
+            Self::BC5_RG_UNORM => "bc5-rg-unorm",
+            Self::BC5_RG_SNORM => "bc5-rg-snorm",
+            Self::BC6H_RGB_UFLOAT => "bc6h-rgb-ufloat",
+            Self::BC6H_RGB_FLOAT => "bc6h-rgb-float",
+            Self::BC7_RGBA_UNORM => "bc7-rgba-unorm",
+            Self::BC7_RGBA_UNORM_SRGB => "bc7-rgba-unorm-srgb",
+            Self::ETC2_RGB8_UNORM => "etc2-rgb8unorm",
+            Self::ETC2_RGB8_UNORM_SRGB => "etc2-rgb8unorm-srgb",
+            Self::ETC2_RGB8A1_UNORM => "etc2-rgb8a1unorm",
+            Self::ETC2_RGB8A1_UNORM_SRGB => "etc2-rgb8a1unorm-srgb",
+            Self::ETC2_RGBA8_UNORM => "etc2-rgba8unorm",
+            Self::ETC2_RGBA8_UNORM_SRGB => "etc2-rgba8unorm-srgb",
+            Self::EAC_R11_UNORM => "eac-r11unorm",
+            Self::EAC_R11_SNORM => "eac-r11snorm",
+            Self::EAC_RG11_UNORM => "eac-rg11unorm",
+            Self::EAC_RG11_SNORM => "eac-rg11snorm",
+            Self::ASTC4X4_UNORM => "astc-4x4-unorm",
+            Self::ASTC4X4_UNORM_SRGB => "astc-4x4-unorm-srgb",
+            Self::ASTC5X4_UNORM => "astc-5x4-unorm",
+            Self::ASTC5X4_UNORM_SRGB => "astc-5x4-unorm-srgb",
+            Self::ASTC5X5_UNORM => "astc-5x5-unorm",
+            Self::ASTC5X5_UNORM_SRGB => "astc-5x5-unorm-srgb",
+            Self::ASTC6X5_UNORM => "astc-6x5-unorm",
+            Self::ASTC6X5_UNORM_SRGB => "astc-6x5-unorm-srgb",
+            Self::ASTC6X6_UNORM => "astc-6x6-unorm",
+            Self::ASTC6X6_UNORM_SRGB => "astc-6x6-unorm-srgb",
+            Self::ASTC8X5_UNORM => "astc-8x5-unorm",
+            Self::ASTC8X5_UNORM_SRGB => "astc-8x5-unorm-srgb",
+            Self::ASTC8X6_UNORM => "astc-8x6-unorm",
+            Self::ASTC8X6_UNORM_SRGB => "astc-8x6-unorm-srgb",
+            Self::ASTC8X8_UNORM => "astc-8x8-unorm",
+            Self::ASTC8X8_UNORM_SRGB => "astc-8x8-unorm-srgb",
+            Self::ASTC10X5_UNORM => "astc-10x5-unorm",
+            Self::ASTC10X5_UNORM_SRGB => "astc-10x5-unorm-srgb",
+            Self::ASTC10X6_UNORM => "astc-10x6-unorm",
+            Self::ASTC10X6_UNORM_SRGB => "astc-10x6-unorm-srgb",
+            Self::ASTC10X8_UNORM => "astc-10x8-unorm",
+            Self::ASTC10X8_UNORM_SRGB => "astc-10x8-unorm-srgb",
+            Self::ASTC10X10_UNORM => "astc-10x10-unorm",
+            Self::ASTC10X10_UNORM_SRGB => "astc-10x10-unorm-srgb",
+            Self::ASTC12X10_UNORM => "astc-12x10-unorm",
+            Self::ASTC12X10_UNORM_SRGB => "astc-12x10-unorm-srgb",
+            Self::ASTC12X12_UNORM => "astc-12x12-unorm",
+            Self::ASTC12X12_UNORM_SRGB => "astc-12x12-unorm-srgb",
+            _ => "unknown",
+        }
+    }
+
     /// Returns true when this object is undefined.
     #[must_use]
     pub(crate) fn is_undefined(self) -> bool {
@@ -1104,6 +1214,49 @@ mod tests {
         assert!(!caps.is_compressed);
 
         assert_eq!(TextureFormat::from_raw(0).caps(&features), None);
+    }
+
+    #[test]
+    fn texture_format_name_covers_webgpu_names_and_recognized_formats() {
+        for (raw, expected) in [
+            (TextureFormat::UNDEFINED, "undefined"),
+            (TextureFormat::R8_UNORM, "r8unorm"),
+            (TextureFormat::RGBA8_UNORM, "rgba8unorm"),
+            (TextureFormat::BGRA8_UNORM_SRGB, "bgra8unorm-srgb"),
+            (TextureFormat::RG11B10_UFLOAT, "rg11b10ufloat"),
+            (TextureFormat::RGB9E5_UFLOAT, "rgb9e5ufloat"),
+            (TextureFormat::DEPTH24_PLUS_STENCIL8, "depth24plus-stencil8"),
+            (
+                TextureFormat::DEPTH32_FLOAT_STENCIL8,
+                "depth32float-stencil8",
+            ),
+            (TextureFormat::BC1_RGBA_UNORM, "bc1-rgba-unorm"),
+            (TextureFormat::ETC2_RGB8_UNORM, "etc2-rgb8unorm"),
+            (TextureFormat::ASTC4X4_UNORM_SRGB, "astc-4x4-unorm-srgb"),
+            (TextureFormat::R16_UNORM, "r16unorm"),
+            (TextureFormat::RGBA16_SNORM, "rgba16snorm"),
+        ] {
+            assert_eq!(TextureFormat::from_raw(raw).name(), expected);
+        }
+        assert_eq!(TextureFormat::from_raw(0x80).name(), "unknown");
+
+        let features = [
+            Feature::TextureCompressionBc,
+            Feature::TextureCompressionEtc2,
+            Feature::TextureCompressionAstc,
+            Feature::Depth32FloatStencil8,
+            Feature::Rg11b10UfloatRenderable,
+            Feature::TextureFormatsTier1,
+            Feature::TextureFormatsTier2,
+        ]
+        .into_iter()
+        .collect();
+        for raw in 1..=0x7f {
+            let format = TextureFormat::from_raw(raw);
+            if format.caps(&features).is_some() {
+                assert_ne!(format.name(), "unknown", "missing name for raw {raw:#x}");
+            }
+        }
     }
 
     #[test]

@@ -125,3 +125,69 @@ on the cdylib".
   `vendor == apple`); the report's criterion "re-confirm the
   `@loader_path` install name on Apple" is deferred to the next run on
   a macOS host, as this fix was produced on a Linux-only host.
+
+## 2026-08-24 — `texture-formats-tier2` advertised without a device query
+
+**Reported by:** subscript-typegpu (downstream GPU project), against
+`13ac0b4`, Metal. Stated from the code paths — the reporter's machines
+report tier 2, so the consequence could not be reproduced downstream.
+
+**Symptom.** `MetalAdapter::supports_texture_formats_tier2()` returned
+`true` unconditionally, so on a Metal device below read-write texture
+tier 2 yawgpu advertised the feature, accepted a `read-write` bind group
+layout on a tier-2 format such as `rgba8unorm`, and handed Tint MSL to a
+compiler whose device cannot execute it — the failure surfaced late
+(Metal compiler / wrong results) instead of at the feature query. Dawn
+gates the feature on `[device readWriteTextureSupport] ==
+MTLReadWriteTextureTier2` (`PhysicalDeviceMTL.mm`); `readWriteTextureSupport`
+appeared nowhere in the yawgpu tree.
+
+**Root cause.** The Metal feature table (`yawgpu-hal/src/metal/mod.rs`)
+hard-coded tier 2 as supported; the core `read-write` rejection message
+also did not name the format or the feature, so a client on a tier-1
+device would have had no pointer to the missing feature.
+
+**Fix.** Contract: `specs/blocks/72-texture-formats-tier2.md`.
+`MetalAdapter::new` queries `readWriteTextureSupport` once and caches
+the `MTLReadWriteTextureTier`; `supports_texture_formats_tier2()` is
+`tier == Tier2` (Dawn's rule). Core: when a `read-write` storage-texture
+layout entry is rejected and the format *would* be read-write capable
+with `TextureFormatsTier2` (evaluated via `caps()` against
+`features ∪ {Tier2}`, no second table), the message names both —
+`storage texture binding format rgba8unorm supports read-write storage
+access only with the texture-formats-tier2 feature, which this device
+does not have`; formats that never support read-write (`rg32float`)
+keep the existing generic message. `TextureFormat::name()` (WebGPU IDL
+names, all 102 header formats) was added for the message. Tier 1,
+Noop, Vulkan and GLES advertisement are untouched.
+
+**Known analogue (not fixed here).** `VulkanAdapter::supports_texture_formats_tier2()`
+is also an unconditional `true`; Dawn gates Vulkan tier 1+2 on
+`shaderStorageImageExtendedFormats` plus per-format colour-attachment
+`VkFormatProperties`. Tracked as the Block 72 follow-up slice.
+
+**Verification.**
+
+- Inline unit tests: `TextureFormat::name()` sample + completeness
+  (every `caps()`-recognised raw has a name); BGL message names
+  `rgba8unorm` + `texture-formats-tier2` without the feature, generic
+  message for `rg32float` with it, no error for `rgba8unorm` with it.
+- Metal HAL unit (`#[ignore]`, real GPU): cached tier equals a fresh
+  `readWriteTextureSupport()` query and `supports_texture_formats_tier2()`
+  is `tier == Tier2` — 42/42 ignored Metal HAL tests green on the M2.
+- Noop integration (`yawgpu/tests/bind_group_validation.rs`): device
+  without the feature → error naming format + tier; with it → no error;
+  `rg32float` with it → generic message.
+- Real-Metal e2e (`yawgpu/tests/e2e_metal_texture_formats_tier2.rs`, new,
+  3/3): advertisement equals a direct `MTLDevice.readWriteTextureSupport`
+  oracle; a device without the feature rejects the `rgba8unorm`
+  `read-write` layout with the tier-naming message; a device with the
+  feature executes a `texture_storage_2d<rgba8unorm, read_write>` compute
+  pass and the readback matches. Full real-Metal e2e suite: 104 passed / 0 failed.
+- Noop workspace suite (88 binaries) green; clippy `-D warnings` clean on
+  default / `metal` / `vulkan` / `gles,tiled`; `cargo fmt --check` clean.
+- CTS (Metal, M2 — reports tier 2, so no behaviour change expected):
+  `capability_checks,features,texture_formats{,_tier1,_tier2}`,
+  `createBindGroupLayout`, `storage_texture,{read_only,read_write}` —
+  `pass=2056 skip=263 warn=0 fail=0 crash=0` before and after, non-pass
+  set diff empty.
