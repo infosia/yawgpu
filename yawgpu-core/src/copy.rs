@@ -226,6 +226,106 @@ pub(crate) fn texel_copy_block_size(format_caps: FormatCaps, aspect: TextureAspe
     }
 }
 
+/// Validates the texture subresource range shared by texture copy entry points.
+pub(crate) fn validate_texture_copy_range(
+    texture: &Texture,
+    mip_level: u32,
+    origin: Origin3d,
+    copy_size: Extent3d,
+    aspect: TextureAspect,
+    label: &str,
+    options: TextureCopyRangeValidation,
+) -> Result<(FormatCaps, Extent3d, bool), String> {
+    if mip_level >= texture.mip_level_count() {
+        return Err(format!("{label} mipLevel is out of range"));
+    }
+
+    let Some(format_caps) = texture.format_caps() else {
+        return Err(format!("{label} format must not be Undefined"));
+    };
+    match aspect {
+        TextureAspect::All => {}
+        TextureAspect::DepthOnly if format_caps.aspects.depth => {}
+        TextureAspect::StencilOnly if format_caps.aspects.stencil => {}
+        TextureAspect::DepthOnly => return Err(options.depth_aspect_message.format(label)),
+        TextureAspect::StencilOnly => return Err(options.stencil_aspect_message.format(label)),
+    }
+
+    let subresource = texture.subresource_size(mip_level);
+    let physical_width = div_ceil_u32(subresource.width, format_caps.block_w)
+        .checked_mul(format_caps.block_w)
+        .ok_or_else(|| format!("{label} subresource width overflows"))?;
+    let physical_height = div_ceil_u32(subresource.height, format_caps.block_h)
+        .checked_mul(format_caps.block_h)
+        .ok_or_else(|| format!("{label} subresource height overflows"))?;
+    let empty_copy =
+        copy_size.width == 0 || copy_size.height == 0 || copy_size.depth_or_array_layers == 0;
+    if origin
+        .x
+        .checked_add(copy_size.width)
+        .is_none_or(|end| end > physical_width)
+        || origin
+            .y
+            .checked_add(copy_size.height)
+            .is_none_or(|end| end > physical_height)
+        || origin
+            .z
+            .checked_add(copy_size.depth_or_array_layers)
+            .is_none_or(|end| end > subresource.depth_or_array_layers)
+    {
+        return Err(format!("{label} range exceeds the texture subresource"));
+    }
+    if options.require_2d_single_layer
+        && texture.dimension() == TextureDimension::D2
+        && texture.size().depth_or_array_layers == 1
+        && !empty_copy
+        && copy_size.depth_or_array_layers != 1
+    {
+        return Err(options.single_layer_2d_message.format(label));
+    }
+    if !origin.x.is_multiple_of(format_caps.block_w)
+        || !origin.y.is_multiple_of(format_caps.block_h)
+    {
+        return Err(format!("{label} origin must be texel block aligned"));
+    }
+    if !copy_size.width.is_multiple_of(format_caps.block_w)
+        || !copy_size.height.is_multiple_of(format_caps.block_h)
+    {
+        return Err(format!(
+            "{label} {} must be texel block aligned",
+            options.size_alignment_noun
+        ));
+    }
+
+    Ok((format_caps, subresource, empty_copy))
+}
+
+/// Configures shared texture copy-range validation wording and optional checks.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TextureCopyRangeValidation {
+    pub(crate) require_2d_single_layer: bool,
+    pub(crate) size_alignment_noun: &'static str,
+    pub(crate) depth_aspect_message: TextureCopyRangeMessage,
+    pub(crate) stencil_aspect_message: TextureCopyRangeMessage,
+    pub(crate) single_layer_2d_message: TextureCopyRangeMessage,
+}
+
+/// Describes how shared texture range validation should render an error.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum TextureCopyRangeMessage {
+    Static(&'static str),
+    LabelSuffix(&'static str),
+}
+
+impl TextureCopyRangeMessage {
+    fn format(self, label: &str) -> String {
+        match self {
+            Self::Static(message) => message.to_owned(),
+            Self::LabelSuffix(suffix) => format!("{label} {suffix}"),
+        }
+    }
+}
+
 /// Returns true when a depth/stencil texture format supports the copy direction and aspect.
 pub(crate) fn depth_stencil_copy_allowed(
     format: TextureFormat,

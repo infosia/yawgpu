@@ -21,8 +21,8 @@ not silently dropped.
 | H1 | yawgpu-hal (lib.rs dispatch, Vulkan, Metal, shared format helpers) | DONE | see log |
 | H2 | yawgpu-hal (GLES-only dedupe + program cache) | DONE | see log |
 | C1a | yawgpu-core (pipeline creation: C1.1, C1.2, C1.8, C1.13, C1.15) | DONE | fb56a6a |
-| C1b | yawgpu-core (pass recording, copy validation, submit bind resolution) | in progress | |
-| F1 | yawgpu (FFI: handle borrowing, chain walks, callbacks, macros) | planned | |
+| C1b | yawgpu-core (pass recording, copy validation, submit bind resolution) | DONE | see log |
+| F1 | yawgpu (FFI: handle borrowing, chain walks, callbacks, macros) | in progress | |
 
 ## H1 — yawgpu-hal: dispatch + Vulkan + Metal + shared helpers
 
@@ -126,3 +126,26 @@ double Vec; `adapter_info_from_core` constant allocation.
   proven over all 102 `HalTextureFormat` variants by unit test.
   Gates: `yawgpu-hal --features gles,noop --lib` 200/0, gles clippy
   clean. H2 committed.
+- 2026-09-02 — H2 committed as fdba835.
+- 2026-09-02 — C1b reviewed (fresh-context equivalence review) +
+  committed. Review found 1 MAJOR: merging the indirect-dispatch scope
+  checks had reordered `dispatch_workgroups_indirect` so an indirect-
+  buffer error surfaced before the dispatch-state error on doubly-
+  invalid input — fixed by re-splitting (state + bound-group scope →
+  indirect buffer → extra-use check against the already-collected
+  scope) and pinned by a unit test. MINORs fixed: string-matched
+  message remaps replaced by explicit message params
+  (`TextureCopyRangeValidation`, `BufferWriteValidation`), latent
+  `size - offset` underflow replaced by `BufferWriteSizeMode` +
+  `checked_sub`, `render_pass_late_checks` rename + doc, 32-bit test
+  overflow, cached `format_caps` invariant test. Logged, not fixed
+  (unobservable): render-pass indirect-buffer parent reference is now
+  recorded after the late attachment/index-buffer checks (same Err
+  poisons the encoder either way); unreachable overflow-message
+  differences in `copy.rs` / `render_pipeline.rs`. **Intended
+  behaviour change C1.5 landed:** `writeTexture` now bounds-checks
+  against the block-rounded physical mip extent like
+  `copyBufferToTexture` (spec + Dawn), unit-tested with BC1 12×8 mip 1.
+  Gates: workspace 1008/0, clippy clean, core
+  `--features tiled,shader-passthrough` green, Metal e2e 67/0 + 41/0,
+  MoltenVK e2e 48/0 + 33/0. F1 dispatched.

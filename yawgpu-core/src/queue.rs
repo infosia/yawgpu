@@ -8,9 +8,9 @@ use yawgpu_hal::{
     HalBufferTextureCopy, HalBufferTextureLayout, HalBufferUsage, HalComputeDispatch,
     HalComputePass, HalCopy, HalDevice, HalIndexFormat, HalQueue, HalRenderBundle,
     HalRenderColorTarget, HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPassCommand,
-    HalRenderPassCommandStream, HalResolveQuerySet, HalScissorRect, HalTextureAspect,
-    HalTextureClear, HalTextureComponentSwizzle, HalTextureCopy, HalTextureViewDimension,
-    HalViewport, SubmissionIndex,
+    HalRenderPassCommandStream, HalResolveQuerySet, HalScissorRect, HalStorageTextureAccess,
+    HalTextureAspect, HalTextureClear, HalTextureComponentSwizzle, HalTextureCopy,
+    HalTextureViewDimension, HalViewport, SubmissionIndex,
 };
 #[cfg(feature = "tiled")]
 use yawgpu_hal::{
@@ -1713,14 +1713,12 @@ fn hal_set_bind_group(
             external_textures: Vec::new(),
         });
     };
-    let bindings = pipeline
-        .metal_bindings()
-        .iter()
-        .copied()
-        .filter(|binding| binding.group == index)
-        .collect::<Vec<_>>();
-    let groups = BTreeMap::from([(index, group.clone())]);
-    let resources = hal_bind_resources(pipeline.bind_group_layouts(), &bindings, &groups)?;
+    let resources = hal_bind_group_resources(
+        pipeline.bind_group_layouts(),
+        pipeline.metal_bindings(),
+        index,
+        group,
+    )?;
     Some(HalRenderPassCommand::SetBindGroup {
         index,
         buffers: resources.buffers,
@@ -2028,6 +2026,52 @@ pub(crate) struct HalBoundResources {
     pub(crate) external_textures: Vec<HalBoundExternalTexture>,
 }
 
+fn hal_bound_texture(
+    binding: &MetalBufferBinding,
+    texture_view: &TextureView,
+    storage_access: Option<HalStorageTextureAccess>,
+) -> Option<HalBoundTexture> {
+    Some(HalBoundTexture {
+        group: binding.group,
+        binding: binding.binding,
+        metal_index: binding.metal_index,
+        vertex_metal_index: binding.vertex_metal_index,
+        fragment_metal_index: binding.fragment_metal_index,
+        texture: texture_view.texture().hal()?,
+        format: hal_texture_format(texture_view.format()),
+        dimension: hal_texture_view_dimension(texture_view.dimension()),
+        base_mip_level: texture_view.base_mip_level(),
+        mip_level_count: texture_view.mip_level_count(),
+        base_array_layer: texture_view.base_array_layer(),
+        array_layer_count: texture_view.array_layer_count(),
+        aspect: hal_texture_aspect(texture_view.aspect()),
+        swizzle: texture_view_hal_component_swizzle(texture_view)?,
+        storage_access,
+    })
+}
+
+fn hal_bind_group_resources(
+    layouts: &[Arc<BindGroupLayout>],
+    metal_bindings: &[MetalBufferBinding],
+    index: u32,
+    bound: &BoundBindGroup,
+) -> Option<HalBoundResources> {
+    let mut resources = HalBoundResources::default();
+    for binding in metal_bindings
+        .iter()
+        .copied()
+        .filter(|binding| binding.group == index)
+    {
+        let entry = bound
+            .group
+            .entries()
+            .iter()
+            .find(|entry| entry.binding == binding.binding)?;
+        hal_bind_resource(&mut resources, layouts, &binding, bound, entry)?;
+    }
+    Some(resources)
+}
+
 /// Returns HAL bound shader resources.
 pub(crate) fn hal_bind_resources(
     layouts: &[Arc<BindGroupLayout>],
@@ -2042,137 +2086,122 @@ pub(crate) fn hal_bind_resources(
             .entries()
             .iter()
             .find(|entry| entry.binding == binding.binding)?;
-        match (binding.kind, &entry.resource) {
-            (
-                MetalBindingKind::Buffer(_),
-                BindGroupResource::Buffer {
-                    buffer,
-                    offset,
-                    size,
-                    ..
-                },
-            ) => {
-                let dynamic_offset = dynamic_offset_for_binding(
-                    layouts,
-                    binding.group,
-                    binding.binding,
-                    &bound.dynamic_offsets,
-                )?;
-                let offset = offset.checked_add(dynamic_offset)?;
-                resources.buffers.push(HalBoundBuffer {
-                    group: binding.group,
-                    binding: binding.binding,
-                    metal_index: binding.metal_index,
-                    vertex_metal_index: binding.vertex_metal_index,
-                    fragment_metal_index: binding.fragment_metal_index,
-                    buffer: buffer.hal()?,
-                    offset,
-                    size: *size,
-                });
-            }
-            (MetalBindingKind::Texture, BindGroupResource::TextureView { texture_view, .. }) => {
-                resources.textures.push(HalBoundTexture {
-                    group: binding.group,
-                    binding: binding.binding,
-                    metal_index: binding.metal_index,
-                    vertex_metal_index: binding.vertex_metal_index,
-                    fragment_metal_index: binding.fragment_metal_index,
-                    texture: texture_view.texture().hal()?,
-                    format: hal_texture_format(texture_view.format()),
-                    dimension: hal_texture_view_dimension(texture_view.dimension()),
-                    base_mip_level: texture_view.base_mip_level(),
-                    mip_level_count: texture_view.mip_level_count(),
-                    base_array_layer: texture_view.base_array_layer(),
-                    array_layer_count: texture_view.array_layer_count(),
-                    aspect: hal_texture_aspect(texture_view.aspect()),
-                    swizzle: texture_view_hal_component_swizzle(texture_view)?,
-                    storage_access: None,
-                });
-            }
-            (
-                MetalBindingKind::StorageTexture { access },
-                BindGroupResource::TextureView { texture_view, .. },
-            ) => {
-                resources.textures.push(HalBoundTexture {
-                    group: binding.group,
-                    binding: binding.binding,
-                    metal_index: binding.metal_index,
-                    vertex_metal_index: binding.vertex_metal_index,
-                    fragment_metal_index: binding.fragment_metal_index,
-                    texture: texture_view.texture().hal()?,
-                    format: hal_texture_format(texture_view.format()),
-                    dimension: hal_texture_view_dimension(texture_view.dimension()),
-                    base_mip_level: texture_view.base_mip_level(),
-                    mip_level_count: texture_view.mip_level_count(),
-                    base_array_layer: texture_view.base_array_layer(),
-                    array_layer_count: texture_view.array_layer_count(),
-                    aspect: hal_texture_aspect(texture_view.aspect()),
-                    swizzle: texture_view_hal_component_swizzle(texture_view)?,
-                    storage_access: Some(hal_storage_texture_access(access)),
-                });
-            }
-            (MetalBindingKind::Sampler, BindGroupResource::Sampler { sampler, .. }) => {
-                resources.samplers.push(HalBoundSampler {
-                    group: binding.group,
-                    binding: binding.binding,
-                    metal_index: binding.metal_index,
-                    vertex_metal_index: binding.vertex_metal_index,
-                    fragment_metal_index: binding.fragment_metal_index,
-                    sampler: sampler.hal()?,
-                });
-            }
-            (
-                MetalBindingKind::ExternalTexture,
-                BindGroupResource::ExternalTexture {
-                    external_texture, ..
-                },
-            ) => {
-                let inner = external_texture.inner();
-                let plane0 = inner.planes.first()?;
-                let plane1 = inner.planes.get(1).unwrap_or(plane0);
-                let params_slot = binding.ext_params_buffer_slot?;
-                let params_vertex_metal_index = match binding.vertex_metal_index {
-                    Some(_) => Some(binding.ext_params_vertex_buffer_slot?),
-                    None => None,
-                };
-                let params_fragment_metal_index = match binding.fragment_metal_index {
-                    Some(_) => Some(binding.ext_params_fragment_buffer_slot?),
-                    None => None,
-                };
-                let plane1_metal_index = binding.metal_index.checked_add(1)?;
-                let plane1_vertex_metal_index = match binding.vertex_metal_index {
-                    Some(slot) => Some(slot.checked_add(1)?),
-                    None => None,
-                };
-                let plane1_fragment_metal_index = match binding.fragment_metal_index {
-                    Some(slot) => Some(slot.checked_add(1)?),
-                    None => None,
-                };
-                resources.external_textures.push(HalBoundExternalTexture {
-                    group: binding.group,
-                    binding: binding.binding,
-                    plane0: plane0.texture().hal()?,
-                    plane1: plane1.texture().hal()?,
-                    plane0_metal_index: binding.metal_index,
-                    plane1_metal_index,
-                    plane0_vertex_metal_index: binding.vertex_metal_index,
-                    plane1_vertex_metal_index,
-                    plane0_fragment_metal_index: binding.fragment_metal_index,
-                    plane1_fragment_metal_index,
-                    params: inner.params.hal()?,
-                    params_metal_index: params_slot,
-                    params_vertex_metal_index,
-                    params_fragment_metal_index,
-                    format: hal_texture_format(plane0.format()),
-                    dimension: hal_texture_view_dimension(plane0.dimension()),
-                    params_offset: 0,
-                    params_size: inner.params.size(),
-                });
-            }
-            _ => return None,
-        }
+        hal_bind_resource(&mut resources, layouts, binding, bound, entry)?;
     }
     Some(resources)
+}
+
+fn hal_bind_resource(
+    resources: &mut HalBoundResources,
+    layouts: &[Arc<BindGroupLayout>],
+    binding: &MetalBufferBinding,
+    bound: &BoundBindGroup,
+    entry: &BindGroupEntry,
+) -> Option<()> {
+    match (binding.kind, &entry.resource) {
+        (
+            MetalBindingKind::Buffer(_),
+            BindGroupResource::Buffer {
+                buffer,
+                offset,
+                size,
+                ..
+            },
+        ) => {
+            let dynamic_offset = dynamic_offset_for_binding(
+                layouts,
+                binding.group,
+                binding.binding,
+                &bound.dynamic_offsets,
+            )?;
+            let offset = offset.checked_add(dynamic_offset)?;
+            resources.buffers.push(HalBoundBuffer {
+                group: binding.group,
+                binding: binding.binding,
+                metal_index: binding.metal_index,
+                vertex_metal_index: binding.vertex_metal_index,
+                fragment_metal_index: binding.fragment_metal_index,
+                buffer: buffer.hal()?,
+                offset,
+                size: *size,
+            });
+        }
+        (MetalBindingKind::Texture, BindGroupResource::TextureView { texture_view, .. }) => {
+            resources
+                .textures
+                .push(hal_bound_texture(binding, texture_view, None)?);
+        }
+        (
+            MetalBindingKind::StorageTexture { access },
+            BindGroupResource::TextureView { texture_view, .. },
+        ) => {
+            resources.textures.push(hal_bound_texture(
+                binding,
+                texture_view,
+                Some(hal_storage_texture_access(access)),
+            )?);
+        }
+        (MetalBindingKind::Sampler, BindGroupResource::Sampler { sampler, .. }) => {
+            resources.samplers.push(HalBoundSampler {
+                group: binding.group,
+                binding: binding.binding,
+                metal_index: binding.metal_index,
+                vertex_metal_index: binding.vertex_metal_index,
+                fragment_metal_index: binding.fragment_metal_index,
+                sampler: sampler.hal()?,
+            });
+        }
+        (
+            MetalBindingKind::ExternalTexture,
+            BindGroupResource::ExternalTexture {
+                external_texture, ..
+            },
+        ) => {
+            let inner = external_texture.inner();
+            let plane0 = inner.planes.first()?;
+            let plane1 = inner.planes.get(1).unwrap_or(plane0);
+            let params_slot = binding.ext_params_buffer_slot?;
+            let params_vertex_metal_index = match binding.vertex_metal_index {
+                Some(_) => Some(binding.ext_params_vertex_buffer_slot?),
+                None => None,
+            };
+            let params_fragment_metal_index = match binding.fragment_metal_index {
+                Some(_) => Some(binding.ext_params_fragment_buffer_slot?),
+                None => None,
+            };
+            let plane1_metal_index = binding.metal_index.checked_add(1)?;
+            let plane1_vertex_metal_index = match binding.vertex_metal_index {
+                Some(slot) => Some(slot.checked_add(1)?),
+                None => None,
+            };
+            let plane1_fragment_metal_index = match binding.fragment_metal_index {
+                Some(slot) => Some(slot.checked_add(1)?),
+                None => None,
+            };
+            resources.external_textures.push(HalBoundExternalTexture {
+                group: binding.group,
+                binding: binding.binding,
+                plane0: plane0.texture().hal()?,
+                plane1: plane1.texture().hal()?,
+                plane0_metal_index: binding.metal_index,
+                plane1_metal_index,
+                plane0_vertex_metal_index: binding.vertex_metal_index,
+                plane1_vertex_metal_index,
+                plane0_fragment_metal_index: binding.fragment_metal_index,
+                plane1_fragment_metal_index,
+                params: inner.params.hal()?,
+                params_metal_index: params_slot,
+                params_vertex_metal_index,
+                params_fragment_metal_index,
+                format: hal_texture_format(plane0.format()),
+                dimension: hal_texture_view_dimension(plane0.dimension()),
+                params_offset: 0,
+                params_size: inner.params.size(),
+            });
+        }
+        _ => return None,
+    }
+    Some(())
 }
 
 /// Returns dynamic offset for binding.

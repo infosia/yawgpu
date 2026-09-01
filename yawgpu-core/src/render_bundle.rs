@@ -386,30 +386,26 @@ impl RenderBundleEncoder {
         limits: Limits,
     ) -> Option<String> {
         self.record_bundle_command(|state| {
-            validate_render_draw_state(
+            record_render_draw(
                 state,
-                RenderDrawKind::Direct {
+                RenderDrawRecord::Direct {
                     vertex_count,
                     instance_count,
                     first_vertex,
                     first_instance,
                 },
                 limits,
-            )?;
-            let pipeline = Arc::clone(
-                state
-                    .render_pipeline
-                    .as_ref()
-                    .ok_or_else(|| "render bundle requires a render pipeline".to_owned())?,
-            );
-            record_pipeline_usage_scope(state, pipeline.bind_group_layouts(), &[])?;
-            state.draw_count = state.draw_count.saturating_add(1);
-            Ok(Some(RenderCommand::Draw(RenderDrawExecution::Direct {
-                vertex_count,
-                instance_count,
-                first_vertex,
-                first_instance,
-            })))
+                DrawRecordingContext {
+                    pipeline_required_prefix: "render bundle",
+                    render_pass_late_checks: false,
+                },
+            )
+            .map(|(command, referenced_indirect_buffer)| {
+                if let Some(buffer) = referenced_indirect_buffer {
+                    state.command_referenced_buffers.push(buffer);
+                }
+                Some(command)
+            })
         })
     }
 
@@ -424,31 +420,27 @@ impl RenderBundleEncoder {
         limits: Limits,
     ) -> Option<String> {
         self.record_bundle_command(|state| {
-            validate_render_draw_state(
+            record_render_draw(
                 state,
-                RenderDrawKind::IndexedDirect {
+                RenderDrawRecord::IndexedDirect {
                     index_count,
                     instance_count,
                     first_index,
+                    base_vertex,
                     first_instance,
                 },
                 limits,
-            )?;
-            let pipeline = Arc::clone(
-                state
-                    .render_pipeline
-                    .as_ref()
-                    .ok_or_else(|| "render bundle requires a render pipeline".to_owned())?,
-            );
-            record_pipeline_usage_scope(state, pipeline.bind_group_layouts(), &[])?;
-            state.draw_count = state.draw_count.saturating_add(1);
-            Ok(Some(RenderCommand::Draw(RenderDrawExecution::Indexed {
-                index_count,
-                instance_count,
-                first_index,
-                base_vertex,
-                first_instance,
-            })))
+                DrawRecordingContext {
+                    pipeline_required_prefix: "render bundle",
+                    render_pass_late_checks: false,
+                },
+            )
+            .map(|(command, referenced_indirect_buffer)| {
+                if let Some(buffer) = referenced_indirect_buffer {
+                    state.command_referenced_buffers.push(buffer);
+                }
+                Some(command)
+            })
         })
     }
 
@@ -460,34 +452,24 @@ impl RenderBundleEncoder {
         limits: Limits,
     ) -> Option<String> {
         self.record_bundle_command(|state| {
-            validate_render_draw_state(state, RenderDrawKind::Indirect, limits)?;
-            let pipeline = Arc::clone(
-                state
-                    .render_pipeline
-                    .as_ref()
-                    .ok_or_else(|| "render bundle requires a render pipeline".to_owned())?,
-            );
-            validate_indirect_buffer(&indirect_buffer, indirect_offset, 16, "draw indirect")?;
-            record_buffer_usage_scope_use(
+            record_render_draw(
                 state,
-                BufferScopeUse {
-                    buffer: Arc::clone(&indirect_buffer),
-                    offset: indirect_offset,
-                    size: 16,
-                    access: ResourceAccess::Read,
+                RenderDrawRecord::Indirect {
+                    indirect_buffer,
+                    indirect_offset,
                 },
-            )?;
-            record_pipeline_usage_scope(state, pipeline.bind_group_layouts(), &[])?;
-            state
-                .command_referenced_buffers
-                .push(Arc::clone(&indirect_buffer));
-            state.draw_count = state.draw_count.saturating_add(1);
-            Ok(Some(RenderCommand::Draw(RenderDrawExecution::Indirect {
-                indirect_buffer: BoundIndirectBuffer {
-                    buffer: indirect_buffer,
-                    offset: indirect_offset,
+                limits,
+                DrawRecordingContext {
+                    pipeline_required_prefix: "render bundle",
+                    render_pass_late_checks: false,
                 },
-            })))
+            )
+            .map(|(command, referenced_indirect_buffer)| {
+                if let Some(buffer) = referenced_indirect_buffer {
+                    state.command_referenced_buffers.push(buffer);
+                }
+                Some(command)
+            })
         })
     }
 
@@ -499,41 +481,24 @@ impl RenderBundleEncoder {
         limits: Limits,
     ) -> Option<String> {
         self.record_bundle_command(|state| {
-            validate_render_draw_state(state, RenderDrawKind::IndexedIndirect, limits)?;
-            let pipeline = Arc::clone(
-                state
-                    .render_pipeline
-                    .as_ref()
-                    .ok_or_else(|| "render bundle requires a render pipeline".to_owned())?,
-            );
-            validate_indirect_buffer(
-                &indirect_buffer,
-                indirect_offset,
-                20,
-                "draw indexed indirect",
-            )?;
-            record_buffer_usage_scope_use(
+            record_render_draw(
                 state,
-                BufferScopeUse {
-                    buffer: Arc::clone(&indirect_buffer),
-                    offset: indirect_offset,
-                    size: 20,
-                    access: ResourceAccess::Read,
+                RenderDrawRecord::IndexedIndirect {
+                    indirect_buffer,
+                    indirect_offset,
                 },
-            )?;
-            record_pipeline_usage_scope(state, pipeline.bind_group_layouts(), &[])?;
-            state
-                .command_referenced_buffers
-                .push(Arc::clone(&indirect_buffer));
-            state.draw_count = state.draw_count.saturating_add(1);
-            Ok(Some(RenderCommand::Draw(
-                RenderDrawExecution::IndexedIndirect {
-                    indirect_buffer: BoundIndirectBuffer {
-                        buffer: indirect_buffer,
-                        offset: indirect_offset,
-                    },
+                limits,
+                DrawRecordingContext {
+                    pipeline_required_prefix: "render bundle",
+                    render_pass_late_checks: false,
                 },
-            )))
+            )
+            .map(|(command, referenced_indirect_buffer)| {
+                if let Some(buffer) = referenced_indirect_buffer {
+                    state.command_referenced_buffers.push(buffer);
+                }
+                Some(command)
+            })
         })
     }
 

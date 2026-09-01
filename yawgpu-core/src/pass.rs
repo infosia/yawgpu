@@ -452,14 +452,14 @@ impl PassEncoderInner {
         if let Some(message) = self.pass_command_immediate_error() {
             return Some(message);
         }
-        let ended = { self.state.lock().ended };
-        if ended {
-            self.parent
-                .record_first_error("pass encoder cannot be used after end");
-            return None;
-        }
         let mut state = self.state.lock();
-        if let Err(message) = command(&mut state) {
+        let error = if state.ended {
+            Some("pass encoder cannot be used after end".to_owned())
+        } else {
+            command(&mut state).err()
+        };
+        drop(state);
+        if let Some(message) = error {
             self.parent.record_first_error(message);
         }
         None
@@ -495,6 +495,48 @@ pub(crate) enum RenderDrawKind {
     Indirect,
     /// Indexed indirect variant.
     IndexedIndirect,
+}
+
+/// Describes a render draw command with all data needed to record it.
+pub(crate) enum RenderDrawRecord {
+    /// Direct draw.
+    Direct {
+        /// Vertex count.
+        vertex_count: u32,
+        /// Instance count.
+        instance_count: u32,
+        /// First vertex.
+        first_vertex: u32,
+        /// First instance.
+        first_instance: u32,
+    },
+    /// Indexed direct draw.
+    IndexedDirect {
+        /// Index count.
+        index_count: u32,
+        /// Instance count.
+        instance_count: u32,
+        /// First index.
+        first_index: u32,
+        /// Base vertex.
+        base_vertex: i32,
+        /// First instance.
+        first_instance: u32,
+    },
+    /// Indirect draw.
+    Indirect {
+        /// Indirect argument buffer.
+        indirect_buffer: Arc<Buffer>,
+        /// Indirect argument offset.
+        indirect_offset: u64,
+    },
+    /// Indexed indirect draw.
+    IndexedIndirect {
+        /// Indirect argument buffer.
+        indirect_buffer: Arc<Buffer>,
+        /// Indirect argument offset.
+        indirect_offset: u64,
+    },
 }
 
 /// Validates render draw state and returns a descriptive error on failure.
@@ -539,6 +581,175 @@ impl RenderDrawKind {
             RenderDrawKind::IndexedDirect { .. } | RenderDrawKind::IndexedIndirect
         )
     }
+}
+
+impl RenderDrawRecord {
+    fn validation_kind(&self) -> RenderDrawKind {
+        match *self {
+            Self::Direct {
+                vertex_count,
+                instance_count,
+                first_vertex,
+                first_instance,
+            } => RenderDrawKind::Direct {
+                vertex_count,
+                instance_count,
+                first_vertex,
+                first_instance,
+            },
+            Self::IndexedDirect {
+                index_count,
+                instance_count,
+                first_index,
+                first_instance,
+                ..
+            } => RenderDrawKind::IndexedDirect {
+                index_count,
+                instance_count,
+                first_index,
+                first_instance,
+            },
+            Self::Indirect { .. } => RenderDrawKind::Indirect,
+            Self::IndexedIndirect { .. } => RenderDrawKind::IndexedIndirect,
+        }
+    }
+
+    fn is_indexed(&self) -> bool {
+        self.validation_kind().is_indexed()
+    }
+}
+
+/// Carries encoder-specific draw recording behavior.
+pub(crate) struct DrawRecordingContext {
+    /// Prefix used by late draw validation errors.
+    pub(crate) pipeline_required_prefix: &'static str,
+    /// Enables render-pass-only late checks: attachment presence, index-buffer
+    /// presence for indexed draws, and occlusion-query write tracking. Render
+    /// bundles never ran these checks.
+    pub(crate) render_pass_late_checks: bool,
+}
+
+/// Records a render draw command after shared validation.
+pub(crate) fn record_render_draw(
+    state: &mut PassEncoderState,
+    record: RenderDrawRecord,
+    limits: Limits,
+    ctx: DrawRecordingContext,
+) -> Result<(RenderCommand, Option<Arc<Buffer>>), String> {
+    validate_render_draw_state(state, record.validation_kind(), limits)?;
+    let pipeline = Arc::clone(state.render_pipeline.as_ref().ok_or_else(|| {
+        format!(
+            "{} requires a render pipeline",
+            ctx.pipeline_required_prefix
+        )
+    })?);
+    match &record {
+        RenderDrawRecord::Indirect {
+            indirect_buffer,
+            indirect_offset,
+        } => {
+            validate_indirect_buffer(indirect_buffer, *indirect_offset, 16, "draw indirect")?;
+            record_buffer_usage_scope_use(
+                state,
+                BufferScopeUse {
+                    buffer: Arc::clone(indirect_buffer),
+                    offset: *indirect_offset,
+                    size: 16,
+                    access: ResourceAccess::Read,
+                },
+            )?;
+        }
+        RenderDrawRecord::IndexedIndirect {
+            indirect_buffer,
+            indirect_offset,
+        } => {
+            validate_indirect_buffer(
+                indirect_buffer,
+                *indirect_offset,
+                20,
+                "draw indexed indirect",
+            )?;
+            record_buffer_usage_scope_use(
+                state,
+                BufferScopeUse {
+                    buffer: Arc::clone(indirect_buffer),
+                    offset: *indirect_offset,
+                    size: 20,
+                    access: ResourceAccess::Read,
+                },
+            )?;
+        }
+        RenderDrawRecord::Direct { .. } | RenderDrawRecord::IndexedDirect { .. } => {}
+    }
+    record_pipeline_usage_scope(state, pipeline.bind_group_layouts())?;
+    let referenced_indirect_buffer = match &record {
+        RenderDrawRecord::Indirect {
+            indirect_buffer, ..
+        }
+        | RenderDrawRecord::IndexedIndirect {
+            indirect_buffer, ..
+        } => Some(Arc::clone(indirect_buffer)),
+        RenderDrawRecord::Direct { .. } | RenderDrawRecord::IndexedDirect { .. } => None,
+    };
+    state.draw_count = state.draw_count.saturating_add(1);
+    if ctx.render_pass_late_checks {
+        if state.render_color_attachments.is_empty()
+            && state.render_depth_stencil_attachment.is_none()
+        {
+            return Err("render pass requires at least one attachment".to_owned());
+        }
+        if record.is_indexed() && state.index_buffer.is_none() {
+            return Err("render pass requires an index buffer".to_owned());
+        }
+        if let Some(query_index) = state.open_occlusion_query {
+            state.written_occlusion_queries.insert(query_index);
+        }
+    }
+    let command = RenderCommand::Draw(match record {
+        RenderDrawRecord::Direct {
+            vertex_count,
+            instance_count,
+            first_vertex,
+            first_instance,
+        } => RenderDrawExecution::Direct {
+            vertex_count,
+            instance_count,
+            first_vertex,
+            first_instance,
+        },
+        RenderDrawRecord::IndexedDirect {
+            index_count,
+            instance_count,
+            first_index,
+            base_vertex,
+            first_instance,
+        } => RenderDrawExecution::Indexed {
+            index_count,
+            instance_count,
+            first_index,
+            base_vertex,
+            first_instance,
+        },
+        RenderDrawRecord::Indirect {
+            indirect_buffer,
+            indirect_offset,
+        } => RenderDrawExecution::Indirect {
+            indirect_buffer: BoundIndirectBuffer {
+                buffer: indirect_buffer,
+                offset: indirect_offset,
+            },
+        },
+        RenderDrawRecord::IndexedIndirect {
+            indirect_buffer,
+            indirect_offset,
+        } => RenderDrawExecution::IndexedIndirect {
+            indirect_buffer: BoundIndirectBuffer {
+                buffer: indirect_buffer,
+                offset: indirect_offset,
+            },
+        },
+    });
+    Ok((command, referenced_indirect_buffer))
 }
 
 /// Validates render draw base state and returns a descriptive error on failure.
@@ -597,16 +808,28 @@ fn validate_draw_time_bind_groups_plus_vertex_buffers(
         .next_back()
         .copied()
         .map_or(0, |slot| slot + 1);
+    validate_bind_groups_plus_vertex_buffers_count(
+        bind_group_count,
+        vertex_buffer_count,
+        limits,
+        "render pass draw",
+    )
+}
+
+/// Validates the combined bind-group and vertex-buffer count limit.
+pub(crate) fn validate_bind_groups_plus_vertex_buffers_count(
+    bind_group_count: u32,
+    vertex_buffer_count: u32,
+    limits: Limits,
+    label: &str,
+) -> Result<(), String> {
     let total = bind_group_count
         .checked_add(vertex_buffer_count)
-        .ok_or_else(|| {
-            "render pass draw bind group plus vertex buffer count overflows".to_owned()
-        })?;
+        .ok_or_else(|| format!("{label} bind group plus vertex buffer count overflows"))?;
     if total > limits.max_bind_groups_plus_vertex_buffers {
-        return Err(
-            "render pass draw bind group plus vertex buffer count exceeds the device limit"
-                .to_owned(),
-        );
+        return Err(format!(
+            "{label} bind group plus vertex buffer count exceeds the device limit"
+        ));
     }
     Ok(())
 }
@@ -933,30 +1156,7 @@ impl TextureAspectMask {
 }
 
 /// Validates usage scope and returns a descriptive error on failure.
-pub(crate) fn validate_usage_scope(
-    required_layouts: &[Arc<BindGroupLayout>],
-    bound_groups: &BTreeMap<u32, BoundBindGroup>,
-    attachment_uses: Option<&[TextureScopeUse]>,
-) -> Result<(), String> {
-    let mut buffer_uses = Vec::new();
-    let mut texture_uses = Vec::new();
-
-    for (index, layout) in required_layouts.iter().enumerate() {
-        let index = u32::try_from(index)
-            .map_err(|_| "pipeline bind group index is too large".to_owned())?;
-        let Some(bound) = bound_groups.get(&index) else {
-            continue;
-        };
-        collect_bind_group_usage(layout, bound, &mut buffer_uses, &mut texture_uses)?;
-    }
-
-    if let Some(attachment_uses) = attachment_uses {
-        texture_uses.extend_from_slice(attachment_uses);
-    }
-    validate_resource_usage_scope(&buffer_uses, &texture_uses)
-}
-
-pub(crate) fn collect_pipeline_usage_scope(
+pub(crate) fn collect_usage_scope(
     required_layouts: &[Arc<BindGroupLayout>],
     bound_groups: &BTreeMap<u32, BoundBindGroup>,
 ) -> Result<(Vec<BufferScopeUse>, Vec<TextureScopeUse>), String> {
@@ -964,8 +1164,7 @@ pub(crate) fn collect_pipeline_usage_scope(
     let mut texture_uses = Vec::new();
 
     for (index, layout) in required_layouts.iter().enumerate() {
-        let index = u32::try_from(index)
-            .map_err(|_| "pipeline bind group index is too large".to_owned())?;
+        let index = validate_pipeline_bind_group_index(index)?;
         let Some(bound) = bound_groups.get(&index) else {
             continue;
         };
@@ -975,13 +1174,56 @@ pub(crate) fn collect_pipeline_usage_scope(
     Ok((buffer_uses, texture_uses))
 }
 
+pub(crate) fn validate_extra_buffer_uses_against_scope(
+    existing: &[BufferScopeUse],
+    extra: &[BufferScopeUse],
+) -> Result<(), String> {
+    for current in extra {
+        for previous in existing {
+            if current.buffer.same(&previous.buffer)
+                && (current.access == ResourceAccess::Write
+                    || previous.access == ResourceAccess::Write)
+            {
+                return Err(
+                    "usage scope cannot read and write or write the same buffer range twice"
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    validate_buffer_usage_scope(extra)
+}
+
 pub(crate) fn record_pipeline_usage_scope(
     state: &mut PassEncoderState,
     required_layouts: &[Arc<BindGroupLayout>],
-    _attachment_uses: &[TextureScopeUse],
 ) -> Result<(), String> {
-    let _ = collect_pipeline_usage_scope(required_layouts, &state.bind_groups)?;
+    for (index, layout) in required_layouts.iter().enumerate() {
+        let index = validate_pipeline_bind_group_index(index)?;
+        let Some(bound) = state.bind_groups.get(&index) else {
+            continue;
+        };
+        let _ = layout;
+        for precomputed in &bound.group.precomputed_usage().buffer_uses {
+            let mut offset = precomputed.scope_use.offset;
+            if let Some(dynamic_offset_index) = precomputed.dynamic_offset_index {
+                let dynamic_offset = bound
+                    .dynamic_offsets
+                    .get(dynamic_offset_index)
+                    .copied()
+                    .unwrap_or(0);
+                offset = offset
+                    .checked_add(u64::from(dynamic_offset))
+                    .ok_or_else(|| "usage scope buffer offset overflows".to_owned())?;
+            }
+            let _ = offset;
+        }
+    }
     Ok(())
+}
+
+fn validate_pipeline_bind_group_index(index: usize) -> Result<u32, String> {
+    u32::try_from(index).map_err(|_| "pipeline bind group index is too large".to_owned())
 }
 
 pub(crate) fn record_bind_group_usage_scope(
@@ -1003,12 +1245,12 @@ pub(crate) fn record_buffer_usage_scope_use(
     state: &mut PassEncoderState,
     buffer_use: BufferScopeUse,
 ) -> Result<(), String> {
-    record_buffer_usage_scope_uses(state, vec![buffer_use])
+    record_buffer_usage_scope_uses(state, [buffer_use])
 }
 
 fn record_buffer_usage_scope_uses(
     state: &mut PassEncoderState,
-    buffer_uses: Vec<BufferScopeUse>,
+    buffer_uses: impl IntoIterator<Item = BufferScopeUse>,
 ) -> Result<(), String> {
     record_resource_usage_scope_uses(state, buffer_uses, Vec::new())
 }
@@ -1016,9 +1258,11 @@ fn record_buffer_usage_scope_uses(
 /// Incrementally validates and records resource uses in the render usage scope.
 pub(crate) fn record_resource_usage_scope_uses(
     state: &mut PassEncoderState,
-    buffer_uses: Vec<BufferScopeUse>,
-    texture_uses: Vec<TextureScopeUse>,
+    buffer_uses: impl IntoIterator<Item = BufferScopeUse>,
+    texture_uses: impl IntoIterator<Item = TextureScopeUse>,
 ) -> Result<(), String> {
+    let buffer_uses = buffer_uses.into_iter().collect::<Vec<_>>();
+    let texture_uses = texture_uses.into_iter().collect::<Vec<_>>();
     // The index contains only already-valid uses. One access therefore fully
     // represents a buffer, while textures need per-resource subresource
     // buckets. Identical bucket entries add no information to pairwise,
@@ -1366,7 +1610,9 @@ pub(crate) fn buffer_ranges_overlap(a: &BufferScopeUse, b: &BufferScopeUse) -> b
 }
 
 /// Returns bind group buffer resources.
-pub(crate) fn bind_group_buffer_resources(group: &BindGroup) -> Vec<Arc<Buffer>> {
+pub(crate) fn bind_group_buffer_resources(
+    group: &BindGroup,
+) -> impl Iterator<Item = Arc<Buffer>> + '_ {
     group
         .entries()
         .iter()
@@ -1374,11 +1620,12 @@ pub(crate) fn bind_group_buffer_resources(group: &BindGroup) -> Vec<Arc<Buffer>>
             BindGroupResource::Buffer { buffer, .. } => Some(Arc::clone(buffer)),
             _ => None,
         })
-        .collect()
 }
 
 /// Returns bind group texture resources.
-pub(crate) fn bind_group_texture_resources(group: &BindGroup) -> Vec<Texture> {
+pub(crate) fn bind_group_texture_resources(
+    group: &BindGroup,
+) -> impl Iterator<Item = Texture> + '_ {
     group
         .entries()
         .iter()
@@ -1386,7 +1633,6 @@ pub(crate) fn bind_group_texture_resources(group: &BindGroup) -> Vec<Texture> {
             BindGroupResource::TextureView { texture_view, .. } => Some(texture_view.texture()),
             _ => None,
         })
-        .collect()
 }
 
 /// Validates pipeline bind groups and returns a descriptive error on failure.
@@ -2969,6 +3215,90 @@ mod tests {
                 "render pass draw bind group plus vertex buffer count exceeds the device limit"
                     .to_owned()
             )
+        );
+    }
+
+    #[test]
+    fn validate_bind_groups_plus_vertex_buffers_count_reports_overflow_and_limit() {
+        let mut limits = Limits::DEFAULT;
+        limits.max_bind_groups_plus_vertex_buffers = 4;
+
+        assert_eq!(
+            validate_bind_groups_plus_vertex_buffers_count(u32::MAX, 1, limits, "test draw"),
+            Err("test draw bind group plus vertex buffer count overflows".to_owned())
+        );
+        assert_eq!(
+            validate_bind_groups_plus_vertex_buffers_count(3, 2, limits, "test draw"),
+            Err(
+                "test draw bind group plus vertex buffer count exceeds the device limit".to_owned()
+            )
+        );
+        assert_eq!(
+            validate_bind_groups_plus_vertex_buffers_count(2, 2, limits, "test draw"),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn record_pipeline_usage_scope_reports_index_too_large() {
+        let too_large = u64::from(u32::MAX)
+            .checked_add(1)
+            .expect("u32::MAX + 1 fits in u64");
+        if let Ok(index) = usize::try_from(too_large) {
+            assert_eq!(
+                validate_pipeline_bind_group_index(index),
+                Err("pipeline bind group index is too large".to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn record_pipeline_usage_scope_reports_dynamic_offset_overflow() {
+        let device = noop_device();
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::UNIFORM,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: 2,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: 0,
+                }),
+            }],
+            error: None,
+        }));
+        let group = Arc::new(BindGroup::new(
+            Arc::clone(&layout),
+            vec![BindGroupEntry {
+                binding: 0,
+                resource: BindGroupResource::Buffer {
+                    buffer,
+                    device: Arc::new(device.clone()),
+                    offset: u64::MAX,
+                    size: 0,
+                },
+            }],
+            false,
+            None,
+        ));
+        let mut state = empty_pass_state(&device);
+        state.bind_groups.insert(
+            0,
+            BoundBindGroup {
+                group,
+                dynamic_offsets: vec![1],
+            },
+        );
+
+        assert_eq!(
+            record_pipeline_usage_scope(&mut state, &[layout]),
+            Err("usage scope buffer offset overflows".to_owned())
         );
     }
 

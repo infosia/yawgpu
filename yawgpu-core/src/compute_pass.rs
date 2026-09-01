@@ -84,19 +84,13 @@ impl ComputePassEncoder {
     /// Records a workgroup dispatch after validating the bound pipeline and limits.
     pub fn dispatch_workgroups(&self, x: u32, y: u32, z: u32, limits: Limits) -> Option<String> {
         self.inner.record_pass_command(|state| {
-            validate_compute_dispatch_state(state, limits)?;
+            let (pipeline, _) = validate_compute_dispatch_state(state, limits)?;
             if x > limits.max_compute_workgroups_per_dimension
                 || y > limits.max_compute_workgroups_per_dimension
                 || z > limits.max_compute_workgroups_per_dimension
             {
                 return Err("compute dispatch workgroup count exceeds the device limit".to_owned());
             }
-            let pipeline = Arc::clone(
-                state
-                    .compute_pipeline
-                    .as_ref()
-                    .ok_or_else(|| "compute dispatch requires a compute pipeline".to_owned())?,
-            );
             self.inner.parent.record_compute_pass(ComputePassCommand {
                 pipeline,
                 bind_groups: state.bind_groups.clone(),
@@ -117,31 +111,26 @@ impl ComputePassEncoder {
         limits: Limits,
     ) -> Option<String> {
         self.inner.record_pass_command(|state| {
-            validate_compute_dispatch_state(state, limits)?;
+            let (pipeline, buffer_uses) = validate_compute_dispatch_state(state, limits)?;
             validate_indirect_buffer(
                 &indirect_buffer,
                 indirect_offset,
                 12,
                 "dispatch workgroups indirect",
             )?;
-            self.inner
-                .parent
-                .record_referenced_buffer(Arc::clone(&indirect_buffer));
-            let pipeline = Arc::clone(
-                state
-                    .compute_pipeline
-                    .as_ref()
-                    .ok_or_else(|| "compute dispatch requires a compute pipeline".to_owned())?,
-            );
-            let (mut buffer_uses, texture_uses) =
-                collect_pipeline_usage_scope(pipeline.bind_group_layouts(), &state.bind_groups)?;
-            buffer_uses.push(BufferScopeUse {
+            let indirect_use = BufferScopeUse {
                 buffer: Arc::clone(&indirect_buffer),
                 offset: indirect_offset,
                 size: 12,
                 access: ResourceAccess::Read,
-            });
-            validate_resource_usage_scope(&buffer_uses, &texture_uses)?;
+            };
+            validate_extra_buffer_uses_against_scope(
+                &buffer_uses,
+                std::slice::from_ref(&indirect_use),
+            )?;
+            self.inner
+                .parent
+                .record_referenced_buffer(Arc::clone(&indirect_buffer));
             self.inner.parent.record_compute_pass(ComputePassCommand {
                 pipeline,
                 bind_groups: state.bind_groups.clone(),
@@ -183,7 +172,7 @@ impl ComputePassEncoder {
 pub(crate) fn validate_compute_dispatch_state(
     state: &mut PassEncoderState,
     limits: Limits,
-) -> Result<(), String> {
+) -> Result<(Arc<ComputePipeline>, Vec<BufferScopeUse>), String> {
     let Some(pipeline) = state.compute_pipeline.clone() else {
         return Err("compute dispatch requires a compute pipeline".to_owned());
     };
@@ -191,11 +180,14 @@ pub(crate) fn validate_compute_dispatch_state(
         return Err("compute dispatch requires a valid compute pipeline".to_owned());
     }
     validate_pipeline_bind_groups_memoized(state, pipeline.bind_group_layouts(), limits)?;
-    validate_usage_scope(pipeline.bind_group_layouts(), &state.bind_groups, None)?;
+    let (buffer_uses, texture_uses) =
+        collect_usage_scope(pipeline.bind_group_layouts(), &state.bind_groups)?;
+    validate_resource_usage_scope(&buffer_uses, &texture_uses)?;
     validate_required_immediate_data(
         pipeline.immediate_required_mask(),
         state.immediate_data_written,
-    )
+    )?;
+    Ok((pipeline, buffer_uses))
 }
 
 #[cfg(test)]
@@ -774,6 +766,116 @@ fn cs() {
             Some(
                 "usage scope cannot read and write or write the same buffer range twice".to_owned()
             )
+        );
+    }
+
+    #[test]
+    fn compute_pass_indirect_validates_dispatch_state_before_indirect_buffer() {
+        let device = noop_device();
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_SRC,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_compute_pass();
+        assert_eq!(begin_error, None);
+
+        assert_eq!(
+            pass.dispatch_workgroups_indirect(buffer, 0, device.limits()),
+            None
+        );
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("compute dispatch requires a compute pipeline".to_owned())
+        );
+    }
+
+    #[test]
+    fn compute_pass_indirect_usage_conflict_stays_after_required_immediates() {
+        let device = noop_device();
+        let bind_group_layout =
+            Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+                entries: vec![BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: SHADER_STAGE_COMPUTE,
+                    binding_array_size: 0,
+                    kind: Some(BindingLayoutKind::Buffer {
+                        ty: BufferBindingType::Storage,
+                        has_dynamic_offset: false,
+                        min_binding_size: 4,
+                    }),
+                }],
+                error: None,
+            }));
+        let pipeline_layout = Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: vec![Arc::clone(&bind_group_layout)],
+            immediate_size: 16,
+            error: None,
+        }));
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r#"
+requires immediate_address_space;
+@group(0) @binding(0) var<storage, read_write> values: array<u32>;
+var<immediate> params : vec4u;
+
+@compute @workgroup_size(1)
+fn cs() {
+    values[0] = params.x;
+}
+"#
+                .to_owned(),
+            )),
+        );
+        let pipeline = Arc::new(device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Explicit(pipeline_layout),
+            shader_module: module,
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        }));
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE | BufferUsage::INDIRECT,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let bind_group = Arc::new(device.create_bind_group(
+            bind_group_layout,
+            vec![BindGroupEntry {
+                binding: 0,
+                resource: BindGroupResource::Buffer {
+                    buffer: Arc::clone(&buffer),
+                    device: Arc::new(device.clone()),
+                    offset: 0,
+                    size: 16,
+                },
+            }],
+        ));
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_compute_pass();
+        assert_eq!(begin_error, None);
+
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(
+            pass.dispatch_workgroups_indirect(buffer, 0, device.limits()),
+            None
+        );
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("Required immediate data at offset 0 was not set.".to_owned())
         );
     }
 

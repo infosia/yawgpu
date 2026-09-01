@@ -791,18 +791,12 @@ fn validate_subpass_bind_group_and_vertex_limits(
         .next_back()
         .copied()
         .map_or(0, |slot| slot + 1);
-    let total = bind_group_count
-        .checked_add(vertex_buffer_count)
-        .ok_or_else(|| {
-            "subpass render pass draw bind group plus vertex buffer count overflows".to_owned()
-        })?;
-    if total > limits.max_bind_groups_plus_vertex_buffers {
-        return Err(
-            "subpass render pass draw bind group plus vertex buffer count exceeds the device limit"
-                .to_owned(),
-        );
-    }
-    Ok(())
+    validate_bind_groups_plus_vertex_buffers_count(
+        bind_group_count,
+        vertex_buffer_count,
+        limits,
+        "subpass render pass draw",
+    )
 }
 
 /// Validates subpass pipeline compatibility.

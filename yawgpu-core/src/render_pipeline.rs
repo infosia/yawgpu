@@ -17,7 +17,7 @@ use crate::device::FeatureSet;
 use crate::format::*;
 use crate::frontend;
 use crate::limits::*;
-use crate::pass::ImmediateWrittenMask;
+use crate::pass::{validate_bind_groups_plus_vertex_buffers_count, ImmediateWrittenMask};
 use crate::pipeline_layout::*;
 use crate::sampler::*;
 use crate::shader::*;
@@ -2464,19 +2464,16 @@ fn validate_bind_groups_plus_vertex_buffers(
     vertex_buffer_count: usize,
     limits: Limits,
 ) -> Result<(), String> {
-    let total = bind_group_layouts
-        .len()
-        .checked_add(vertex_buffer_count)
-        .ok_or_else(|| {
-            "render pipeline bind group plus vertex buffer count overflows".to_owned()
-        })?;
-    if total > limits.max_bind_groups_plus_vertex_buffers as usize {
-        return Err(
-            "render pipeline bind group plus vertex buffer count exceeds the device limit"
-                .to_owned(),
-        );
-    }
-    Ok(())
+    let bind_group_count = u32::try_from(bind_group_layouts.len())
+        .map_err(|_| "render pipeline bind group plus vertex buffer count overflows".to_owned())?;
+    let vertex_buffer_count = u32::try_from(vertex_buffer_count)
+        .map_err(|_| "render pipeline bind group plus vertex buffer count overflows".to_owned())?;
+    validate_bind_groups_plus_vertex_buffers_count(
+        bind_group_count,
+        vertex_buffer_count,
+        limits,
+        "render pipeline",
+    )
 }
 
 /// Validates vertex state and returns a descriptive error on failure.

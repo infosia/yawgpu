@@ -720,33 +720,104 @@ impl Buffer {
 
     /// Validates queue write and returns a descriptive error on failure.
     pub fn validate_queue_write(&self, offset: u64, size: u64) -> Result<(), &'static str> {
-        let state = self.inner.state.lock();
-        if state.is_error {
-            return Err("cannot write to an error buffer");
-        }
-        if state.is_destroyed {
-            return Err("cannot write to a destroyed buffer");
-        }
-        if state.map_state != BufferMapState::Unmapped {
-            return Err("cannot write to a mapped buffer");
-        }
-        if !self.inner.usage.contains(BufferUsage::COPY_DST) {
-            return Err("queue write requires CopyDst usage");
-        }
-        if !offset.is_multiple_of(4) {
-            return Err("queue write offset must be 4-byte aligned");
-        }
-        if !size.is_multiple_of(4) {
-            return Err("queue write size must be 4-byte aligned");
-        }
-        let Some(end) = offset.checked_add(size) else {
-            return Err("queue write range overflows");
-        };
-        if end > self.inner.size {
-            return Err("queue write range exceeds buffer size");
-        }
-        Ok(())
+        validate_buffer_write_or_clear(
+            self,
+            offset,
+            size,
+            BufferWriteOrClearValidation {
+                error_buffer: "cannot write to an error buffer",
+                destroyed_buffer: Some("cannot write to a destroyed buffer"),
+                mapped_buffer: Some("cannot write to a mapped buffer"),
+                missing_copy_dst: "queue write requires CopyDst usage",
+                size_mode: BufferWriteSizeMode::Exact,
+                offset_alignment: "queue write offset must be 4-byte aligned",
+                size_alignment: "queue write size must be 4-byte aligned",
+                range_overflows: "queue write range overflows",
+                range_exceeds: "queue write range exceeds buffer size",
+            },
+        )
     }
+}
+
+/// Configures shared buffer write/clear validation messages and optional checks.
+pub(crate) struct BufferWriteOrClearValidation {
+    pub(crate) error_buffer: &'static str,
+    pub(crate) destroyed_buffer: Option<&'static str>,
+    pub(crate) mapped_buffer: Option<&'static str>,
+    pub(crate) missing_copy_dst: &'static str,
+    pub(crate) size_mode: BufferWriteSizeMode,
+    pub(crate) offset_alignment: &'static str,
+    pub(crate) size_alignment: &'static str,
+    pub(crate) range_overflows: &'static str,
+    pub(crate) range_exceeds: &'static str,
+}
+
+/// Defines whether `size` is exact or `u64::MAX` means "to buffer end".
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum BufferWriteSizeMode {
+    Exact,
+    ResolveToEnd {
+        offset_exceeds_message: &'static str,
+    },
+}
+
+/// Validates buffer writes and clears while preserving caller-specific messages.
+pub(crate) fn validate_buffer_write_or_clear(
+    buffer: &Buffer,
+    offset: u64,
+    size: u64,
+    options: BufferWriteOrClearValidation,
+) -> Result<(), &'static str> {
+    let state = buffer.inner.state.lock();
+    if state.is_error {
+        return Err(options.error_buffer);
+    }
+    if let Some(message) = options.destroyed_buffer {
+        if state.is_destroyed {
+            return Err(message);
+        }
+    }
+    if let Some(message) = options.mapped_buffer {
+        if state.map_state != BufferMapState::Unmapped {
+            return Err(message);
+        }
+    }
+    drop(state);
+    if !buffer.inner.usage.contains(BufferUsage::COPY_DST) {
+        return Err(options.missing_copy_dst);
+    }
+    let resolved_size = match options.size_mode {
+        BufferWriteSizeMode::Exact => size,
+        BufferWriteSizeMode::ResolveToEnd {
+            offset_exceeds_message,
+        } => {
+            if offset > buffer.inner.size {
+                return Err(offset_exceeds_message);
+            }
+            if size == u64::MAX {
+                buffer
+                    .inner
+                    .size
+                    .checked_sub(offset)
+                    .ok_or(offset_exceeds_message)?
+            } else {
+                size
+            }
+        }
+    };
+    if !offset.is_multiple_of(4) {
+        return Err(options.offset_alignment);
+    }
+    if !resolved_size.is_multiple_of(4) {
+        return Err(options.size_alignment);
+    }
+    let Some(end) = offset.checked_add(resolved_size) else {
+        return Err(options.range_overflows);
+    };
+    if offset > buffer.inner.size || end > buffer.inner.size {
+        return Err(options.range_exceeds);
+    }
+    Ok(())
 }
 
 fn ranges_overlap(a: MappedRange, b: MappedRange) -> bool {
@@ -911,6 +982,80 @@ mod tests {
 
         assert!(error_buffer.is_error());
         assert_eq!(error.message, "buffer usage must be non-zero");
+    }
+
+    #[test]
+    fn validate_buffer_write_or_clear_preserves_queue_state_order() {
+        let buffer = noop_buffer(16, BufferUsage::COPY_DST);
+        buffer.destroy();
+
+        assert_eq!(
+            validate_buffer_write_or_clear(
+                &buffer,
+                1,
+                2,
+                BufferWriteOrClearValidation {
+                    error_buffer: "error",
+                    destroyed_buffer: Some("destroyed"),
+                    mapped_buffer: Some("mapped"),
+                    missing_copy_dst: "usage",
+                    size_mode: BufferWriteSizeMode::Exact,
+                    offset_alignment: "offset",
+                    size_alignment: "size",
+                    range_overflows: "queue write range overflows",
+                    range_exceeds: "queue write range exceeds buffer size",
+                },
+            ),
+            Err("destroyed")
+        );
+    }
+
+    #[test]
+    fn validate_buffer_write_or_clear_handles_to_end_alignment_and_range() {
+        let buffer = noop_buffer(18, BufferUsage::COPY_DST);
+
+        assert_eq!(
+            validate_buffer_write_or_clear(
+                &buffer,
+                16,
+                u64::MAX,
+                BufferWriteOrClearValidation {
+                    error_buffer: "error",
+                    destroyed_buffer: None,
+                    mapped_buffer: None,
+                    missing_copy_dst: "usage",
+                    size_mode: BufferWriteSizeMode::ResolveToEnd {
+                        offset_exceeds_message: "offset exceeds",
+                    },
+                    offset_alignment: "offset align",
+                    size_alignment: "size align",
+                    range_overflows: "clear buffer range overflows",
+                    range_exceeds: "clear buffer range exceeds buffer size",
+                },
+            ),
+            Err("size align")
+        );
+        assert_eq!(
+            validate_buffer_write_or_clear(
+                &buffer,
+                20,
+                u64::MAX,
+                BufferWriteOrClearValidation {
+                    error_buffer: "error",
+                    destroyed_buffer: None,
+                    mapped_buffer: None,
+                    missing_copy_dst: "usage",
+                    size_mode: BufferWriteSizeMode::ResolveToEnd {
+                        offset_exceeds_message: "offset exceeds",
+                    },
+                    offset_alignment: "offset align",
+                    size_alignment: "size align",
+                    range_overflows: "clear buffer range overflows",
+                    range_exceeds: "clear buffer range exceeds buffer size",
+                },
+            ),
+            Err("offset exceeds")
+        );
     }
 
     #[test]

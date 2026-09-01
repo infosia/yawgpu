@@ -938,12 +938,12 @@ impl CommandEncoder {
     }
 
     /// Tracks several buffers referenced by the encoder.
-    pub(crate) fn record_referenced_buffers(&self, buffers: Vec<Arc<Buffer>>) {
+    pub(crate) fn record_referenced_buffers(&self, buffers: impl IntoIterator<Item = Arc<Buffer>>) {
         record_referenced_buffers_locked(&mut self.inner.state.lock(), buffers);
     }
 
     /// Tracks several textures referenced by the encoder.
-    pub(crate) fn record_referenced_textures(&self, textures: Vec<Texture>) {
+    pub(crate) fn record_referenced_textures(&self, textures: impl IntoIterator<Item = Texture>) {
         self.inner.state.lock().referenced_textures.extend(textures);
     }
 
@@ -1040,27 +1040,25 @@ pub(crate) fn validate_copy_buffer_to_buffer(
 
 /// Validates clear buffer and returns a descriptive error on failure.
 pub(crate) fn validate_clear_buffer(buffer: &Buffer, offset: u64, size: u64) -> Result<(), String> {
-    if buffer.is_error() {
-        return Err("clear buffer command cannot use an error buffer".to_owned());
-    }
-    if !buffer.usage().contains(BufferUsage::COPY_DST) {
-        return Err("clear buffer requires CopyDst usage".to_owned());
-    }
-    if offset > buffer.size() {
-        return Err("clear buffer offset exceeds buffer size".to_owned());
-    }
-    let resolved_size = if size == u64::MAX {
-        buffer.size() - offset
-    } else {
-        size
-    };
-    if !offset.is_multiple_of(4) {
-        return Err("clear buffer offset must be 4-byte aligned".to_owned());
-    }
-    if !resolved_size.is_multiple_of(4) {
-        return Err("clear buffer size must be 4-byte aligned".to_owned());
-    }
-    validate_buffer_range(offset, resolved_size, buffer.size(), "clear buffer range")
+    validate_buffer_write_or_clear(
+        buffer,
+        offset,
+        size,
+        BufferWriteOrClearValidation {
+            error_buffer: "clear buffer command cannot use an error buffer",
+            destroyed_buffer: None,
+            mapped_buffer: None,
+            missing_copy_dst: "clear buffer requires CopyDst usage",
+            size_mode: BufferWriteSizeMode::ResolveToEnd {
+                offset_exceeds_message: "clear buffer offset exceeds buffer size",
+            },
+            offset_alignment: "clear buffer offset must be 4-byte aligned",
+            size_alignment: "clear buffer size must be 4-byte aligned",
+            range_overflows: "clear buffer range overflows",
+            range_exceeds: "clear buffer range exceeds buffer size",
+        },
+    )
+    .map_err(str::to_owned)
 }
 
 /// Validates encoder write buffer and returns a descriptive error on failure.
@@ -1069,24 +1067,23 @@ pub(crate) fn validate_encoder_write_buffer(
     offset: u64,
     size: u64,
 ) -> Result<(), String> {
-    if buffer.is_error() {
-        return Err("command encoder write buffer cannot use an error buffer".to_owned());
-    }
-    if !buffer.usage().contains(BufferUsage::COPY_DST) {
-        return Err("command encoder write buffer requires CopyDst usage".to_owned());
-    }
-    if !offset.is_multiple_of(4) {
-        return Err("command encoder write buffer offset must be 4-byte aligned".to_owned());
-    }
-    if !size.is_multiple_of(4) {
-        return Err("command encoder write buffer size must be 4-byte aligned".to_owned());
-    }
-    validate_buffer_range(
+    validate_buffer_write_or_clear(
+        buffer,
         offset,
         size,
-        buffer.size(),
-        "command encoder write buffer range",
+        BufferWriteOrClearValidation {
+            error_buffer: "command encoder write buffer cannot use an error buffer",
+            destroyed_buffer: None,
+            mapped_buffer: None,
+            missing_copy_dst: "command encoder write buffer requires CopyDst usage",
+            size_mode: BufferWriteSizeMode::Exact,
+            offset_alignment: "command encoder write buffer offset must be 4-byte aligned",
+            size_alignment: "command encoder write buffer size must be 4-byte aligned",
+            range_overflows: "command encoder write buffer range overflows",
+            range_exceeds: "command encoder write buffer range exceeds buffer size",
+        },
     )
+    .map_err(str::to_owned)
 }
 
 /// Validates render pass descriptor and returns a descriptive error on failure.
@@ -1975,59 +1972,27 @@ pub(crate) fn validate_texture_copy_subresource(
     label: &str,
     require_2d_single_layer: bool,
 ) -> Result<FormatCaps, String> {
-    if mip_level >= texture.mip_level_count() {
-        return Err(format!("{label} mipLevel is out of range"));
-    }
-
-    let Some(format_caps) = texture.format_caps() else {
-        return Err(format!("{label} format must not be Undefined"));
-    };
-    validate_copy_aspect(format_caps, aspect, label)?;
-
-    let subresource = texture.subresource_size(mip_level);
-    let physical_width = div_ceil_u32(subresource.width, format_caps.block_w)
-        .checked_mul(format_caps.block_w)
-        .ok_or_else(|| format!("{label} subresource width overflows"))?;
-    let physical_height = div_ceil_u32(subresource.height, format_caps.block_h)
-        .checked_mul(format_caps.block_h)
-        .ok_or_else(|| format!("{label} subresource height overflows"))?;
-    let empty_copy =
-        copy_size.width == 0 || copy_size.height == 0 || copy_size.depth_or_array_layers == 0;
-    if origin
-        .x
-        .checked_add(copy_size.width)
-        .is_none_or(|end| end > physical_width)
-        || origin
-            .y
-            .checked_add(copy_size.height)
-            .is_none_or(|end| end > physical_height)
-        || origin
-            .z
-            .checked_add(copy_size.depth_or_array_layers)
-            .is_none_or(|end| end > subresource.depth_or_array_layers)
-    {
-        return Err(format!("{label} range exceeds the texture subresource"));
-    }
-    if require_2d_single_layer
-        && texture.dimension() == TextureDimension::D2
-        && texture.size().depth_or_array_layers == 1
-        && !empty_copy
-        && copy_size.depth_or_array_layers != 1
-    {
-        return Err(format!(
-            "{label} 2D copies require depthOrArrayLayers to be one"
-        ));
-    }
-    if !origin.x.is_multiple_of(format_caps.block_w)
-        || !origin.y.is_multiple_of(format_caps.block_h)
-    {
-        return Err(format!("{label} origin must be texel block aligned"));
-    }
-    if !copy_size.width.is_multiple_of(format_caps.block_w)
-        || !copy_size.height.is_multiple_of(format_caps.block_h)
-    {
-        return Err(format!("{label} copy size must be texel block aligned"));
-    }
+    let (format_caps, subresource, empty_copy) = validate_texture_copy_range(
+        texture,
+        mip_level,
+        origin,
+        copy_size,
+        aspect,
+        label,
+        TextureCopyRangeValidation {
+            require_2d_single_layer,
+            size_alignment_noun: "copy size",
+            depth_aspect_message: TextureCopyRangeMessage::LabelSuffix(
+                "DepthOnly aspect requires a depth format",
+            ),
+            stencil_aspect_message: TextureCopyRangeMessage::LabelSuffix(
+                "StencilOnly aspect requires a stencil format",
+            ),
+            single_layer_2d_message: TextureCopyRangeMessage::LabelSuffix(
+                "2D copies require depthOrArrayLayers to be one",
+            ),
+        },
+    )?;
     // The depth or stencil aspect can only be copied as a whole 2D subresource:
     // full mip width/height at a zero x/y origin. A range of array layers
     // (non-zero `origin.z` / `copy_size.depth_or_array_layers > 1`) is allowed —
@@ -2046,25 +2011,6 @@ pub(crate) fn validate_texture_copy_subresource(
     }
 
     Ok(format_caps)
-}
-
-/// Validates copy aspect and returns a descriptive error on failure.
-pub(crate) fn validate_copy_aspect(
-    format_caps: FormatCaps,
-    aspect: TextureAspect,
-    label: &str,
-) -> Result<(), String> {
-    match aspect {
-        TextureAspect::All => Ok(()),
-        TextureAspect::DepthOnly if format_caps.aspects.depth => Ok(()),
-        TextureAspect::StencilOnly if format_caps.aspects.stencil => Ok(()),
-        TextureAspect::DepthOnly => {
-            Err(format!("{label} DepthOnly aspect requires a depth format"))
-        }
-        TextureAspect::StencilOnly => Err(format!(
-            "{label} StencilOnly aspect requires a stencil format"
-        )),
-    }
 }
 
 /// Returns texture formats copy compatible.

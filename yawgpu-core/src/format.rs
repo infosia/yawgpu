@@ -779,11 +779,9 @@ impl TextureFormat {
         if features.contains(&Feature::TextureFormatsTier1) {
             match self.0 {
                 TextureFormat::R8_UNORM
-                | TextureFormat::R8_SNORM
                 | TextureFormat::R8_UINT
                 | TextureFormat::R8_SINT
                 | TextureFormat::RG8_UNORM
-                | TextureFormat::RG8_SNORM
                 | TextureFormat::RG8_UINT
                 | TextureFormat::RG8_SINT
                 | TextureFormat::R16_UINT
@@ -798,6 +796,16 @@ impl TextureFormat {
                     caps.storage_capable = true;
                     caps.storage_read_only_capable = true;
                 }
+                TextureFormat::R8_SNORM | TextureFormat::RG8_SNORM => {
+                    caps.storage_capable = true;
+                    caps.storage_read_only_capable = true;
+                    caps.renderable = true;
+                    caps.multisample_capable = true;
+                }
+                TextureFormat::RGBA8_SNORM => {
+                    caps.renderable = true;
+                    caps.multisample_capable = true;
+                }
                 _ => {}
             }
         }
@@ -805,15 +813,6 @@ impl TextureFormat {
             // `bgra8unorm` storage is write-only — NOT read-only-capable (the one
             // WebGPU format with that asymmetry); leave `storage_read_only_capable`.
             caps.storage_capable = true;
-        }
-        if features.contains(&Feature::TextureFormatsTier1) {
-            match self.0 {
-                TextureFormat::R8_SNORM | TextureFormat::RG8_SNORM | TextureFormat::RGBA8_SNORM => {
-                    caps.renderable = true;
-                    caps.multisample_capable = true;
-                }
-                _ => {}
-            }
         }
         if features.contains(&Feature::TextureFormatsTier2) {
             // `texture-formats-tier2` grants read-write storage to this set

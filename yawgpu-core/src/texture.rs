@@ -113,6 +113,7 @@ pub(crate) struct TextureInner {
     pub(crate) dimension: TextureDimension,
     pub(crate) size: Extent3d,
     pub(crate) format: TextureFormat,
+    pub(crate) format_caps: Option<FormatCaps>,
     pub(crate) features: FeatureSet,
     pub(crate) mip_level_count: u32,
     pub(crate) sample_count: u32,
@@ -158,6 +159,7 @@ impl Texture {
             &features,
             descriptor.sample_count,
         );
+        let format_caps = descriptor.format.caps(&features);
         Self {
             inner: Arc::new(TextureInner {
                 hal,
@@ -165,6 +167,7 @@ impl Texture {
                 dimension: descriptor.dimension,
                 size: descriptor.size,
                 format: descriptor.format,
+                format_caps,
                 features,
                 mip_level_count: descriptor.mip_level_count,
                 sample_count: descriptor.sample_count,
@@ -216,7 +219,7 @@ impl Texture {
     /// Returns the texture format capabilities for this texture's device features.
     #[must_use]
     pub(crate) fn format_caps(&self) -> Option<FormatCaps> {
-        self.inner.format.caps(&self.inner.features)
+        self.inner.format_caps
     }
 
     /// Returns capabilities for a view format using this texture's device features.
@@ -691,61 +694,27 @@ pub(crate) fn validate_queue_write_texture(
     if texture.sample_count() != 1 {
         return Err("queue texture write destination sampleCount must be one".to_owned());
     }
-    if mip_level >= texture.mip_level_count() {
-        return Err("queue texture write mipLevel is out of range".to_owned());
-    }
-
-    let Some(format_caps) = texture.format_caps() else {
-        return Err("queue texture write format must not be Undefined".to_owned());
-    };
-    match aspect {
-        TextureAspect::All => {}
-        TextureAspect::DepthOnly if !format_caps.aspects.depth => {
-            return Err("DepthOnly texture writes require a depth format".to_owned());
-        }
-        TextureAspect::StencilOnly if !format_caps.aspects.stencil => {
-            return Err("StencilOnly texture writes require a stencil format".to_owned());
-        }
-        TextureAspect::DepthOnly | TextureAspect::StencilOnly => {}
-    }
-
-    let subresource = texture.subresource_size(mip_level);
-    let empty_write =
-        write_size.width == 0 || write_size.height == 0 || write_size.depth_or_array_layers == 0;
-    if origin
-        .x
-        .checked_add(write_size.width)
-        .is_none_or(|end| end > subresource.width)
-        || origin
-            .y
-            .checked_add(write_size.height)
-            .is_none_or(|end| end > subresource.height)
-        || origin
-            .z
-            .checked_add(write_size.depth_or_array_layers)
-            .is_none_or(|end| end > subresource.depth_or_array_layers)
-    {
-        return Err("queue texture write range exceeds the texture subresource".to_owned());
-    }
-    if texture.dimension() == TextureDimension::D2
-        && texture.size().depth_or_array_layers == 1
-        && !empty_write
-        && write_size.depth_or_array_layers != 1
-    {
-        return Err(
-            "queue texture writes to 2D textures require depthOrArrayLayers to be one".to_owned(),
-        );
-    }
-    if !origin.x.is_multiple_of(format_caps.block_w)
-        || !origin.y.is_multiple_of(format_caps.block_h)
-    {
-        return Err("queue texture write origin must be texel block aligned".to_owned());
-    }
-    if !write_size.width.is_multiple_of(format_caps.block_w)
-        || !write_size.height.is_multiple_of(format_caps.block_h)
-    {
-        return Err("queue texture write size must be texel block aligned".to_owned());
-    }
+    let (format_caps, subresource, empty_write) = validate_texture_copy_range(
+        texture,
+        mip_level,
+        origin,
+        write_size,
+        aspect,
+        "queue texture write",
+        TextureCopyRangeValidation {
+            require_2d_single_layer: true,
+            size_alignment_noun: "size",
+            depth_aspect_message: TextureCopyRangeMessage::Static(
+                "DepthOnly texture writes require a depth format",
+            ),
+            stencil_aspect_message: TextureCopyRangeMessage::Static(
+                "StencilOnly texture writes require a stencil format",
+            ),
+            single_layer_2d_message: TextureCopyRangeMessage::Static(
+                "queue texture writes to 2D textures require depthOrArrayLayers to be one",
+            ),
+        },
+    )?;
     if format_caps.aspects.depth && format_caps.aspects.stencil && aspect == TextureAspect::All {
         return Err(
             "queue texture write of a combined depth-stencil format requires a single aspect"
@@ -1714,6 +1683,45 @@ mod tests {
     }
 
     #[test]
+    fn texture_format_caps_cache_matches_direct_format_caps() {
+        let rgba_descriptor = texture_descriptor_4x4();
+        let rgba_texture = Texture::new(rgba_descriptor.clone(), None, false, FeatureSet::new());
+        assert_eq!(
+            rgba_texture.format_caps(),
+            rgba_texture.format().caps(&FeatureSet::new())
+        );
+
+        let mut features = FeatureSet::new();
+        features.insert(Feature::TextureCompressionBc);
+        let bc_descriptor = TextureDescriptor {
+            format: TextureFormat::from_raw(TextureFormat::BC1_RGBA_UNORM),
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            ..rgba_descriptor.clone()
+        };
+        let bc_texture = Texture::new(bc_descriptor.clone(), None, false, features.clone());
+        assert_eq!(
+            bc_texture.format_caps(),
+            bc_texture.format().caps(&features)
+        );
+
+        let hal_device = hal_noop_device();
+        let from_hal = Texture::from_hal(
+            rgba_descriptor.clone(),
+            hal_device
+                .create_texture(&hal_texture_descriptor(&rgba_descriptor))
+                .expect("Noop texture allocation should succeed"),
+        );
+        assert_eq!(
+            from_hal.format_caps(),
+            from_hal.format().caps(&FeatureSet::new())
+        );
+    }
+
+    #[test]
     fn texture_is_error_same_destroy_create_view_and_validate_queue_write() {
         let texture = noop_texture();
         let other = noop_texture();
@@ -1896,6 +1904,62 @@ mod tests {
                 "queue texture write depth/stencil format does not support this copy aspect/usage"
                     .to_owned()
             )
+        );
+    }
+
+    #[test]
+    fn validate_queue_write_texture_uses_physical_compressed_mip_bounds() {
+        let device = noop_adapter()
+            .create_device(None, &[Feature::TextureCompressionBc], "", "")
+            .expect("Noop compressed texture device");
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_DST,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 12,
+                height: 8,
+                depth_or_array_layers: 1,
+            },
+            format: TextureFormat::from_raw(TextureFormat::BC1_RGBA_UNORM),
+            mip_level_count: 2,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+        let layout = TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(256),
+            rows_per_image: None,
+        };
+
+        assert_eq!(
+            texture.validate_queue_write(
+                1,
+                Origin3d { x: 0, y: 0, z: 0 },
+                Extent3d {
+                    width: 8,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                TextureAspect::All,
+                layout,
+                1024,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            texture.validate_queue_write(
+                1,
+                Origin3d { x: 0, y: 0, z: 0 },
+                Extent3d {
+                    width: 12,
+                    height: 12,
+                    depth_or_array_layers: 1,
+                },
+                TextureAspect::All,
+                layout,
+                1024,
+            ),
+            Err("queue texture write range exceeds the texture subresource".to_owned())
         );
     }
 

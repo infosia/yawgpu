@@ -285,40 +285,25 @@ impl RenderPassEncoder {
         limits: Limits,
     ) -> Option<String> {
         self.inner.record_pass_command(|state| {
-            validate_render_draw_state(
+            let command = record_render_draw(
                 state,
-                RenderDrawKind::Direct {
+                RenderDrawRecord::Direct {
                     vertex_count,
                     instance_count,
                     first_vertex,
                     first_instance,
                 },
                 limits,
-            )?;
-            let pipeline = Arc::clone(
-                state
-                    .render_pipeline
-                    .as_ref()
-                    .ok_or_else(|| "render pass requires a render pipeline".to_owned())?,
+                DrawRecordingContext {
+                    pipeline_required_prefix: "render pass",
+                    render_pass_late_checks: true,
+                },
             );
-            record_pipeline_usage_scope(state, pipeline.bind_group_layouts(), &[])?;
-            state.draw_count = state.draw_count.saturating_add(1);
-            if state.render_color_attachments.is_empty()
-                && state.render_depth_stencil_attachment.is_none()
-            {
-                return Err("render pass requires at least one attachment".to_owned());
+            let (command, referenced_indirect_buffer) = command?;
+            if let Some(buffer) = referenced_indirect_buffer {
+                self.inner.parent.record_referenced_buffer(buffer);
             }
-            if let Some(query_index) = state.open_occlusion_query {
-                state.written_occlusion_queries.insert(query_index);
-            }
-            state
-                .render_commands
-                .push(RenderCommand::Draw(RenderDrawExecution::Direct {
-                    vertex_count,
-                    instance_count,
-                    first_vertex,
-                    first_instance,
-                }));
+            state.render_commands.push(command);
             Ok(())
         })
     }
@@ -334,44 +319,26 @@ impl RenderPassEncoder {
         limits: Limits,
     ) -> Option<String> {
         self.inner.record_pass_command(|state| {
-            validate_render_draw_state(
+            let command = record_render_draw(
                 state,
-                RenderDrawKind::IndexedDirect {
-                    index_count,
-                    instance_count,
-                    first_index,
-                    first_instance,
-                },
-                limits,
-            )?;
-            let pipeline = Arc::clone(
-                state
-                    .render_pipeline
-                    .as_ref()
-                    .ok_or_else(|| "render pass requires a render pipeline".to_owned())?,
-            );
-            record_pipeline_usage_scope(state, pipeline.bind_group_layouts(), &[])?;
-            state.draw_count = state.draw_count.saturating_add(1);
-            if state.render_color_attachments.is_empty()
-                && state.render_depth_stencil_attachment.is_none()
-            {
-                return Err("render pass requires at least one attachment".to_owned());
-            }
-            if state.index_buffer.is_none() {
-                return Err("render pass requires an index buffer".to_owned());
-            }
-            if let Some(query_index) = state.open_occlusion_query {
-                state.written_occlusion_queries.insert(query_index);
-            }
-            state
-                .render_commands
-                .push(RenderCommand::Draw(RenderDrawExecution::Indexed {
+                RenderDrawRecord::IndexedDirect {
                     index_count,
                     instance_count,
                     first_index,
                     base_vertex,
                     first_instance,
-                }));
+                },
+                limits,
+                DrawRecordingContext {
+                    pipeline_required_prefix: "render pass",
+                    render_pass_late_checks: true,
+                },
+            );
+            let (command, referenced_indirect_buffer) = command?;
+            if let Some(buffer) = referenced_indirect_buffer {
+                self.inner.parent.record_referenced_buffer(buffer);
+            }
+            state.render_commands.push(command);
             Ok(())
         })
     }
@@ -384,44 +351,23 @@ impl RenderPassEncoder {
         limits: Limits,
     ) -> Option<String> {
         self.inner.record_pass_command(|state| {
-            validate_render_draw_state(state, RenderDrawKind::Indirect, limits)?;
-            let pipeline = Arc::clone(
-                state
-                    .render_pipeline
-                    .as_ref()
-                    .ok_or_else(|| "render pass requires a render pipeline".to_owned())?,
-            );
-            validate_indirect_buffer(&indirect_buffer, indirect_offset, 16, "draw indirect")?;
-            record_buffer_usage_scope_use(
+            let command = record_render_draw(
                 state,
-                BufferScopeUse {
-                    buffer: Arc::clone(&indirect_buffer),
-                    offset: indirect_offset,
-                    size: 16,
-                    access: ResourceAccess::Read,
+                RenderDrawRecord::Indirect {
+                    indirect_buffer,
+                    indirect_offset,
                 },
-            )?;
-            record_pipeline_usage_scope(state, pipeline.bind_group_layouts(), &[])?;
-            self.inner
-                .parent
-                .record_referenced_buffer(Arc::clone(&indirect_buffer));
-            state.draw_count = state.draw_count.saturating_add(1);
-            if state.render_color_attachments.is_empty()
-                && state.render_depth_stencil_attachment.is_none()
-            {
-                return Err("render pass requires at least one attachment".to_owned());
+                limits,
+                DrawRecordingContext {
+                    pipeline_required_prefix: "render pass",
+                    render_pass_late_checks: true,
+                },
+            );
+            let (command, referenced_indirect_buffer) = command?;
+            if let Some(buffer) = referenced_indirect_buffer {
+                self.inner.parent.record_referenced_buffer(buffer);
             }
-            if let Some(query_index) = state.open_occlusion_query {
-                state.written_occlusion_queries.insert(query_index);
-            }
-            state
-                .render_commands
-                .push(RenderCommand::Draw(RenderDrawExecution::Indirect {
-                    indirect_buffer: BoundIndirectBuffer {
-                        buffer: indirect_buffer,
-                        offset: indirect_offset,
-                    },
-                }));
+            state.render_commands.push(command);
             Ok(())
         })
     }
@@ -434,52 +380,23 @@ impl RenderPassEncoder {
         limits: Limits,
     ) -> Option<String> {
         self.inner.record_pass_command(|state| {
-            validate_render_draw_state(state, RenderDrawKind::IndexedIndirect, limits)?;
-            let pipeline = Arc::clone(
-                state
-                    .render_pipeline
-                    .as_ref()
-                    .ok_or_else(|| "render pass requires a render pipeline".to_owned())?,
-            );
-            validate_indirect_buffer(
-                &indirect_buffer,
-                indirect_offset,
-                20,
-                "draw indexed indirect",
-            )?;
-            record_buffer_usage_scope_use(
+            let command = record_render_draw(
                 state,
-                BufferScopeUse {
-                    buffer: Arc::clone(&indirect_buffer),
-                    offset: indirect_offset,
-                    size: 20,
-                    access: ResourceAccess::Read,
+                RenderDrawRecord::IndexedIndirect {
+                    indirect_buffer,
+                    indirect_offset,
                 },
-            )?;
-            record_pipeline_usage_scope(state, pipeline.bind_group_layouts(), &[])?;
-            self.inner
-                .parent
-                .record_referenced_buffer(Arc::clone(&indirect_buffer));
-            state.draw_count = state.draw_count.saturating_add(1);
-            if state.render_color_attachments.is_empty()
-                && state.render_depth_stencil_attachment.is_none()
-            {
-                return Err("render pass requires at least one attachment".to_owned());
+                limits,
+                DrawRecordingContext {
+                    pipeline_required_prefix: "render pass",
+                    render_pass_late_checks: true,
+                },
+            );
+            let (command, referenced_indirect_buffer) = command?;
+            if let Some(buffer) = referenced_indirect_buffer {
+                self.inner.parent.record_referenced_buffer(buffer);
             }
-            if state.index_buffer.is_none() {
-                return Err("render pass requires an index buffer".to_owned());
-            }
-            if let Some(query_index) = state.open_occlusion_query {
-                state.written_occlusion_queries.insert(query_index);
-            }
-            state
-                .render_commands
-                .push(RenderCommand::Draw(RenderDrawExecution::IndexedIndirect {
-                    indirect_buffer: BoundIndirectBuffer {
-                        buffer: indirect_buffer,
-                        offset: indirect_offset,
-                    },
-                }));
+            state.render_commands.push(command);
             Ok(())
         })
     }
@@ -621,14 +538,14 @@ impl RenderPassEncoder {
                 }
                 self.inner
                     .parent
-                    .record_referenced_buffers(bundle.referenced_buffers().to_vec());
+                    .record_referenced_buffers(bundle.referenced_buffers().iter().cloned());
                 self.inner
                     .parent
-                    .record_referenced_textures(bundle.referenced_textures().to_vec());
+                    .record_referenced_textures(bundle.referenced_textures().iter().cloned());
                 record_resource_usage_scope_uses(
                     state,
-                    bundle.buffer_uses().to_vec(),
-                    bundle.texture_uses().to_vec(),
+                    bundle.buffer_uses().iter().cloned(),
+                    bundle.texture_uses().iter().cloned(),
                 )?;
                 state.draw_count = state.draw_count.saturating_add(bundle.draw_count());
                 if bundle.draw_count() != 0 {
