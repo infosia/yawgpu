@@ -600,13 +600,7 @@ fn encode_compute_sampler(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     binding: &HalBoundSampler,
 ) -> Result<(), HalError> {
-    let HalSampler::Metal(sampler) = &binding.sampler else {
-        return Err(texture_error("compute sampler is not Metal-backed"));
-    };
-    let sampler = sampler
-        ._inner
-        .as_deref()
-        .ok_or_else(|| texture_error("sampler allocation failed"))?;
+    let sampler = metal_bound_sampler(binding, "compute sampler is not Metal-backed")?;
     unsafe {
         encoder.setSamplerState_atIndex(Some(sampler), to_ns(u64::from(binding.metal_index))?);
     }
@@ -655,24 +649,63 @@ fn encode_compute_external_texture(
     Ok(())
 }
 
+fn metal_bound_buffer<'a>(
+    binding: &'a HalBoundBuffer,
+    backend_error: &'static str,
+    offset_error: &'static str,
+) -> Result<(&'a ProtocolObject<dyn MTLBufferTrait>, usize), HalError> {
+    let HalBuffer::Metal(buffer) = &binding.buffer else {
+        return Err(buffer_error(backend_error));
+    };
+    if binding.offset > buffer.size() {
+        return Err(buffer_error(offset_error));
+    }
+    Ok((buffer.inner()?, to_ns(binding.offset)?))
+}
+
+fn metal_bound_sampler<'a>(
+    binding: &'a HalBoundSampler,
+    backend_error: &'static str,
+) -> Result<&'a ProtocolObject<dyn MTLSamplerState>, HalError> {
+    let HalSampler::Metal(sampler) = &binding.sampler else {
+        return Err(texture_error(backend_error));
+    };
+    sampler
+        ._inner
+        .as_deref()
+        .ok_or_else(|| texture_error("sampler allocation failed"))
+}
+
 fn encode_compute_buffer(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     binding: &HalBoundBuffer,
 ) -> Result<(), HalError> {
-    let HalBuffer::Metal(buffer) = &binding.buffer else {
-        return Err(buffer_error("compute buffer is not Metal-backed"));
-    };
-    if binding.offset > buffer.size() {
-        return Err(buffer_error("compute buffer offset exceeds buffer size"));
-    }
+    let (buffer, offset) = metal_bound_buffer(
+        binding,
+        "compute buffer is not Metal-backed",
+        "compute buffer offset exceeds buffer size",
+    )?;
     unsafe {
         encoder.setBuffer_offset_atIndex(
-            Some(buffer.inner()?),
-            to_ns(binding.offset)?,
+            Some(buffer),
+            offset,
             to_ns(u64::from(binding.metal_index))?,
         );
     }
     Ok(())
+}
+
+fn per_stage_slots(
+    vertex: Option<u32>,
+    fragment: Option<u32>,
+    flat: u32,
+) -> (Option<usize>, Option<usize>) {
+    match (vertex, fragment) {
+        (Some(vertex), Some(fragment)) => (Some(vertex as usize), Some(fragment as usize)),
+        (Some(vertex), None) => (Some(vertex as usize), None),
+        (None, Some(fragment)) => (None, Some(fragment as usize)),
+        (None, None) => (Some(flat as usize), Some(flat as usize)),
+    }
 }
 
 fn msl_buffer_sizes(
@@ -1449,41 +1482,24 @@ fn encode_render_bind_buffer(
     encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
     binding: &HalBoundBuffer,
 ) -> Result<(), HalError> {
-    let HalBuffer::Metal(buffer) = &binding.buffer else {
-        return Err(buffer_error("render bind buffer is not Metal-backed"));
-    };
-    if binding.offset > buffer.size() {
-        return Err(buffer_error(
-            "render bind buffer offset exceeds buffer size",
-        ));
-    }
-    let offset = to_ns(binding.offset)?;
-    // Per-stage binding: use stage-specific slots when available, otherwise
-    // fall back to the flat metal_index for both stages (backwards compat).
-    if let Some(vtx) = binding.vertex_metal_index {
-        let vtx_index = to_ns(u64::from(vtx))?;
+    let (buffer, offset) = metal_bound_buffer(
+        binding,
+        "render bind buffer is not Metal-backed",
+        "render bind buffer offset exceeds buffer size",
+    )?;
+    let (vertex_slot, fragment_slot) = per_stage_slots(
+        binding.vertex_metal_index,
+        binding.fragment_metal_index,
+        binding.metal_index,
+    );
+    if let Some(slot) = vertex_slot {
         unsafe {
-            encoder.setVertexBuffer_offset_atIndex(Some(buffer.inner()?), offset, vtx_index);
-        }
-    } else if binding.fragment_metal_index.is_none() {
-        // No per-stage info: bind to both stages at the flat index (compute
-        // code path reuses this function for bind-group buffers in render
-        // pipelines that predate per-stage maps; also handles Noop).
-        let index = to_ns(u64::from(binding.metal_index))?;
-        unsafe {
-            encoder.setVertexBuffer_offset_atIndex(Some(buffer.inner()?), offset, index);
+            encoder.setVertexBuffer_offset_atIndex(Some(buffer), offset, slot);
         }
     }
-    if let Some(frag) = binding.fragment_metal_index {
-        let frag_index = to_ns(u64::from(frag))?;
+    if let Some(slot) = fragment_slot {
         unsafe {
-            encoder.setFragmentBuffer_offset_atIndex(Some(buffer.inner()?), offset, frag_index);
-        }
-    } else if binding.vertex_metal_index.is_none() {
-        // Symmetric fallback for fragment stage.
-        let index = to_ns(u64::from(binding.metal_index))?;
-        unsafe {
-            encoder.setFragmentBuffer_offset_atIndex(Some(buffer.inner()?), offset, index);
+            encoder.setFragmentBuffer_offset_atIndex(Some(buffer), offset, slot);
         }
     }
     Ok(())
@@ -1497,27 +1513,19 @@ fn encode_render_bind_texture(
         return Err(texture_error("render bind texture is not Metal-backed"));
     };
     let view = metal_texture_view(texture, binding)?;
-    // Per-stage binding: use stage-specific texture slots when available.
-    if let Some(vtx) = binding.vertex_metal_index {
-        let vtx_index = to_ns(u64::from(vtx))?;
+    let (vertex_slot, fragment_slot) = per_stage_slots(
+        binding.vertex_metal_index,
+        binding.fragment_metal_index,
+        binding.metal_index,
+    );
+    if let Some(slot) = vertex_slot {
         unsafe {
-            encoder.setVertexTexture_atIndex(Some(view.as_ref()), vtx_index);
-        }
-    } else if binding.fragment_metal_index.is_none() {
-        let index = to_ns(u64::from(binding.metal_index))?;
-        unsafe {
-            encoder.setVertexTexture_atIndex(Some(view.as_ref()), index);
+            encoder.setVertexTexture_atIndex(Some(view.as_ref()), slot);
         }
     }
-    if let Some(frag) = binding.fragment_metal_index {
-        let frag_index = to_ns(u64::from(frag))?;
+    if let Some(slot) = fragment_slot {
         unsafe {
-            encoder.setFragmentTexture_atIndex(Some(view.as_ref()), frag_index);
-        }
-    } else if binding.vertex_metal_index.is_none() {
-        let index = to_ns(u64::from(binding.metal_index))?;
-        unsafe {
-            encoder.setFragmentTexture_atIndex(Some(view.as_ref()), index);
+            encoder.setFragmentTexture_atIndex(Some(view.as_ref()), slot);
         }
     }
     Ok(())
@@ -1702,34 +1710,20 @@ fn encode_render_bind_sampler(
     encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
     binding: &HalBoundSampler,
 ) -> Result<(), HalError> {
-    let HalSampler::Metal(sampler) = &binding.sampler else {
-        return Err(texture_error("render bind sampler is not Metal-backed"));
-    };
-    let sampler = sampler
-        ._inner
-        .as_deref()
-        .ok_or_else(|| texture_error("sampler allocation failed"))?;
-    // Per-stage binding: use stage-specific sampler slots when available.
-    if let Some(vtx) = binding.vertex_metal_index {
-        let vtx_index = to_ns(u64::from(vtx))?;
+    let sampler = metal_bound_sampler(binding, "render bind sampler is not Metal-backed")?;
+    let (vertex_slot, fragment_slot) = per_stage_slots(
+        binding.vertex_metal_index,
+        binding.fragment_metal_index,
+        binding.metal_index,
+    );
+    if let Some(slot) = vertex_slot {
         unsafe {
-            encoder.setVertexSamplerState_atIndex(Some(sampler), vtx_index);
-        }
-    } else if binding.fragment_metal_index.is_none() {
-        let index = to_ns(u64::from(binding.metal_index))?;
-        unsafe {
-            encoder.setVertexSamplerState_atIndex(Some(sampler), index);
+            encoder.setVertexSamplerState_atIndex(Some(sampler), slot);
         }
     }
-    if let Some(frag) = binding.fragment_metal_index {
-        let frag_index = to_ns(u64::from(frag))?;
+    if let Some(slot) = fragment_slot {
         unsafe {
-            encoder.setFragmentSamplerState_atIndex(Some(sampler), frag_index);
-        }
-    } else if binding.vertex_metal_index.is_none() {
-        let index = to_ns(u64::from(binding.metal_index))?;
-        unsafe {
-            encoder.setFragmentSamplerState_atIndex(Some(sampler), index);
+            encoder.setFragmentSamplerState_atIndex(Some(sampler), slot);
         }
     }
     Ok(())
@@ -1877,6 +1871,14 @@ mod tests {
         HalSubpassAttachmentLayout, HalSubpassColorAttachment, HalSubpassInputAttachment,
         HalSubpassLayout, HalSubpassPassLayout, HalSubpassRenderPassCommand,
     };
+
+    #[test]
+    fn per_stage_slots_resolves_stage_specific_and_flat_fallbacks() {
+        assert_eq!(per_stage_slots(Some(1), Some(2), 9), (Some(1), Some(2)));
+        assert_eq!(per_stage_slots(Some(1), None, 9), (Some(1), None));
+        assert_eq!(per_stage_slots(None, Some(2), 9), (None, Some(2)));
+        assert_eq!(per_stage_slots(None, None, 9), (Some(9), Some(9)));
+    }
 
     /// Constructs a minimal `MetalBuffer` stub usable in unit tests.
     /// `inner` is `None` so GPU calls will fail, but `size()` works.

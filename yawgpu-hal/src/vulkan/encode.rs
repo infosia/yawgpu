@@ -10,6 +10,7 @@ use crate::{
     HalRenderColorTarget, HalRenderDepthStencilAttachment, HalTextureAspect, HalTextureClear,
     HalTextureDimension,
 };
+use std::collections::HashSet;
 
 /// Records submit into the command stream.
 pub(super) fn submit_copies(
@@ -397,14 +398,42 @@ fn retire_ops(
 }
 
 fn collect_retained_resources(copies: &[HalCopy]) -> Vec<RetainedResource> {
-    let mut retained = Vec::new();
+    let mut retained = RetainedResources::default();
     for copy in copies {
         retain_copy_resources(copy, &mut retained);
     }
-    retained
+    retained.into_vec()
 }
 
-fn retain_copy_resources(copy: &HalCopy, retained: &mut Vec<RetainedResource>) {
+#[derive(Default)]
+struct RetainedResources {
+    resources: Vec<RetainedResource>,
+    seen: HashSet<(RetainedResourceKind, usize)>,
+}
+
+impl RetainedResources {
+    fn retain(&mut self, kind: RetainedResourceKind, ptr: usize, resource: RetainedResource) {
+        if self.seen.insert((kind, ptr)) {
+            self.resources.push(resource);
+        }
+    }
+
+    fn into_vec(self) -> Vec<RetainedResource> {
+        self.resources
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum RetainedResourceKind {
+    Buffer,
+    Texture,
+    Sampler,
+    QuerySet,
+    ComputePipeline,
+    RenderPipeline,
+}
+
+fn retain_copy_resources(copy: &HalCopy, retained: &mut RetainedResources) {
     match copy {
         HalCopy::Buffer(copy) => {
             retain_hal_buffer(&copy.source, retained);
@@ -464,7 +493,7 @@ fn retain_copy_resources(copy: &HalCopy, retained: &mut Vec<RetainedResource>) {
 
 fn retain_render_stream_command_resources(
     commands: &[HalRenderPassCommand],
-    retained: &mut Vec<RetainedResource>,
+    retained: &mut RetainedResources,
 ) {
     for command in commands {
         match command {
@@ -510,75 +539,99 @@ fn retain_render_stream_command_resources(
     }
 }
 
-fn retain_hal_buffer(buffer: &crate::HalBuffer, retained: &mut Vec<RetainedResource>) {
+fn retain_hal_buffer(buffer: &crate::HalBuffer, retained: &mut RetainedResources) {
     let crate::HalBuffer::Vulkan(buffer) = buffer else {
         return;
     };
     if let Some(inner) = &buffer.inner {
-        retained.push(RetainedResource::Buffer {
-            _inner: Arc::clone(inner),
-        });
+        retained.retain(
+            RetainedResourceKind::Buffer,
+            Arc::as_ptr(inner) as usize,
+            RetainedResource::Buffer {
+                _inner: Arc::clone(inner),
+            },
+        );
     }
 }
 
-fn retain_hal_texture(texture: &HalTexture, retained: &mut Vec<RetainedResource>) {
+fn retain_hal_texture(texture: &HalTexture, retained: &mut RetainedResources) {
     let HalTexture::Vulkan(texture) = texture else {
         return;
     };
     if let Some(inner) = &texture.inner {
-        retained.push(RetainedResource::Texture {
-            _inner: Arc::clone(inner),
-        });
+        retained.retain(
+            RetainedResourceKind::Texture,
+            Arc::as_ptr(inner) as usize,
+            RetainedResource::Texture {
+                _inner: Arc::clone(inner),
+            },
+        );
     }
 }
 
-fn retain_hal_sampler(sampler: &HalSampler, retained: &mut Vec<RetainedResource>) {
+fn retain_hal_sampler(sampler: &HalSampler, retained: &mut RetainedResources) {
     let HalSampler::Vulkan(sampler) = sampler else {
         return;
     };
     if let Some(inner) = &sampler._inner {
-        retained.push(RetainedResource::Sampler {
-            _inner: Arc::clone(inner),
-        });
+        retained.retain(
+            RetainedResourceKind::Sampler,
+            Arc::as_ptr(inner) as usize,
+            RetainedResource::Sampler {
+                _inner: Arc::clone(inner),
+            },
+        );
     }
 }
 
-fn retain_hal_query_set(query_set: &HalQuerySet, retained: &mut Vec<RetainedResource>) {
+fn retain_hal_query_set(query_set: &HalQuerySet, retained: &mut RetainedResources) {
     let HalQuerySet::Vulkan(query_set) = query_set else {
         return;
     };
-    retained.push(RetainedResource::QuerySet {
-        _inner: Arc::clone(&query_set.inner),
-    });
+    retained.retain(
+        RetainedResourceKind::QuerySet,
+        Arc::as_ptr(&query_set.inner) as usize,
+        RetainedResource::QuerySet {
+            _inner: Arc::clone(&query_set.inner),
+        },
+    );
 }
 
 fn retain_hal_compute_pipeline(
     pipeline: &crate::HalComputePipeline,
-    retained: &mut Vec<RetainedResource>,
+    retained: &mut RetainedResources,
 ) {
     let crate::HalComputePipeline::Vulkan(pipeline) = pipeline else {
         return;
     };
-    retained.push(RetainedResource::ComputePipeline {
-        _inner: Arc::clone(&pipeline.inner),
-    });
+    retained.retain(
+        RetainedResourceKind::ComputePipeline,
+        Arc::as_ptr(&pipeline.inner) as usize,
+        RetainedResource::ComputePipeline {
+            _inner: Arc::clone(&pipeline.inner),
+        },
+    );
 }
 
 fn retain_hal_render_pipeline(
     pipeline: &crate::HalRenderPipeline,
-    retained: &mut Vec<RetainedResource>,
+    retained: &mut RetainedResources,
 ) {
     let crate::HalRenderPipeline::Vulkan(pipeline) = pipeline else {
         return;
     };
-    retained.push(RetainedResource::RenderPipeline {
-        _inner: Arc::clone(&pipeline.inner),
-    });
+    retained.retain(
+        RetainedResourceKind::RenderPipeline,
+        Arc::as_ptr(&pipeline.inner) as usize,
+        RetainedResource::RenderPipeline {
+            _inner: Arc::clone(&pipeline.inner),
+        },
+    );
 }
 
 fn retain_hal_external_texture(
     texture: &crate::HalBoundExternalTexture,
-    retained: &mut Vec<RetainedResource>,
+    retained: &mut RetainedResources,
 ) {
     retain_hal_texture(&texture.plane0, retained);
     retain_hal_texture(&texture.plane1, retained);
@@ -586,10 +639,7 @@ fn retain_hal_external_texture(
 }
 
 #[cfg(feature = "tiled")]
-fn retain_subpass_resources(
-    pass: &HalSubpassRenderPassCommand,
-    retained: &mut Vec<RetainedResource>,
-) {
+fn retain_subpass_resources(pass: &HalSubpassRenderPassCommand, retained: &mut RetainedResources) {
     for attachment in &pass.color_attachments {
         retain_subpass_attachment_resource(&attachment.resource, retained);
     }
@@ -616,7 +666,7 @@ fn retain_subpass_resources(
 #[cfg(feature = "tiled")]
 fn retain_subpass_attachment_resource(
     resource: &HalSubpassAttachmentResource,
-    retained: &mut Vec<RetainedResource>,
+    retained: &mut RetainedResources,
 ) {
     match resource {
         HalSubpassAttachmentResource::Persistent {
@@ -1054,7 +1104,7 @@ pub(super) fn encode_compute_pass(
     };
     let descriptor_pool = create_compute_descriptor_pool(device, pipeline)?;
     let descriptor_sets = if let Some(pool) = descriptor_pool {
-        match allocate_compute_descriptor_sets(device, pool, pipeline) {
+        match allocate_descriptor_sets(device, pool, &pipeline.inner.descriptor_set_layouts) {
             Ok(sets) => sets,
             Err(error) => {
                 unsafe {
@@ -1390,7 +1440,7 @@ fn encode_subpass_draw(
     };
     let descriptor_pool = create_render_descriptor_pool(device, pipeline)?;
     let descriptor_sets = if let Some(pool) = descriptor_pool {
-        match allocate_render_descriptor_sets(device, pool, pipeline) {
+        match allocate_descriptor_sets(device, pool, &pipeline.inner.descriptor_set_layouts) {
             Ok(sets) => sets,
             Err(error) => {
                 unsafe {
@@ -2693,7 +2743,7 @@ fn prepare_vulkan_render_draw(
     if state.descriptors_dirty {
         let descriptor_pool = create_render_descriptor_pool(device, pipeline)?;
         let descriptor_sets = if let Some(pool) = descriptor_pool {
-            match allocate_render_descriptor_sets(device, pool, pipeline) {
+            match allocate_descriptor_sets(device, pool, &pipeline.inner.descriptor_set_layouts) {
                 Ok(sets) => sets,
                 Err(error) => {
                     unsafe {
@@ -3497,32 +3547,12 @@ pub(super) fn validate_buffer_texture_range(
     buffer: &VulkanBuffer,
     copy: &HalBufferTextureCopy,
 ) -> Result<(), HalError> {
-    let (_, block_width, block_height) = texture_block_info(copy);
-    let width_blocks = div_ceil_u32(copy.extent.width, block_width);
-    let height_blocks = div_ceil_u32(copy.extent.height, block_height);
-    let rows = u64::from(height_blocks.saturating_sub(1));
-    let last_row = rows
-        .checked_mul(u64::from(copy.buffer_layout.bytes_per_row))
-        .ok_or_else(|| buffer_error("buffer texture row range overflows"))?;
-    let images = u64::from(copy.extent.depth_or_array_layers.saturating_sub(1));
-    let last_image = images
-        .checked_mul(u64::from(copy.buffer_layout.bytes_per_row))
-        .and_then(|bytes| bytes.checked_mul(u64::from(copy.buffer_layout.rows_per_image)))
-        .ok_or_else(|| buffer_error("buffer texture image range overflows"))?;
-    let row_bytes = u64::from(width_blocks)
-        .checked_mul(u64::from(texture_bytes_per_pixel(copy)?))
-        .ok_or_else(|| buffer_error("buffer texture row bytes overflow"))?;
-    let required = copy
-        .buffer_layout
-        .offset
-        .checked_add(last_image)
-        .and_then(|offset| offset.checked_add(last_row))
-        .and_then(|offset| offset.checked_add(row_bytes))
-        .ok_or_else(|| buffer_error("buffer texture range overflows"))?;
-    if required > buffer.size() {
-        return Err(buffer_error("buffer texture range exceeds buffer size"));
-    }
-    Ok(())
+    crate::format::validate_buffer_texture_range(
+        BACKEND,
+        buffer.size(),
+        copy,
+        texture_bytes_per_pixel(copy)?,
+    )
 }
 
 /// Returns texture bytes per pixel.
@@ -3530,31 +3560,12 @@ pub(super) fn texture_bytes_per_pixel(copy: &HalBufferTextureCopy) -> Result<u32
     let crate::HalTexture::Vulkan(texture) = &copy.texture else {
         return Err(texture_error("texture is not Vulkan-backed"));
     };
-    aspect_bytes_per_pixel(copy.format, copy.aspect, texture.bytes_per_pixel)
-}
-
-fn aspect_bytes_per_pixel(
-    format: HalTextureFormat,
-    aspect: HalTextureAspect,
-    full_bytes_per_pixel: u32,
-) -> Result<u32, HalError> {
-    match aspect {
-        HalTextureAspect::StencilOnly => Ok(1),
-        HalTextureAspect::DepthOnly => match format {
-            HalTextureFormat::Depth16Unorm => Ok(2),
-            HalTextureFormat::Depth32Float | HalTextureFormat::Depth32FloatStencil8 => Ok(4),
-            _ => full_texture_bytes_per_pixel(full_bytes_per_pixel),
-        },
-        HalTextureAspect::All => full_texture_bytes_per_pixel(full_bytes_per_pixel),
-    }
-}
-
-fn full_texture_bytes_per_pixel(bytes_per_pixel: u32) -> Result<u32, HalError> {
-    if bytes_per_pixel == 0 {
-        Err(texture_error("unsupported texture format"))
-    } else {
-        Ok(bytes_per_pixel)
-    }
+    crate::format::aspect_bytes_per_pixel(
+        BACKEND,
+        copy.format,
+        copy.aspect,
+        texture.bytes_per_pixel,
+    )
 }
 
 /// Returns buffer image copy.
@@ -4301,73 +4312,6 @@ mod tests {
         assert_eq!(
             buffer_texture_copy_aspect_flags(HalTextureFormat::Rgba8Unorm, HalTextureAspect::All),
             vk::ImageAspectFlags::COLOR
-        );
-    }
-
-    #[test]
-    fn aspect_bytes_per_pixel_uses_copied_depth_stencil_plane_size() {
-        assert_eq!(
-            aspect_bytes_per_pixel(
-                HalTextureFormat::Depth24PlusStencil8,
-                HalTextureAspect::StencilOnly,
-                5,
-            )
-            .expect("packed stencil byte size"),
-            1
-        );
-        assert_eq!(
-            aspect_bytes_per_pixel(
-                HalTextureFormat::Depth32FloatStencil8,
-                HalTextureAspect::StencilOnly,
-                5,
-            )
-            .expect("packed stencil byte size"),
-            1
-        );
-        assert_eq!(
-            aspect_bytes_per_pixel(HalTextureFormat::Stencil8, HalTextureAspect::StencilOnly, 4,)
-                .expect("stencil8 byte size"),
-            1
-        );
-        assert_eq!(
-            aspect_bytes_per_pixel(
-                HalTextureFormat::Depth16Unorm,
-                HalTextureAspect::DepthOnly,
-                2,
-            )
-            .expect("depth16 byte size"),
-            2
-        );
-        assert_eq!(
-            aspect_bytes_per_pixel(
-                HalTextureFormat::Depth32Float,
-                HalTextureAspect::DepthOnly,
-                4,
-            )
-            .expect("depth32 byte size"),
-            4
-        );
-        assert_eq!(
-            aspect_bytes_per_pixel(
-                HalTextureFormat::Depth32FloatStencil8,
-                HalTextureAspect::DepthOnly,
-                5,
-            )
-            .expect("packed depth byte size"),
-            4
-        );
-        assert_eq!(
-            aspect_bytes_per_pixel(
-                HalTextureFormat::Depth32FloatStencil8,
-                HalTextureAspect::All,
-                5
-            )
-            .expect("whole-format byte size"),
-            5
-        );
-        assert!(
-            aspect_bytes_per_pixel(HalTextureFormat::Unsupported, HalTextureAspect::All, 0)
-                .is_err()
         );
     }
 

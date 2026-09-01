@@ -1,3 +1,8 @@
+#[cfg(any(feature = "metal", feature = "vulkan", test))]
+use crate::command::{HalBufferTextureCopy, HalTextureAspect};
+#[cfg(any(feature = "metal", feature = "vulkan", test))]
+use crate::error::HalError;
+
 /// Enumerates HAL vertex format values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -417,6 +422,81 @@ impl HalTextureFormat {
     }
 }
 
+/// Validates buffer texture range and returns a descriptive error on failure.
+#[cfg(any(feature = "metal", feature = "vulkan", test))]
+pub(crate) fn validate_buffer_texture_range(
+    backend: &'static str,
+    buffer_size: u64,
+    copy: &HalBufferTextureCopy,
+    bytes_per_pixel: u32,
+) -> Result<(), HalError> {
+    let (_, block_width, block_height) = copy.format.compressed_block_info().unwrap_or((1, 1, 1));
+    let width_blocks = copy.extent.width.div_ceil(block_width);
+    let height_blocks = copy.extent.height.div_ceil(block_height);
+    let rows = u64::from(height_blocks.saturating_sub(1));
+    let last_row = rows
+        .checked_mul(u64::from(copy.buffer_layout.bytes_per_row))
+        .ok_or_else(|| buffer_error(backend, "buffer texture row range overflows"))?;
+    let images = u64::from(copy.extent.depth_or_array_layers.saturating_sub(1));
+    let last_image = images
+        .checked_mul(u64::from(copy.buffer_layout.bytes_per_row))
+        .and_then(|bytes| bytes.checked_mul(u64::from(copy.buffer_layout.rows_per_image)))
+        .ok_or_else(|| buffer_error(backend, "buffer texture image range overflows"))?;
+    let row_bytes = u64::from(width_blocks)
+        .checked_mul(u64::from(bytes_per_pixel))
+        .ok_or_else(|| buffer_error(backend, "buffer texture row bytes overflow"))?;
+    let required = copy
+        .buffer_layout
+        .offset
+        .checked_add(last_image)
+        .and_then(|offset| offset.checked_add(last_row))
+        .and_then(|offset| offset.checked_add(row_bytes))
+        .ok_or_else(|| buffer_error(backend, "buffer texture range overflows"))?;
+    if required > buffer_size {
+        return Err(buffer_error(
+            backend,
+            "buffer texture range exceeds buffer size",
+        ));
+    }
+    Ok(())
+}
+
+/// Returns the per-texel byte size of the texture aspect being copied.
+#[cfg(any(feature = "metal", feature = "vulkan", test))]
+pub(crate) fn aspect_bytes_per_pixel(
+    backend: &'static str,
+    format: HalTextureFormat,
+    aspect: HalTextureAspect,
+    full_bytes_per_pixel: u32,
+) -> Result<u32, HalError> {
+    match aspect {
+        HalTextureAspect::StencilOnly => Ok(1),
+        HalTextureAspect::DepthOnly => match format {
+            HalTextureFormat::Depth16Unorm => Ok(2),
+            HalTextureFormat::Depth32Float | HalTextureFormat::Depth32FloatStencil8 => Ok(4),
+            _ => full_texture_bytes_per_pixel(backend, full_bytes_per_pixel),
+        },
+        HalTextureAspect::All => full_texture_bytes_per_pixel(backend, full_bytes_per_pixel),
+    }
+}
+
+#[cfg(any(feature = "metal", feature = "vulkan", test))]
+fn full_texture_bytes_per_pixel(
+    backend: &'static str,
+    bytes_per_pixel: u32,
+) -> Result<u32, HalError> {
+    if bytes_per_pixel == 0 {
+        Err(buffer_error(backend, "unsupported texture format"))
+    } else {
+        Ok(bytes_per_pixel)
+    }
+}
+
+#[cfg(any(feature = "metal", feature = "vulkan", test))]
+fn buffer_error(backend: &'static str, message: &'static str) -> HalError {
+    HalError::BufferOperationFailed { backend, message }
+}
+
 /// Enumerates HAL texture usage.
 #[derive(Debug, Clone, Copy)]
 pub struct HalTextureUsage {
@@ -555,6 +635,11 @@ pub(crate) fn format_has_stencil_aspect(format: HalTextureFormat) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "noop")]
+    use crate::{
+        noop, HalBuffer, HalBufferTextureLayout, HalExtent3d, HalOrigin3d, HalTexture,
+        HalTextureDescriptor, HalTextureDimension, HalTextureUsage,
+    };
 
     const UNCOMPRESSED_COLOR_FORMATS: &[HalTextureFormat] = &[
         HalTextureFormat::R8Unorm,
@@ -644,6 +729,161 @@ mod tests {
             HalTextureFormat::Rgba32Float.color_clear_kind(),
             HalColorClearKind::Float
         );
+    }
+
+    #[test]
+    fn aspect_bytes_per_pixel_uses_copied_depth_stencil_plane_size() {
+        assert_eq!(
+            aspect_bytes_per_pixel(
+                "test",
+                HalTextureFormat::Depth24PlusStencil8,
+                HalTextureAspect::StencilOnly,
+                5,
+            )
+            .expect("packed stencil byte size"),
+            1
+        );
+        assert_eq!(
+            aspect_bytes_per_pixel(
+                "test",
+                HalTextureFormat::Depth32FloatStencil8,
+                HalTextureAspect::StencilOnly,
+                5,
+            )
+            .expect("packed stencil byte size"),
+            1
+        );
+        assert_eq!(
+            aspect_bytes_per_pixel(
+                "test",
+                HalTextureFormat::Stencil8,
+                HalTextureAspect::StencilOnly,
+                4,
+            )
+            .expect("stencil8 byte size"),
+            1
+        );
+        assert_eq!(
+            aspect_bytes_per_pixel(
+                "test",
+                HalTextureFormat::Depth16Unorm,
+                HalTextureAspect::DepthOnly,
+                2,
+            )
+            .expect("depth16 byte size"),
+            2
+        );
+        assert_eq!(
+            aspect_bytes_per_pixel(
+                "test",
+                HalTextureFormat::Depth32Float,
+                HalTextureAspect::DepthOnly,
+                4,
+            )
+            .expect("depth32 byte size"),
+            4
+        );
+        assert_eq!(
+            aspect_bytes_per_pixel(
+                "test",
+                HalTextureFormat::Depth32FloatStencil8,
+                HalTextureAspect::DepthOnly,
+                5,
+            )
+            .expect("packed depth byte size"),
+            4
+        );
+        assert_eq!(
+            aspect_bytes_per_pixel(
+                "test",
+                HalTextureFormat::Depth32FloatStencil8,
+                HalTextureAspect::All,
+                5
+            )
+            .expect("whole-format byte size"),
+            5
+        );
+        assert!(aspect_bytes_per_pixel(
+            "test",
+            HalTextureFormat::Unsupported,
+            HalTextureAspect::All,
+            0
+        )
+        .is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "noop")]
+    fn validate_buffer_texture_range_checks_final_copied_byte() {
+        let copy = make_copy(16, 4, 4, 3, 2);
+
+        validate_buffer_texture_range("test", 112, &copy, 4).expect("range should fit");
+        assert!(validate_buffer_texture_range("test", 111, &copy, 4).is_err());
+    }
+
+    #[cfg(feature = "noop")]
+    fn make_copy(
+        bytes_per_row: u32,
+        rows_per_image: u32,
+        width: u32,
+        height: u32,
+        depth_or_array_layers: u32,
+    ) -> HalBufferTextureCopy {
+        let device = noop::NoopDevice::new();
+        let usage = crate::HalBufferUsage {
+            map_read: false,
+            map_write: false,
+            copy_src: true,
+            copy_dst: true,
+            index: false,
+            vertex: false,
+            uniform: false,
+            storage: false,
+            indirect: false,
+            query_resolve: false,
+        };
+        HalBufferTextureCopy {
+            buffer: HalBuffer::Noop(
+                device
+                    .create_buffer(1024, usage)
+                    .expect("Noop buffer allocation should succeed"),
+            ),
+            buffer_layout: HalBufferTextureLayout {
+                offset: 0,
+                bytes_per_row,
+                rows_per_image,
+            },
+            texture: HalTexture::Noop(
+                device
+                    .create_texture(&HalTextureDescriptor {
+                        dimension: HalTextureDimension::D2,
+                        format: HalTextureFormat::Rgba8Unorm,
+                        width,
+                        height,
+                        depth_or_array_layers,
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        usage: HalTextureUsage {
+                            copy_src: true,
+                            copy_dst: true,
+                            texture_binding: false,
+                            storage_binding: false,
+                            render_attachment: false,
+                            transient: false,
+                        },
+                    })
+                    .expect("Noop texture allocation should succeed"),
+            ),
+            format: HalTextureFormat::Rgba8Unorm,
+            aspect: HalTextureAspect::All,
+            mip_level: 0,
+            origin: HalOrigin3d { x: 0, y: 0, z: 0 },
+            extent: HalExtent3d {
+                width,
+                height,
+                depth_or_array_layers,
+            },
+        }
     }
 
     #[test]

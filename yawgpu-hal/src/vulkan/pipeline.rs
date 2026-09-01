@@ -1240,123 +1240,25 @@ pub(super) fn create_compute_descriptor_pool(
     if pipeline.inner.descriptor_set_layouts.is_empty() {
         return Ok(None);
     }
-    let uniform_count = pipeline
-        .inner
-        .descriptor_bindings
-        .iter()
-        .filter(|binding| {
-            matches!(
-                binding.kind,
-                HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Uniform)
-            )
-        })
-        .count();
-    let storage_count = pipeline
-        .inner
-        .descriptor_bindings
-        .iter()
-        .filter(|binding| {
-            matches!(
-                binding.kind,
-                HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Storage)
-            )
-        })
-        .count();
-    let texture_count = pipeline
-        .inner
-        .descriptor_bindings
-        .iter()
-        .filter(|binding| matches!(binding.kind, HalDescriptorBindingKind::Texture))
-        .count();
-    let storage_texture_count = pipeline
-        .inner
-        .descriptor_bindings
-        .iter()
-        .filter(|binding| {
-            matches!(
-                binding.kind,
-                HalDescriptorBindingKind::StorageTexture { .. }
-            )
-        })
-        .count();
-    let sampler_count = pipeline
-        .inner
-        .descriptor_bindings
-        .iter()
-        .filter(|binding| matches!(binding.kind, HalDescriptorBindingKind::Sampler))
-        .count();
-    let mut pool_sizes = Vec::new();
-    if uniform_count > 0 {
-        pool_sizes.push(
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count(
-                    u32::try_from(uniform_count)
-                        .map_err(|_| shader_error("uniform descriptor count is too large"))?,
-                ),
-        );
-    }
-    if storage_count > 0 {
-        pool_sizes.push(
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(
-                    u32::try_from(storage_count)
-                        .map_err(|_| shader_error("storage descriptor count is too large"))?,
-                ),
-        );
-    }
-    if texture_count > 0 {
-        pool_sizes.push(
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                .descriptor_count(
-                    u32::try_from(texture_count)
-                        .map_err(|_| shader_error("texture descriptor count is too large"))?,
-                ),
-        );
-    }
-    if storage_texture_count > 0 {
-        pool_sizes.push(
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::STORAGE_IMAGE)
-                .descriptor_count(
-                    u32::try_from(storage_texture_count).map_err(|_| {
-                        shader_error("storage texture descriptor count is too large")
-                    })?,
-                ),
-        );
-    }
-    if sampler_count > 0 {
-        pool_sizes.push(
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::SAMPLER)
-                .descriptor_count(
-                    u32::try_from(sampler_count)
-                        .map_err(|_| shader_error("sampler descriptor count is too large"))?,
-                ),
-        );
-    }
-    let pool_info = vk::DescriptorPoolCreateInfo::default()
-        .max_sets(
-            u32::try_from(pipeline.inner.descriptor_set_layouts.len())
-                .map_err(|_| shader_error("descriptor set count is too large"))?,
-        )
-        .pool_sizes(&pool_sizes);
-    let pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
-        .map_err(|_| shader_error("descriptor pool creation failed"))?;
-    Ok(Some(pool))
+    // Compute descriptor bindings come from compute shader resources and never
+    // include render-only input attachments; the shared pool helper's
+    // INPUT_ATTACHMENT arm is therefore inert here.
+    create_descriptor_pool(
+        device,
+        pipeline.inner.descriptor_set_layouts.len(),
+        &pipeline.inner.descriptor_bindings,
+    )
 }
 
-/// Returns allocate compute descriptor sets.
-pub(super) fn allocate_compute_descriptor_sets(
+/// Returns allocated descriptor sets.
+pub(super) fn allocate_descriptor_sets(
     device: &ash::Device,
     pool: vk::DescriptorPool,
-    pipeline: &VulkanComputePipeline,
+    layouts: &[vk::DescriptorSetLayout],
 ) -> Result<Vec<vk::DescriptorSet>, HalError> {
     let allocate_info = vk::DescriptorSetAllocateInfo::default()
         .descriptor_pool(pool)
-        .set_layouts(&pipeline.inner.descriptor_set_layouts);
+        .set_layouts(layouts);
     unsafe { device.allocate_descriptor_sets(&allocate_info) }
         .map_err(|_| shader_error("descriptor set allocation failed"))
 }
@@ -1400,29 +1302,8 @@ pub(super) fn update_compute_descriptor_sets(
                 ));
             }
         }
-        let writes = write_specs
-            .iter()
-            .map(|(info, group, binding, descriptor_type)| {
-                let group = usize::try_from(*group)
-                    .map_err(|_| shader_error("descriptor group index is too large"))?;
-                let descriptor_set = descriptor_sets
-                    .get(group)
-                    .copied()
-                    .ok_or_else(|| shader_error("descriptor set is missing"))?;
-                let write = vk::WriteDescriptorSet::default()
-                    .dst_set(descriptor_set)
-                    .dst_binding(*binding)
-                    .descriptor_type(*descriptor_type);
-                Ok(match info {
-                    DescriptorInfo::Buffer(index) => {
-                        write.buffer_info(std::slice::from_ref(&buffer_infos[*index]))
-                    }
-                    DescriptorInfo::Image(index) => {
-                        write.image_info(std::slice::from_ref(&image_infos[*index]))
-                    }
-                })
-            })
-            .collect::<Result<Vec<_>, HalError>>()?;
+        let writes =
+            build_descriptor_writes(descriptor_sets, &buffer_infos, &image_infos, &write_specs)?;
         unsafe {
             device.update_descriptor_sets(&writes, &[]);
         }
@@ -1448,19 +1329,6 @@ pub(super) fn create_render_descriptor_pool(
         pipeline.inner.descriptor_set_layouts.len(),
         &pipeline.inner.descriptor_bindings,
     )
-}
-
-/// Returns allocate render descriptor sets.
-pub(super) fn allocate_render_descriptor_sets(
-    device: &ash::Device,
-    pool: vk::DescriptorPool,
-    pipeline: &VulkanRenderPipeline,
-) -> Result<Vec<vk::DescriptorSet>, HalError> {
-    let allocate_info = vk::DescriptorSetAllocateInfo::default()
-        .descriptor_pool(pool)
-        .set_layouts(&pipeline.inner.descriptor_set_layouts);
-    unsafe { device.allocate_descriptor_sets(&allocate_info) }
-        .map_err(|_| shader_error("descriptor set allocation failed"))
 }
 
 /// Returns update render descriptor sets.
@@ -1521,29 +1389,8 @@ pub(super) fn update_render_descriptor_sets(
                 ));
             }
         }
-        let writes = write_specs
-            .iter()
-            .map(|(info, group, binding, descriptor_type)| {
-                let group = usize::try_from(*group)
-                    .map_err(|_| shader_error("descriptor group index is too large"))?;
-                let descriptor_set = descriptor_sets
-                    .get(group)
-                    .copied()
-                    .ok_or_else(|| shader_error("descriptor set is missing"))?;
-                let write = vk::WriteDescriptorSet::default()
-                    .dst_set(descriptor_set)
-                    .dst_binding(*binding)
-                    .descriptor_type(*descriptor_type);
-                Ok(match info {
-                    DescriptorInfo::Buffer(index) => {
-                        write.buffer_info(std::slice::from_ref(&buffer_infos[*index]))
-                    }
-                    DescriptorInfo::Image(index) => {
-                        write.image_info(std::slice::from_ref(&image_infos[*index]))
-                    }
-                })
-            })
-            .collect::<Result<Vec<_>, HalError>>()?;
+        let writes =
+            build_descriptor_writes(descriptor_sets, &buffer_infos, &image_infos, &write_specs)?;
         unsafe {
             device.update_descriptor_sets(&writes, &[]);
         }
@@ -1560,6 +1407,39 @@ pub(super) fn update_render_descriptor_sets(
 pub(super) enum DescriptorInfo {
     Buffer(usize),
     Image(usize),
+}
+
+type DescriptorWriteSpec = (DescriptorInfo, u32, u32, vk::DescriptorType);
+
+fn build_descriptor_writes<'a>(
+    descriptor_sets: &[vk::DescriptorSet],
+    buffer_infos: &'a [vk::DescriptorBufferInfo],
+    image_infos: &'a [vk::DescriptorImageInfo],
+    write_specs: &[DescriptorWriteSpec],
+) -> Result<Vec<vk::WriteDescriptorSet<'a>>, HalError> {
+    write_specs
+        .iter()
+        .map(|(info, group, binding, descriptor_type)| {
+            let group = usize::try_from(*group)
+                .map_err(|_| shader_error("descriptor group index is too large"))?;
+            let descriptor_set = descriptor_sets
+                .get(group)
+                .copied()
+                .ok_or_else(|| shader_error("descriptor set is missing"))?;
+            let write = vk::WriteDescriptorSet::default()
+                .dst_set(descriptor_set)
+                .dst_binding(*binding)
+                .descriptor_type(*descriptor_type);
+            Ok(match info {
+                DescriptorInfo::Buffer(index) => {
+                    write.buffer_info(std::slice::from_ref(&buffer_infos[*index]))
+                }
+                DescriptorInfo::Image(index) => {
+                    write.image_info(std::slice::from_ref(&image_infos[*index]))
+                }
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2011,50 +1891,22 @@ pub(super) fn create_descriptor_pool(
     if descriptor_set_count == 0 {
         return Ok(None);
     }
-    let uniform_count = bindings
-        .iter()
-        .filter(|binding| {
-            matches!(
-                binding.kind,
-                HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Uniform)
-            )
-        })
-        .count();
-    let storage_count = bindings
-        .iter()
-        .filter(|binding| {
-            matches!(
-                binding.kind,
-                HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Storage)
-            )
-        })
-        .count();
-    let texture_count = bindings
-        .iter()
-        .filter(|binding| matches!(binding.kind, HalDescriptorBindingKind::Texture))
-        .count();
-    let storage_texture_count = bindings
-        .iter()
-        .filter(|binding| {
-            matches!(
-                binding.kind,
-                HalDescriptorBindingKind::StorageTexture { .. }
-            )
-        })
-        .count();
-    let sampler_count = bindings
-        .iter()
-        .filter(|binding| matches!(binding.kind, HalDescriptorBindingKind::Sampler))
-        .count();
-    let input_attachment_count = bindings
-        .iter()
-        .filter(|binding| {
-            matches!(
-                binding.kind,
-                HalDescriptorBindingKind::InputAttachment { .. }
-            )
-        })
-        .count();
+    let mut uniform_count = 0usize;
+    let mut storage_count = 0usize;
+    let mut texture_count = 0usize;
+    let mut storage_texture_count = 0usize;
+    let mut sampler_count = 0usize;
+    let mut input_attachment_count = 0usize;
+    for binding in bindings {
+        match binding.kind {
+            HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Uniform) => uniform_count += 1,
+            HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Storage) => storage_count += 1,
+            HalDescriptorBindingKind::Texture => texture_count += 1,
+            HalDescriptorBindingKind::StorageTexture { .. } => storage_texture_count += 1,
+            HalDescriptorBindingKind::Sampler => sampler_count += 1,
+            HalDescriptorBindingKind::InputAttachment { .. } => input_attachment_count += 1,
+        }
+    }
     let mut pool_sizes = Vec::new();
     if uniform_count > 0 {
         pool_sizes.push(

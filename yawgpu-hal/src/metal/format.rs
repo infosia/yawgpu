@@ -18,32 +18,12 @@ pub(super) fn validate_buffer_texture_range(
     buffer: &MetalBuffer,
     copy: &HalBufferTextureCopy,
 ) -> Result<(), HalError> {
-    let (_, block_width, block_height) = copy.format.compressed_block_info().unwrap_or((1, 1, 1));
-    let width_blocks = copy.extent.width.div_ceil(block_width);
-    let height_blocks = copy.extent.height.div_ceil(block_height);
-    let rows = u64::from(height_blocks.saturating_sub(1));
-    let last_row = rows
-        .checked_mul(u64::from(copy.buffer_layout.bytes_per_row))
-        .ok_or_else(|| buffer_error("buffer texture row range overflows"))?;
-    let images = u64::from(copy.extent.depth_or_array_layers.saturating_sub(1));
-    let last_image = images
-        .checked_mul(u64::from(copy.buffer_layout.bytes_per_row))
-        .and_then(|bytes| bytes.checked_mul(u64::from(copy.buffer_layout.rows_per_image)))
-        .ok_or_else(|| buffer_error("buffer texture image range overflows"))?;
-    let row_bytes = u64::from(width_blocks)
-        .checked_mul(u64::from(texture_bytes_per_pixel(copy)?))
-        .ok_or_else(|| buffer_error("buffer texture row bytes overflow"))?;
-    let required = copy
-        .buffer_layout
-        .offset
-        .checked_add(last_image)
-        .and_then(|offset| offset.checked_add(last_row))
-        .and_then(|offset| offset.checked_add(row_bytes))
-        .ok_or_else(|| buffer_error("buffer texture range overflows"))?;
-    if required > buffer.size() {
-        return Err(buffer_error("buffer texture range exceeds buffer size"));
-    }
-    Ok(())
+    crate::format::validate_buffer_texture_range(
+        BACKEND,
+        buffer.size(),
+        copy,
+        texture_bytes_per_pixel(copy)?,
+    )
 }
 
 /// Returns the per-texel byte size of the *aspect* being copied. For a single
@@ -54,23 +34,12 @@ pub(super) fn texture_bytes_per_pixel(copy: &HalBufferTextureCopy) -> Result<u32
     let HalTexture::Metal(texture) = &copy.texture else {
         return Err(texture_error("texture is not Metal-backed"));
     };
-    match copy.aspect {
-        crate::HalTextureAspect::StencilOnly => Ok(1),
-        crate::HalTextureAspect::DepthOnly => Ok(match copy.format {
-            crate::HalTextureFormat::Depth16Unorm => 2,
-            crate::HalTextureFormat::Depth32Float
-            | crate::HalTextureFormat::Depth32FloatStencil8 => 4,
-            _ => full_bytes_per_pixel(texture)?,
-        }),
-        crate::HalTextureAspect::All => full_bytes_per_pixel(texture),
-    }
-}
-
-fn full_bytes_per_pixel(texture: &MetalTexture) -> Result<u32, HalError> {
-    if texture.bytes_per_pixel == 0 {
-        return Err(texture_error("unsupported texture format"));
-    }
-    Ok(texture.bytes_per_pixel)
+    crate::format::aspect_bytes_per_pixel(
+        BACKEND,
+        copy.format,
+        copy.aspect,
+        texture.bytes_per_pixel,
+    )
 }
 
 /// Returns buffer texture bytes per image.

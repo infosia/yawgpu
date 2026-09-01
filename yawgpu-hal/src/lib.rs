@@ -4,6 +4,33 @@
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
+macro_rules! hal_dispatch {
+    ($value:expr, $binding:ident => $call:expr) => {
+        match $value {
+            #[cfg(feature = "noop")]
+            Self::Noop($binding) => $call,
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan($binding) => $call,
+            #[cfg(feature = "metal")]
+            Self::Metal($binding) => $call,
+            #[cfg(feature = "gles")]
+            Self::Gles($binding) => $call,
+        }
+    };
+    ($value:expr, $binding:ident => $call:expr, map $wrapper:ident) => {
+        match $value {
+            #[cfg(feature = "noop")]
+            Self::Noop($binding) => $call.map($wrapper::Noop),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan($binding) => $call.map($wrapper::Vulkan),
+            #[cfg(feature = "metal")]
+            Self::Metal($binding) => $call.map($wrapper::Metal),
+            #[cfg(feature = "gles")]
+            Self::Gles($binding) => $call.map($wrapper::Gles),
+        }
+    };
+}
+
 mod command;
 mod descriptors;
 mod error;
@@ -391,16 +418,7 @@ impl HalAdapter {
     /// Returns the name.
     #[must_use]
     pub fn name(&self) -> String {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(adapter) => adapter.name().to_owned(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(adapter) => adapter.name().to_owned(),
-            #[cfg(feature = "metal")]
-            Self::Metal(adapter) => adapter.name().to_owned(),
-            #[cfg(feature = "gles")]
-            Self::Gles(adapter) => adapter.name().to_owned(),
-        }
+        hal_dispatch!(self, adapter => adapter.name().to_owned())
     }
 
     /// Returns the backend.
@@ -421,121 +439,49 @@ impl HalAdapter {
     /// Returns the backend-reported supported limits.
     #[must_use]
     pub fn limits(&self) -> HalLimits {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(adapter) => adapter.limits(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(adapter) => adapter.limits(),
-            #[cfg(feature = "metal")]
-            Self::Metal(adapter) => adapter.limits(),
-            #[cfg(feature = "gles")]
-            Self::Gles(adapter) => adapter.limits(),
-        }
+        hal_dispatch!(self, adapter => adapter.limits())
     }
 
     /// Returns true when WebGPU texture format tier 1 is supported.
     #[must_use]
     pub fn supports_texture_formats_tier1(&self) -> bool {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(adapter) => adapter.supports_texture_formats_tier1(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(adapter) => adapter.supports_texture_formats_tier1(),
-            #[cfg(feature = "metal")]
-            Self::Metal(adapter) => adapter.supports_texture_formats_tier1(),
-            #[cfg(feature = "gles")]
-            Self::Gles(adapter) => adapter.supports_texture_formats_tier1(),
-        }
+        hal_dispatch!(self, adapter => adapter.supports_texture_formats_tier1())
     }
 
     /// Returns true when WebGPU texture format tier 2 is supported.
     #[must_use]
     pub fn supports_texture_formats_tier2(&self) -> bool {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(adapter) => adapter.supports_texture_formats_tier2(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(adapter) => adapter.supports_texture_formats_tier2(),
-            #[cfg(feature = "metal")]
-            Self::Metal(adapter) => adapter.supports_texture_formats_tier2(),
-            #[cfg(feature = "gles")]
-            Self::Gles(adapter) => adapter.supports_texture_formats_tier2(),
-        }
+        hal_dispatch!(self, adapter => adapter.supports_texture_formats_tier2())
     }
 
     /// Returns true when `Rg11b10Ufloat` is renderable.
     #[must_use]
     pub fn supports_rg11b10ufloat_renderable(&self) -> bool {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(adapter) => adapter.supports_rg11b10ufloat_renderable(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(adapter) => adapter.supports_rg11b10ufloat_renderable(),
-            #[cfg(feature = "metal")]
-            Self::Metal(adapter) => adapter.supports_rg11b10ufloat_renderable(),
-            #[cfg(feature = "gles")]
-            Self::Gles(adapter) => adapter.supports_rg11b10ufloat_renderable(),
-        }
+        hal_dispatch!(self, adapter => adapter.supports_rg11b10ufloat_renderable())
     }
 
     /// Returns true when BGRA8 unorm storage textures are supported.
     #[must_use]
     pub fn supports_bgra8unorm_storage(&self) -> bool {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(adapter) => adapter.supports_bgra8unorm_storage(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(adapter) => adapter.supports_bgra8unorm_storage(),
-            #[cfg(feature = "metal")]
-            Self::Metal(adapter) => adapter.supports_bgra8unorm_storage(),
-            #[cfg(feature = "gles")]
-            Self::Gles(adapter) => adapter.supports_bgra8unorm_storage(),
-        }
+        hal_dispatch!(self, adapter => adapter.supports_bgra8unorm_storage())
     }
 
     /// Returns true when 32-bit float textures are filterable.
     #[must_use]
     pub fn supports_float32_filterable(&self) -> bool {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(adapter) => adapter.supports_float32_filterable(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(adapter) => adapter.supports_float32_filterable(),
-            #[cfg(feature = "metal")]
-            Self::Metal(adapter) => adapter.supports_float32_filterable(),
-            #[cfg(feature = "gles")]
-            Self::Gles(adapter) => adapter.supports_float32_filterable(),
-        }
+        hal_dispatch!(self, adapter => adapter.supports_float32_filterable())
     }
 
     /// Returns true when timestamp queries are supported.
     #[must_use]
     pub fn supports_timestamp_query(&self) -> bool {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(adapter) => adapter.supports_timestamp_query(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(adapter) => adapter.supports_timestamp_query(),
-            #[cfg(feature = "metal")]
-            Self::Metal(adapter) => adapter.supports_timestamp_query(),
-            #[cfg(feature = "gles")]
-            Self::Gles(adapter) => adapter.supports_timestamp_query(),
-        }
+        hal_dispatch!(self, adapter => adapter.supports_timestamp_query())
     }
 
     /// Returns true when Depth32FloatStencil8 textures are supported.
     #[must_use]
     pub fn supports_depth32float_stencil8(&self) -> bool {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(adapter) => adapter.supports_depth32float_stencil8(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(adapter) => adapter.supports_depth32float_stencil8(),
-            #[cfg(feature = "metal")]
-            Self::Metal(adapter) => adapter.supports_depth32float_stencil8(),
-            #[cfg(feature = "gles")]
-            Self::Gles(adapter) => adapter.supports_depth32float_stencil8(),
-        }
+        hal_dispatch!(self, adapter => adapter.supports_depth32float_stencil8())
     }
 
     /// Returns true when BC texture compression is supported.
@@ -616,165 +562,66 @@ impl HalAdapter {
     /// Returns true when texture view component swizzling is supported.
     #[must_use]
     pub fn supports_texture_component_swizzle(&self) -> bool {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(adapter) => adapter.supports_texture_component_swizzle(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(adapter) => adapter.supports_texture_component_swizzle(),
-            #[cfg(feature = "metal")]
-            Self::Metal(adapter) => adapter.supports_texture_component_swizzle(),
-            #[cfg(feature = "gles")]
-            Self::Gles(adapter) => adapter.supports_texture_component_swizzle(),
-        }
+        hal_dispatch!(self, adapter => adapter.supports_texture_component_swizzle())
     }
 
     /// Returns true when WGSL `shader-f16` is supported.
     #[must_use]
     pub fn supports_shader_float16(&self) -> bool {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(adapter) => adapter.supports_shader_float16(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(adapter) => adapter.supports_shader_float16(),
-            #[cfg(feature = "metal")]
-            Self::Metal(adapter) => adapter.supports_shader_float16(),
-            #[cfg(feature = "gles")]
-            Self::Gles(adapter) => adapter.supports_shader_float16(),
-        }
+        hal_dispatch!(self, adapter => adapter.supports_shader_float16())
     }
 
     /// Returns true when WGSL `subgroups` is supported.
     #[must_use]
     pub fn supports_subgroups(&self) -> bool {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(adapter) => adapter.supports_subgroups(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(adapter) => adapter.supports_subgroups(),
-            #[cfg(feature = "metal")]
-            Self::Metal(adapter) => adapter.supports_subgroups(),
-            #[cfg(feature = "gles")]
-            Self::Gles(adapter) => adapter.supports_subgroups(),
-        }
+        hal_dispatch!(self, adapter => adapter.supports_subgroups())
     }
 
     /// Returns true when depth clip control is supported.
     #[must_use]
     pub fn supports_depth_clip_control(&self) -> bool {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(adapter) => adapter.supports_depth_clip_control(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(adapter) => adapter.supports_depth_clip_control(),
-            #[cfg(feature = "metal")]
-            Self::Metal(adapter) => adapter.supports_depth_clip_control(),
-            #[cfg(feature = "gles")]
-            Self::Gles(adapter) => adapter.supports_depth_clip_control(),
-        }
+        hal_dispatch!(self, adapter => adapter.supports_depth_clip_control())
     }
 
     /// Returns true when float32 color target blending is supported.
     #[must_use]
     pub fn supports_float32_blendable(&self) -> bool {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(adapter) => adapter.supports_float32_blendable(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(adapter) => adapter.supports_float32_blendable(),
-            #[cfg(feature = "metal")]
-            Self::Metal(adapter) => adapter.supports_float32_blendable(),
-            #[cfg(feature = "gles")]
-            Self::Gles(adapter) => adapter.supports_float32_blendable(),
-        }
+        hal_dispatch!(self, adapter => adapter.supports_float32_blendable())
     }
 
     /// Returns true when dual-source blending is supported.
     #[must_use]
     pub fn supports_dual_source_blending(&self) -> bool {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(adapter) => adapter.supports_dual_source_blending(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(adapter) => adapter.supports_dual_source_blending(),
-            #[cfg(feature = "metal")]
-            Self::Metal(adapter) => adapter.supports_dual_source_blending(),
-            #[cfg(feature = "gles")]
-            Self::Gles(adapter) => adapter.supports_dual_source_blending(),
-        }
+        hal_dispatch!(self, adapter => adapter.supports_dual_source_blending())
     }
 
     /// Returns true when WGSL clip distances are supported.
     #[must_use]
     pub fn supports_clip_distances(&self) -> bool {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(adapter) => adapter.supports_clip_distances(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(adapter) => adapter.supports_clip_distances(),
-            #[cfg(feature = "metal")]
-            Self::Metal(adapter) => adapter.supports_clip_distances(),
-            #[cfg(feature = "gles")]
-            Self::Gles(adapter) => adapter.supports_clip_distances(),
-        }
+        hal_dispatch!(self, adapter => adapter.supports_clip_distances())
     }
 
     /// Returns true when WGSL primitive index is supported.
     #[must_use]
     pub fn supports_primitive_index(&self) -> bool {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(adapter) => adapter.supports_primitive_index(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(adapter) => adapter.supports_primitive_index(),
-            #[cfg(feature = "metal")]
-            Self::Metal(adapter) => adapter.supports_primitive_index(),
-            #[cfg(feature = "gles")]
-            Self::Gles(adapter) => adapter.supports_primitive_index(),
-        }
+        hal_dispatch!(self, adapter => adapter.supports_primitive_index())
     }
 
     /// Returns true when indirect draws support non-zero first instance values.
     #[must_use]
     pub fn supports_indirect_first_instance(&self) -> bool {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(adapter) => adapter.supports_indirect_first_instance(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(adapter) => adapter.supports_indirect_first_instance(),
-            #[cfg(feature = "metal")]
-            Self::Metal(adapter) => adapter.supports_indirect_first_instance(),
-            #[cfg(feature = "gles")]
-            Self::Gles(adapter) => adapter.supports_indirect_first_instance(),
-        }
+        hal_dispatch!(self, adapter => adapter.supports_indirect_first_instance())
     }
 
     /// Returns the supported subgroup size range, or `None` when unsupported.
     #[must_use]
     pub fn subgroup_size_range(&self) -> Option<(u32, u32)> {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(adapter) => adapter.subgroup_size_range(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(adapter) => adapter.subgroup_size_range(),
-            #[cfg(feature = "metal")]
-            Self::Metal(adapter) => adapter.subgroup_size_range(),
-            #[cfg(feature = "gles")]
-            Self::Gles(adapter) => adapter.subgroup_size_range(),
-        }
+        hal_dispatch!(self, adapter => adapter.subgroup_size_range())
     }
 
     /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<HalDevice, HalError> {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(adapter) => adapter.create_device().map(HalDevice::Noop),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(adapter) => adapter.create_device().map(HalDevice::Vulkan),
-            #[cfg(feature = "metal")]
-            Self::Metal(adapter) => adapter.create_device().map(HalDevice::Metal),
-            #[cfg(feature = "gles")]
-            Self::Gles(adapter) => adapter.create_device().map(HalDevice::Gles),
-        }
+        hal_dispatch!(self, adapter => adapter.create_device(), map HalDevice)
     }
 }
 
@@ -853,16 +700,7 @@ impl HalDevice {
     /// Returns the allocation count.
     #[must_use]
     pub fn allocation_count(&self) -> u64 {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(device) => device.allocation_count(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(device) => device.allocation_count(),
-            #[cfg(feature = "metal")]
-            Self::Metal(device) => device.allocation_count(),
-            #[cfg(feature = "gles")]
-            Self::Gles(device) => device.allocation_count(),
-        }
+        hal_dispatch!(self, device => device.allocation_count())
     }
 
     /// Returns the queue.
@@ -882,16 +720,7 @@ impl HalDevice {
 
     /// Allocates a buffer of the given size on this device.
     pub fn create_buffer(&self, size: u64, usage: HalBufferUsage) -> Result<HalBuffer, HalError> {
-        Ok(match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(device) => HalBuffer::Noop(device.create_buffer(size, usage)?),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(device) => HalBuffer::Vulkan(device.create_buffer(size, usage)?),
-            #[cfg(feature = "metal")]
-            Self::Metal(device) => HalBuffer::Metal(device.create_buffer(size, usage)?),
-            #[cfg(feature = "gles")]
-            Self::Gles(device) => HalBuffer::Gles(device.create_buffer(size, usage)?),
-        })
+        hal_dispatch!(self, device => device.create_buffer(size, usage), map HalBuffer)
     }
 
     /// Creates a texture matching the given descriptor.
@@ -901,16 +730,7 @@ impl HalDevice {
     ) -> Result<HalTexture, HalError> {
         #[cfg(not(any(feature = "metal", feature = "vulkan", feature = "gles")))]
         let _ = descriptor;
-        Ok(match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(device) => HalTexture::Noop(device.create_texture(descriptor)?),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(device) => HalTexture::Vulkan(device.create_texture(descriptor)?),
-            #[cfg(feature = "metal")]
-            Self::Metal(device) => HalTexture::Metal(device.create_texture(descriptor)?),
-            #[cfg(feature = "gles")]
-            Self::Gles(device) => HalTexture::Gles(device.create_texture(descriptor)?),
-        })
+        hal_dispatch!(self, device => device.create_texture(descriptor), map HalTexture)
     }
 
     /// Creates a query set matching the given kind and count.
@@ -1279,32 +1099,14 @@ pub enum HalQueue {
 impl HalQueue {
     /// Submits an empty command buffer to flush the queue.
     pub fn submit_empty(&self) -> Result<SubmissionIndex, HalError> {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(queue) => queue.submit_empty(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(queue) => queue.submit_empty(),
-            #[cfg(feature = "metal")]
-            Self::Metal(queue) => queue.submit_empty(),
-            #[cfg(feature = "gles")]
-            Self::Gles(queue) => queue.submit_empty(),
-        }
+        hal_dispatch!(self, queue => queue.submit_empty())
     }
 
     /// Returns the highest submission index proven complete without blocking.
     ///
     /// Returns [`SubmissionIndex::NONE`] when no submission has been issued.
     pub fn completed_submission_index(&self) -> Result<SubmissionIndex, HalError> {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(queue) => queue.completed_submission_index(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(queue) => queue.completed_submission_index(),
-            #[cfg(feature = "metal")]
-            Self::Metal(queue) => queue.completed_submission_index(),
-            #[cfg(feature = "gles")]
-            Self::Gles(queue) => queue.completed_submission_index(),
-        }
+        hal_dispatch!(self, queue => queue.completed_submission_index())
     }
 
     /// Blocks until the requested submission index has completed.
@@ -1313,46 +1115,19 @@ impl HalQueue {
     /// submission. A never-issued index returns an error instead of waiting
     /// indefinitely.
     pub fn wait_for_submission(&self, index: SubmissionIndex) -> Result<(), HalError> {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(queue) => queue.wait_for_submission(index),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(queue) => queue.wait_for_submission(index),
-            #[cfg(feature = "metal")]
-            Self::Metal(queue) => queue.wait_for_submission(index),
-            #[cfg(feature = "gles")]
-            Self::Gles(queue) => queue.wait_for_submission(index),
-        }
+        hal_dispatch!(self, queue => queue.wait_for_submission(index))
     }
 
     /// Waits until all submitted queue work has completed.
     pub fn wait_idle(&self) -> Result<(), HalError> {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(queue) => queue.wait_idle(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(queue) => queue.wait_idle(),
-            #[cfg(feature = "metal")]
-            Self::Metal(queue) => queue.wait_idle(),
-            #[cfg(feature = "gles")]
-            Self::Gles(queue) => queue.wait_idle(),
-        }
+        hal_dispatch!(self, queue => queue.wait_idle())
     }
 
     /// Records and submits the given buffer/texture copy operations.
     pub fn submit_copies(&self, copies: &[HalCopy]) -> Result<SubmissionIndex, HalError> {
         #[cfg(not(any(feature = "noop", feature = "metal", feature = "vulkan")))]
         let _ = copies;
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(queue) => queue.submit_copies(copies),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(queue) => queue.submit_copies(copies),
-            #[cfg(feature = "metal")]
-            Self::Metal(queue) => queue.submit_copies(copies),
-            #[cfg(feature = "gles")]
-            Self::Gles(queue) => queue.submit_copies(copies),
-        }
+        hal_dispatch!(self, queue => queue.submit_copies(copies))
     }
 }
 
@@ -1378,63 +1153,27 @@ impl HalBuffer {
     /// Returns the size.
     #[must_use]
     pub fn size(&self) -> u64 {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(buffer) => buffer.size(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(buffer) => buffer.size(),
-            #[cfg(feature = "metal")]
-            Self::Metal(buffer) => buffer.size(),
-            #[cfg(feature = "gles")]
-            Self::Gles(buffer) => buffer.size(),
-        }
+        hal_dispatch!(self, buffer => buffer.size())
     }
 
     /// Records a write command.
     pub fn write(&self, offset: u64, data: &[u8]) -> Result<(), HalError> {
         #[cfg(not(any(feature = "metal", feature = "vulkan")))]
         let _ = (offset, data);
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(buffer) => buffer.write(offset, data),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(buffer) => buffer.write(offset, data),
-            #[cfg(feature = "metal")]
-            Self::Metal(buffer) => buffer.write(offset, data),
-            #[cfg(feature = "gles")]
-            Self::Gles(buffer) => buffer.write(offset, data),
-        }
+        hal_dispatch!(self, buffer => buffer.write(offset, data))
     }
 
     /// Reads `len` bytes at `offset` back from the buffer into host memory.
     pub fn read(&self, offset: u64, len: u64) -> Result<Vec<u8>, HalError> {
         #[cfg(not(any(feature = "metal", feature = "vulkan")))]
         let _ = offset;
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(buffer) => buffer.read(offset, len),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(buffer) => buffer.read(offset, len),
-            #[cfg(feature = "metal")]
-            Self::Metal(buffer) => buffer.read(offset, len),
-            #[cfg(feature = "gles")]
-            Self::Gles(buffer) => buffer.read(offset, len),
-        }
+        hal_dispatch!(self, buffer => buffer.read(offset, len))
     }
 
     /// Returns mapped ptr.
     #[must_use]
     pub fn mapped_ptr(&self) -> Option<NonNull<u8>> {
-        match self {
-            #[cfg(feature = "noop")]
-            Self::Noop(buffer) => buffer.mapped_ptr(),
-            #[cfg(feature = "vulkan")]
-            Self::Vulkan(buffer) => buffer.mapped_ptr(),
-            #[cfg(feature = "metal")]
-            Self::Metal(buffer) => buffer.mapped_ptr(),
-            #[cfg(feature = "gles")]
-            Self::Gles(buffer) => buffer.mapped_ptr(),
-        }
+        hal_dispatch!(self, buffer => buffer.mapped_ptr())
     }
 }
 
