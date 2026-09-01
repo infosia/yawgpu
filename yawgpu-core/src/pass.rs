@@ -1801,9 +1801,12 @@ pub(crate) fn overlay_written_immediates(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "tiled")]
+    use crate::test_helpers::input_attachment_layout_entry;
     use crate::test_helpers::{
         empty_bind_group, noop_device, noop_render_attachment, noop_render_pass_descriptor,
         noop_render_pipeline, noop_texture, render_pipeline_descriptor, render_shader_module,
+        uniform_layout_entry,
     };
     use crate::Device;
 
@@ -1843,32 +1846,6 @@ mod tests {
             depth_slice: None,
             aspects,
             access,
-        }
-    }
-
-    fn uniform_layout_entry(binding: u32) -> BindGroupLayoutEntry {
-        BindGroupLayoutEntry {
-            binding,
-            visibility: 4,
-            binding_array_size: 0,
-            kind: Some(BindingLayoutKind::Buffer {
-                ty: BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: 16,
-            }),
-        }
-    }
-
-    #[cfg(feature = "tiled")]
-    fn input_attachment_layout_entry(binding: u32) -> BindGroupLayoutEntry {
-        BindGroupLayoutEntry {
-            binding,
-            visibility: 4,
-            binding_array_size: 0,
-            kind: Some(BindingLayoutKind::InputAttachment {
-                sample_type: TextureSampleType::Float,
-                multisampled: false,
-            }),
         }
     }
 
@@ -2562,7 +2539,7 @@ mod tests {
 
     #[test]
     fn bind_group_layout_compatibility_uses_exclusive_pipeline_and_structure() {
-        let entries = vec![uniform_layout_entry(0)];
+        let entries = vec![uniform_layout_entry(0, 4, 16)];
         let explicit_a = Arc::new(BindGroupLayout::new(entries.clone(), false, false));
         let explicit_b = Arc::new(BindGroupLayout::new(entries.clone(), false, false));
         let auto_pipeline_a_group_0 = Arc::new(BindGroupLayout::new_auto(entries.clone(), 7));
@@ -2913,11 +2890,14 @@ mod tests {
         let device = noop_device();
         let input_only_layout =
             Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
-                entries: vec![input_attachment_layout_entry(0)],
+                entries: vec![input_attachment_layout_entry(0, 4)],
                 error: None,
             }));
         let mixed_layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
-            entries: vec![input_attachment_layout_entry(0), uniform_layout_entry(1)],
+            entries: vec![
+                input_attachment_layout_entry(0, 4),
+                uniform_layout_entry(1, 4, 16),
+            ],
             error: None,
         }));
         let bound_groups = BTreeMap::new();

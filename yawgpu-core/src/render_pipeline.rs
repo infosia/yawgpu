@@ -18,7 +18,6 @@ use crate::format::*;
 use crate::frontend;
 use crate::limits::*;
 use crate::pass::ImmediateWrittenMask;
-use crate::pipeline_id::next_pipeline_id;
 use crate::pipeline_layout::*;
 use crate::sampler::*;
 use crate::shader::*;
@@ -546,25 +545,11 @@ impl RenderPipeline {
     pub(crate) fn new(
         descriptor: RenderPipelineDescriptor,
         is_error: bool,
-        limits: Limits,
-        features: &FeatureSet,
+        resolved: Option<Result<ResolvedRenderPipelineParts, String>>,
         hal_device: Option<&HalDevice>,
     ) -> (Self, Option<String>) {
-        let pipeline_id = next_pipeline_id();
-        let resolved = if is_error {
-            None
-        } else {
-            resolve_render_pipeline_descriptor_for_source(
-                &descriptor,
-                limits,
-                features,
-                None,
-                pipeline_id,
-            )
-            .ok()
-        };
         let (vertex_entry_name, fragment_entry_name, bind_group_layouts, immediate_required_mask) =
-            resolved.unwrap_or_else(|| {
+            resolved.and_then(Result::ok).unwrap_or_else(|| {
                 (
                     descriptor
                         .vertex
@@ -632,35 +617,15 @@ impl RenderPipeline {
     pub(crate) fn new_subpass(
         descriptor: SubpassRenderPipelineDescriptor,
         is_error: bool,
-        limits: Limits,
-        features: &FeatureSet,
+        resolved: Option<Result<ResolvedRenderPipelineParts, String>>,
         hal_device: Option<&HalDevice>,
     ) -> (Self, Option<String>) {
-        let pipeline_id = next_pipeline_id();
         let compatibility = SubpassPipelineCompatibility {
             pass_layout: Arc::clone(&descriptor.pass_layout),
             subpass_index: descriptor.subpass_index,
         };
-        let subpass_color_attachment_indices = descriptor
-            .pass_layout
-            .descriptor()
-            .subpasses
-            .get(descriptor.subpass_index as usize)
-            .map(|subpass| subpass.color_attachment_indices.as_slice());
-        let resolved = if is_error {
-            None
-        } else {
-            resolve_render_pipeline_descriptor_for_source(
-                &descriptor.base,
-                limits,
-                features,
-                subpass_color_attachment_indices,
-                pipeline_id,
-            )
-            .ok()
-        };
         let (vertex_entry_name, fragment_entry_name, bind_group_layouts, immediate_required_mask) =
-            resolved.unwrap_or_else(|| {
+            resolved.and_then(Result::ok).unwrap_or_else(|| {
                 (
                     descriptor
                         .base
@@ -862,46 +827,6 @@ impl RenderPipeline {
     }
 }
 
-/// Validates render pipeline descriptor and returns a descriptive error on failure.
-pub(crate) fn validate_render_pipeline_descriptor(
-    descriptor: &RenderPipelineDescriptor,
-    limits: Limits,
-    features: &FeatureSet,
-) -> Option<String> {
-    resolve_render_pipeline_descriptor_for_source(descriptor, limits, features, None, 0).err()
-}
-
-/// Validates subpass render pipeline descriptor and returns a descriptive error on failure.
-#[cfg(feature = "tiled")]
-pub(crate) fn validate_subpass_render_pipeline_descriptor(
-    descriptor: &SubpassRenderPipelineDescriptor,
-    limits: Limits,
-    features: &FeatureSet,
-) -> Option<String> {
-    let subpass_color_attachment_indices = descriptor
-        .pass_layout
-        .descriptor()
-        .subpasses
-        .get(descriptor.subpass_index as usize)
-        .map(|subpass| subpass.color_attachment_indices.as_slice());
-    let (vertex_entry, fragment_entry, _, _) = match resolve_render_pipeline_descriptor_for_source(
-        &descriptor.base,
-        limits,
-        features,
-        subpass_color_attachment_indices,
-        0,
-    ) {
-        Ok(resolved) => resolved,
-        Err(message) => return Some(message),
-    };
-    validate_subpass_pipeline_has_no_immediates(
-        &descriptor.base,
-        &vertex_entry,
-        fragment_entry.as_deref(),
-    )
-    .err()
-}
-
 /// Rejects subpass pipelines whose shader stages statically use
 /// `var<immediate>` data (Block 94 Phase Review MAJOR 2). The tiled subpass
 /// vendor extension has no `SetImmediates` surface -- the subpass encoder
@@ -912,7 +837,7 @@ pub(crate) fn validate_subpass_render_pipeline_descriptor(
 /// tiled-feature limitation (the standard render-pass path fully supports
 /// immediates).
 #[cfg(feature = "tiled")]
-fn validate_subpass_pipeline_has_no_immediates(
+pub(crate) fn validate_subpass_pipeline_has_no_immediates(
     descriptor: &RenderPipelineDescriptor,
     vertex_entry: &str,
     fragment_entry: Option<&str>,
@@ -943,7 +868,7 @@ pub(crate) type ResolvedRenderPipelineParts = (
     ImmediateWrittenMask,
 );
 
-fn resolve_render_pipeline_descriptor_for_source(
+pub(crate) fn resolve_render_pipeline_descriptor_for_source(
     descriptor: &RenderPipelineDescriptor,
     limits: Limits,
     features: &FeatureSet,
@@ -2403,7 +2328,12 @@ pub(crate) fn resolve_render_pipeline_descriptor(
         features,
         subpass_color_attachment_indices,
     )?;
-    validate_render_pipeline_layout(descriptor, &vertex_entry, fragment_entry.as_deref())?;
+    let stage_bindings = render_pipeline_stage_resource_bindings(
+        descriptor,
+        &vertex_entry,
+        fragment_entry.as_deref(),
+    )?;
+    validate_render_pipeline_layout(descriptor, &stage_bindings)?;
     let immediate_size_budget = resolve_render_pipeline_immediate_size(
         descriptor,
         &vertex_entry,
@@ -2435,8 +2365,7 @@ pub(crate) fn resolve_render_pipeline_descriptor(
     validate_multisample_state(descriptor, fragment_entry.as_deref())?;
     let bind_group_layouts = effective_render_bind_group_layouts(
         descriptor,
-        &vertex_entry,
-        fragment_entry.as_deref(),
+        &stage_bindings,
         limits,
         features,
         pipeline_id,
@@ -3422,8 +3351,7 @@ fn inter_stage_input_builtin_count(
 /// Validates render pipeline layout and returns a descriptive error on failure.
 pub(crate) fn validate_render_pipeline_layout(
     descriptor: &RenderPipelineDescriptor,
-    vertex_entry: &str,
-    fragment_entry: Option<&str>,
+    requirements: &[StageResourceBinding],
 ) -> Result<(), String> {
     let RenderPipelineLayout::Explicit(layout) = &descriptor.layout else {
         return Ok(());
@@ -3432,21 +3360,7 @@ pub(crate) fn validate_render_pipeline_layout(
         return Err("render pipeline layout must not be an error pipeline layout".to_owned());
     }
 
-    let mut requirements = stage_resource_bindings(
-        &descriptor.vertex.shader,
-        vertex_entry,
-        PipelineShaderStage::Vertex,
-    )?;
-    if let Some(fragment) = &descriptor.fragment {
-        if let Some(fragment_entry) = fragment_entry {
-            requirements.extend(stage_resource_bindings(
-                &fragment.shader,
-                fragment_entry,
-                PipelineShaderStage::Fragment,
-            )?);
-        }
-    }
-    validate_pipeline_layout_stage_bindings(layout, &requirements)
+    validate_pipeline_layout_stage_bindings(layout, requirements)
 }
 
 /// Returns the pipeline's effective user-immediate budget in bytes (Blocks
@@ -3502,10 +3416,11 @@ pub(crate) fn resolve_render_pipeline_immediate_size(
     limits: Limits,
 ) -> Result<u32, String> {
     let size = render_pipeline_layout_immediate_size(descriptor, vertex_entry, fragment_entry)?;
-    if matches!(descriptor.layout, RenderPipelineLayout::Auto) && size > limits.max_immediate_size {
-        return Err("pipeline layout immediateSize exceeds the device limit".to_owned());
-    }
-    Ok(size)
+    resolve_auto_pipeline_immediate_size(
+        size,
+        matches!(descriptor.layout, RenderPipelineLayout::Auto),
+        limits,
+    )
 }
 
 /// Validates that `entry_point`'s reflected immediate data size fits within
@@ -3526,8 +3441,7 @@ pub(crate) fn validate_render_stage_immediate_size(
 /// Returns effective render bind group layouts.
 pub(crate) fn effective_render_bind_group_layouts(
     descriptor: &RenderPipelineDescriptor,
-    vertex_entry: &str,
-    fragment_entry: Option<&str>,
+    requirements: &[StageResourceBinding],
     limits: Limits,
     features: &FeatureSet,
     pipeline_id: u64,
@@ -3535,26 +3449,34 @@ pub(crate) fn effective_render_bind_group_layouts(
     match &descriptor.layout {
         RenderPipelineLayout::Explicit(layout) => Ok(layout.bind_group_layouts().to_vec()),
         RenderPipelineLayout::Auto => {
-            let mut requirements = stage_resource_bindings(
-                &descriptor.vertex.shader,
-                vertex_entry,
-                PipelineShaderStage::Vertex,
-            )?;
-            if let Some(fragment) = &descriptor.fragment {
-                if let Some(fragment_entry) = fragment_entry {
-                    requirements.extend(stage_resource_bindings(
-                        &fragment.shader,
-                        fragment_entry,
-                        PipelineShaderStage::Fragment,
-                    )?);
-                }
-            }
             // Storage-texture format/access support is validated uniformly by
             // the derived bind-group-layout validation (`bind_group_layout.rs`,
             // via `FormatCaps`), so no render-specific format gate is needed.
-            derive_bind_group_layouts(requirements, limits, features, pipeline_id)
+            derive_bind_group_layouts(requirements.to_vec(), limits, features, pipeline_id)
         }
     }
+}
+
+fn render_pipeline_stage_resource_bindings(
+    descriptor: &RenderPipelineDescriptor,
+    vertex_entry: &str,
+    fragment_entry: Option<&str>,
+) -> Result<Vec<StageResourceBinding>, String> {
+    let mut requirements = stage_resource_bindings(
+        &descriptor.vertex.shader,
+        vertex_entry,
+        PipelineShaderStage::Vertex,
+    )?;
+    if let Some(fragment) = &descriptor.fragment {
+        if let Some(fragment_entry) = fragment_entry {
+            requirements.extend(stage_resource_bindings(
+                &fragment.shader,
+                fragment_entry,
+                PipelineShaderStage::Fragment,
+            )?);
+        }
+    }
+    Ok(requirements)
 }
 
 /// Returns stage resource bindings.
@@ -3877,7 +3799,14 @@ fn fs() -> @location(0) vec4<f32> {
         let mut descriptor = render_pipeline_descriptor(render_shader_module(&device));
         descriptor.depth_stencil = Some(state);
         assert_eq!(
-            validate_render_pipeline_descriptor(&descriptor, device.limits(), &device.features()),
+            resolve_render_pipeline_descriptor_for_source(
+                &descriptor,
+                device.limits(),
+                &device.features(),
+                None,
+                1
+            )
+            .err(),
             None
         );
         assert!(!device.create_render_pipeline(descriptor).is_error());
@@ -3913,7 +3842,14 @@ fn fs() -> @location(0) vec4<f32> {
         let mut descriptor = render_pipeline_descriptor(render_shader_module(&device));
         descriptor.depth_stencil = Some(state);
         assert_eq!(
-            validate_render_pipeline_descriptor(&descriptor, device.limits(), &device.features()),
+            resolve_render_pipeline_descriptor_for_source(
+                &descriptor,
+                device.limits(),
+                &device.features(),
+                None,
+                1
+            )
+            .err(),
             None
         );
         assert!(!device.create_render_pipeline(descriptor).is_error());
@@ -4274,7 +4210,8 @@ fn fs(input: FsIn) -> @location(0) vec4f {{
         let mut color_depth = render_pipeline_descriptor(Arc::clone(&module));
         color_depth.depth_stencil = Some(depth_stencil_state());
         assert_eq!(
-            validate_render_pipeline_descriptor(&color_depth, limits, &features),
+            resolve_render_pipeline_descriptor_for_source(&color_depth, limits, &features, None, 1)
+                .err(),
             None
         );
         assert!(!device.create_render_pipeline(color_depth).is_error());
@@ -4291,7 +4228,8 @@ fn fs(input: FsIn) -> @location(0) vec4f {{
         depth_only.fragment = None;
         depth_only.depth_stencil = Some(depth_stencil_state());
         assert_eq!(
-            validate_render_pipeline_descriptor(&depth_only, limits, &features),
+            resolve_render_pipeline_descriptor_for_source(&depth_only, limits, &features, None, 1)
+                .err(),
             None
         );
         assert!(!device.create_render_pipeline(depth_only).is_error());
@@ -4300,7 +4238,8 @@ fn fs(input: FsIn) -> @location(0) vec4f {{
         invalid.fragment = None;
         invalid.depth_stencil = None;
         assert_eq!(
-            validate_render_pipeline_descriptor(&invalid, limits, &features),
+            resolve_render_pipeline_descriptor_for_source(&invalid, limits, &features, None, 1)
+                .err(),
             Some("render pipeline requires a fragment state or depthStencil state".to_owned())
         );
     }
@@ -4635,7 +4574,14 @@ fn fs(input: FsIn) -> @location(0) vec4f {{
         }];
 
         assert_eq!(
-            validate_render_pipeline_descriptor(&descriptor, device.limits(), &device.features()),
+            resolve_render_pipeline_descriptor_for_source(
+                &descriptor,
+                device.limits(),
+                &device.features(),
+                None,
+                1
+            )
+            .err(),
             Some("render pipeline vertex buffer arrayStride exceeds the device limit".to_owned())
         );
     }
@@ -4654,7 +4600,14 @@ fn fs(input: FsIn) -> @location(0) vec4f {{
         }];
 
         assert_eq!(
-            validate_render_pipeline_descriptor(&descriptor, device.limits(), &device.features()),
+            resolve_render_pipeline_descriptor_for_source(
+                &descriptor,
+                device.limits(),
+                &device.features(),
+                None,
+                1
+            )
+            .err(),
             Some("render pipeline vertex buffer arrayStride must be a multiple of 4".to_owned())
         );
     }
@@ -4670,7 +4623,14 @@ fn fs(input: FsIn) -> @location(0) vec4f {{
             TextureFormat::from_raw(TextureFormat::RGB10A2_UNORM);
 
         assert_eq!(
-            validate_render_pipeline_descriptor(&descriptor, device.limits(), &device.features()),
+            resolve_render_pipeline_descriptor_for_source(
+                &descriptor,
+                device.limits(),
+                &device.features(),
+                None,
+                1
+            )
+            .err(),
             None
         );
         assert!(!device.create_render_pipeline(descriptor).is_error());
@@ -4717,14 +4677,26 @@ fn fs(input: FsIn) -> @location(0) vec4f {{
             color_attachment_bytes_per_sample(fragment.targets.iter().map(|target| target.format)),
             Some(33)
         );
-        assert!(
-            validate_render_pipeline_descriptor(&descriptor, tight_limits, &device.features())
-                .is_some()
-        );
+        assert!(resolve_render_pipeline_descriptor_for_source(
+            &descriptor,
+            tight_limits,
+            &device.features(),
+            None,
+            1,
+        )
+        .err()
+        .is_some());
 
         tight_limits.max_color_attachment_bytes_per_sample = 33;
         assert_eq!(
-            validate_render_pipeline_descriptor(&descriptor, tight_limits, &device.features()),
+            resolve_render_pipeline_descriptor_for_source(
+                &descriptor,
+                tight_limits,
+                &device.features(),
+                None,
+                1
+            )
+            .err(),
             None
         );
     }
@@ -4740,7 +4712,14 @@ fn fs(input: FsIn) -> @location(0) vec4f {{
         descriptor.depth_stencil = Some(depth_stencil_state());
 
         assert_eq!(
-            validate_render_pipeline_descriptor(&descriptor, device.limits(), &device.features()),
+            resolve_render_pipeline_descriptor_for_source(
+                &descriptor,
+                device.limits(),
+                &device.features(),
+                None,
+                1
+            )
+            .err(),
             None
         );
         assert!(!device.create_render_pipeline(descriptor).is_error());
@@ -4756,7 +4735,14 @@ fn fs(input: FsIn) -> @location(0) vec4f {{
         let descriptor = render_pipeline_descriptor(module);
 
         assert_eq!(
-            validate_render_pipeline_descriptor(&descriptor, device.limits(), &device.features()),
+            resolve_render_pipeline_descriptor_for_source(
+                &descriptor,
+                device.limits(),
+                &device.features(),
+                None,
+                1
+            )
+            .err(),
             None
         );
         assert!(!device.create_render_pipeline(descriptor).is_error());
@@ -4772,7 +4758,14 @@ fn fs(input: FsIn) -> @location(0) vec4f {{
         let descriptor = render_pipeline_descriptor(module);
 
         assert_eq!(
-            validate_render_pipeline_descriptor(&descriptor, device.limits(), &device.features()),
+            resolve_render_pipeline_descriptor_for_source(
+                &descriptor,
+                device.limits(),
+                &device.features(),
+                None,
+                1
+            )
+            .err(),
             Some(
                 "render pipeline framebuffer-fetch color input requires a declared color target"
                     .to_owned()
@@ -4877,6 +4870,14 @@ fn fs() -> @location(0) vec4<f32> {
             error: None,
         };
 
+        assert_eq!(
+            validate_subpass_pipeline_has_no_immediates(&descriptor.base, "vs", Some("fs")),
+            Err(
+                "subpass render pipelines do not support immediate data (var<immediate>)"
+                    .to_owned()
+            )
+        );
+
         device.push_error_scope(ErrorFilter::Validation);
         let pipeline = device.create_subpass_render_pipeline(descriptor);
         let error = device
@@ -4931,7 +4932,14 @@ fn fs() -> @location(0) vec4<f32> {
         fragment.target_count = 0;
 
         assert_eq!(
-            validate_render_pipeline_descriptor(&descriptor, device.limits(), &device.features()),
+            resolve_render_pipeline_descriptor_for_source(
+                &descriptor,
+                device.limits(),
+                &device.features(),
+                None,
+                1
+            )
+            .err(),
             Some("render pipeline requires a color target or depthStencil state".to_owned())
         );
         device.push_error_scope(ErrorFilter::Validation);
@@ -4976,7 +4984,14 @@ fn fs() -> @location(0) vec4<f32> {
         };
 
         assert_eq!(
-            validate_render_pipeline_descriptor(&descriptor, device.limits(), &device.features()),
+            resolve_render_pipeline_descriptor_for_source(
+                &descriptor,
+                device.limits(),
+                &device.features(),
+                None,
+                1
+            )
+            .err(),
             None
         );
         assert!(!device.create_render_pipeline(descriptor).is_error());
@@ -5015,11 +5030,14 @@ fn fs() -> @location(0) vec4<f32> {
             };
 
             assert_eq!(
-                validate_render_pipeline_descriptor(
+                resolve_render_pipeline_descriptor_for_source(
                     &descriptor,
                     device.limits(),
-                    &device.features()
-                ),
+                    &device.features(),
+                    None,
+                    1,
+                )
+                .err(),
                 None
             );
             assert!(!device.create_render_pipeline(descriptor).is_error());
@@ -5056,14 +5074,28 @@ fn fs() -> @location(0) vec4<f32> {
 
         let empty = FeatureSet::new();
         assert_eq!(
-            validate_render_pipeline_descriptor(&descriptor, device.limits(), &empty),
+            resolve_render_pipeline_descriptor_for_source(
+                &descriptor,
+                device.limits(),
+                &empty,
+                None,
+                1
+            )
+            .err(),
             Some("render pipeline color target format must be blendable".to_owned())
         );
 
         let mut enabled = FeatureSet::new();
         enabled.insert(Feature::Float32Blendable);
         assert_eq!(
-            validate_render_pipeline_descriptor(&descriptor, device.limits(), &enabled),
+            resolve_render_pipeline_descriptor_for_source(
+                &descriptor,
+                device.limits(),
+                &enabled,
+                None,
+                1
+            )
+            .err(),
             None
         );
     }
@@ -5087,7 +5119,7 @@ fn fs() -> @location(0) vec4<f32> {
         });
 
         assert_eq!(
-            validate_render_pipeline_descriptor(&descriptor, device.limits(), &FeatureSet::new()),
+            resolve_render_pipeline_descriptor_for_source(&descriptor, device.limits(), &FeatureSet::new(), None, 1).err(),
             Some(
                 "render pipeline dual-source blend factors require the dual-source-blending feature"
                     .to_owned()
@@ -5097,7 +5129,14 @@ fn fs() -> @location(0) vec4<f32> {
         let mut enabled = FeatureSet::new();
         enabled.insert(Feature::DualSourceBlending);
         assert_eq!(
-            validate_render_pipeline_descriptor(&descriptor, device.limits(), &enabled),
+            resolve_render_pipeline_descriptor_for_source(
+                &descriptor,
+                device.limits(),
+                &enabled,
+                None,
+                1
+            )
+            .err(),
             None
         );
     }
@@ -5123,7 +5162,7 @@ fn fs() -> @location(0) vec4<f32> {
         let mut enabled = FeatureSet::new();
         enabled.insert(Feature::DualSourceBlending);
         assert_eq!(
-            validate_render_pipeline_descriptor(&descriptor, device.limits(), &enabled),
+            resolve_render_pipeline_descriptor_for_source(&descriptor, device.limits(), &enabled, None, 1).err(),
             Some(
                 "render pipeline dual-source blend factors require the fragment shader to write a @blend_src(1) output"
                     .to_owned()
@@ -5165,7 +5204,14 @@ fn fs() -> @location(0) vec4<f32> {
         let mut enabled = FeatureSet::new();
         enabled.insert(Feature::DualSourceBlending);
         assert_eq!(
-            validate_render_pipeline_descriptor(&descriptor, device.limits(), &enabled),
+            resolve_render_pipeline_descriptor_for_source(
+                &descriptor,
+                device.limits(),
+                &enabled,
+                None,
+                1
+            )
+            .err(),
             Some("dual-source blending requires a single color target".to_owned())
         );
     }
@@ -5212,7 +5258,14 @@ fn fs() -> @location(0) vec4<f32> {
         ];
 
         assert_eq!(
-            validate_render_pipeline_descriptor(&descriptor, device.limits(), &FeatureSet::new()),
+            resolve_render_pipeline_descriptor_for_source(
+                &descriptor,
+                device.limits(),
+                &FeatureSet::new(),
+                None,
+                1
+            )
+            .err(),
             None
         );
     }
@@ -5574,12 +5627,14 @@ fn fs() -> @builtin(frag_depth) f32 {
         let mut descriptor = msl_render_passthrough_descriptor(&device);
         descriptor.layout = RenderPipelineLayout::Auto;
 
-        let err = validate_render_pipeline_descriptor(
+        let err = resolve_render_pipeline_descriptor_for_source(
             &descriptor,
             device.limits(),
             &FeatureSet::default(),
+            None,
+            1,
         )
-        .expect("auto layout should fail");
+        .expect_err("auto layout should fail");
 
         assert_eq!(
             err,
@@ -5597,12 +5652,14 @@ fn fs() -> @builtin(frag_depth) f32 {
             value: 1.0,
         });
 
-        let err = validate_render_pipeline_descriptor(
+        let err = resolve_render_pipeline_descriptor_for_source(
             &descriptor,
             device.limits(),
             &FeatureSet::default(),
+            None,
+            1,
         )
-        .expect("constants should fail");
+        .expect_err("constants should fail");
 
         assert_eq!(
             err,
@@ -5624,12 +5681,14 @@ fn fs() -> @builtin(frag_depth) f32 {
             "@fragment fn fs() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }".to_owned(),
         )));
 
-        let err = validate_render_pipeline_descriptor(
+        let err = resolve_render_pipeline_descriptor_for_source(
             &descriptor,
             device.limits(),
             &FeatureSet::default(),
+            None,
+            1,
         )
-        .expect("mixed passthrough/reflected stages should fail");
+        .expect_err("mixed passthrough/reflected stages should fail");
 
         assert_eq!(
             err,
@@ -5658,12 +5717,14 @@ fn fs() -> @builtin(frag_depth) f32 {
             .shader
             .module = fragment;
 
-        let err = validate_render_pipeline_descriptor(
+        let err = resolve_render_pipeline_descriptor_for_source(
             &descriptor,
             device.limits(),
             &FeatureSet::default(),
+            None,
+            1,
         )
-        .expect("mixed reflected/passthrough stages should fail");
+        .expect_err("mixed reflected/passthrough stages should fail");
 
         assert_eq!(
             err,
@@ -5679,12 +5740,14 @@ fn fs() -> @builtin(frag_depth) f32 {
         descriptor.fragment = None;
         descriptor.depth_stencil = None;
 
-        let err = validate_render_pipeline_descriptor(
+        let err = resolve_render_pipeline_descriptor_for_source(
             &descriptor,
             device.limits(),
             &FeatureSet::default(),
+            None,
+            1,
         )
-        .expect("vertex-only render pipeline should fail");
+        .expect_err("vertex-only render pipeline should fail");
 
         assert_eq!(
             err,
@@ -5713,12 +5776,14 @@ fn fs() -> @builtin(frag_depth) f32 {
         let mut descriptor = spirv_render_passthrough_descriptor(&device);
         descriptor.layout = RenderPipelineLayout::Auto;
 
-        let err = validate_render_pipeline_descriptor(
+        let err = resolve_render_pipeline_descriptor_for_source(
             &descriptor,
             device.limits(),
             &FeatureSet::default(),
+            None,
+            1,
         )
-        .expect("auto layout should fail");
+        .expect_err("auto layout should fail");
 
         assert_eq!(
             err,
@@ -5736,12 +5801,14 @@ fn fs() -> @builtin(frag_depth) f32 {
             value: 1.0,
         });
 
-        let err = validate_render_pipeline_descriptor(
+        let err = resolve_render_pipeline_descriptor_for_source(
             &descriptor,
             device.limits(),
             &FeatureSet::default(),
+            None,
+            1,
         )
-        .expect("constants should fail");
+        .expect_err("constants should fail");
 
         assert_eq!(
             err,
@@ -5765,12 +5832,14 @@ fn fs() -> @builtin(frag_depth) f32 {
             vec![msl_render_entry("fs", ShaderStage::Fragment)],
         );
 
-        let err = validate_render_pipeline_descriptor(
+        let err = resolve_render_pipeline_descriptor_for_source(
             &descriptor,
             device.limits(),
             &FeatureSet::default(),
+            None,
+            1,
         )
-        .expect("mixed SPIR-V/MSL passthrough stages should fail");
+        .expect_err("mixed SPIR-V/MSL passthrough stages should fail");
 
         assert_eq!(
             err,
@@ -5790,12 +5859,14 @@ fn fs() -> @builtin(frag_depth) f32 {
             .shader
             .module = spirv_render_module(&device);
 
-        let err = validate_render_pipeline_descriptor(
+        let err = resolve_render_pipeline_descriptor_for_source(
             &descriptor,
             device.limits(),
             &FeatureSet::default(),
+            None,
+            1,
         )
-        .expect("mixed MSL/SPIR-V passthrough stages should fail");
+        .expect_err("mixed MSL/SPIR-V passthrough stages should fail");
 
         assert_eq!(
             err,
@@ -5817,12 +5888,14 @@ fn fs() -> @builtin(frag_depth) f32 {
             "@fragment fn fs() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }".to_owned(),
         )));
 
-        let err = validate_render_pipeline_descriptor(
+        let err = resolve_render_pipeline_descriptor_for_source(
             &descriptor,
             device.limits(),
             &FeatureSet::default(),
+            None,
+            1,
         )
-        .expect("mixed SPIR-V/reflected stages should fail");
+        .expect_err("mixed SPIR-V/reflected stages should fail");
 
         assert_eq!(
             err,
@@ -5847,12 +5920,14 @@ fn fs() -> @builtin(frag_depth) f32 {
             .shader
             .module = fragment;
 
-        let err = validate_render_pipeline_descriptor(
+        let err = resolve_render_pipeline_descriptor_for_source(
             &descriptor,
             device.limits(),
             &FeatureSet::default(),
+            None,
+            1,
         )
-        .expect("mixed reflected/SPIR-V stages should fail");
+        .expect_err("mixed reflected/SPIR-V stages should fail");
 
         assert_eq!(
             err,

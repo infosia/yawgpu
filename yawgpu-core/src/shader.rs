@@ -515,11 +515,6 @@ fn fs(@builtin(primitive_index) idx: u32) -> @location(0) vec4f {
     }
 
     #[cfg(feature = "shader-passthrough")]
-    fn valid_spirv_words() -> Vec<u32> {
-        vec![0x0723_0203, 0, 0, 0, 0]
-    }
-
-    #[cfg(feature = "shader-passthrough")]
     fn msl_entry(name: &str, workgroup_size: [u32; 3]) -> MslEntryPoint {
         MslEntryPoint {
             name: name.to_owned(),

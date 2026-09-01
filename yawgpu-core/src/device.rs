@@ -13,6 +13,7 @@ use crate::command_encoder::*;
 use crate::compute_pipeline::*;
 use crate::error::*;
 use crate::limits::*;
+use crate::pipeline_id::next_pipeline_id;
 use crate::pipeline_layout::*;
 use crate::query_set::*;
 use crate::queue::*;
@@ -529,35 +530,47 @@ impl Device {
         &self,
         descriptor: ComputePipelineDescriptor,
     ) -> ComputePipeline {
+        self.create_compute_pipeline_inner(descriptor, true)
+    }
+
+    fn create_compute_pipeline_inner(
+        &self,
+        descriptor: ComputePipelineDescriptor,
+        dispatch_errors: bool,
+    ) -> ComputePipeline {
         self.inner
             .compute_pipeline_creation_count
             .fetch_add(1, Ordering::Relaxed);
+        let pipeline_id = next_pipeline_id();
         if self.is_lost() {
-            return ComputePipeline::new(
-                descriptor,
-                true,
+            return ComputePipeline::new(descriptor, true, None, None).0;
+        }
+        let mut resolved = None;
+        let error = if let Some(message) = descriptor.error.clone() {
+            Some(message)
+        } else {
+            let result = resolve_compute_pipeline_descriptor_for_source(
+                &descriptor,
                 self.limits(),
                 &self.inner.features,
-                None,
-            )
-            .0;
-        }
-        let error = descriptor.error.clone().or_else(|| {
-            validate_compute_pipeline_descriptor(&descriptor, self.limits(), &self.inner.features)
-        });
+                pipeline_id,
+            );
+            let error = result.as_ref().err().cloned();
+            resolved = Some(result);
+            error
+        };
         let is_error = error.is_some();
-        if let Some(message) = error {
-            self.dispatch_error(ErrorKind::Validation, message);
+        if dispatch_errors {
+            if let Some(message) = error {
+                self.dispatch_error(ErrorKind::Validation, message);
+            }
         }
-        let (pipeline, backend_error) = ComputePipeline::new(
-            descriptor,
-            is_error,
-            self.limits(),
-            &self.inner.features,
-            Some(&self.inner.hal),
-        );
-        if let Some(message) = backend_error {
-            self.dispatch_error(ErrorKind::Internal, message);
+        let (pipeline, backend_error) =
+            ComputePipeline::new(descriptor, is_error, resolved, Some(&self.inner.hal));
+        if dispatch_errors {
+            if let Some(message) = backend_error {
+                self.dispatch_error(ErrorKind::Internal, message);
+            }
         }
         pipeline
     }
@@ -568,64 +581,54 @@ impl Device {
         &self,
         descriptor: ComputePipelineDescriptor,
     ) -> ComputePipeline {
-        self.inner
-            .compute_pipeline_creation_count
-            .fetch_add(1, Ordering::Relaxed);
-        if self.is_lost() {
-            return ComputePipeline::new(
-                descriptor,
-                true,
-                self.limits(),
-                &self.inner.features,
-                None,
-            )
-            .0;
-        }
-        let error = descriptor.error.clone().or_else(|| {
-            validate_compute_pipeline_descriptor(&descriptor, self.limits(), &self.inner.features)
-        });
-        ComputePipeline::new(
-            descriptor,
-            error.is_some(),
-            self.limits(),
-            &self.inner.features,
-            Some(&self.inner.hal),
-        )
-        .0
+        self.create_compute_pipeline_inner(descriptor, false)
     }
 
     /// Validates and creates a render pipeline, routing any failure to the active error scope.
     #[must_use]
     pub fn create_render_pipeline(&self, descriptor: RenderPipelineDescriptor) -> RenderPipeline {
+        self.create_render_pipeline_inner(descriptor, true)
+    }
+
+    fn create_render_pipeline_inner(
+        &self,
+        descriptor: RenderPipelineDescriptor,
+        dispatch_errors: bool,
+    ) -> RenderPipeline {
         self.inner
             .render_pipeline_creation_count
             .fetch_add(1, Ordering::Relaxed);
+        let pipeline_id = next_pipeline_id();
         if self.is_lost() {
-            return RenderPipeline::new(
-                descriptor,
-                true,
+            return RenderPipeline::new(descriptor, true, None, None).0;
+        }
+        let mut resolved = None;
+        let error = if let Some(message) = descriptor.error.clone() {
+            Some(message)
+        } else {
+            let result = resolve_render_pipeline_descriptor_for_source(
+                &descriptor,
                 self.limits(),
                 &self.inner.features,
                 None,
-            )
-            .0;
-        }
-        let error = descriptor.error.clone().or_else(|| {
-            validate_render_pipeline_descriptor(&descriptor, self.limits(), &self.inner.features)
-        });
+                pipeline_id,
+            );
+            let error = result.as_ref().err().cloned();
+            resolved = Some(result);
+            error
+        };
         let is_error = error.is_some();
-        if let Some(message) = error {
-            self.dispatch_error(ErrorKind::Validation, message);
+        if dispatch_errors {
+            if let Some(message) = error {
+                self.dispatch_error(ErrorKind::Validation, message);
+            }
         }
-        let (pipeline, backend_error) = RenderPipeline::new(
-            descriptor,
-            is_error,
-            self.limits(),
-            &self.inner.features,
-            Some(&self.inner.hal),
-        );
-        if let Some(message) = backend_error {
-            self.dispatch_error(ErrorKind::Internal, message);
+        let (pipeline, backend_error) =
+            RenderPipeline::new(descriptor, is_error, resolved, Some(&self.inner.hal));
+        if dispatch_errors {
+            if let Some(message) = backend_error {
+                self.dispatch_error(ErrorKind::Internal, message);
+            }
         }
         pipeline
     }
@@ -637,17 +640,23 @@ impl Device {
         &self,
         descriptor: SubpassRenderPipelineDescriptor,
     ) -> RenderPipeline {
+        self.create_subpass_render_pipeline_inner(descriptor, true)
+    }
+
+    #[cfg(feature = "tiled")]
+    fn create_subpass_render_pipeline_inner(
+        &self,
+        descriptor: SubpassRenderPipelineDescriptor,
+        dispatch_errors: bool,
+    ) -> RenderPipeline {
+        let pipeline_id = next_pipeline_id();
         if self.is_lost() {
-            return RenderPipeline::new_subpass(
-                descriptor,
-                true,
-                self.limits(),
-                &self.inner.features,
-                None,
-            )
-            .0;
+            return RenderPipeline::new_subpass(descriptor, true, None, None).0;
         }
-        let error = descriptor.error.clone().or_else(|| {
+        let mut resolved = None;
+        let error = if let Some(message) = descriptor.error.clone() {
+            Some(message)
+        } else {
             if descriptor.pass_layout.is_error() {
                 Some("subpass render pipeline pass layout must not be an error layout".to_owned())
             } else if descriptor.subpass_index as usize
@@ -655,26 +664,44 @@ impl Device {
             {
                 Some("subpass render pipeline subpassIndex is out of range".to_owned())
             } else {
-                validate_subpass_render_pipeline_descriptor(
-                    &descriptor,
+                let subpass_color_attachment_indices = descriptor
+                    .pass_layout
+                    .descriptor()
+                    .subpasses
+                    .get(descriptor.subpass_index as usize)
+                    .map(|subpass| subpass.color_attachment_indices.as_slice());
+                let result = resolve_render_pipeline_descriptor_for_source(
+                    &descriptor.base,
                     self.limits(),
                     &self.inner.features,
+                    subpass_color_attachment_indices,
+                    pipeline_id,
                 )
+                .and_then(|parts| {
+                    validate_subpass_pipeline_has_no_immediates(
+                        &descriptor.base,
+                        &parts.0,
+                        parts.1.as_deref(),
+                    )?;
+                    Ok(parts)
+                });
+                let error = result.as_ref().err().cloned();
+                resolved = Some(result);
+                error
             }
-        });
+        };
         let is_error = error.is_some();
-        if let Some(message) = error {
-            self.dispatch_error(ErrorKind::Validation, message);
+        if dispatch_errors {
+            if let Some(message) = error {
+                self.dispatch_error(ErrorKind::Validation, message);
+            }
         }
-        let (pipeline, backend_error) = RenderPipeline::new_subpass(
-            descriptor,
-            is_error,
-            self.limits(),
-            &self.inner.features,
-            Some(&self.inner.hal),
-        );
-        if let Some(message) = backend_error {
-            self.dispatch_error(ErrorKind::Internal, message);
+        let (pipeline, backend_error) =
+            RenderPipeline::new_subpass(descriptor, is_error, resolved, Some(&self.inner.hal));
+        if dispatch_errors {
+            if let Some(message) = backend_error {
+                self.dispatch_error(ErrorKind::Internal, message);
+            }
         }
         pipeline
     }
@@ -685,30 +712,7 @@ impl Device {
         &self,
         descriptor: RenderPipelineDescriptor,
     ) -> RenderPipeline {
-        self.inner
-            .render_pipeline_creation_count
-            .fetch_add(1, Ordering::Relaxed);
-        if self.is_lost() {
-            return RenderPipeline::new(
-                descriptor,
-                true,
-                self.limits(),
-                &self.inner.features,
-                None,
-            )
-            .0;
-        }
-        let error = descriptor.error.clone().or_else(|| {
-            validate_render_pipeline_descriptor(&descriptor, self.limits(), &self.inner.features)
-        });
-        RenderPipeline::new(
-            descriptor,
-            error.is_some(),
-            self.limits(),
-            &self.inner.features,
-            Some(&self.inner.hal),
-        )
-        .0
+        self.create_render_pipeline_inner(descriptor, false)
     }
 }
 

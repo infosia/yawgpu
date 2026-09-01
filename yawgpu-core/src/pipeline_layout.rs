@@ -150,6 +150,18 @@ pub(crate) fn validate_pipeline_layout_descriptor(
     None
 }
 
+/// Resolves an auto pipeline layout immediate-size budget against device limits.
+pub(crate) fn resolve_auto_pipeline_immediate_size(
+    size: u32,
+    is_auto_layout: bool,
+    limits: Limits,
+) -> Result<u32, String> {
+    if is_auto_layout && size > limits.max_immediate_size {
+        return Err("pipeline layout immediateSize exceeds the device limit".to_owned());
+    }
+    Ok(size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +201,24 @@ mod tests {
         assert_eq!(
             error.message,
             "pipeline layout cannot contain an error bind group layout"
+        );
+    }
+
+    #[test]
+    fn resolve_auto_pipeline_immediate_size_checks_only_auto_layouts() {
+        let limits = Limits {
+            max_immediate_size: 4,
+            ..Limits::DEFAULT
+        };
+
+        assert_eq!(resolve_auto_pipeline_immediate_size(4, true, limits), Ok(4));
+        assert_eq!(
+            resolve_auto_pipeline_immediate_size(8, true, limits),
+            Err("pipeline layout immediateSize exceeds the device limit".to_owned())
+        );
+        assert_eq!(
+            resolve_auto_pipeline_immediate_size(8, false, limits),
+            Ok(8)
         );
     }
 }

@@ -2,6 +2,49 @@ use crate::adapter::Feature;
 use crate::device::FeatureSet;
 use crate::texture_view::TextureAspect;
 
+const WGSL_STORAGE_TEXEL_FORMATS: &[(&str, u32)] = &[
+    ("R8Unorm", TextureFormat::R8_UNORM),
+    ("R8Snorm", TextureFormat::R8_SNORM),
+    ("R8Uint", TextureFormat::R8_UINT),
+    ("R8Sint", TextureFormat::R8_SINT),
+    ("R16Unorm", TextureFormat::R16_UNORM),
+    ("R16Snorm", TextureFormat::R16_SNORM),
+    ("R16Uint", TextureFormat::R16_UINT),
+    ("R16Sint", TextureFormat::R16_SINT),
+    ("R16Float", TextureFormat::R16_FLOAT),
+    ("Rg8Unorm", TextureFormat::RG8_UNORM),
+    ("Rg8Snorm", TextureFormat::RG8_SNORM),
+    ("Rg8Uint", TextureFormat::RG8_UINT),
+    ("Rg8Sint", TextureFormat::RG8_SINT),
+    ("Rg16Unorm", TextureFormat::RG16_UNORM),
+    ("Rg16Snorm", TextureFormat::RG16_SNORM),
+    ("Rg16Uint", TextureFormat::RG16_UINT),
+    ("Rg16Sint", TextureFormat::RG16_SINT),
+    ("Rg16Float", TextureFormat::RG16_FLOAT),
+    ("R32Float", TextureFormat::R32_FLOAT),
+    ("R32Uint", TextureFormat::R32_UINT),
+    ("R32Sint", TextureFormat::R32_SINT),
+    ("Rgba8Unorm", TextureFormat::RGBA8_UNORM),
+    ("Rgba8Snorm", TextureFormat::RGBA8_SNORM),
+    ("Rgba8Uint", TextureFormat::RGBA8_UINT),
+    ("Rgba8Sint", TextureFormat::RGBA8_SINT),
+    ("Bgra8Unorm", TextureFormat::BGRA8_UNORM),
+    ("Rgb10a2Uint", TextureFormat::RGB10A2_UINT),
+    ("Rgb10a2Unorm", TextureFormat::RGB10A2_UNORM),
+    ("Rg11b10Ufloat", TextureFormat::RG11B10_UFLOAT),
+    ("Rg32Float", TextureFormat::RG32_FLOAT),
+    ("Rg32Uint", TextureFormat::RG32_UINT),
+    ("Rg32Sint", TextureFormat::RG32_SINT),
+    ("Rgba16Unorm", TextureFormat::RGBA16_UNORM),
+    ("Rgba16Snorm", TextureFormat::RGBA16_SNORM),
+    ("Rgba16Uint", TextureFormat::RGBA16_UINT),
+    ("Rgba16Sint", TextureFormat::RGBA16_SINT),
+    ("Rgba16Float", TextureFormat::RGBA16_FLOAT),
+    ("Rgba32Float", TextureFormat::RGBA32_FLOAT),
+    ("Rgba32Uint", TextureFormat::RGBA32_UINT),
+    ("Rgba32Sint", TextureFormat::RGBA32_SINT),
+];
+
 /// Enumerates texture format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextureFormat(u32);
@@ -332,6 +375,14 @@ impl TextureFormat {
             Self::ASTC12X12_UNORM_SRGB => "astc-12x12-unorm-srgb",
             _ => "unknown",
         }
+    }
+
+    /// Returns the texture format represented by a WGSL storage-texture texel name.
+    #[must_use]
+    pub(crate) fn from_wgsl_texel_name(name: &str) -> Option<Self> {
+        WGSL_STORAGE_TEXEL_FORMATS
+            .iter()
+            .find_map(|(format_name, raw)| (*format_name == name).then(|| Self::from_raw(*raw)))
     }
 
     /// Returns true when this object is undefined.
@@ -1257,6 +1308,32 @@ mod tests {
                 assert_ne!(format.name(), "unknown", "missing name for raw {raw:#x}");
             }
         }
+    }
+
+    #[test]
+    fn wgsl_texel_name_round_trips_storage_capable_formats() {
+        let features = [
+            Feature::Bgra8UnormStorage,
+            Feature::TextureFormatsTier1,
+            Feature::TextureFormatsTier2,
+        ]
+        .into_iter()
+        .collect();
+
+        for raw in 1..=0x7f {
+            let format = TextureFormat::from_raw(raw);
+            if format
+                .caps(&features)
+                .is_some_and(|caps| caps.storage_capable)
+            {
+                let name = WGSL_STORAGE_TEXEL_FORMATS
+                    .iter()
+                    .find_map(|(name, texel_raw)| (*texel_raw == raw).then_some(*name))
+                    .unwrap_or_else(|| panic!("missing WGSL texel name for {raw:#x}"));
+                assert_eq!(TextureFormat::from_wgsl_texel_name(name), Some(format));
+            }
+        }
+        assert_eq!(TextureFormat::from_wgsl_texel_name("NoSuchFormat"), None);
     }
 
     #[test]

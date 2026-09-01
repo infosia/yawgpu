@@ -2662,32 +2662,6 @@ fn cs() {
         }))
     }
 
-    fn storage_texture_compute_pipeline(
-        device: &Device,
-        layout: Arc<PipelineLayout>,
-    ) -> Arc<ComputePipeline> {
-        let module = Arc::new(
-            device.create_shader_module(ShaderModuleSource::Wgsl(
-                r"
-@group(0) @binding(0) var tex: texture_storage_2d<rgba8unorm, read>;
-
-@compute @workgroup_size(1)
-fn cs() {
-    _ = textureLoad(tex, vec2<i32>(0, 0));
-}
-"
-                .to_owned(),
-            )),
-        );
-        Arc::new(device.create_compute_pipeline(ComputePipelineDescriptor {
-            layout: ComputePipelineLayout::Explicit(layout),
-            shader_module: module,
-            entry_point: Some("cs".to_owned()),
-            constants: Vec::new(),
-            error: None,
-        }))
-    }
-
     fn write_storage_texture_compute_pipeline(
         device: &Device,
         layout: Arc<PipelineLayout>,
@@ -2999,7 +2973,11 @@ fn fs() -> @location(0) vec4<f32> {
         let layout = storage_texture_bind_group_layout(&device);
         let bind_group = storage_texture_bind_group(&device, layout.clone());
         let pipeline_layout = explicit_pipeline_layout(&device, layout);
-        let pipeline = storage_texture_compute_pipeline(&device, pipeline_layout);
+        let pipeline = storage_texture_compute_pipeline(
+            &device,
+            pipeline_layout,
+            StorageTextureAccess::ReadOnly,
+        );
         let encoder = device.create_command_encoder();
         let (pass, begin_error) = encoder.begin_compute_pass();
         assert_eq!(begin_error, None);

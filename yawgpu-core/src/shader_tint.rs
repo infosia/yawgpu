@@ -1795,18 +1795,15 @@ mod tests {
 
     #[test]
     fn texel_format_matches_reflected_storage_texture_format_names() {
-        assert_eq!(
-            texel_format(yawgpu_tint::TexelFormat::Rgb10A2Uint).unwrap(),
-            "Rgb10a2Uint"
-        );
-        assert_eq!(
-            texel_format(yawgpu_tint::TexelFormat::Rgb10A2Unorm).unwrap(),
-            "Rgb10a2Unorm"
-        );
-        assert_eq!(
-            texel_format(yawgpu_tint::TexelFormat::Rg11B10Ufloat).unwrap(),
-            "Rg11b10Ufloat"
-        );
+        for (format, expected) in [
+            (yawgpu_tint::TexelFormat::Rgb10A2Uint, "Rgb10a2Uint"),
+            (yawgpu_tint::TexelFormat::Rgb10A2Unorm, "Rgb10a2Unorm"),
+            (yawgpu_tint::TexelFormat::Rg11B10Ufloat, "Rg11b10Ufloat"),
+        ] {
+            let name = texel_format(format).unwrap();
+            assert_eq!(name, expected);
+            assert!(crate::TextureFormat::from_wgsl_texel_name(&name).is_some());
+        }
     }
 
     #[test]

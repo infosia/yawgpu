@@ -236,6 +236,93 @@ pub(crate) fn compute_pipeline_descriptor(module: Arc<ShaderModule>) -> ComputeP
     }
 }
 
+/// Returns a valid SPIR-V passthrough word stream.
+#[cfg(feature = "shader-passthrough")]
+pub(crate) fn valid_spirv_words() -> Vec<u32> {
+    vec![0x0723_0203, 0, 0, 0, 0]
+}
+
+/// Returns a uniform bind group layout entry.
+pub(crate) fn uniform_layout_entry(
+    binding: u32,
+    visibility: u64,
+    min_binding_size: u64,
+) -> BindGroupLayoutEntry {
+    BindGroupLayoutEntry {
+        binding,
+        visibility,
+        binding_array_size: 0,
+        kind: Some(BindingLayoutKind::Buffer {
+            ty: BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size,
+        }),
+    }
+}
+
+/// Returns an input attachment bind group layout entry.
+#[cfg(feature = "tiled")]
+pub(crate) fn input_attachment_layout_entry(binding: u32, visibility: u64) -> BindGroupLayoutEntry {
+    BindGroupLayoutEntry {
+        binding,
+        visibility,
+        binding_array_size: 0,
+        kind: Some(BindingLayoutKind::InputAttachment {
+            sample_type: TextureSampleType::Float,
+            multisampled: false,
+        }),
+    }
+}
+
+/// Returns a compute pipeline using a storage texture binding.
+pub(crate) fn storage_texture_compute_pipeline(
+    device: &Device,
+    layout: Arc<PipelineLayout>,
+    access: StorageTextureAccess,
+) -> Arc<ComputePipeline> {
+    let wgsl = match access {
+        StorageTextureAccess::ReadOnly => {
+            r"
+@group(0) @binding(0) var tex: texture_storage_2d<rgba8unorm, read>;
+
+@compute @workgroup_size(1)
+fn cs() {
+    _ = textureLoad(tex, vec2<i32>(0, 0));
+}
+"
+        }
+        StorageTextureAccess::WriteOnly => {
+            r"
+@group(0) @binding(0) var output_texture: texture_storage_2d<rgba8unorm, write>;
+
+@compute @workgroup_size(1)
+fn cs() {
+    textureStore(output_texture, vec2<i32>(0, 0), vec4<f32>(1.0, 0.0, 0.0, 1.0));
+}
+"
+        }
+        StorageTextureAccess::ReadWrite => {
+            r"
+@group(0) @binding(0) var tex: texture_storage_2d<rgba8unorm, read_write>;
+
+@compute @workgroup_size(1)
+fn cs() {
+    let color = textureLoad(tex, vec2<i32>(0, 0));
+    textureStore(tex, vec2<i32>(0, 0), color);
+}
+"
+        }
+    };
+    let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(wgsl.to_owned())));
+    Arc::new(device.create_compute_pipeline(ComputePipelineDescriptor {
+        layout: ComputePipelineLayout::Explicit(layout),
+        shader_module: module,
+        entry_point: Some("cs".to_owned()),
+        constants: Vec::new(),
+        error: None,
+    }))
+}
+
 /// Returns render shader module.
 pub(crate) fn render_shader_module(device: &Device) -> Arc<ShaderModule> {
     Arc::new(

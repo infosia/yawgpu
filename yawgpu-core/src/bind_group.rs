@@ -1077,33 +1077,6 @@ mod tests {
     }
 
     #[cfg(feature = "tiled")]
-    fn input_attachment_layout_entry(binding: u32) -> BindGroupLayoutEntry {
-        BindGroupLayoutEntry {
-            binding,
-            visibility: SHADER_STAGE_FRAGMENT,
-            binding_array_size: 0,
-            kind: Some(BindingLayoutKind::InputAttachment {
-                sample_type: TextureSampleType::Float,
-                multisampled: false,
-            }),
-        }
-    }
-
-    #[cfg(feature = "tiled")]
-    fn uniform_layout_entry(binding: u32) -> BindGroupLayoutEntry {
-        BindGroupLayoutEntry {
-            binding,
-            visibility: SHADER_STAGE_FRAGMENT,
-            binding_array_size: 0,
-            kind: Some(BindingLayoutKind::Buffer {
-                ty: BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: 4,
-            }),
-        }
-    }
-
-    #[cfg(feature = "tiled")]
     fn uniform_bind_group_entry(device: &Device, binding: u32) -> BindGroupEntry {
         let buffer = Arc::new(device.create_buffer(BufferDescriptor {
             usage: BufferUsage::UNIFORM,
@@ -1126,7 +1099,10 @@ mod tests {
     fn validate_bind_group_descriptor_accepts_mixed_group_with_input_omitted() {
         let device = noop_device();
         let layout = device.create_bind_group_layout(BindGroupLayoutDescriptor {
-            entries: vec![input_attachment_layout_entry(0), uniform_layout_entry(1)],
+            entries: vec![
+                input_attachment_layout_entry(0, SHADER_STAGE_FRAGMENT),
+                uniform_layout_entry(1, SHADER_STAGE_FRAGMENT, 4),
+            ],
             error: None,
         });
         let entries = vec![uniform_bind_group_entry(&device, 1)];
@@ -1142,7 +1118,10 @@ mod tests {
     fn validate_bind_group_descriptor_accepts_mixed_group_with_input_omitted_after_resource() {
         let device = noop_device();
         let layout = device.create_bind_group_layout(BindGroupLayoutDescriptor {
-            entries: vec![uniform_layout_entry(0), input_attachment_layout_entry(1)],
+            entries: vec![
+                uniform_layout_entry(0, SHADER_STAGE_FRAGMENT, 4),
+                input_attachment_layout_entry(1, SHADER_STAGE_FRAGMENT),
+            ],
             error: None,
         });
         let entries = vec![uniform_bind_group_entry(&device, 0)];
@@ -1158,7 +1137,10 @@ mod tests {
     fn validate_bind_group_descriptor_rejects_mixed_group_missing_non_input() {
         let device = noop_device();
         let layout = device.create_bind_group_layout(BindGroupLayoutDescriptor {
-            entries: vec![input_attachment_layout_entry(0), uniform_layout_entry(1)],
+            entries: vec![
+                input_attachment_layout_entry(0, SHADER_STAGE_FRAGMENT),
+                uniform_layout_entry(1, SHADER_STAGE_FRAGMENT, 4),
+            ],
             error: None,
         });
 
@@ -1173,7 +1155,10 @@ mod tests {
     fn validate_bind_group_descriptor_rejects_explicit_view_for_input_slot() {
         let device = noop_device();
         let layout = device.create_bind_group_layout(BindGroupLayoutDescriptor {
-            entries: vec![uniform_layout_entry(0), input_attachment_layout_entry(1)],
+            entries: vec![
+                uniform_layout_entry(0, SHADER_STAGE_FRAGMENT, 4),
+                input_attachment_layout_entry(1, SHADER_STAGE_FRAGMENT),
+            ],
             error: None,
         });
         let view = noop_render_attachment(&device);

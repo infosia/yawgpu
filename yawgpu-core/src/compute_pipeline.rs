@@ -13,7 +13,6 @@ use crate::format::*;
 use crate::frontend;
 use crate::limits::*;
 use crate::pass::ImmediateWrittenMask;
-use crate::pipeline_id::next_pipeline_id;
 use crate::pipeline_layout::*;
 use crate::shader::*;
 use crate::texture_view::*;
@@ -151,24 +150,11 @@ impl ComputePipeline {
     pub(crate) fn new(
         descriptor: ComputePipelineDescriptor,
         is_error: bool,
-        limits: Limits,
-        features: &FeatureSet,
+        resolved: Option<Result<ResolvedPipelineParts, String>>,
         hal_device: Option<&HalDevice>,
     ) -> (Self, Option<String>) {
-        let pipeline_id = next_pipeline_id();
-        let resolved = if is_error {
-            None
-        } else {
-            resolve_compute_pipeline_descriptor_for_source(
-                &descriptor,
-                limits,
-                features,
-                pipeline_id,
-            )
-            .ok()
-        };
         let (entry_name, bindings, workgroup, bind_group_layouts, immediate_required_mask) =
-            resolved.unwrap_or_else(|| {
+            resolved.and_then(Result::ok).unwrap_or_else(|| {
                 (
                     descriptor.entry_point.clone().unwrap_or_default(),
                     Vec::new(),
@@ -266,7 +252,7 @@ pub(crate) type ResolvedPipelineParts = (
     ImmediateWrittenMask,
 );
 
-fn resolve_compute_pipeline_descriptor_for_source(
+pub(crate) fn resolve_compute_pipeline_descriptor_for_source(
     descriptor: &ComputePipelineDescriptor,
     limits: Limits,
     features: &FeatureSet,
@@ -900,15 +886,6 @@ pub(crate) fn validate_metal_slot_ranges(
     Ok(())
 }
 
-/// Validates compute pipeline descriptor and returns a descriptive error on failure.
-pub(crate) fn validate_compute_pipeline_descriptor(
-    descriptor: &ComputePipelineDescriptor,
-    limits: Limits,
-    features: &FeatureSet,
-) -> Option<String> {
-    resolve_compute_pipeline_descriptor_for_source(descriptor, limits, features, 0).err()
-}
-
 /// Records resolve into the command stream.
 pub(crate) fn resolve_compute_pipeline_descriptor(
     descriptor: &ComputePipelineDescriptor,
@@ -954,29 +931,10 @@ pub(crate) fn resolve_msl_passthrough_compute_pipeline_descriptor(
     descriptor: &ComputePipelineDescriptor,
     entries: &[MslEntryPoint],
 ) -> Result<ResolvedPipelineParts, String> {
-    if descriptor.shader_module.is_error() {
-        return Err("compute pipeline shader module must not be an error module".to_owned());
-    }
-    if !descriptor.constants.is_empty() {
-        return Err(
-            "pipeline-overridable constants are not supported with shader passthrough".to_owned(),
-        );
-    }
-    let ComputePipelineLayout::Explicit(layout) = &descriptor.layout else {
-        return Err("shader passthrough requires an explicit pipeline layout".to_owned());
-    };
-    if layout.is_error() {
-        return Err("compute pipeline layout must not be an error pipeline layout".to_owned());
-    }
-    let Some(entry_name) = descriptor
-        .entry_point
-        .as_deref()
-        .filter(|name| !name.is_empty())
-    else {
-        return Err(
-            "MSL passthrough compute entry point not found or missing workgroup size".to_owned(),
-        );
-    };
+    let (layout, entry_name) = passthrough_compute_common(
+        descriptor,
+        "MSL passthrough compute entry point not found or missing workgroup size",
+    )?;
     let Some(entry) = entries
         .iter()
         .find(|entry| entry.name == entry_name && entry.stage == ShaderStage::Compute)
@@ -1007,6 +965,27 @@ pub(crate) fn resolve_msl_passthrough_compute_pipeline_descriptor(
 pub(crate) fn resolve_spirv_passthrough_compute_pipeline_descriptor(
     descriptor: &ComputePipelineDescriptor,
 ) -> Result<ResolvedPipelineParts, String> {
+    let (layout, entry_name) = passthrough_compute_common(
+        descriptor,
+        "SPIR-V passthrough compute entry point is required",
+    )?;
+    Ok((
+        entry_name.to_owned(),
+        Vec::new(),
+        Some(ResolvedComputeWorkgroup {
+            size: [1, 1, 1],
+            storage_size: 0,
+        }),
+        layout.bind_group_layouts().to_vec(),
+        0,
+    ))
+}
+
+#[cfg(feature = "shader-passthrough")]
+fn passthrough_compute_common<'a>(
+    descriptor: &'a ComputePipelineDescriptor,
+    missing_entry_message: &str,
+) -> Result<(&'a Arc<PipelineLayout>, &'a str), String> {
     if descriptor.shader_module.is_error() {
         return Err("compute pipeline shader module must not be an error module".to_owned());
     }
@@ -1026,18 +1005,9 @@ pub(crate) fn resolve_spirv_passthrough_compute_pipeline_descriptor(
         .as_deref()
         .filter(|name| !name.is_empty())
     else {
-        return Err("SPIR-V passthrough compute entry point is required".to_owned());
+        return Err(missing_entry_message.to_owned());
     };
-    Ok((
-        entry_name.to_owned(),
-        Vec::new(),
-        Some(ResolvedComputeWorkgroup {
-            size: [1, 1, 1],
-            storage_size: 0,
-        }),
-        layout.bind_group_layouts().to_vec(),
-        0,
-    ))
+    Ok((layout, entry_name))
 }
 
 /// Records resolve into the command stream.
@@ -1266,10 +1236,11 @@ pub(crate) fn resolve_compute_pipeline_immediate_size(
     limits: Limits,
 ) -> Result<u32, String> {
     let size = compute_pipeline_layout_immediate_size(layout, Some(module), entry_name)?;
-    if matches!(layout, ComputePipelineLayout::Auto) && size > limits.max_immediate_size {
-        return Err("pipeline layout immediateSize exceeds the device limit".to_owned());
-    }
-    Ok(size)
+    resolve_auto_pipeline_immediate_size(
+        size,
+        matches!(layout, ComputePipelineLayout::Auto),
+        limits,
+    )
 }
 
 /// Validates that `entry_name`'s reflected immediate data size -- the total
@@ -1725,58 +1696,8 @@ pub(crate) fn reflected_storage_texture_access(
 
 /// Returns reflected storage texture format.
 pub(crate) fn reflected_storage_texture_format(format: &str) -> Result<TextureFormat, String> {
-    let raw = match format {
-        "Rgba8Unorm" => 0x0000_0016,
-        "Rgba8Snorm" => 0x0000_0018,
-        "Rgba8Uint" => 0x0000_0019,
-        "Rgba8Sint" => 0x0000_001A,
-        "Rgba16Uint" => 0x0000_0026,
-        "Rgba16Sint" => 0x0000_0027,
-        "Rgba16Float" => 0x0000_0028,
-        "R32Uint" => 0x0000_000F,
-        "R32Sint" => 0x0000_0010,
-        "R32Float" => 0x0000_000E,
-        "Rg32Uint" => 0x0000_0022,
-        "Rg32Sint" => 0x0000_0023,
-        "Rg32Float" => 0x0000_0021,
-        "Rgba32Uint" => 0x0000_002A,
-        "Rgba32Sint" => 0x0000_002B,
-        "Rgba32Float" => 0x0000_0029,
-        // `texture-formats-tier1` storage formats — recognised here so the
-        // shared `caps.storage_capable` check (feature-gated in
-        // `FormatCaps::apply_feature_upgrades`) decides acceptance, instead of
-        // rejecting them up front (F-059).
-        "R8Unorm" => 0x0000_0001,
-        "R8Snorm" => 0x0000_0002,
-        "R8Uint" => 0x0000_0003,
-        "R8Sint" => 0x0000_0004,
-        "R16Uint" => 0x0000_0007,
-        "R16Sint" => 0x0000_0008,
-        "R16Float" => 0x0000_0009,
-        "Rg8Unorm" => 0x0000_000A,
-        "Rg8Snorm" => 0x0000_000B,
-        "Rg8Uint" => 0x0000_000C,
-        "Rg8Sint" => 0x0000_000D,
-        "Rg16Uint" => 0x0000_0013,
-        "Rg16Sint" => 0x0000_0014,
-        "Rg16Float" => 0x0000_0015,
-        "Bgra8Unorm" => 0x0000_001B,
-        "Rgb10a2Uint" => 0x0000_001D,
-        "Rgb10a2Unorm" => 0x0000_001E,
-        "Rg11b10Ufloat" => 0x0000_001F,
-        // 16-bit-norm storage formats — baseline-storage in WebGPU, gated only by
-        // format availability; the shader frontend must accept baseline WebGPU
-        // storage formats here.
-        // to compile them (F-059).
-        "R16Unorm" => 0x0000_0005,
-        "R16Snorm" => 0x0000_0006,
-        "Rg16Unorm" => 0x0000_0011,
-        "Rg16Snorm" => 0x0000_0012,
-        "Rgba16Unorm" => 0x0000_0024,
-        "Rgba16Snorm" => 0x0000_0025,
-        _ => return Err("pipeline auto layout storage texture format is unsupported".to_owned()),
-    };
-    Ok(TextureFormat::from_raw(raw))
+    TextureFormat::from_wgsl_texel_name(format)
+        .ok_or_else(|| "pipeline auto layout storage texture format is unsupported".to_owned())
 }
 
 /// Returns merge bind group layout entry.
@@ -2982,11 +2903,6 @@ fn cs() {
     }
 
     #[cfg(feature = "shader-passthrough")]
-    fn valid_spirv_words() -> Vec<u32> {
-        vec![0x0723_0203, 0, 0, 0, 0]
-    }
-
-    #[cfg(feature = "shader-passthrough")]
     fn spirv_passthrough_module(device: &Device) -> Arc<ShaderModule> {
         Arc::new(
             device.create_shader_module(ShaderModuleSource::SpirvPassthrough(valid_spirv_words())),
@@ -3141,12 +3057,13 @@ fn cs() {
         let device = noop_device();
         let module = spirv_passthrough_module(&device);
 
-        let err = validate_compute_pipeline_descriptor(
+        let err = resolve_compute_pipeline_descriptor_for_source(
             &spirv_passthrough_descriptor(module, ComputePipelineLayout::Auto),
             device.limits(),
             &FeatureSet::default(),
+            1,
         )
-        .expect("auto layout should fail");
+        .expect_err("auto layout should fail");
 
         assert_eq!(
             err,
@@ -3166,12 +3083,13 @@ fn cs() {
             value: 1.0,
         });
 
-        let err = validate_compute_pipeline_descriptor(
+        let err = resolve_compute_pipeline_descriptor_for_source(
             &descriptor,
             device.limits(),
             &FeatureSet::default(),
+            1,
         )
-        .expect("constants should fail");
+        .expect_err("constants should fail");
 
         assert_eq!(
             err,
@@ -3214,12 +3132,13 @@ fn cs() {
         let device = noop_device();
         let module = msl_passthrough_module(&device, vec![msl_compute_entry("cs", [1, 1, 1])]);
 
-        let err = validate_compute_pipeline_descriptor(
+        let err = resolve_compute_pipeline_descriptor_for_source(
             &msl_passthrough_descriptor(module, ComputePipelineLayout::Auto),
             device.limits(),
             &FeatureSet::default(),
+            1,
         )
-        .expect("auto layout should fail");
+        .expect_err("auto layout should fail");
 
         assert_eq!(
             err,
@@ -3241,12 +3160,13 @@ fn cs() {
             }],
         );
 
-        let err = validate_compute_pipeline_descriptor(
+        let err = resolve_compute_pipeline_descriptor_for_source(
             &msl_passthrough_descriptor(missing, layout.clone()),
             device.limits(),
             &FeatureSet::default(),
+            1,
         )
-        .expect("missing compute metadata should fail");
+        .expect_err("missing compute metadata should fail");
         assert_eq!(
             err,
             "MSL passthrough compute entry point not found or missing workgroup size"
@@ -3259,12 +3179,13 @@ fn cs() {
             },
             None,
         ));
-        let err = validate_compute_pipeline_descriptor(
+        let err = resolve_compute_pipeline_descriptor_for_source(
             &msl_passthrough_descriptor(zero, layout),
             device.limits(),
             &FeatureSet::default(),
+            1,
         )
-        .expect("zero workgroup metadata should fail");
+        .expect_err("zero workgroup metadata should fail");
         assert_eq!(
             err,
             "MSL passthrough compute entry point not found or missing workgroup size"
@@ -3283,12 +3204,13 @@ fn cs() {
             value: 1.0,
         });
 
-        let err = validate_compute_pipeline_descriptor(
+        let err = resolve_compute_pipeline_descriptor_for_source(
             &descriptor,
             device.limits(),
             &FeatureSet::default(),
+            1,
         )
-        .expect("constants should fail");
+        .expect_err("constants should fail");
 
         assert_eq!(
             err,

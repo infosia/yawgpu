@@ -905,8 +905,16 @@ fn cs() {
                 },
             }],
         ));
-        let pipeline_a = storage_texture_compute_pipeline(&device, Arc::clone(&pipeline_layout));
-        let pipeline_b = storage_texture_compute_pipeline(&device, pipeline_layout);
+        let pipeline_a = storage_texture_compute_pipeline(
+            &device,
+            Arc::clone(&pipeline_layout),
+            StorageTextureAccess::WriteOnly,
+        );
+        let pipeline_b = storage_texture_compute_pipeline(
+            &device,
+            pipeline_layout,
+            StorageTextureAccess::WriteOnly,
+        );
 
         let encoder = device.create_command_encoder();
         let (pass, begin_error) = encoder.begin_compute_pass();
@@ -1053,32 +1061,6 @@ fn cs() {
 @compute @workgroup_size(1)
 fn cs() {
     values[0] = 1u;
-}
-"
-                .to_owned(),
-            )),
-        );
-        Arc::new(device.create_compute_pipeline(ComputePipelineDescriptor {
-            layout: ComputePipelineLayout::Explicit(layout),
-            shader_module: module,
-            entry_point: Some("cs".to_owned()),
-            constants: Vec::new(),
-            error: None,
-        }))
-    }
-
-    fn storage_texture_compute_pipeline(
-        device: &crate::device::Device,
-        layout: Arc<crate::pipeline_layout::PipelineLayout>,
-    ) -> Arc<ComputePipeline> {
-        let module = Arc::new(
-            device.create_shader_module(ShaderModuleSource::Wgsl(
-                r"
-@group(0) @binding(0) var output_texture: texture_storage_2d<rgba8unorm, write>;
-
-@compute @workgroup_size(1)
-fn cs() {
-    textureStore(output_texture, vec2<i32>(0, 0), vec4<f32>(1.0, 0.0, 0.0, 1.0));
 }
 "
                 .to_owned(),
