@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -22,6 +23,113 @@ use crate::{
 pub(super) type GlesSampleMaskIFn = unsafe extern "system" fn(u32, u32);
 pub(super) type GlesTextureViewFn =
     unsafe extern "system" fn(u32, u32, u32, u32, u32, u32, u32, u32);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum TextureToBufferComputeEncoding {
+    R8Snorm,
+    Rg8Snorm,
+    Rgba8Snorm,
+    R16Unorm,
+    R16Snorm,
+    Rg16Unorm,
+    Rg16Snorm,
+    Rgba16Unorm,
+    Rgba16Snorm,
+    Rgb9e5Ufloat,
+    Depth16Unorm,
+    Depth24Plus,
+    Depth32Float,
+}
+
+impl TextureToBufferComputeEncoding {
+    pub(super) fn bytes_per_pixel(self) -> u32 {
+        match self {
+            Self::R8Snorm => 1,
+            Self::Rg8Snorm | Self::R16Unorm | Self::R16Snorm | Self::Depth16Unorm => 2,
+            Self::Rgba8Snorm
+            | Self::Rg16Unorm
+            | Self::Rg16Snorm
+            | Self::Rgb9e5Ufloat
+            | Self::Depth24Plus
+            | Self::Depth32Float => 4,
+            Self::Rgba16Unorm | Self::Rgba16Snorm => 8,
+        }
+    }
+
+    pub(super) fn shader_store(self) -> &'static str {
+        match self {
+            Self::R8Snorm => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeByte(base, packSnorm4x8(vec4(value.r, 0.0, 0.0, 0.0)) & 0xffu);"
+            }
+            Self::Rg8Snorm => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU16(base, packSnorm4x8(vec4(value.rg, 0.0, 0.0)) & 0xffffu);"
+            }
+            Self::Rgba8Snorm => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU32(base, packSnorm4x8(value));"
+            }
+            Self::R16Unorm => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU16(base, packUnorm16(value.r));"
+            }
+            Self::R16Snorm => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU16(base, packSnorm2x16(vec2(value.r, 0.0)) & 0xffffu);"
+            }
+            Self::Rg16Unorm => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU32(base, packUnorm16(value.r) | (packUnorm16(value.g) << 16));"
+            }
+            Self::Rg16Snorm => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU32(base, packSnorm2x16(value.rg));"
+            }
+            Self::Rgba16Unorm => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU32(base, packUnorm16(value.r) | (packUnorm16(value.g) << 16));\n\
+                 writeU32(base + 4u, packUnorm16(value.b) | (packUnorm16(value.a) << 16));"
+            }
+            Self::Rgba16Snorm => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU32(base, packSnorm2x16(value.rg));\n\
+                 writeU32(base + 4u, packSnorm2x16(value.ba));"
+            }
+            Self::Rgb9e5Ufloat => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU32(base, packRgb9e5(value.rgb));"
+            }
+            Self::Depth16Unorm => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU16(base, packUnorm16(value.r));"
+            }
+            Self::Depth24Plus => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU32(base, uint(round(clamp(value.r, 0.0, 1.0) * 16777215.0)));"
+            }
+            Self::Depth32Float => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU32(base, floatBitsToUint(value.r));"
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) struct TextureToBufferComputeProgramKey {
+    pub(super) target: u32,
+    pub(super) encoding: TextureToBufferComputeEncoding,
+}
+
+#[derive(Clone)]
+pub(super) struct TextureToBufferComputeProgram {
+    pub(super) program: glow::Program,
+    pub(super) u_texture: Option<glow::UniformLocation>,
+    pub(super) u_mip: Option<glow::UniformLocation>,
+    pub(super) u_origin: Option<glow::UniformLocation>,
+    pub(super) u_extent: Option<glow::UniformLocation>,
+}
 
 pub(super) struct GlesDeviceCaps {
     pub(super) supports_base_vertex: bool,
@@ -76,6 +184,8 @@ pub(super) struct EglDeviceState {
     /// emitted for samplerless textureLoad. Integer/stencil textures are
     /// incomplete with the texture object's default LINEAR filtering.
     pub(super) placeholder_sampler: Result<glow::Sampler, HalError>,
+    pub(super) texture_to_buffer_compute_programs:
+        Mutex<HashMap<TextureToBufferComputeProgramKey, TextureToBufferComputeProgram>>,
 }
 
 // SAFETY: All access to the EGL context and `glow::Context` goes through
@@ -98,6 +208,11 @@ impl Drop for EglDeviceState {
             if let Ok(sampler) = self.placeholder_sampler.as_ref() {
                 unsafe {
                     self.gl.delete_sampler(*sampler);
+                }
+            }
+            for cached in self.texture_to_buffer_compute_programs.get_mut().drain() {
+                unsafe {
+                    self.gl.delete_program(cached.1.program);
                 }
             }
             let _ = egl_state
@@ -227,6 +342,29 @@ impl GlesDeviceInner {
         }
     }
 
+    pub(super) fn with_texture_to_buffer_compute_program<R>(
+        &self,
+        gl: &glow::Context,
+        key: TextureToBufferComputeProgramKey,
+        create: impl FnOnce(
+            &glow::Context,
+            TextureToBufferComputeProgramKey,
+        ) -> Result<TextureToBufferComputeProgram, HalError>,
+        use_cached: impl FnOnce(&TextureToBufferComputeProgram) -> R,
+    ) -> Result<R, HalError> {
+        let cache = match self {
+            Self::Egl(state) => &state.texture_to_buffer_compute_programs,
+            #[cfg(windows)]
+            Self::Wgl(state) => &state.texture_to_buffer_compute_programs,
+        };
+        let mut cache = cache.lock();
+        let program = match cache.entry(key) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => entry.insert(create(gl, key)?),
+        };
+        Ok(use_cached(program))
+    }
+
     fn allocation_count(&self) -> u64 {
         match self {
             Self::Egl(state) => state.allocations.load(Ordering::Relaxed),
@@ -324,6 +462,7 @@ impl GlesDevice {
             supports_cube_map_array: caps.supports_cube_map_array,
             texture_view: caps.texture_view,
             placeholder_sampler,
+            texture_to_buffer_compute_programs: Mutex::new(HashMap::new()),
         }));
         let queue = GlesQueue::new(Arc::clone(&inner));
         Self { inner, queue }

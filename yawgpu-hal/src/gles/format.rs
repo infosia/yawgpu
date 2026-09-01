@@ -604,39 +604,6 @@ pub(super) fn is_color_renderable_with(
     }
 }
 
-/// Component class a GLES color clear (and any other component-class-sensitive
-/// path) must dispatch on for a given color-attachment format.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum GlesClearKind {
-    /// Float / normalized components: `glClearColor` + `glClear` semantics.
-    Float,
-    /// Unsigned-integer components: `glClearBufferuiv` semantics.
-    Uint,
-    /// Signed-integer components: `glClearBufferiv` semantics.
-    Sint,
-}
-
-/// Classifies a color format's component class from its GL upload triplet:
-/// a `*_INTEGER` external format marks an integer attachment, and the
-/// signedness of its `ty` picks `Sint` vs `Uint`. Formats that do not map on
-/// GLES (or are non-integer) classify as `Float`, preserving the existing
-/// `glClearColor` path.
-pub(super) fn color_clear_kind(format: HalTextureFormat) -> GlesClearKind {
-    let Ok(gles) = map_texture_format(format) else {
-        return GlesClearKind::Float;
-    };
-    if !matches!(
-        gles.format,
-        glow::RED_INTEGER | glow::RG_INTEGER | glow::RGBA_INTEGER
-    ) {
-        return GlesClearKind::Float;
-    }
-    match gles.ty {
-        glow::BYTE | glow::SHORT | glow::INT => GlesClearKind::Sint,
-        _ => GlesClearKind::Uint,
-    }
-}
-
 pub(super) fn map_vertex_format(format: HalVertexFormat) -> Result<GlesVertexFormat, HalError> {
     match format {
         HalVertexFormat::Uint8 => Ok(gles_vertex_format(1, glow::UNSIGNED_BYTE, false, true)),
@@ -751,6 +718,127 @@ fn gles_format(internal: u32, format: u32, ty: u32, bytes_per_pixel: u32) -> Gle
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::HalColorClearKind;
+
+    const SUPPORTED_GLES_TEXTURE_FORMATS: &[HalTextureFormat] = &[
+        HalTextureFormat::R8Unorm,
+        HalTextureFormat::R8Snorm,
+        HalTextureFormat::R8Uint,
+        HalTextureFormat::R8Sint,
+        HalTextureFormat::R16Unorm,
+        HalTextureFormat::R16Snorm,
+        HalTextureFormat::R16Uint,
+        HalTextureFormat::R16Sint,
+        HalTextureFormat::R16Float,
+        HalTextureFormat::Rg8Unorm,
+        HalTextureFormat::Rg8Snorm,
+        HalTextureFormat::Rg8Uint,
+        HalTextureFormat::Rg8Sint,
+        HalTextureFormat::Rg16Unorm,
+        HalTextureFormat::Rg16Snorm,
+        HalTextureFormat::Rg16Uint,
+        HalTextureFormat::Rg16Sint,
+        HalTextureFormat::Rg16Float,
+        HalTextureFormat::R32Uint,
+        HalTextureFormat::R32Sint,
+        HalTextureFormat::R32Float,
+        HalTextureFormat::Rg32Uint,
+        HalTextureFormat::Rg32Sint,
+        HalTextureFormat::Rg32Float,
+        HalTextureFormat::Rgba8Unorm,
+        HalTextureFormat::Rgba8UnormSrgb,
+        HalTextureFormat::Rgba8Snorm,
+        HalTextureFormat::Rgba8Uint,
+        HalTextureFormat::Rgba8Sint,
+        HalTextureFormat::Bgra8Unorm,
+        HalTextureFormat::Bgra8UnormSrgb,
+        HalTextureFormat::Rgb10a2Uint,
+        HalTextureFormat::Rgb10a2Unorm,
+        HalTextureFormat::Rg11b10Ufloat,
+        HalTextureFormat::Rgb9e5Ufloat,
+        HalTextureFormat::Rgba16Unorm,
+        HalTextureFormat::Rgba16Snorm,
+        HalTextureFormat::Rgba16Uint,
+        HalTextureFormat::Rgba16Sint,
+        HalTextureFormat::Rgba16Float,
+        HalTextureFormat::Rgba32Uint,
+        HalTextureFormat::Rgba32Sint,
+        HalTextureFormat::Rgba32Float,
+        HalTextureFormat::Depth16Unorm,
+        HalTextureFormat::Depth24Plus,
+        HalTextureFormat::Depth24PlusStencil8,
+        HalTextureFormat::Depth32Float,
+        HalTextureFormat::Depth32FloatStencil8,
+        HalTextureFormat::Stencil8,
+        HalTextureFormat::Bc1RgbaUnorm,
+        HalTextureFormat::Bc1RgbaUnormSrgb,
+        HalTextureFormat::Bc2RgbaUnorm,
+        HalTextureFormat::Bc2RgbaUnormSrgb,
+        HalTextureFormat::Bc3RgbaUnorm,
+        HalTextureFormat::Bc3RgbaUnormSrgb,
+        HalTextureFormat::Bc4RUnorm,
+        HalTextureFormat::Bc4RSnorm,
+        HalTextureFormat::Bc5RgUnorm,
+        HalTextureFormat::Bc5RgSnorm,
+        HalTextureFormat::Bc6hRgbUfloat,
+        HalTextureFormat::Bc6hRgbFloat,
+        HalTextureFormat::Bc7RgbaUnorm,
+        HalTextureFormat::Bc7RgbaUnormSrgb,
+        HalTextureFormat::Etc2Rgb8Unorm,
+        HalTextureFormat::Etc2Rgb8UnormSrgb,
+        HalTextureFormat::Etc2Rgb8a1Unorm,
+        HalTextureFormat::Etc2Rgb8a1UnormSrgb,
+        HalTextureFormat::Etc2Rgba8Unorm,
+        HalTextureFormat::Etc2Rgba8UnormSrgb,
+        HalTextureFormat::EacR11Unorm,
+        HalTextureFormat::EacR11Snorm,
+        HalTextureFormat::EacRg11Unorm,
+        HalTextureFormat::EacRg11Snorm,
+        HalTextureFormat::Astc4x4Unorm,
+        HalTextureFormat::Astc4x4UnormSrgb,
+        HalTextureFormat::Astc5x4Unorm,
+        HalTextureFormat::Astc5x4UnormSrgb,
+        HalTextureFormat::Astc5x5Unorm,
+        HalTextureFormat::Astc5x5UnormSrgb,
+        HalTextureFormat::Astc6x5Unorm,
+        HalTextureFormat::Astc6x5UnormSrgb,
+        HalTextureFormat::Astc6x6Unorm,
+        HalTextureFormat::Astc6x6UnormSrgb,
+        HalTextureFormat::Astc8x5Unorm,
+        HalTextureFormat::Astc8x5UnormSrgb,
+        HalTextureFormat::Astc8x6Unorm,
+        HalTextureFormat::Astc8x6UnormSrgb,
+        HalTextureFormat::Astc8x8Unorm,
+        HalTextureFormat::Astc8x8UnormSrgb,
+        HalTextureFormat::Astc10x5Unorm,
+        HalTextureFormat::Astc10x5UnormSrgb,
+        HalTextureFormat::Astc10x6Unorm,
+        HalTextureFormat::Astc10x6UnormSrgb,
+        HalTextureFormat::Astc10x8Unorm,
+        HalTextureFormat::Astc10x8UnormSrgb,
+        HalTextureFormat::Astc10x10Unorm,
+        HalTextureFormat::Astc10x10UnormSrgb,
+        HalTextureFormat::Astc12x10Unorm,
+        HalTextureFormat::Astc12x10UnormSrgb,
+        HalTextureFormat::Astc12x12Unorm,
+        HalTextureFormat::Astc12x12UnormSrgb,
+    ];
+
+    fn mapped_color_clear_kind(format: HalTextureFormat) -> HalColorClearKind {
+        let Ok(gles) = map_texture_format(format) else {
+            return HalColorClearKind::Float;
+        };
+        if !matches!(
+            gles.format,
+            glow::RED_INTEGER | glow::RG_INTEGER | glow::RGBA_INTEGER
+        ) {
+            return HalColorClearKind::Float;
+        }
+        match gles.ty {
+            glow::BYTE | glow::SHORT | glow::INT => HalColorClearKind::Sint,
+            _ => HalColorClearKind::Uint,
+        }
+    }
 
     #[test]
     fn map_texture_format_maps_uncompressed_color_formats() {
@@ -1285,49 +1373,14 @@ mod tests {
     }
 
     #[test]
-    fn color_clear_kind_classifies_component_classes() {
-        let uint = [
-            HalTextureFormat::R8Uint,
-            HalTextureFormat::R16Uint,
-            HalTextureFormat::R32Uint,
-            HalTextureFormat::Rg8Uint,
-            HalTextureFormat::Rg16Uint,
-            HalTextureFormat::Rg32Uint,
-            HalTextureFormat::Rgba8Uint,
-            HalTextureFormat::Rgba16Uint,
-            HalTextureFormat::Rgba32Uint,
-            HalTextureFormat::Rgb10a2Uint,
-        ];
-        for format in uint {
-            assert_eq!(color_clear_kind(format), GlesClearKind::Uint, "{format:?}");
-        }
-
-        let sint = [
-            HalTextureFormat::R8Sint,
-            HalTextureFormat::R16Sint,
-            HalTextureFormat::R32Sint,
-            HalTextureFormat::Rg8Sint,
-            HalTextureFormat::Rg16Sint,
-            HalTextureFormat::Rg32Sint,
-            HalTextureFormat::Rgba8Sint,
-            HalTextureFormat::Rgba16Sint,
-            HalTextureFormat::Rgba32Sint,
-        ];
-        for format in sint {
-            assert_eq!(color_clear_kind(format), GlesClearKind::Sint, "{format:?}");
-        }
-
-        let float = [
-            HalTextureFormat::Rgba8Unorm,
-            HalTextureFormat::Bgra8Unorm,
-            HalTextureFormat::Rgb10a2Unorm,
-            HalTextureFormat::R16Float,
-            HalTextureFormat::Rgba32Float,
-            // Unmapped formats fall back to the float clear path.
-            HalTextureFormat::Depth32Float,
-        ];
-        for format in float {
-            assert_eq!(color_clear_kind(format), GlesClearKind::Float, "{format:?}");
+    fn mapped_and_hal_color_clear_kinds_agree_for_supported_formats() {
+        for format in SUPPORTED_GLES_TEXTURE_FORMATS {
+            assert!(map_texture_format(*format).is_ok(), "{format:?}");
+            assert_eq!(
+                mapped_color_clear_kind(*format),
+                format.color_clear_kind(),
+                "{format:?}"
+            );
         }
     }
 

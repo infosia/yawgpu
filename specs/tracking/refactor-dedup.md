@@ -19,8 +19,9 @@ not silently dropped.
 | Slice | Crate | Status | Commit |
 |---|---|---|---|
 | H1 | yawgpu-hal (lib.rs dispatch, Vulkan, Metal, shared format helpers) | DONE | see log |
-| H2 | yawgpu-hal (GLES-only dedupe + program cache) | in progress | |
-| C1 | yawgpu-core (pipeline creation, pass recording, copy validation) | planned | |
+| H2 | yawgpu-hal (GLES-only dedupe + program cache) | DONE | see log |
+| C1a | yawgpu-core (pipeline creation: C1.1, C1.2, C1.8, C1.13, C1.15) | DONE | fb56a6a |
+| C1b | yawgpu-core (pass recording, copy validation, submit bind resolution) | in progress | |
 | F1 | yawgpu (FFI: handle borrowing, chain walks, callbacks, macros) | planned | |
 
 ## H1 — yawgpu-hal: dispatch + Vulkan + Metal + shared helpers
@@ -107,3 +108,21 @@ double Vec; `adapter_info_from_core` constant allocation.
   stencil/smoke) 48/0, MoltenVK e2e (basic/buffer/texture/render/
   compute/depth) 31/0. `find_surface_pending` fold left as-is (touches
   present control flow). H2 dispatched.
+- 2026-09-02 — H1 committed as c0649e5.
+- 2026-09-02 — C1a reviewed + committed fb56a6a: single resolve per
+  pipeline creation (pipeline id now allocated in `Device`, only ever
+  used for auto-BGL identity), hex→named texel table verified 40/40
+  names + values identical. Workspace 999/0, clippy clean, core
+  `--features tiled,shader-passthrough` 572/0, Metal e2e 25/0.
+- 2026-09-02 — H2 (GLES) cannot run on this machine; verified by a
+  fresh-context equivalence review instead. Review found 1 MAJOR
+  (compute-pass buffer bindings validated after `use_program`, leaving
+  the program bound on error) + MINOR (resolve-target mip conversion
+  became a silent `as`, fallible attach between FBO create/cleanup,
+  error precedence on doubly-invalid inputs, unreachable cache error) —
+  all fixed in a revision handoff. Noted, not fixed (pre-existing):
+  cached programs / placeholder sampler skip deletion when the instance
+  is not EGL (`gles/device.rs` Drop). `color_clear_kind` equivalence
+  proven over all 102 `HalTextureFormat` variants by unit test.
+  Gates: `yawgpu-hal --features gles,noop --lib` 200/0, gles clippy
+  clean. H2 committed.

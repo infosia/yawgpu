@@ -3,26 +3,26 @@ use std::sync::Arc;
 
 use glow::HasContext;
 
-use super::device::{GlesDeviceInner, GlesTextureViewFn};
-use super::format::{
-    color_clear_kind, map_primitive_topology, map_vertex_format, storage_image_format,
-    GlesClearKind,
+use super::device::{
+    GlesDeviceInner, GlesTextureViewFn, TextureToBufferComputeEncoding,
+    TextureToBufferComputeProgram, TextureToBufferComputeProgramKey,
 };
+use super::format::{map_primitive_topology, map_vertex_format, storage_image_format};
 use super::texture::GlesTextureMeta;
 use super::BACKEND;
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
 use crate::{
     HalBlendFactor, HalBlendOperation, HalBoundBuffer, HalBoundExternalTexture,
     HalBoundIndexBuffer, HalBoundIndirectBuffer, HalBoundSampler, HalBoundTexture, HalBuffer,
-    HalBufferBindingKind, HalBufferClear, HalBufferCopy, HalBufferTextureCopy, HalColorTargetState,
-    HalCompareFunction, HalComputeDispatch, HalComputePass, HalComputePipeline, HalCopy,
-    HalCullMode, HalDepthStencilState, HalDescriptorBinding, HalDescriptorBindingKind, HalDraw,
-    HalError, HalFrontFace, HalGlesBindingClass, HalGlesBindingRemap, HalIndexFormat, HalQuerySet,
-    HalRenderLoadOp, HalRenderPassCommand, HalRenderPassCommandStream, HalRenderPipeline,
-    HalResolveQuerySet, HalSampler, HalStencilFaceState, HalStencilOperation,
-    HalStorageTextureAccess, HalTexture, HalTextureAspect, HalTextureClear, HalTextureCopy,
-    HalTextureFormat, HalTextureMetadataSlot, HalTextureViewDimension, HalVertexStepMode,
-    SubmissionIndex,
+    HalBufferBindingKind, HalBufferClear, HalBufferCopy, HalBufferTextureCopy, HalColorClearKind,
+    HalColorTargetState, HalCompareFunction, HalComputeDispatch, HalComputePass,
+    HalComputePipeline, HalCopy, HalCullMode, HalDepthStencilState, HalDescriptorBinding,
+    HalDescriptorBindingKind, HalDraw, HalError, HalFrontFace, HalGlesBindingClass,
+    HalGlesBindingRemap, HalIndexFormat, HalQuerySet, HalRenderLoadOp, HalRenderPassCommand,
+    HalRenderPassCommandStream, HalRenderPipeline, HalResolveQuerySet, HalSampler,
+    HalStencilFaceState, HalStencilOperation, HalStorageTextureAccess, HalTexture,
+    HalTextureAspect, HalTextureClear, HalTextureCopy, HalTextureFormat, HalTextureMetadataSlot,
+    HalTextureViewDimension, HalVertexStepMode, SubmissionIndex,
 };
 
 /// Stores GLES queue data used by validation and backend submission.
@@ -115,7 +115,9 @@ impl GlesQueue {
                             submit_resolve_query_set(gl, resolve)?;
                         }
                         HalCopy::BufferToTexture(copy) => submit_buffer_to_texture(gl, copy)?,
-                        HalCopy::TextureToBuffer(copy) => submit_texture_to_buffer(gl, copy)?,
+                        HalCopy::TextureToBuffer(copy) => {
+                            submit_texture_to_buffer(self.inner.as_ref(), gl, copy)?;
+                        }
                         HalCopy::TextureToTexture(copy) => submit_texture_to_texture(gl, copy)?,
                         HalCopy::ComputePass(pass) => {
                             submit_compute_pass(
@@ -356,44 +358,17 @@ fn submit_compute_pass(
     };
     reject_external_texture_bindings(pass.bind_external_textures.len())?;
     let program = pipeline.raw_or_err()?;
-    let bindings = pass
-        .bind_buffers
-        .iter()
-        .map(|bound| {
-            let HalBuffer::Gles(buffer) = &bound.buffer else {
-                return Err(HalError::BufferOperationFailed {
-                    backend: BACKEND,
-                    message: "compute pass binding is not a GLES buffer",
-                });
-            };
-            let (target, class) = binding_target(pipeline.bindings(), bound.group, bound.binding)?;
-            let Some(flat_binding) =
-                flat_binding(pipeline.binding_remaps(), bound.group, bound.binding, class)
-            else {
-                return Ok(None);
-            };
-            let bound_size = gles_bound_buffer_size(buffer, bound)?;
-            let buffer = buffer.raw_or_err()?;
-            let offset =
-                i32::try_from(bound.offset).map_err(|_| HalError::BufferOperationFailed {
-                    backend: BACKEND,
-                    message: "compute buffer binding offset exceeds GLES limit",
-                })?;
-            let size = i32::try_from(bound_size).map_err(|_| HalError::BufferOperationFailed {
-                backend: BACKEND,
-                message: "compute buffer binding size exceeds GLES limit",
-            })?;
-            Ok(Some((target, flat_binding, buffer, offset, size)))
-        })
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+    let buffer_bindings = resolve_buffer_bindings(
+        &pass.bind_buffers,
+        pipeline.bindings(),
+        pipeline.binding_remaps(),
+        "compute pass binding is not a GLES buffer",
+        "compute buffer binding offset exceeds GLES limit",
+        "compute buffer binding size exceeds GLES limit",
+    )?;
     unsafe {
         gl.use_program(Some(program));
-        for (target, binding, buffer, offset, size) in bindings {
-            gl.bind_buffer_range(target, binding, Some(buffer), offset, size);
-        }
+        apply_buffer_bindings(gl, &buffer_bindings);
         let texture_units = bind_combined_samplers(
             gl,
             pipeline.combined_samplers(),
@@ -1790,22 +1765,22 @@ fn create_render_fbo(
             }
             let draw_buffer = index as u32;
             let [r, g, b, a] = color.clear_color;
-            match color_clear_kind(color.view_format) {
-                GlesClearKind::Float => {
+            match color.view_format.color_clear_kind() {
+                HalColorClearKind::Float => {
                     gl.clear_buffer_f32_slice(
                         glow::COLOR,
                         draw_buffer,
                         &[r as f32, g as f32, b as f32, a as f32],
                     );
                 }
-                GlesClearKind::Sint => {
+                HalColorClearKind::Sint => {
                     gl.clear_buffer_i32_slice(
                         glow::COLOR,
                         draw_buffer,
                         &[r as i32, g as i32, b as i32, a as i32],
                     );
                 }
-                GlesClearKind::Uint => {
+                HalColorClearKind::Uint => {
                     gl.clear_buffer_u32_slice(
                         glow::COLOR,
                         draw_buffer,
@@ -1848,20 +1823,69 @@ unsafe fn attach_2d_texture_to_framebuffer(
     meta: &GlesTextureMeta,
     texture: glow::Texture,
     mip_level: u32,
-) {
+    mip_level_message: &'static str,
+) -> Result<(), HalError> {
+    let mip_level = if meta.target == glow::TEXTURE_2D_MULTISAMPLE {
+        0
+    } else {
+        i32_from_u32(mip_level, mip_level_message)?
+    };
     unsafe {
         gl.framebuffer_texture_2d(
             framebuffer_target,
             attachment,
             meta.target,
             Some(texture),
-            if meta.target == glow::TEXTURE_2D_MULTISAMPLE {
-                0
-            } else {
-                mip_level as i32
-            },
+            mip_level,
         );
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn attach_texture_to_framebuffer(
+    gl: &glow::Context,
+    framebuffer_target: u32,
+    attachment: u32,
+    meta: &GlesTextureMeta,
+    texture: glow::Texture,
+    mip_level: u32,
+    layer: u32,
+    mip_level_message: &'static str,
+    layer_message: &'static str,
+    error_message: &'static str,
+) -> Result<(), HalError> {
+    unsafe {
+        match meta.target {
+            glow::TEXTURE_2D | glow::TEXTURE_2D_MULTISAMPLE => {
+                attach_2d_texture_to_framebuffer(
+                    gl,
+                    framebuffer_target,
+                    attachment,
+                    meta,
+                    texture,
+                    mip_level,
+                    mip_level_message,
+                )?;
+            }
+            glow::TEXTURE_2D_ARRAY | glow::TEXTURE_3D => {
+                gl.framebuffer_texture_layer(
+                    framebuffer_target,
+                    attachment,
+                    Some(texture),
+                    i32_from_u32(mip_level, mip_level_message)?,
+                    i32_from_u32(layer, layer_message)?,
+                );
+            }
+            _ => {
+                return Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: error_message,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Attaches a color texture to the render FBO, selecting the target's layer.
@@ -1886,35 +1910,19 @@ unsafe fn attach_color_texture_to_framebuffer(
     layer: u32,
 ) -> Result<(), HalError> {
     unsafe {
-        match meta.target {
-            glow::TEXTURE_2D | glow::TEXTURE_2D_MULTISAMPLE => {
-                attach_2d_texture_to_framebuffer(
-                    gl,
-                    framebuffer_target,
-                    attachment,
-                    meta,
-                    texture,
-                    mip_level,
-                );
-            }
-            glow::TEXTURE_2D_ARRAY | glow::TEXTURE_3D => {
-                gl.framebuffer_texture_layer(
-                    framebuffer_target,
-                    attachment,
-                    Some(texture),
-                    i32_from_u32(mip_level, "color attachment mip level exceeds GLES limit")?,
-                    i32_from_u32(layer, "color attachment layer exceeds GLES limit")?,
-                );
-            }
-            _ => {
-                return Err(HalError::BufferOperationFailed {
-                    backend: BACKEND,
-                    message: "GLES render pass color attachment target is unsupported",
-                });
-            }
-        }
+        attach_texture_to_framebuffer(
+            gl,
+            framebuffer_target,
+            attachment,
+            meta,
+            texture,
+            mip_level,
+            layer,
+            "color attachment mip level exceeds GLES limit",
+            "color attachment layer exceeds GLES limit",
+            "GLES render pass color attachment target is unsupported",
+        )
     }
-    Ok(())
 }
 
 unsafe fn attach_depth_stencil_texture_to_framebuffer(
@@ -1927,41 +1935,19 @@ unsafe fn attach_depth_stencil_texture_to_framebuffer(
     array_layer: u32,
 ) -> Result<(), HalError> {
     unsafe {
-        match meta.target {
-            glow::TEXTURE_2D | glow::TEXTURE_2D_MULTISAMPLE => {
-                attach_2d_texture_to_framebuffer(
-                    gl,
-                    framebuffer_target,
-                    attachment,
-                    meta,
-                    texture,
-                    mip_level,
-                );
-            }
-            glow::TEXTURE_2D_ARRAY | glow::TEXTURE_3D => {
-                gl.framebuffer_texture_layer(
-                    framebuffer_target,
-                    attachment,
-                    Some(texture),
-                    i32_from_u32(
-                        mip_level,
-                        "depth-stencil attachment mip level exceeds GLES limit",
-                    )?,
-                    i32_from_u32(
-                        array_layer,
-                        "depth-stencil attachment array layer exceeds GLES limit",
-                    )?,
-                );
-            }
-            _ => {
-                return Err(HalError::BufferOperationFailed {
-                    backend: BACKEND,
-                    message: "GLES render pass depth-stencil attachment target is unsupported",
-                });
-            }
-        }
+        attach_texture_to_framebuffer(
+            gl,
+            framebuffer_target,
+            attachment,
+            meta,
+            texture,
+            mip_level,
+            array_layer,
+            "depth-stencil attachment mip level exceeds GLES limit",
+            "depth-stencil attachment array layer exceeds GLES limit",
+            "GLES render pass depth-stencil attachment target is unsupported",
+        )
     }
-    Ok(())
 }
 
 unsafe fn attach_resolve_texture_to_framebuffer(
@@ -1972,35 +1958,26 @@ unsafe fn attach_resolve_texture_to_framebuffer(
     mip_level: u32,
     array_layer: u32,
 ) -> Result<(), HalError> {
-    unsafe {
-        match meta.target {
-            glow::TEXTURE_2D => {
-                gl.framebuffer_texture_2d(
-                    glow::DRAW_FRAMEBUFFER,
-                    attachment,
-                    glow::TEXTURE_2D,
-                    Some(texture),
-                    i32_from_u32(mip_level, "resolve target mip level exceeds GLES limit")?,
-                );
-            }
-            glow::TEXTURE_2D_ARRAY => {
-                gl.framebuffer_texture_layer(
-                    glow::DRAW_FRAMEBUFFER,
-                    attachment,
-                    Some(texture),
-                    i32_from_u32(mip_level, "resolve target mip level exceeds GLES limit")?,
-                    i32_from_u32(array_layer, "resolve target array layer exceeds GLES limit")?,
-                );
-            }
-            _ => {
-                return Err(HalError::BufferOperationFailed {
-                    backend: BACKEND,
-                    message: "GLES resolve target must be a single-sample 2D texture",
-                });
-            }
-        }
+    if !matches!(meta.target, glow::TEXTURE_2D | glow::TEXTURE_2D_ARRAY) {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES resolve target must be a single-sample 2D texture",
+        });
     }
-    Ok(())
+    unsafe {
+        attach_texture_to_framebuffer(
+            gl,
+            glow::DRAW_FRAMEBUFFER,
+            attachment,
+            meta,
+            texture,
+            mip_level,
+            array_layer,
+            "resolve target mip level exceeds GLES limit",
+            "resolve target array layer exceeds GLES limit",
+            "GLES resolve target must be a single-sample 2D texture",
+        )
+    }
 }
 
 fn resolve_render_pass(
@@ -2743,36 +2720,107 @@ fn resolve_bound_buffer_size(
     }
 }
 
+#[derive(Clone, Copy)]
+struct ResolvedBufferBinding {
+    target: u32,
+    binding: u32,
+    buffer: glow::Buffer,
+    offset: i32,
+    size: i32,
+}
+
+fn resolve_buffer_binding(
+    bound: &HalBoundBuffer,
+    descriptors: &[HalDescriptorBinding],
+    remaps: &[HalGlesBindingRemap],
+    not_gles_buffer_message: &'static str,
+    offset_limit_message: &'static str,
+    size_limit_message: &'static str,
+) -> Result<Option<ResolvedBufferBinding>, HalError> {
+    let HalBuffer::Gles(buffer) = &bound.buffer else {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: not_gles_buffer_message,
+        });
+    };
+    let (target, class) = binding_target(descriptors, bound.group, bound.binding)?;
+    let Some(flat_binding) = flat_binding(remaps, bound.group, bound.binding, class) else {
+        return Ok(None);
+    };
+    let bound_size = gles_bound_buffer_size(buffer, bound)?;
+    let buffer = buffer.raw_or_err()?;
+    let offset = i32::try_from(bound.offset).map_err(|_| HalError::BufferOperationFailed {
+        backend: BACKEND,
+        message: offset_limit_message,
+    })?;
+    let size = i32::try_from(bound_size).map_err(|_| HalError::BufferOperationFailed {
+        backend: BACKEND,
+        message: size_limit_message,
+    })?;
+    Ok(Some(ResolvedBufferBinding {
+        target,
+        binding: flat_binding,
+        buffer,
+        offset,
+        size,
+    }))
+}
+
+fn resolve_buffer_bindings(
+    bind_buffers: &[HalBoundBuffer],
+    descriptors: &[HalDescriptorBinding],
+    remaps: &[HalGlesBindingRemap],
+    not_gles_buffer_message: &'static str,
+    offset_limit_message: &'static str,
+    size_limit_message: &'static str,
+) -> Result<Vec<ResolvedBufferBinding>, HalError> {
+    let mut resolved = Vec::new();
+    for bound in bind_buffers {
+        if let Some(binding) = resolve_buffer_binding(
+            bound,
+            descriptors,
+            remaps,
+            not_gles_buffer_message,
+            offset_limit_message,
+            size_limit_message,
+        )? {
+            resolved.push(binding);
+        }
+    }
+    Ok(resolved)
+}
+
+unsafe fn apply_buffer_bindings(gl: &glow::Context, bindings: &[ResolvedBufferBinding]) {
+    unsafe {
+        for binding in bindings {
+            gl.bind_buffer_range(
+                binding.target,
+                binding.binding,
+                Some(binding.buffer),
+                binding.offset,
+                binding.size,
+            );
+        }
+    }
+}
+
 fn bind_render_buffers(
     gl: &glow::Context,
     bind_buffers: &[HalBoundBuffer],
     pipeline: &super::pipeline::GlesRenderPipeline,
 ) -> Result<(), HalError> {
     for bound in bind_buffers {
-        let HalBuffer::Gles(buffer) = &bound.buffer else {
-            return Err(HalError::BufferOperationFailed {
-                backend: BACKEND,
-                message: "render pass binding is not a GLES buffer",
-            });
-        };
-        let (target, class) = binding_target(pipeline.bindings(), bound.group, bound.binding)?;
-        let Some(flat_binding) =
-            flat_binding(pipeline.binding_remaps(), bound.group, bound.binding, class)
-        else {
-            continue;
-        };
-        let bound_size = gles_bound_buffer_size(buffer, bound)?;
-        let buffer = buffer.raw_or_err()?;
-        let offset = i32::try_from(bound.offset).map_err(|_| HalError::BufferOperationFailed {
-            backend: BACKEND,
-            message: "render buffer binding offset exceeds GLES limit",
-        })?;
-        let size = i32::try_from(bound_size).map_err(|_| HalError::BufferOperationFailed {
-            backend: BACKEND,
-            message: "render buffer binding size exceeds GLES limit",
-        })?;
-        unsafe {
-            gl.bind_buffer_range(target, flat_binding, Some(buffer), offset, size);
+        if let Some(binding) = resolve_buffer_binding(
+            bound,
+            pipeline.bindings(),
+            pipeline.binding_remaps(),
+            "render pass binding is not a GLES buffer",
+            "render buffer binding offset exceeds GLES limit",
+            "render buffer binding size exceeds GLES limit",
+        )? {
+            unsafe {
+                apply_buffer_bindings(gl, std::slice::from_ref(&binding));
+            }
         }
     }
     Ok(())
@@ -2946,7 +2994,7 @@ fn submit_texture_clear(gl: &glow::Context, clear: &HalTextureClear) -> Result<(
 
         let mut result = Ok(());
         for layer in layers {
-            attach_texture_clear_layer(gl, meta, raw_texture, mip_level, layer)?;
+            attach_texture_clear_layer(gl, meta, raw_texture, clear.mip_level, layer)?;
             if gl.check_framebuffer_status(glow::DRAW_FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
                 result = Err(HalError::BufferOperationFailed {
                     backend: BACKEND,
@@ -2954,14 +3002,14 @@ fn submit_texture_clear(gl: &glow::Context, clear: &HalTextureClear) -> Result<(
                 });
                 break;
             }
-            match color_clear_kind(clear.format) {
-                GlesClearKind::Float => {
+            match clear.format.color_clear_kind() {
+                HalColorClearKind::Float => {
                     gl.clear_buffer_f32_slice(glow::COLOR, 0, &[0.0, 0.0, 0.0, 0.0]);
                 }
-                GlesClearKind::Sint => {
+                HalColorClearKind::Sint => {
                     gl.clear_buffer_i32_slice(glow::COLOR, 0, &[0, 0, 0, 0]);
                 }
-                GlesClearKind::Uint => {
+                HalColorClearKind::Uint => {
                     gl.clear_buffer_u32_slice(glow::COLOR, 0, &[0, 0, 0, 0]);
                 }
             }
@@ -2986,7 +3034,7 @@ fn submit_texture_clear_zero_upload(
     texture: glow::Texture,
     mip_level: i32,
     clear: &HalTextureClear,
-    layers: &[i32],
+    layers: &[u32],
 ) -> Result<(), HalError> {
     let mip_width = mip_dimension(meta.width, clear.mip_level);
     let mip_height = mip_dimension(meta.height, clear.mip_level);
@@ -3033,7 +3081,14 @@ fn submit_texture_clear_zero_upload(
                 );
             }
             glow::TEXTURE_2D_ARRAY | glow::TEXTURE_3D => {
-                let first_layer = layers.first().copied().unwrap_or(0);
+                let first_layer = layers
+                    .first()
+                    .copied()
+                    .map(|layer| {
+                        i32_from_u32(layer, "texture clear layer index exceeds GLES limit")
+                    })
+                    .transpose()?
+                    .unwrap_or(0);
                 gl.tex_sub_image_3d(
                     meta.target,
                     mip_level,
@@ -3067,45 +3122,30 @@ unsafe fn attach_texture_clear_layer(
     gl: &glow::Context,
     meta: &GlesTextureMeta,
     texture: glow::Texture,
-    mip_level: i32,
-    layer: i32,
+    mip_level: u32,
+    layer: u32,
 ) -> Result<(), HalError> {
     unsafe {
-        match meta.target {
-            glow::TEXTURE_2D => {
-                gl.framebuffer_texture_2d(
-                    glow::DRAW_FRAMEBUFFER,
-                    glow::COLOR_ATTACHMENT0,
-                    glow::TEXTURE_2D,
-                    Some(texture),
-                    mip_level,
-                );
-            }
-            glow::TEXTURE_2D_ARRAY | glow::TEXTURE_3D => {
-                gl.framebuffer_texture_layer(
-                    glow::DRAW_FRAMEBUFFER,
-                    glow::COLOR_ATTACHMENT0,
-                    Some(texture),
-                    mip_level,
-                    layer,
-                );
-            }
-            _ => {
-                return Err(HalError::BufferOperationFailed {
-                    backend: BACKEND,
-                    message: "unsupported GLES texture clear target",
-                });
-            }
-        }
+        attach_texture_to_framebuffer(
+            gl,
+            glow::DRAW_FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            meta,
+            texture,
+            mip_level,
+            layer,
+            "texture clear mip level exceeds GLES limit",
+            "texture clear layer index exceeds GLES limit",
+            "unsupported GLES texture clear target",
+        )
     }
-    Ok(())
 }
 
 fn texture_clear_layers(
     meta: &GlesTextureMeta,
     mip_level: u32,
     clear: &HalTextureClear,
-) -> Result<Vec<i32>, HalError> {
+) -> Result<Vec<u32>, HalError> {
     let (start, count) = match meta.target {
         glow::TEXTURE_2D => (0, 1),
         glow::TEXTURE_2D_ARRAY => (clear.base_array_layer, clear.array_layer_count),
@@ -3125,10 +3165,8 @@ fn texture_clear_layers(
         })?;
     let mut layers = Vec::with_capacity(count as usize);
     for layer in start..end {
-        layers.push(i32_from_u32(
-            layer,
-            "texture clear layer index exceeds GLES limit",
-        )?);
+        i32_from_u32(layer, "texture clear layer index exceeds GLES limit")?;
+        layers.push(layer);
     }
     Ok(layers)
 }
@@ -3234,6 +3272,7 @@ fn submit_buffer_to_texture(
 }
 
 fn submit_texture_to_buffer(
+    device: &GlesDeviceInner,
     gl: &glow::Context,
     copy: &HalBufferTextureCopy,
 ) -> Result<(), HalError> {
@@ -3264,9 +3303,9 @@ fn submit_texture_to_buffer(
         });
     }
     if let Some(encoding) = texture_to_buffer_compute_encoding(copy.format, copy.aspect) {
-        return submit_texture_to_buffer_compute(gl, copy, encoding);
+        return submit_texture_to_buffer_compute(device, gl, copy, encoding);
     }
-    let mip_level = i32_from_u32(copy.mip_level, "texture mip level exceeds GLES limit")?;
+    i32_from_u32(copy.mip_level, "texture mip level exceeds GLES limit")?;
     let x = i32_from_u32(copy.origin.x, "texture x origin exceeds GLES limit")?;
     let width = i32_from_u32(copy.extent.width, "texture copy width exceeds GLES limit")?;
     let uses_layered_target = meta.target != glow::TEXTURE_2D;
@@ -3301,18 +3340,40 @@ fn submit_texture_to_buffer(
         });
     }
 
-    // Precompute every exact texel-row span so fallible arithmetic happens
-    // before any GL state is touched. Reading one tight row at a time avoids
-    // relying on PACK_ROW_LENGTH/PBO padding preservation, and keeps row,
-    // image, pre-offset, and post-copy padding bytes untouched.
-    let image_stride =
-        u64::from(copy.buffer_layout.bytes_per_row) * u64::from(copy.buffer_layout.rows_per_image);
-    let mut row_spans = Vec::with_capacity(
-        copy.extent
-            .depth_or_array_layers
-            .saturating_mul(copy.extent.height) as usize,
-    );
-    for slice in 0..copy.extent.depth_or_array_layers {
+    let row_offsets = buffer_texture_row_spans(
+        copy,
+        row_bytes,
+        destination.size(),
+        |slice| {
+            let layer =
+                copy.origin
+                    .z
+                    .checked_add(slice)
+                    .ok_or(HalError::BufferOperationFailed {
+                        backend: BACKEND,
+                        message: "texture layer index exceeds GLES limit",
+                    })?;
+            i32_from_u32(layer, "texture layer index exceeds GLES limit").map(|_| ())
+        },
+        |row_offset| {
+            // The staged path passes the offset to `glBufferSubData` (i32);
+            // the pack-buffer path passes it to `glReadPixels` (u32). Validate
+            // the stricter bound up front so the copy loop below cannot fail.
+            if use_client_staging {
+                i32_from_u64(row_offset, "texture-to-buffer offset exceeds GLES limit").map(|_| ())
+            } else {
+                u32_from_u64(row_offset, "texture-to-buffer offset exceeds GLES limit").map(|_| ())
+            }
+        },
+    )?;
+    let mut row_spans = Vec::with_capacity(row_offsets.len());
+    for (index, row_offset) in row_offsets.into_iter().enumerate() {
+        let slice = u32::try_from(index / copy.extent.height as usize).map_err(|_| {
+            HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "texture layer index exceeds GLES limit",
+            }
+        })?;
         let layer = copy
             .origin
             .z
@@ -3321,54 +3382,23 @@ fn submit_texture_to_buffer(
                 backend: BACKEND,
                 message: "texture layer index exceeds GLES limit",
             })?;
-        let layer = i32_from_u32(layer, "texture layer index exceeds GLES limit")?;
-        let slice_offset = u64::from(slice)
-            .checked_mul(image_stride)
-            .and_then(|bytes| copy.buffer_layout.offset.checked_add(bytes))
+        i32_from_u32(layer, "texture layer index exceeds GLES limit")?;
+        let row = u32::try_from(index % copy.extent.height as usize).map_err(|_| {
+            HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "texture row index exceeds GLES limit",
+            }
+        })?;
+        let row_y = copy
+            .origin
+            .y
+            .checked_add(row)
             .ok_or(HalError::BufferOperationFailed {
                 backend: BACKEND,
-                message: "texture-to-buffer offset exceeds GLES limit",
+                message: "texture row index exceeds GLES limit",
             })?;
-        for row in 0..copy.extent.height {
-            let row_offset = u64::from(row)
-                .checked_mul(u64::from(copy.buffer_layout.bytes_per_row))
-                .and_then(|bytes| slice_offset.checked_add(bytes))
-                .ok_or(HalError::BufferOperationFailed {
-                    backend: BACKEND,
-                    message: "texture-to-buffer offset exceeds GLES limit",
-                })?;
-            let row_end =
-                row_offset
-                    .checked_add(row_bytes)
-                    .ok_or(HalError::BufferOperationFailed {
-                        backend: BACKEND,
-                        message: "texture-to-buffer range exceeds GLES limit",
-                    })?;
-            if row_end > destination.size() {
-                return Err(HalError::BufferOperationFailed {
-                    backend: BACKEND,
-                    message: "texture-to-buffer range exceeds buffer size",
-                });
-            }
-            // The staged path passes the offset to `glBufferSubData` (i32);
-            // the pack-buffer path passes it to `glReadPixels` (u32). Validate
-            // the stricter bound up front so the copy loop below cannot fail.
-            if use_client_staging {
-                i32_from_u64(row_offset, "texture-to-buffer offset exceeds GLES limit")?;
-            } else {
-                u32_from_u64(row_offset, "texture-to-buffer offset exceeds GLES limit")?;
-            }
-            let row_y = copy
-                .origin
-                .y
-                .checked_add(row)
-                .ok_or(HalError::BufferOperationFailed {
-                    backend: BACKEND,
-                    message: "texture row index exceeds GLES limit",
-                })?;
-            let row_y = i32_from_u32(row_y, "texture row index exceeds GLES limit")?;
-            row_spans.push((layer, row_y, row_offset));
-        }
+        let row_y = i32_from_u32(row_y, "texture row index exceeds GLES limit")?;
+        row_spans.push((layer, row_y, row_offset));
     }
 
     unsafe {
@@ -3387,29 +3417,28 @@ fn submit_texture_to_buffer(
         gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
         let mut result = Ok(());
         let mut attached_layer = None;
+        let mut staging = Vec::new();
         for (layer, row_y, row_offset) in row_spans {
             let attachment_changed = if attached_layer == Some(layer) {
                 // Reuse the framebuffer attachment across rows of the same
                 // layer; `row_spans` is ordered by layer then row.
                 false
-            } else if uses_layered_target {
-                gl.framebuffer_texture_layer(
-                    glow::READ_FRAMEBUFFER,
-                    glow::COLOR_ATTACHMENT0,
-                    Some(texture),
-                    mip_level,
-                    layer,
-                );
-                attached_layer = Some(layer);
-                true
             } else {
-                gl.framebuffer_texture_2d(
+                if let Err(error) = attach_texture_to_framebuffer(
+                    gl,
                     glow::READ_FRAMEBUFFER,
                     glow::COLOR_ATTACHMENT0,
-                    meta.target,
-                    Some(texture),
-                    mip_level,
-                );
+                    meta,
+                    texture,
+                    copy.mip_level,
+                    layer,
+                    "texture mip level exceeds GLES limit",
+                    "texture layer index exceeds GLES limit",
+                    "texture-to-buffer source target is unsupported",
+                ) {
+                    result = Err(error);
+                    break;
+                }
                 attached_layer = Some(layer);
                 true
             };
@@ -3423,7 +3452,8 @@ fn submit_texture_to_buffer(
                 break;
             }
             if use_client_staging {
-                let mut staging = vec![0u8; staging_len];
+                staging.clear();
+                staging.resize(staging_len, 0);
                 gl.read_pixels(
                     x,
                     row_y,
@@ -3455,98 +3485,6 @@ fn submit_texture_to_buffer(
         gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
         gl.delete_framebuffer(framebuffer);
         result
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-enum TextureToBufferComputeEncoding {
-    R8Snorm,
-    Rg8Snorm,
-    Rgba8Snorm,
-    R16Unorm,
-    R16Snorm,
-    Rg16Unorm,
-    Rg16Snorm,
-    Rgba16Unorm,
-    Rgba16Snorm,
-    Rgb9e5Ufloat,
-    Depth16Unorm,
-    Depth24Plus,
-    Depth32Float,
-}
-
-impl TextureToBufferComputeEncoding {
-    fn bytes_per_pixel(self) -> u32 {
-        match self {
-            Self::R8Snorm => 1,
-            Self::Rg8Snorm | Self::R16Unorm | Self::R16Snorm | Self::Depth16Unorm => 2,
-            Self::Rgba8Snorm
-            | Self::Rg16Unorm
-            | Self::Rg16Snorm
-            | Self::Rgb9e5Ufloat
-            | Self::Depth24Plus
-            | Self::Depth32Float => 4,
-            Self::Rgba16Unorm | Self::Rgba16Snorm => 8,
-        }
-    }
-
-    fn shader_store(self) -> &'static str {
-        match self {
-            Self::R8Snorm => {
-                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
-                 writeByte(base, packSnorm4x8(vec4(value.r, 0.0, 0.0, 0.0)) & 0xffu);"
-            }
-            Self::Rg8Snorm => {
-                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
-                 writeU16(base, packSnorm4x8(vec4(value.rg, 0.0, 0.0)) & 0xffffu);"
-            }
-            Self::Rgba8Snorm => {
-                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
-                 writeU32(base, packSnorm4x8(value));"
-            }
-            Self::R16Unorm => {
-                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
-                 writeU16(base, packUnorm16(value.r));"
-            }
-            Self::R16Snorm => {
-                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
-                 writeU16(base, packSnorm2x16(vec2(value.r, 0.0)) & 0xffffu);"
-            }
-            Self::Rg16Unorm => {
-                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
-                 writeU32(base, packUnorm16(value.r) | (packUnorm16(value.g) << 16));"
-            }
-            Self::Rg16Snorm => {
-                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
-                 writeU32(base, packSnorm2x16(value.rg));"
-            }
-            Self::Rgba16Unorm => {
-                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
-                 writeU32(base, packUnorm16(value.r) | (packUnorm16(value.g) << 16));\n\
-                 writeU32(base + 4u, packUnorm16(value.b) | (packUnorm16(value.a) << 16));"
-            }
-            Self::Rgba16Snorm => {
-                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
-                 writeU32(base, packSnorm2x16(value.rg));\n\
-                 writeU32(base + 4u, packSnorm2x16(value.ba));"
-            }
-            Self::Rgb9e5Ufloat => {
-                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
-                 writeU32(base, packRgb9e5(value.rgb));"
-            }
-            Self::Depth16Unorm => {
-                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
-                 writeU16(base, packUnorm16(value.r));"
-            }
-            Self::Depth24Plus => {
-                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
-                 writeU32(base, uint(round(clamp(value.r, 0.0, 1.0) * 16777215.0)));"
-            }
-            Self::Depth32Float => {
-                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
-                 writeU32(base, floatBitsToUint(value.r));"
-            }
-        }
     }
 }
 
@@ -3607,7 +3545,69 @@ fn texture_to_buffer_compute_encoding(
     }
 }
 
+fn buffer_texture_row_spans(
+    copy: &HalBufferTextureCopy,
+    row_bytes: u64,
+    buffer_size: u64,
+    validate_slice: impl Fn(u32) -> Result<(), HalError>,
+    validate_row_offset: impl Fn(u64) -> Result<(), HalError>,
+) -> Result<Vec<u64>, HalError> {
+    if row_bytes == 0 || copy.extent.height == 0 || copy.extent.depth_or_array_layers == 0 {
+        return Ok(Vec::new());
+    }
+
+    // Precompute every exact texel-row span so fallible arithmetic happens
+    // before any GL state is touched.
+    let image_stride = u64::from(copy.buffer_layout.bytes_per_row)
+        .checked_mul(u64::from(copy.buffer_layout.rows_per_image))
+        .ok_or(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "texture-to-buffer offset exceeds GLES limit",
+        })?;
+    let mut row_spans = Vec::with_capacity(
+        copy.extent
+            .depth_or_array_layers
+            .saturating_mul(copy.extent.height) as usize,
+    );
+    for slice in 0..copy.extent.depth_or_array_layers {
+        validate_slice(slice)?;
+        let slice_offset = u64::from(slice)
+            .checked_mul(image_stride)
+            .and_then(|bytes| copy.buffer_layout.offset.checked_add(bytes))
+            .ok_or(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "texture-to-buffer offset exceeds GLES limit",
+            })?;
+        for row in 0..copy.extent.height {
+            let row_offset = u64::from(row)
+                .checked_mul(u64::from(copy.buffer_layout.bytes_per_row))
+                .and_then(|bytes| slice_offset.checked_add(bytes))
+                .ok_or(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "texture-to-buffer offset exceeds GLES limit",
+                })?;
+            let row_end =
+                row_offset
+                    .checked_add(row_bytes)
+                    .ok_or(HalError::BufferOperationFailed {
+                        backend: BACKEND,
+                        message: "texture-to-buffer range exceeds GLES limit",
+                    })?;
+            if row_end > buffer_size {
+                return Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "texture-to-buffer range exceeds buffer size",
+                });
+            }
+            validate_row_offset(row_offset)?;
+            row_spans.push(row_offset);
+        }
+    }
+    Ok(row_spans)
+}
+
 fn submit_texture_to_buffer_compute(
+    device: &GlesDeviceInner,
     gl: &glow::Context,
     copy: &HalBufferTextureCopy,
     encoding: TextureToBufferComputeEncoding,
@@ -3648,46 +3648,15 @@ fn submit_texture_to_buffer_compute(
         ensure_2d_target_copy(copy.extent.depth_or_array_layers, copy.origin.z)?;
     }
 
-    let image_stride =
-        u64::from(copy.buffer_layout.bytes_per_row) * u64::from(copy.buffer_layout.rows_per_image);
-    let mut row_spans = Vec::with_capacity(
-        copy.extent
-            .depth_or_array_layers
-            .saturating_mul(copy.extent.height) as usize,
-    );
-    for slice in 0..copy.extent.depth_or_array_layers {
-        let slice_offset = u64::from(slice)
-            .checked_mul(image_stride)
-            .and_then(|bytes| copy.buffer_layout.offset.checked_add(bytes))
-            .ok_or(HalError::BufferOperationFailed {
-                backend: BACKEND,
-                message: "texture-to-buffer offset exceeds GLES limit",
-            })?;
-        for row in 0..copy.extent.height {
-            let row_offset = u64::from(row)
-                .checked_mul(u64::from(copy.buffer_layout.bytes_per_row))
-                .and_then(|bytes| slice_offset.checked_add(bytes))
-                .ok_or(HalError::BufferOperationFailed {
-                    backend: BACKEND,
-                    message: "texture-to-buffer offset exceeds GLES limit",
-                })?;
-            let row_end =
-                row_offset
-                    .checked_add(row_bytes)
-                    .ok_or(HalError::BufferOperationFailed {
-                        backend: BACKEND,
-                        message: "texture-to-buffer range exceeds GLES limit",
-                    })?;
-            if row_end > destination.size() {
-                return Err(HalError::BufferOperationFailed {
-                    backend: BACKEND,
-                    message: "texture-to-buffer range exceeds buffer size",
-                });
-            }
-            i32_from_u64(row_offset, "texture-to-buffer offset exceeds GLES limit")?;
-            row_spans.push(row_offset);
-        }
-    }
+    let row_spans = buffer_texture_row_spans(
+        copy,
+        row_bytes,
+        destination.size(),
+        |_| Ok(()),
+        |row_offset| {
+            i32_from_u64(row_offset, "texture-to-buffer offset exceeds GLES limit").map(|_| ())
+        },
+    )?;
 
     let staging_len = row_bytes
         .checked_mul(u64::from(copy.extent.height))
@@ -3718,9 +3687,18 @@ fn submit_texture_to_buffer_compute(
             backend: BACKEND,
             message: "texture-to-buffer row size exceeds host limit",
         })?;
+    let program_key = TextureToBufferComputeProgramKey {
+        target: meta.target,
+        encoding,
+    };
 
     unsafe {
-        let program = create_texture_to_buffer_compute_program(gl, meta.target, encoding)?;
+        let cached_program = device.with_texture_to_buffer_compute_program(
+            gl,
+            program_key,
+            create_texture_to_buffer_compute_program,
+            Clone::clone,
+        )?;
         let staging = gl
             .create_buffer()
             .map_err(|_| HalError::BufferOperationFailed {
@@ -3736,22 +3714,22 @@ fn submit_texture_to_buffer_compute(
         gl.active_texture(glow::TEXTURE0);
         gl.bind_texture(meta.target, Some(texture));
         apply_depth_stencil_texture_mode(gl, meta.target, meta, copy.aspect);
-        gl.use_program(Some(program));
-        if let Some(location) = gl.get_uniform_location(program, "u_texture") {
-            gl.uniform_1_i32(Some(&location), 0);
+        gl.use_program(Some(cached_program.program));
+        if let Some(location) = cached_program.u_texture.as_ref() {
+            gl.uniform_1_i32(Some(location), 0);
         }
-        if let Some(location) = gl.get_uniform_location(program, "u_mip") {
+        if let Some(location) = cached_program.u_mip.as_ref() {
             gl.uniform_1_i32(
-                Some(&location),
+                Some(location),
                 i32_from_u32(copy.mip_level, "texture mip level exceeds GLES limit")?,
             );
         }
-        if let Some(location) = gl.get_uniform_location(program, "u_origin") {
-            gl.uniform_3_u32(Some(&location), copy.origin.x, copy.origin.y, copy.origin.z);
+        if let Some(location) = cached_program.u_origin.as_ref() {
+            gl.uniform_3_u32(Some(location), copy.origin.x, copy.origin.y, copy.origin.z);
         }
-        if let Some(location) = gl.get_uniform_location(program, "u_extent") {
+        if let Some(location) = cached_program.u_extent.as_ref() {
             gl.uniform_3_u32(
-                Some(&location),
+                Some(location),
                 copy.extent.width,
                 copy.extent.height,
                 copy.extent.depth_or_array_layers,
@@ -3793,16 +3771,16 @@ fn submit_texture_to_buffer_compute(
         gl.bind_texture(meta.target, None);
         gl.use_program(None);
         gl.delete_buffer(staging);
-        gl.delete_program(program);
         result
     }
 }
 
 fn create_texture_to_buffer_compute_program(
     gl: &glow::Context,
-    target: u32,
-    encoding: TextureToBufferComputeEncoding,
-) -> Result<glow::Program, HalError> {
+    key: TextureToBufferComputeProgramKey,
+) -> Result<TextureToBufferComputeProgram, HalError> {
+    let target = key.target;
+    let encoding = key.encoding;
     let sampler_type = match target {
         glow::TEXTURE_2D => "sampler2D",
         glow::TEXTURE_2D_ARRAY => "sampler2DArray",
@@ -3920,7 +3898,13 @@ fn create_texture_to_buffer_compute_program(
                 message: "texture-to-buffer compute program linking failed",
             });
         }
-        Ok(program)
+        Ok(TextureToBufferComputeProgram {
+            program,
+            u_texture: gl.get_uniform_location(program, "u_texture"),
+            u_mip: gl.get_uniform_location(program, "u_mip"),
+            u_origin: gl.get_uniform_location(program, "u_origin"),
+            u_extent: gl.get_uniform_location(program, "u_extent"),
+        })
     }
 }
 
@@ -4028,20 +4012,29 @@ fn submit_texture_to_texture(gl: &glow::Context, copy: &HalTextureCopy) -> Resul
     // to a read framebuffer and copying into the bound destination texture
     // with glCopyTexSubImage{2D,3D} (both core in ES 3.1).
     let mut slice_layers = Vec::with_capacity(depth as usize);
-    for slice in 0..depth {
-        let source_layer = source_z
-            .checked_add(slice)
-            .ok_or(HalError::BufferOperationFailed {
-                backend: BACKEND,
-                message: "source texture layer index exceeds GLES limit",
-            })?;
-        let destination_layer =
-            destination_z
+    for slice in 0..copy.extent.depth_or_array_layers {
+        let source_layer =
+            copy.source_origin
+                .z
                 .checked_add(slice)
                 .ok_or(HalError::BufferOperationFailed {
                     backend: BACKEND,
-                    message: "destination texture layer index exceeds GLES limit",
+                    message: "source texture layer index exceeds GLES limit",
                 })?;
+        i32_from_u32(
+            source_layer,
+            "source texture layer index exceeds GLES limit",
+        )?;
+        let destination_layer = copy.destination_origin.z.checked_add(slice).ok_or(
+            HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "destination texture layer index exceeds GLES limit",
+            },
+        )?;
+        let destination_layer = i32_from_u32(
+            destination_layer,
+            "destination texture layer index exceeds GLES limit",
+        )?;
         slice_layers.push((source_layer, destination_layer));
     }
     unsafe {
@@ -4058,22 +4051,20 @@ fn submit_texture_to_texture(gl: &glow::Context, copy: &HalTextureCopy) -> Resul
         gl.bind_texture(destination_target, Some(destination_texture));
         let mut result = Ok(());
         for (source_layer, destination_layer) in slice_layers {
-            if source_target == glow::TEXTURE_2D {
-                gl.framebuffer_texture_2d(
-                    glow::READ_FRAMEBUFFER,
-                    glow::COLOR_ATTACHMENT0,
-                    source_target,
-                    Some(source_texture),
-                    source_mip_level,
-                );
-            } else {
-                gl.framebuffer_texture_layer(
-                    glow::READ_FRAMEBUFFER,
-                    glow::COLOR_ATTACHMENT0,
-                    Some(source_texture),
-                    source_mip_level,
-                    source_layer,
-                );
+            if let Err(error) = attach_texture_to_framebuffer(
+                gl,
+                glow::READ_FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                source.meta(),
+                source_texture,
+                copy.source_mip_level,
+                source_layer,
+                "source texture mip level exceeds GLES limit",
+                "source texture layer index exceeds GLES limit",
+                "texture-to-texture source target is unsupported",
+            ) {
+                result = Err(error);
+                break;
             }
             if gl.check_framebuffer_status(glow::READ_FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
                 result = Err(HalError::BufferOperationFailed {
@@ -4233,6 +4224,116 @@ mod tests {
     fn query_resolve_bytes_reject_out_of_range_and_overflow() {
         assert!(gles_query_resolve_bytes(&[1], 1, 1, &[1]).is_err());
         assert!(gles_query_resolve_bytes(&[], u32::MAX, 1, &[]).is_err());
+    }
+
+    #[cfg(feature = "noop")]
+    fn row_span_copy(
+        offset: u64,
+        bytes_per_row: u32,
+        rows_per_image: u32,
+        width: u32,
+        height: u32,
+        depth_or_array_layers: u32,
+    ) -> HalBufferTextureCopy {
+        let device = crate::noop::NoopDevice::new();
+        let texture = device
+            .create_texture(&crate::HalTextureDescriptor {
+                dimension: crate::HalTextureDimension::D2,
+                format: HalTextureFormat::Rgba8Unorm,
+                width,
+                height,
+                depth_or_array_layers,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: crate::HalTextureUsage {
+                    copy_src: false,
+                    copy_dst: false,
+                    texture_binding: false,
+                    storage_binding: false,
+                    render_attachment: false,
+                    transient: false,
+                },
+            })
+            .expect("noop texture creation");
+        HalBufferTextureCopy {
+            buffer: HalBuffer::Noop(crate::noop::NoopBuffer::new(256)),
+            buffer_layout: crate::HalBufferTextureLayout {
+                offset,
+                bytes_per_row,
+                rows_per_image,
+            },
+            texture: HalTexture::Noop(texture),
+            format: HalTextureFormat::Rgba8Unorm,
+            aspect: HalTextureAspect::All,
+            mip_level: 0,
+            origin: crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+            extent: crate::HalExtent3d {
+                width,
+                height,
+                depth_or_array_layers,
+            },
+        }
+    }
+
+    #[cfg(feature = "noop")]
+    #[test]
+    fn buffer_texture_row_spans_precomputes_row_offsets() {
+        let copy = row_span_copy(5, 16, 3, 2, 2, 2);
+        let offsets = buffer_texture_row_spans(&copy, 8, 256, |_| Ok(()), |_| Ok(()))
+            .expect("valid row spans");
+
+        assert_eq!(offsets, vec![5, 21, 53, 69]);
+    }
+
+    #[cfg(feature = "noop")]
+    #[test]
+    fn buffer_texture_row_spans_rejects_invalid_ranges() {
+        let out_of_bounds_copy = row_span_copy(250, 16, 1, 2, 1, 1);
+        assert!(
+            buffer_texture_row_spans(&out_of_bounds_copy, 8, 256, |_| Ok(()), |_| Ok(())).is_err(),
+            "row end must fit in the destination buffer"
+        );
+
+        let offset_limit_copy = row_span_copy(8, 16, 1, 2, 1, 1);
+        assert!(
+            buffer_texture_row_spans(
+                &offset_limit_copy,
+                8,
+                256,
+                |_| Ok(()),
+                |offset| {
+                    if offset > 4 {
+                        Err(HalError::BufferOperationFailed {
+                            backend: BACKEND,
+                            message: "texture-to-buffer offset exceeds GLES limit",
+                        })
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .is_err(),
+            "caller-specific offset checks run before GL state is touched"
+        );
+
+        let slice_limit_copy = row_span_copy(250, 16, 1, 2, 1, 1);
+        assert!(
+            buffer_texture_row_spans(
+                &slice_limit_copy,
+                8,
+                256,
+                |_| Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "texture layer index exceeds GLES limit",
+                }),
+                |_| Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "texture-to-buffer offset exceeds GLES limit",
+                }),
+            )
+            .is_err(),
+            "slice validation runs before row offset validation"
+        );
     }
 
     #[test]

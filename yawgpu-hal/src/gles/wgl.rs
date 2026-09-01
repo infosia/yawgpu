@@ -4,6 +4,7 @@
 //! an OpenGL ES profile context through `WGL_EXT_create_context_es2_profile`
 //! so the GLES e2e tests can run against the host GL driver without ANGLE.
 
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -30,7 +31,10 @@ use super::adapter::{
     detect_texture_view_support, detect_vertex_array_bgra_support, parse_gles_version,
     query_gles_adapter_caps,
 };
-use super::device::{GlesSampleMaskIFn, GlesTextureViewFn};
+use super::device::{
+    GlesSampleMaskIFn, GlesTextureViewFn, TextureToBufferComputeProgram,
+    TextureToBufferComputeProgramKey,
+};
 use super::format::GlesColorRenderCaps;
 use super::sampler::create_nearest_placeholder_sampler;
 use super::BACKEND;
@@ -186,6 +190,8 @@ pub(super) struct WglDeviceState {
     /// Manually loaded `glTextureView`; glow 0.14 has no wrapper for it.
     pub(super) texture_view: Option<GlesTextureViewFn>,
     pub(super) placeholder_sampler: Result<glow::Sampler, HalError>,
+    pub(super) texture_to_buffer_compute_programs:
+        Mutex<HashMap<TextureToBufferComputeProgramKey, TextureToBufferComputeProgram>>,
 }
 
 // SAFETY: All GL access goes through `with_current_context`, which serializes
@@ -200,6 +206,9 @@ impl Drop for WglDeviceState {
             let _ = wglMakeCurrent(self.hdc, self.hglrc);
             if let Ok(sampler) = self.placeholder_sampler.as_ref() {
                 self.gl.delete_sampler(*sampler);
+            }
+            for cached in self.texture_to_buffer_compute_programs.get_mut().drain() {
+                self.gl.delete_program(cached.1.program);
             }
             let _ = wglMakeCurrent(std::ptr::null_mut(), std::ptr::null_mut());
             if !self.hglrc.is_null() {
@@ -377,6 +386,7 @@ impl WglDeviceState {
             supports_cube_map_array,
             texture_view,
             placeholder_sampler,
+            texture_to_buffer_compute_programs: Mutex::new(HashMap::new()),
         })
     }
 
