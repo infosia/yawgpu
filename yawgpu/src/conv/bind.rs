@@ -70,7 +70,7 @@ unsafe fn map_bind_group_entry(entry: &native::WGPUBindGroupEntry) -> core::Bind
 
     if !entry.buffer.is_null() {
         present_count += 1;
-        let buffer = clone_handle::<WGPUBufferImpl>(entry.buffer, "WGPUBuffer");
+        let buffer = borrow_handle::<WGPUBufferImpl>(entry.buffer, "WGPUBuffer");
         resource = core::BindGroupResource::Buffer {
             buffer: Arc::clone(&buffer.core),
             device: Arc::clone(&buffer.device),
@@ -80,7 +80,7 @@ unsafe fn map_bind_group_entry(entry: &native::WGPUBindGroupEntry) -> core::Bind
     }
     if !entry.sampler.is_null() {
         present_count += 1;
-        let sampler = clone_handle::<WGPUSamplerImpl>(entry.sampler, "WGPUSampler");
+        let sampler = borrow_handle::<WGPUSamplerImpl>(entry.sampler, "WGPUSampler");
         resource = core::BindGroupResource::Sampler {
             sampler: Arc::clone(&sampler._core),
             device: Arc::clone(&sampler._device),
@@ -89,7 +89,7 @@ unsafe fn map_bind_group_entry(entry: &native::WGPUBindGroupEntry) -> core::Bind
     if !entry.textureView.is_null() {
         present_count += 1;
         let texture_view =
-            clone_handle::<WGPUTextureViewImpl>(entry.textureView, "WGPUTextureView");
+            borrow_handle::<WGPUTextureViewImpl>(entry.textureView, "WGPUTextureView");
         resource = core::BindGroupResource::TextureView {
             texture_view: Arc::clone(&texture_view._core),
             device: Arc::clone(&texture_view._device),
@@ -102,7 +102,7 @@ unsafe fn map_bind_group_entry(entry: &native::WGPUBindGroupEntry) -> core::Bind
                 "external texture bind group entry must not be null".to_owned(),
             );
         } else {
-            let external_texture = clone_handle::<WGPUExternalTextureImpl>(
+            let external_texture = borrow_handle::<WGPUExternalTextureImpl>(
                 external_texture_entry.externalTexture,
                 "WGPUExternalTexture",
             );
@@ -154,7 +154,7 @@ pub unsafe fn map_pipeline_layout_descriptor(
                     Arc::new(core::BindGroupLayout::empty_unused())
                 } else {
                     let layout =
-                        clone_handle::<WGPUBindGroupLayoutImpl>(*layout, "WGPUBindGroupLayout");
+                        borrow_handle::<WGPUBindGroupLayoutImpl>(*layout, "WGPUBindGroupLayout");
                     Arc::clone(&layout._core)
                 }
             })
@@ -230,48 +230,21 @@ fn map_bind_group_layout_entry(
 
 #[cfg(feature = "tiled")]
 unsafe fn input_attachment_binding_layout<'a>(
-    mut chain: *const native::WGPUChainedStruct,
+    chain: *const native::WGPUChainedStruct,
 ) -> Option<&'a crate::YaWGPUInputAttachmentBindingLayout> {
-    while let Some(node) = chain.as_ref() {
-        if node.sType == crate::YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT {
-            return Some(
-                &*(node as *const native::WGPUChainedStruct
-                    as *const crate::YaWGPUInputAttachmentBindingLayout),
-            );
-        }
-        chain = node.next;
-    }
-    None
+    find_in_chain(chain, crate::YAWGPU_STYPE_INPUT_ATTACHMENT_BINDING_LAYOUT)
 }
 
 unsafe fn external_texture_binding_layout<'a>(
-    mut chain: *const native::WGPUChainedStruct,
+    chain: *const native::WGPUChainedStruct,
 ) -> Option<&'a native::WGPUExternalTextureBindingLayout> {
-    while let Some(node) = chain.as_ref() {
-        if node.sType == native::WGPUSType_ExternalTextureBindingLayout {
-            return Some(
-                &*(node as *const native::WGPUChainedStruct
-                    as *const native::WGPUExternalTextureBindingLayout),
-            );
-        }
-        chain = node.next;
-    }
-    None
+    find_in_chain(chain, native::WGPUSType_ExternalTextureBindingLayout)
 }
 
 unsafe fn external_texture_binding_entry<'a>(
-    mut chain: *const native::WGPUChainedStruct,
+    chain: *const native::WGPUChainedStruct,
 ) -> Option<&'a native::WGPUExternalTextureBindingEntry> {
-    while let Some(node) = chain.as_ref() {
-        if node.sType == native::WGPUSType_ExternalTextureBindingEntry {
-            return Some(
-                &*(node as *const native::WGPUChainedStruct
-                    as *const native::WGPUExternalTextureBindingEntry),
-            );
-        }
-        chain = node.next;
-    }
-    None
+    find_in_chain(chain, native::WGPUSType_ExternalTextureBindingEntry)
 }
 
 fn standard_binding_layout_fields_empty(entry: &native::WGPUBindGroupLayoutEntry) -> bool {

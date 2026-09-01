@@ -17,59 +17,52 @@ use crate::{YaWGPUShaderSourceMSL, YAWGPU_STYPE_SHADER_SOURCE_MSL};
 pub unsafe fn map_shader_module_descriptor(
     descriptor: &native::WGPUShaderModuleDescriptor,
 ) -> core::ShaderModuleSource {
+    const EXACTLY_ONE_SOURCE: &str =
+        "shader module descriptor must contain exactly one shader source";
+
     let mut source = None;
     let mut chain = descriptor.nextInChain;
 
     while let Some(node) = chain.as_ref() {
-        if node.sType == native::WGPUSType_ShaderSourceWGSL {
-            if source.is_some() {
-                return core::ShaderModuleSource::Invalid(
-                    "shader module descriptor must contain exactly one shader source".to_owned(),
-                );
+        let mapped = match node.sType {
+            native::WGPUSType_ShaderSourceWGSL => {
+                let Some(wgsl) = chain.cast::<native::WGPUShaderSourceWGSL>().as_ref() else {
+                    return core::ShaderModuleSource::Invalid(
+                        "WGSL shader source chain node must be valid".to_owned(),
+                    );
+                };
+                let code =
+                    string_view_to_str(wgsl.code).map_or_else(String::new, ToOwned::to_owned);
+                Some(core::ShaderModuleSource::Wgsl(code))
             }
-            let Some(wgsl) = chain.cast::<native::WGPUShaderSourceWGSL>().as_ref() else {
-                return core::ShaderModuleSource::Invalid(
-                    "WGSL shader source chain node must be valid".to_owned(),
-                );
-            };
-            let code = string_view_to_str(wgsl.code).map_or_else(String::new, ToOwned::to_owned);
-            source = Some(core::ShaderModuleSource::Wgsl(code));
-        }
-        if node.sType == native::WGPUSType_ShaderSourceSPIRV {
-            if source.is_some() {
-                return core::ShaderModuleSource::Invalid(
-                    "shader module descriptor must contain exactly one shader source".to_owned(),
-                );
+            native::WGPUSType_ShaderSourceSPIRV => {
+                let Some(spirv) = chain.cast::<native::WGPUShaderSourceSPIRV>().as_ref() else {
+                    return core::ShaderModuleSource::Invalid(
+                        "SPIR-V shader source chain node must be valid".to_owned(),
+                    );
+                };
+                Some(map_spirv_shader_source(spirv))
             }
-            let Some(spirv) = chain.cast::<native::WGPUShaderSourceSPIRV>().as_ref() else {
-                return core::ShaderModuleSource::Invalid(
-                    "SPIR-V shader source chain node must be valid".to_owned(),
-                );
-            };
-            source = Some(map_spirv_shader_source(spirv));
-        }
-        if node.sType == YAWGPU_STYPE_SHADER_SOURCE_MSL {
-            if source.is_some() {
-                return core::ShaderModuleSource::Invalid(
-                    "shader module descriptor must contain exactly one shader source".to_owned(),
-                );
+            YAWGPU_STYPE_SHADER_SOURCE_MSL => {
+                let Some(msl) = chain.cast::<YaWGPUShaderSourceMSL>().as_ref() else {
+                    return core::ShaderModuleSource::Invalid(
+                        "MSL shader source chain node must be valid".to_owned(),
+                    );
+                };
+                Some(map_msl_shader_source(msl))
             }
-            let Some(msl) = chain.cast::<YaWGPUShaderSourceMSL>().as_ref() else {
-                return core::ShaderModuleSource::Invalid(
-                    "MSL shader source chain node must be valid".to_owned(),
-                );
-            };
-            source = Some(map_msl_shader_source(msl));
+            _ => None,
+        };
+        if let Some(mapped) = mapped {
+            if source.replace(mapped).is_some() {
+                return core::ShaderModuleSource::Invalid(EXACTLY_ONE_SOURCE.to_owned());
+            }
         }
 
         chain = node.next;
     }
 
-    source.unwrap_or_else(|| {
-        core::ShaderModuleSource::Invalid(
-            "shader module descriptor must contain exactly one shader source".to_owned(),
-        )
-    })
+    source.unwrap_or_else(|| core::ShaderModuleSource::Invalid(EXACTLY_ONE_SOURCE.to_owned()))
 }
 
 unsafe fn map_spirv_shader_source(

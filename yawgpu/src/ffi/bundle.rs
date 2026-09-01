@@ -52,7 +52,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderSetPipeline(
     pipeline: native::WGPURenderPipeline,
 ) {
     let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
-    let pipeline = clone_handle(pipeline, "WGPURenderPipeline");
+    let pipeline = borrow_handle(pipeline, "WGPURenderPipeline");
     if !pipeline._device.same(&encoder.device) {
         dispatch_optional_error(
             &encoder.device,
@@ -86,7 +86,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderSetBindGroup(
 ) {
     let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
     let group =
-        (!group.is_null()).then(|| clone_handle::<WGPUBindGroupImpl>(group, "WGPUBindGroup"));
+        (!group.is_null()).then(|| borrow_handle::<WGPUBindGroupImpl>(group, "WGPUBindGroup"));
     if let Some(group) = group.as_ref() {
         if !group._device.same(&encoder.device) {
             dispatch_optional_error(
@@ -158,7 +158,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderSetVertexBuffer(
     size: u64,
 ) {
     let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
-    let buffer = (!buffer.is_null()).then(|| clone_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer"));
+    let buffer = (!buffer.is_null()).then(|| borrow_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer"));
     if let Some(buffer) = buffer.as_ref() {
         if !buffer.device.same(&encoder.device) {
             dispatch_optional_error(
@@ -197,7 +197,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderSetIndexBuffer(
     size: u64,
 ) {
     let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
-    let buffer = clone_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer");
+    let buffer = borrow_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer");
     if !buffer.device.same(&encoder.device) {
         dispatch_optional_error(
             &encoder.device,
@@ -287,7 +287,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderDrawIndirect(
     indirect_offset: u64,
 ) {
     let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
-    let indirect_buffer = clone_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
+    let indirect_buffer = borrow_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
     if !indirect_buffer.device.same(&encoder.device) {
         dispatch_optional_error(
             &encoder.device,
@@ -320,7 +320,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderDrawIndexedIndirect(
     indirect_offset: u64,
 ) {
     let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
-    let indirect_buffer = clone_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
+    let indirect_buffer = borrow_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
     if !indirect_buffer.device.same(&encoder.device) {
         dispatch_optional_error(
             &encoder.device,

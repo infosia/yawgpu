@@ -90,7 +90,7 @@ pub unsafe extern "C" fn wgpuComputePassEncoderSetPipeline(
     pipeline: native::WGPUComputePipeline,
 ) {
     let pass = borrow_handle(compute_pass_encoder, "WGPUComputePassEncoder");
-    let pipeline = clone_handle(pipeline, "WGPUComputePipeline");
+    let pipeline = borrow_handle(pipeline, "WGPUComputePipeline");
     if !pipeline._device.same(&pass.device) {
         dispatch_optional_error(
             &pass.device,
@@ -123,7 +123,7 @@ pub unsafe extern "C" fn wgpuComputePassEncoderSetBindGroup(
 ) {
     let pass = borrow_handle(compute_pass_encoder, "WGPUComputePassEncoder");
     let group =
-        (!group.is_null()).then(|| clone_handle::<WGPUBindGroupImpl>(group, "WGPUBindGroup"));
+        (!group.is_null()).then(|| borrow_handle::<WGPUBindGroupImpl>(group, "WGPUBindGroup"));
     if let Some(group) = group.as_ref() {
         if !group._device.same(&pass.device) {
             dispatch_optional_error(
@@ -214,7 +214,7 @@ pub unsafe extern "C" fn wgpuComputePassEncoderDispatchWorkgroupsIndirect(
     indirect_offset: u64,
 ) {
     let pass = borrow_handle(compute_pass_encoder, "WGPUComputePassEncoder");
-    let indirect_buffer = clone_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
+    let indirect_buffer = borrow_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
     if !indirect_buffer.device.same(&pass.device) {
         dispatch_optional_error(
             &pass.device,

@@ -78,12 +78,12 @@ pub unsafe fn map_compute_pipeline_descriptor(
 ) -> core::ComputePipelineDescriptor {
     let mut error = None;
     let compute = &descriptor.compute;
-    let shader_module = clone_handle::<WGPUShaderModuleImpl>(compute.module, "WGPUShaderModule");
+    let shader_module = borrow_handle::<WGPUShaderModuleImpl>(compute.module, "WGPUShaderModule");
     let layout = if descriptor.layout.is_null() {
         core::ComputePipelineLayout::Auto
     } else {
         let layout =
-            clone_handle::<WGPUPipelineLayoutImpl>(descriptor.layout, "WGPUPipelineLayout");
+            borrow_handle::<WGPUPipelineLayoutImpl>(descriptor.layout, "WGPUPipelineLayout");
         core::ComputePipelineLayout::Explicit(Arc::clone(&layout._core))
     };
     let entry_point = string_view_to_str(compute.entryPoint).map(ToOwned::to_owned);
@@ -118,12 +118,12 @@ pub unsafe fn map_render_pipeline_descriptor(
 ) -> core::RenderPipelineDescriptor {
     let mut error = None;
     let vertex_module =
-        clone_handle::<WGPUShaderModuleImpl>(descriptor.vertex.module, "WGPUShaderModule");
+        borrow_handle::<WGPUShaderModuleImpl>(descriptor.vertex.module, "WGPUShaderModule");
     let layout = if descriptor.layout.is_null() {
         core::RenderPipelineLayout::Auto
     } else {
         let layout =
-            clone_handle::<WGPUPipelineLayoutImpl>(descriptor.layout, "WGPUPipelineLayout");
+            borrow_handle::<WGPUPipelineLayoutImpl>(descriptor.layout, "WGPUPipelineLayout");
         core::RenderPipelineLayout::Explicit(Arc::clone(&layout._core))
     };
 
@@ -144,7 +144,7 @@ pub unsafe fn map_render_pipeline_descriptor(
 
     let fragment = if let Some(fragment) = descriptor.fragment.as_ref() {
         let fragment_module =
-            clone_handle::<WGPUShaderModuleImpl>(fragment.module, "WGPUShaderModule");
+            borrow_handle::<WGPUShaderModuleImpl>(fragment.module, "WGPUShaderModule");
         if fragment.targetCount > 0 && fragment.targets.is_null() {
             set_first_error(
                 &mut error,
@@ -195,7 +195,7 @@ pub unsafe fn map_render_pipeline_descriptor(
 pub unsafe fn map_subpass_render_pipeline_descriptor(
     descriptor: &crate::YaWGPUSubpassRenderPipelineDescriptor,
 ) -> core::SubpassRenderPipelineDescriptor {
-    let pass_layout = clone_handle::<crate::YaWGPUSubpassPassLayoutImpl>(
+    let pass_layout = borrow_handle::<crate::YaWGPUSubpassPassLayoutImpl>(
         descriptor.passLayout,
         "YaWGPUSubpassPassLayout",
     );

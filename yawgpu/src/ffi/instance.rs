@@ -6,6 +6,25 @@ const SUPPORTED_INSTANCE_FEATURES: &[native::WGPUInstanceFeatureName] =
 // Advertised for native parity; FutureRegistry::wait_any does not enforce it today.
 pub(crate) const TIMED_WAIT_ANY_MAX_COUNT: usize = 64;
 
+#[cfg(any(feature = "metal", feature = "vulkan", feature = "gles"))]
+fn finish_real_instance(
+    hal_instance: HalInstance,
+    prefix: &str,
+    backend: &str,
+    timed_wait_any_enabled: bool,
+) -> Option<Arc<WGPUInstanceImpl>> {
+    if hal_instance.enumerate_adapters().is_empty() {
+        eprintln!(
+            "{prefix}: {backend} requested but enumerate_adapters returned no adapters; returning NULL instance"
+        );
+        return None;
+    }
+    Some(WGPUInstanceImpl::from_core(
+        core::Instance::from_hal(hal_instance),
+        timed_wait_any_enabled,
+    ))
+}
+
 /// Creates a new WebGPU instance.
 ///
 /// Resolves the HAL backend per the `YaWGPUInstanceBackendSelect` chain entry,
@@ -44,17 +63,15 @@ pub unsafe extern "C" fn wgpuCreateInstance(
             {
                 match yawgpu_hal::metal::MetalInstance::new() {
                     Ok(instance) => {
-                        let hal_instance = yawgpu_hal::HalInstance::Metal(instance);
-                        if hal_instance.enumerate_adapters().is_empty() {
-                            eprintln!(
-                                "yawgpu-metal: YAWGPU_INSTANCE_BACKEND_METAL requested but enumerate_adapters returned no adapters; returning NULL instance"
-                            );
-                            return std::ptr::null();
-                        }
-                        WGPUInstanceImpl::from_core(
-                            core::Instance::from_hal(hal_instance),
+                        let Some(instance) = finish_real_instance(
+                            yawgpu_hal::HalInstance::Metal(instance),
+                            "yawgpu-metal",
+                            "YAWGPU_INSTANCE_BACKEND_METAL",
                             timed_wait_any_enabled,
-                        )
+                        ) else {
+                            return std::ptr::null();
+                        };
+                        instance
                     }
                     Err(err) => {
                         eprintln!(
@@ -78,17 +95,15 @@ pub unsafe extern "C" fn wgpuCreateInstance(
             {
                 match yawgpu_hal::vulkan::VulkanInstance::new() {
                     Ok(instance) => {
-                        let hal_instance = yawgpu_hal::HalInstance::Vulkan(instance);
-                        if hal_instance.enumerate_adapters().is_empty() {
-                            eprintln!(
-                                "yawgpu-vulkan: YAWGPU_INSTANCE_BACKEND_VULKAN requested but enumerate_adapters returned no adapters; returning NULL instance"
-                            );
-                            return std::ptr::null();
-                        }
-                        WGPUInstanceImpl::from_core(
-                            core::Instance::from_hal(hal_instance),
+                        let Some(instance) = finish_real_instance(
+                            yawgpu_hal::HalInstance::Vulkan(instance),
+                            "yawgpu-vulkan",
+                            "YAWGPU_INSTANCE_BACKEND_VULKAN",
                             timed_wait_any_enabled,
-                        )
+                        ) else {
+                            return std::ptr::null();
+                        };
+                        instance
                     }
                     Err(err) => {
                         eprintln!(
@@ -113,17 +128,15 @@ pub unsafe extern "C" fn wgpuCreateInstance(
                 let context_backend = gles_context_backend_choice(descriptor);
                 match yawgpu_hal::gles::GlesInstance::new_with_choice(context_backend) {
                     Ok(instance) => {
-                        let hal_instance = yawgpu_hal::HalInstance::Gles(instance);
-                        if hal_instance.enumerate_adapters().is_empty() {
-                            eprintln!(
-                                "yawgpu-gles: YAWGPU_INSTANCE_BACKEND_GLES requested but enumerate_adapters returned no adapters; returning NULL instance"
-                            );
-                            return std::ptr::null();
-                        }
-                        WGPUInstanceImpl::from_core(
-                            core::Instance::from_hal(hal_instance),
+                        let Some(instance) = finish_real_instance(
+                            yawgpu_hal::HalInstance::Gles(instance),
+                            "yawgpu-gles",
+                            "YAWGPU_INSTANCE_BACKEND_GLES",
                             timed_wait_any_enabled,
-                        )
+                        ) else {
+                            return std::ptr::null();
+                        };
+                        instance
                     }
                     Err(err) => {
                         eprintln!(
@@ -536,8 +549,9 @@ pub unsafe extern "C" fn wgpuInstanceWaitAny(
         .collect::<Vec<_>>();
     let timeout = std::time::Duration::from_nanos(timeout_ns);
     let started = std::time::Instant::now();
+    let mut callbacks_to_fire = Vec::new();
     let result = loop {
-        let result = instance.wait_any(&future_ids);
+        let result = instance.wait_any(&future_ids, &mut callbacks_to_fire);
         if result.status != core::WaitAnyStatus::TimedOut
             || timeout_ns == 0
             || started.elapsed() >= timeout
@@ -547,9 +561,10 @@ pub unsafe extern "C" fn wgpuInstanceWaitAny(
         std::thread::yield_now();
     };
 
+    let completed = result.completed.iter().copied().collect::<HashSet<_>>();
     for info in wait_infos {
         let id = core::FutureId::from_raw(info.future.id);
-        info.completed = u32::from(result.completed.contains(&id));
+        info.completed = u32::from(completed.contains(&id));
     }
 
     match result.status {

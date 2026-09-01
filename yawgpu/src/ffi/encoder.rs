@@ -74,7 +74,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderBeginComputePass(
         .as_ref()
         .and_then(|descriptor| descriptor.timestampWrites.as_ref())
     {
-        let query_set = clone_handle(timestamp_writes.querySet, "WGPUQuerySet");
+        let query_set = borrow_handle(timestamp_writes.querySet, "WGPUQuerySet");
         if !query_set._device.same(&encoder.device) {
             dispatch_optional_error(
                 &encoder.device,
@@ -207,8 +207,8 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyBufferToBuffer(
     size: u64,
 ) {
     let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
-    let source = clone_handle(source, "WGPUBuffer");
-    let destination = clone_handle(destination, "WGPUBuffer");
+    let source = borrow_handle(source, "WGPUBuffer");
+    let destination = borrow_handle(destination, "WGPUBuffer");
     if !source.device.same(&encoder.device) || !destination.device.same(&encoder.device) {
         dispatch_optional_error(
             &encoder.device,
@@ -244,7 +244,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderClearBuffer(
     size: u64,
 ) {
     let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
-    let buffer = clone_handle(buffer, "WGPUBuffer");
+    let buffer = borrow_handle(buffer, "WGPUBuffer");
     if !buffer.device.same(&encoder.device) {
         dispatch_optional_error(
             &encoder.device,
@@ -284,7 +284,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderWriteBuffer(
     size: usize,
 ) {
     let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
-    let buffer = clone_handle(buffer, "WGPUBuffer");
+    let buffer = borrow_handle(buffer, "WGPUBuffer");
     let size = match u64::try_from(size) {
         Ok(size) => size,
         Err(_) => {
@@ -316,7 +316,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderWriteTimestamp(
     query_index: u32,
 ) {
     let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
-    let query_set = clone_handle(query_set, "WGPUQuerySet");
+    let query_set = borrow_handle(query_set, "WGPUQuerySet");
     dispatch_optional_error(
         &encoder.device,
         encoder
@@ -342,8 +342,8 @@ pub unsafe extern "C" fn wgpuCommandEncoderResolveQuerySet(
     destination_offset: u64,
 ) {
     let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
-    let query_set = clone_handle(query_set, "WGPUQuerySet");
-    let destination = clone_handle(destination, "WGPUBuffer");
+    let query_set = borrow_handle(query_set, "WGPUQuerySet");
+    let destination = borrow_handle(destination, "WGPUBuffer");
     if !query_set._device.same(&encoder.device) || !destination.device.same(&encoder.device) {
         dispatch_optional_error(
             &encoder.device,
@@ -390,8 +390,8 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyBufferToTexture(
     let copy_size = copy_size
         .as_ref()
         .expect("wgpuCommandEncoderCopyBufferToTexture copySize must not be null");
-    let source_buffer = clone_handle(source.buffer, "WGPUBuffer");
-    let destination_texture = clone_handle(destination.texture, "WGPUTexture");
+    let source_buffer = borrow_handle(source.buffer, "WGPUBuffer");
+    let destination_texture = borrow_handle(destination.texture, "WGPUTexture");
     if !destination_texture.device.same(&encoder.device) {
         dispatch_optional_error(
             &encoder.device,
@@ -448,8 +448,8 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToBuffer(
     let copy_size = copy_size
         .as_ref()
         .expect("wgpuCommandEncoderCopyTextureToBuffer copySize must not be null");
-    let source_texture = clone_handle(source.texture, "WGPUTexture");
-    let destination_buffer = clone_handle(destination.buffer, "WGPUBuffer");
+    let source_texture = borrow_handle(source.texture, "WGPUTexture");
+    let destination_buffer = borrow_handle(destination.buffer, "WGPUBuffer");
     if !source_texture.device.same(&encoder.device) {
         dispatch_optional_error(
             &encoder.device,
@@ -505,8 +505,8 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToTexture(
     let copy_size = copy_size
         .as_ref()
         .expect("wgpuCommandEncoderCopyTextureToTexture copySize must not be null");
-    let source_texture = clone_handle(source.texture, "WGPUTexture");
-    let destination_texture = clone_handle(destination.texture, "WGPUTexture");
+    let source_texture = borrow_handle(source.texture, "WGPUTexture");
+    let destination_texture = borrow_handle(destination.texture, "WGPUTexture");
     if !source_texture.device.same(&encoder.device)
         || !destination_texture.device.same(&encoder.device)
     {
@@ -577,44 +577,34 @@ fn validate_render_pass_descriptor_devices(
         }
     };
     for attachment in attachments {
-        if !attachment.view.is_null() {
-            let view =
-                unsafe { clone_handle::<WGPUTextureViewImpl>(attachment.view, "WGPUTextureView") };
-            if !view._device.same(device) {
-                return Some(
-                    "render pass color attachment view must belong to the command encoder device"
-                        .to_owned(),
-                );
-            }
+        if !attachment.view.is_null() && !unsafe { view_belongs_to_device(attachment.view, device) }
+        {
+            return Some(
+                "render pass color attachment view must belong to the command encoder device"
+                    .to_owned(),
+            );
         }
-        if !attachment.resolveTarget.is_null() {
-            let target = unsafe {
-                clone_handle::<WGPUTextureViewImpl>(attachment.resolveTarget, "WGPUTextureView")
-            };
-            if !target._device.same(device) {
-                return Some(
-                    "render pass resolve target must belong to the command encoder device"
-                        .to_owned(),
-                );
-            }
+        if !attachment.resolveTarget.is_null()
+            && !unsafe { view_belongs_to_device(attachment.resolveTarget, device) }
+        {
+            return Some(
+                "render pass resolve target must belong to the command encoder device".to_owned(),
+            );
         }
     }
     if let Some(depth_stencil) = unsafe { descriptor.depthStencilAttachment.as_ref() } {
-        if !depth_stencil.view.is_null() {
-            let view = unsafe {
-                clone_handle::<WGPUTextureViewImpl>(depth_stencil.view, "WGPUTextureView")
-            };
-            if !view._device.same(device) {
-                return Some(
-                    "render pass depth-stencil attachment view must belong to the command encoder device"
-                        .to_owned(),
-                );
-            }
+        if !depth_stencil.view.is_null()
+            && !unsafe { view_belongs_to_device(depth_stencil.view, device) }
+        {
+            return Some(
+                "render pass depth-stencil attachment view must belong to the command encoder device"
+                    .to_owned(),
+            );
         }
     }
     if !descriptor.occlusionQuerySet.is_null() {
         let query_set = unsafe {
-            clone_handle::<WGPUQuerySetImpl>(descriptor.occlusionQuerySet, "WGPUQuerySet")
+            borrow_handle::<WGPUQuerySetImpl>(descriptor.occlusionQuerySet, "WGPUQuerySet")
         };
         if !query_set._device.same(device) {
             return Some(
@@ -625,7 +615,7 @@ fn validate_render_pass_descriptor_devices(
     }
     if let Some(timestamp_writes) = unsafe { descriptor.timestampWrites.as_ref() } {
         let query_set =
-            unsafe { clone_handle::<WGPUQuerySetImpl>(timestamp_writes.querySet, "WGPUQuerySet") };
+            unsafe { borrow_handle::<WGPUQuerySetImpl>(timestamp_writes.querySet, "WGPUQuerySet") };
         if !query_set._device.same(device) {
             return Some(
                 "render pass timestamp query set must belong to the command encoder device"

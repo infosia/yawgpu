@@ -128,8 +128,8 @@ pub unsafe extern "C" fn wgpuDeviceSetLabel(
     label: native::WGPUStringView,
 ) {
     let device = borrow_handle(device, "WGPUDevice");
-    let label = label_from_string_view(label).unwrap_or_default();
-    device.core.set_label(&label);
+    let label = string_view_to_str(label).unwrap_or_default();
+    device.core.set_label(label);
 }
 
 /// Gets information about the adapter used to create a device.
@@ -209,16 +209,13 @@ pub unsafe extern "C" fn wgpuDeviceCreateTexture(
 unsafe fn texture_binding_view_dimension(
     descriptor: &native::WGPUTextureDescriptor,
 ) -> native::WGPUTextureViewDimension {
-    let mut chain = descriptor.nextInChain;
-    while let Some(node) = chain.as_ref() {
-        if node.sType == native::WGPUSType_TextureBindingViewDimension {
-            let binding = &*(node as *const native::WGPUChainedStruct
-                as *const native::WGPUTextureBindingViewDimension);
-            return binding.textureBindingViewDimension;
-        }
-        chain = node.next;
-    }
-    native::WGPUTextureViewDimension_Undefined
+    find_in_chain::<native::WGPUTextureBindingViewDimension>(
+        descriptor.nextInChain,
+        native::WGPUSType_TextureBindingViewDimension,
+    )
+    .map_or(native::WGPUTextureViewDimension_Undefined, |binding| {
+        binding.textureBindingViewDimension
+    })
 }
 
 /// Creates a sampler on a device.
@@ -313,15 +310,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateShaderModule(
         _instance: Arc::clone(&device.instance),
         label: Mutex::new(label_from_string_view(descriptor.label)),
     });
-    let handle = if !handle._core.is_error() {
-        if let Some(key) = key {
-            cache_handle(&device.shader_module_cache, key, handle)
-        } else {
-            handle
-        }
-    } else {
-        handle
-    };
+    let handle = cache_if_valid(&device.shader_module_cache, key, handle);
     arc_to_handle(handle)
 }
 
@@ -370,7 +359,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateBindGroup(
     let descriptor = descriptor
         .as_ref()
         .expect("WGPUBindGroupDescriptor must not be null");
-    let layout = clone_handle(descriptor.layout, "WGPUBindGroupLayout");
+    let layout = borrow_handle(descriptor.layout, "WGPUBindGroupLayout");
     let mut entries = map_bind_group_entries(descriptor);
     if !layout._device.same(&device.core) {
         entries.push(core::BindGroupEntry {
@@ -423,15 +412,7 @@ pub unsafe extern "C" fn wgpuDeviceCreatePipelineLayout(
         _instance: Arc::clone(&device.instance),
         label: Mutex::new(label),
     });
-    let handle = if !handle._core.is_error() {
-        if let Some(key) = key {
-            cache_handle(&device.pipeline_layout_cache, key, handle)
-        } else {
-            handle
-        }
-    } else {
-        handle
-    };
+    let handle = cache_if_valid(&device.pipeline_layout_cache, key, handle);
     arc_to_handle(handle)
 }
 

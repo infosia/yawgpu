@@ -100,7 +100,11 @@ pub unsafe extern "C" fn wgpuSurfaceConfigure(
         );
         return;
     } else {
-        std::slice::from_raw_parts(config.viewFormats, config.viewFormatCount).to_vec()
+        std::slice::from_raw_parts(config.viewFormats, config.viewFormatCount)
+            .iter()
+            .copied()
+            .map(crate::conv::map_texture_format)
+            .collect()
     };
     if let Some(hal) = surface
         .hal
@@ -176,45 +180,63 @@ pub unsafe extern "C" fn wgpuSurfaceGetCurrentTexture(
     };
     surface_texture.nextInChain = std::ptr::null_mut();
     surface_texture.texture = std::ptr::null();
-    let config = surface
-        .configured
-        .lock()
-        .expect("surface configuration lock is not poisoned")
-        .clone();
-    if surface.is_error || config.is_none() {
+    if surface.is_error
+        || surface
+            .configured
+            .lock()
+            .expect("surface configuration lock is not poisoned")
+            .is_none()
+    {
         surface_texture.status = native::WGPUSurfaceGetCurrentTextureStatus_Error;
         return;
     }
-    let config = config.expect("surface configuration was checked");
     if let Some(hal) = surface
         .hal
         .lock()
         .expect("surface HAL lock is not poisoned")
         .as_mut()
     {
+        let Some((device, usage, width, height, format, view_formats)) = surface
+            .configured
+            .lock()
+            .expect("surface configuration lock is not poisoned")
+            .as_ref()
+            .map(|config| {
+                (
+                    Arc::clone(&config.device),
+                    config.usage,
+                    config.width,
+                    config.height,
+                    config.format,
+                    config.view_formats.clone(),
+                )
+            })
+        else {
+            surface_texture.status = native::WGPUSurfaceGetCurrentTextureStatus_Error;
+            return;
+        };
+        if surface.is_error {
+            surface_texture.status = native::WGPUSurfaceGetCurrentTextureStatus_Error;
+            return;
+        }
         match hal.acquire_next_texture() {
             Ok(hal_texture) => {
                 let descriptor = core::TextureDescriptor {
-                    usage: map_texture_usage(config.usage),
+                    usage: map_texture_usage(usage),
                     dimension: core::TextureDimension::D2,
                     size: core::Extent3d {
-                        width: config.width,
-                        height: config.height,
+                        width,
+                        height,
                         depth_or_array_layers: 1,
                     },
-                    format: crate::conv::map_texture_format(config.format),
+                    format: crate::conv::map_texture_format(format),
                     mip_level_count: 1,
                     sample_count: 1,
-                    view_formats: config
-                        .view_formats
-                        .iter()
-                        .copied()
-                        .map(crate::conv::map_texture_format)
-                        .collect(),
+                    view_formats,
                 };
                 let texture = Arc::new(WGPUTextureImpl {
                     core: Arc::new(core::Texture::from_hal(descriptor, hal_texture)),
-                    device: Arc::clone(&config.device),
+                    device,
                     instance: Arc::clone(&surface._instance),
                     label: Mutex::new(None),
                     binding_view_dimension: native::WGPUTextureViewDimension_Undefined,
@@ -249,15 +271,16 @@ pub unsafe extern "C" fn wgpuSurfacePresent(surface: native::WGPUSurface) -> nat
         .expect("surface HAL lock is not poisoned")
         .as_mut()
     {
-        let config = surface
+        let device = surface
             .configured
             .lock()
             .expect("surface configuration lock is not poisoned")
-            .clone();
-        let Some(config) = config else {
+            .as_ref()
+            .map(|config| Arc::clone(&config.device));
+        let Some(device) = device else {
             return native::WGPUStatus_Error;
         };
-        if hal.present(config.device.queue().hal()).is_err() {
+        if hal.present(device.queue().hal()).is_err() {
             return native::WGPUStatus_Error;
         }
     }

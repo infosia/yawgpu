@@ -35,8 +35,8 @@ pub unsafe extern "C" fn wgpuQueueSetLabel(
     label: native::WGPUStringView,
 ) {
     let queue = borrow_handle(queue, "WGPUQueue");
-    let label = label_from_string_view(label).unwrap_or_default();
-    queue.core.set_label(&label);
+    let label = string_view_to_str(label).unwrap_or_default();
+    queue.core.set_label(label);
 }
 
 /// Schedules a callback once all submitted queue work is done.
@@ -96,7 +96,7 @@ pub unsafe extern "C" fn wgpuQueueSubmit(
         std::slice::from_raw_parts(commands, command_count)
             .iter()
             .map(|command| {
-                let command = clone_handle::<WGPUCommandBufferImpl>(*command, "WGPUCommandBuffer");
+                let command = borrow_handle::<WGPUCommandBufferImpl>(*command, "WGPUCommandBuffer");
                 if !command._device.same(&queue.device) {
                     queue.device.dispatch_error(
                         core::ErrorKind::Validation,

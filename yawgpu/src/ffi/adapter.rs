@@ -199,10 +199,10 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
                 device_lost_callback,
                 device_lost_futures: Mutex::new(Vec::new()),
                 default_queue: Mutex::new(None),
-                shader_module_cache: Mutex::new(HashMap::new()),
-                pipeline_layout_cache: Mutex::new(HashMap::new()),
-                compute_pipeline_cache: Mutex::new(HashMap::new()),
-                render_pipeline_cache: Mutex::new(HashMap::new()),
+                shader_module_cache: ObjectCache::new(),
+                pipeline_layout_cache: ObjectCache::new(),
+                compute_pipeline_cache: ObjectCache::new(),
+                render_pipeline_cache: ObjectCache::new(),
             });
             if let Some(callback) = uncaptured_error_callback.callback {
                 let device_handle = Arc::as_ptr(&device_impl) as usize;

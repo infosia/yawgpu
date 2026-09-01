@@ -119,7 +119,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetPipeline(
     pipeline: native::WGPURenderPipeline,
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
-    let pipeline = clone_handle(pipeline, "WGPURenderPipeline");
+    let pipeline = borrow_handle(pipeline, "WGPURenderPipeline");
     if !pipeline._device.same(&pass.device) {
         dispatch_optional_error(
             &pass.device,
@@ -152,7 +152,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetBindGroup(
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
     let group =
-        (!group.is_null()).then(|| clone_handle::<WGPUBindGroupImpl>(group, "WGPUBindGroup"));
+        (!group.is_null()).then(|| borrow_handle::<WGPUBindGroupImpl>(group, "WGPUBindGroup"));
     if let Some(group) = group.as_ref() {
         if !group._device.same(&pass.device) {
             dispatch_optional_error(
@@ -191,7 +191,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetVertexBuffer(
     size: u64,
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
-    let buffer = (!buffer.is_null()).then(|| clone_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer"));
+    let buffer = (!buffer.is_null()).then(|| borrow_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer"));
     if let Some(buffer) = buffer.as_ref() {
         if !buffer.device.same(&pass.device) {
             dispatch_optional_error(
@@ -229,7 +229,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetIndexBuffer(
     size: u64,
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
-    let buffer = clone_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer");
+    let buffer = borrow_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer");
     if !buffer.device.same(&pass.device) {
         dispatch_optional_error(
             &pass.device,
@@ -318,7 +318,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderDrawIndirect(
     indirect_offset: u64,
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
-    let indirect_buffer = clone_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
+    let indirect_buffer = borrow_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
     if !indirect_buffer.device.same(&pass.device) {
         dispatch_optional_error(
             &pass.device,
@@ -350,7 +350,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderDrawIndexedIndirect(
     indirect_offset: u64,
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
-    let indirect_buffer = clone_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
+    let indirect_buffer = borrow_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
     if !indirect_buffer.device.same(&pass.device) {
         dispatch_optional_error(
             &pass.device,

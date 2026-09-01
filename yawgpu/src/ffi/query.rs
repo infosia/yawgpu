@@ -48,8 +48,8 @@ pub unsafe extern "C" fn wgpuQuerySetSetLabel(
     label: native::WGPUStringView,
 ) {
     let query_set = borrow_handle(query_set, "WGPUQuerySet");
-    let label = label_from_string_view(label).unwrap_or_default();
-    query_set.core.set_label(&label);
+    let label = string_view_to_str(label).unwrap_or_default();
+    query_set.core.set_label(label);
 }
 
 /// Releases one owned reference to a query set handle.

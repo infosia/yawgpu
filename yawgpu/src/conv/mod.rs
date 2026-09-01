@@ -105,9 +105,54 @@ pub unsafe fn borrow_handle<'a, T>(handle: *const T, name: &str) -> &'a T {
         .unwrap_or_else(|| panic!("{name} must not be null"))
 }
 
+/// Finds the first chained input struct with the requested `s_type`.
+///
+/// # Safety
+///
+/// `chain`, when non-null, must point to a valid linked list of
+/// `WGPUChainedStruct` nodes. A matching node must be a valid allocation of
+/// `T` with the chain header at offset zero.
+pub unsafe fn find_in_chain<'a, T>(
+    mut chain: *const native::WGPUChainedStruct,
+    s_type: native::WGPUSType,
+) -> Option<&'a T> {
+    while let Some(node) = chain.as_ref() {
+        if node.sType == s_type {
+            return (node as *const native::WGPUChainedStruct)
+                .cast::<T>()
+                .as_ref();
+        }
+        chain = node.next;
+    }
+    None
+}
+
+/// Finds the first chained output struct with the requested `s_type`.
+///
+/// # Safety
+///
+/// `chain`, when non-null, must point to a valid linked list of mutable
+/// `WGPUChainedStruct` nodes. A matching node must be a valid, uniquely
+/// borrowed allocation of `T` with the chain header at offset zero.
+pub unsafe fn find_in_chain_mut<'a, T>(
+    mut chain: *mut native::WGPUChainedStruct,
+    s_type: native::WGPUSType,
+) -> Option<&'a mut T> {
+    while let Some(node) = chain.as_mut() {
+        if node.sType == s_type {
+            return (node as *mut native::WGPUChainedStruct)
+                .cast::<T>()
+                .as_mut();
+        }
+        chain = node.next;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ffi::ObjectCache;
     use crate::{
         WGPUBindGroupLayoutImpl, WGPUBufferImpl, WGPUDeviceImpl, WGPUInstanceImpl,
         WGPUPipelineLayoutImpl, WGPUShaderModuleImpl, WGPUTextureImpl, WGPUTextureViewImpl,
@@ -155,10 +200,10 @@ mod tests {
             },
             device_lost_futures: Mutex::new(Vec::new()),
             default_queue: Mutex::new(None),
-            shader_module_cache: Mutex::new(std::collections::HashMap::new()),
-            pipeline_layout_cache: Mutex::new(std::collections::HashMap::new()),
-            compute_pipeline_cache: Mutex::new(std::collections::HashMap::new()),
-            render_pipeline_cache: Mutex::new(std::collections::HashMap::new()),
+            shader_module_cache: ObjectCache::new(),
+            pipeline_layout_cache: ObjectCache::new(),
+            compute_pipeline_cache: ObjectCache::new(),
+            render_pipeline_cache: ObjectCache::new(),
         })
     }
 
@@ -377,6 +422,92 @@ mod tests {
     #[should_panic(expected = "WGPUBuffer must not be null")]
     fn borrow_handle_null_panics_with_contract_message() {
         let _ = unsafe { borrow_handle::<WGPUBufferImpl>(std::ptr::null(), "WGPUBuffer") };
+    }
+
+    #[test]
+    fn find_in_chain_finds_second_node_and_reports_misses() {
+        let mut max_draw_count = native::WGPURenderPassMaxDrawCount {
+            chain: native::WGPUChainedStruct {
+                next: std::ptr::null_mut(),
+                sType: native::WGPUSType_RenderPassMaxDrawCount,
+            },
+            maxDrawCount: 12,
+        };
+        let binding_view_dimension = native::WGPUTextureBindingViewDimension {
+            chain: native::WGPUChainedStruct {
+                next: std::ptr::from_mut(&mut max_draw_count.chain),
+                sType: native::WGPUSType_TextureBindingViewDimension,
+            },
+            textureBindingViewDimension: native::WGPUTextureViewDimension_2D,
+        };
+
+        let found = unsafe {
+            find_in_chain::<native::WGPURenderPassMaxDrawCount>(
+                std::ptr::from_ref(&binding_view_dimension.chain),
+                native::WGPUSType_RenderPassMaxDrawCount,
+            )
+        }
+        .expect("second node");
+        assert_eq!(found.maxDrawCount, 12);
+        assert!(unsafe {
+            find_in_chain::<native::WGPUSurfaceSourceMetalLayer>(
+                std::ptr::from_ref(&binding_view_dimension.chain),
+                native::WGPUSType_SurfaceSourceMetalLayer,
+            )
+        }
+        .is_none());
+        assert!(unsafe {
+            find_in_chain::<native::WGPURenderPassMaxDrawCount>(
+                std::ptr::null(),
+                native::WGPUSType_RenderPassMaxDrawCount,
+            )
+        }
+        .is_none());
+    }
+
+    #[test]
+    fn find_in_chain_mut_finds_second_node_and_reports_misses() {
+        let mut compat = native::WGPUCompatibilityModeLimits {
+            chain: native::WGPUChainedStruct {
+                next: std::ptr::null_mut(),
+                sType: native::WGPUSType_CompatibilityModeLimits,
+            },
+            maxStorageBuffersInVertexStage: 1,
+            maxStorageTexturesInVertexStage: 2,
+            maxStorageBuffersInFragmentStage: 3,
+            maxStorageTexturesInFragmentStage: 4,
+        };
+        let mut max_draw_count = native::WGPURenderPassMaxDrawCount {
+            chain: native::WGPUChainedStruct {
+                next: std::ptr::from_mut(&mut compat.chain),
+                sType: native::WGPUSType_RenderPassMaxDrawCount,
+            },
+            maxDrawCount: 12,
+        };
+
+        let found = unsafe {
+            find_in_chain_mut::<native::WGPUCompatibilityModeLimits>(
+                std::ptr::from_mut(&mut max_draw_count.chain),
+                native::WGPUSType_CompatibilityModeLimits,
+            )
+        }
+        .expect("second node");
+        found.maxStorageBuffersInVertexStage = 9;
+        assert_eq!(compat.maxStorageBuffersInVertexStage, 9);
+        assert!(unsafe {
+            find_in_chain_mut::<native::WGPUTextureBindingViewDimension>(
+                std::ptr::from_mut(&mut max_draw_count.chain),
+                native::WGPUSType_TextureBindingViewDimension,
+            )
+        }
+        .is_none());
+        assert!(unsafe {
+            find_in_chain_mut::<native::WGPUCompatibilityModeLimits>(
+                std::ptr::null_mut(),
+                native::WGPUSType_CompatibilityModeLimits,
+            )
+        }
+        .is_none());
     }
 
     #[test]

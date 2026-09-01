@@ -117,7 +117,7 @@ unsafe fn validate_subpass_render_pipeline_devices(
     device: &WGPUDeviceImpl,
     descriptor: &YaWGPUSubpassRenderPipelineDescriptor,
 ) -> Option<String> {
-    let pass_layout = clone_handle::<YaWGPUSubpassPassLayoutImpl>(
+    let pass_layout = borrow_handle::<YaWGPUSubpassPassLayoutImpl>(
         descriptor.passLayout,
         "YaWGPUSubpassPassLayout",
     );
@@ -199,7 +199,7 @@ pub unsafe extern "C" fn yawgpuSubpassRenderPassEncoderSetPipeline(
     pipeline: native::WGPURenderPipeline,
 ) {
     let pass = borrow_handle(encoder, "YaWGPUSubpassRenderPassEncoder");
-    let pipeline = clone_handle::<WGPURenderPipelineImpl>(pipeline, "WGPURenderPipeline");
+    let pipeline = borrow_handle::<WGPURenderPipelineImpl>(pipeline, "WGPURenderPipeline");
     if !pipeline._device.same(&pass.device) {
         dispatch_optional_error(
             &pass.device,
@@ -232,7 +232,7 @@ pub unsafe extern "C" fn yawgpuSubpassRenderPassEncoderSetBindGroup(
 ) {
     let pass = borrow_handle(encoder, "YaWGPUSubpassRenderPassEncoder");
     let group =
-        (!group.is_null()).then(|| clone_handle::<WGPUBindGroupImpl>(group, "WGPUBindGroup"));
+        (!group.is_null()).then(|| borrow_handle::<WGPUBindGroupImpl>(group, "WGPUBindGroup"));
     if let Some(group) = group.as_ref() {
         if !group._device.same(&pass.device) {
             dispatch_optional_error(
@@ -271,7 +271,7 @@ pub unsafe extern "C" fn yawgpuSubpassRenderPassEncoderSetVertexBuffer(
     size: u64,
 ) {
     let pass = borrow_handle(encoder, "YaWGPUSubpassRenderPassEncoder");
-    let buffer = (!buffer.is_null()).then(|| clone_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer"));
+    let buffer = (!buffer.is_null()).then(|| borrow_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer"));
     if let Some(buffer) = buffer.as_ref() {
         if !buffer.device.same(&pass.device) {
             dispatch_optional_error(
@@ -310,7 +310,7 @@ pub unsafe extern "C" fn yawgpuSubpassRenderPassEncoderSetIndexBuffer(
     size: u64,
 ) {
     let pass = borrow_handle(encoder, "YaWGPUSubpassRenderPassEncoder");
-    let buffer = clone_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer");
+    let buffer = borrow_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer");
     if !buffer.device.same(&pass.device) {
         dispatch_optional_error(
             &pass.device,
@@ -462,7 +462,7 @@ unsafe fn validate_subpass_render_pass_descriptor_devices(
     descriptor: &YaWGPUSubpassRenderPassDescriptor,
     device: &core::Device,
 ) -> Option<String> {
-    let pass_layout = clone_handle::<YaWGPUSubpassPassLayoutImpl>(
+    let pass_layout = borrow_handle::<YaWGPUSubpassPassLayoutImpl>(
         descriptor.passLayout,
         "YaWGPUSubpassPassLayout",
     );
@@ -475,34 +475,23 @@ unsafe fn validate_subpass_render_pass_descriptor_devices(
         std::slice::from_raw_parts(descriptor.colorAttachments, descriptor.colorAttachmentCount)
     };
     for attachment in attachments {
-        if !attachment.view.is_null() {
-            let view = clone_handle::<WGPUTextureViewImpl>(attachment.view, "WGPUTextureView");
-            if !view._device.same(device) {
-                return Some(
-                    "subpass color attachment view must belong to the command encoder device"
-                        .into(),
-                );
-            }
+        if !attachment.view.is_null() && !view_belongs_to_device(attachment.view, device) {
+            return Some(
+                "subpass color attachment view must belong to the command encoder device".into(),
+            );
         }
-        if !attachment.resolveTarget.is_null() {
-            let target =
-                clone_handle::<WGPUTextureViewImpl>(attachment.resolveTarget, "WGPUTextureView");
-            if !target._device.same(device) {
-                return Some(
-                    "subpass resolve target must belong to the command encoder device".into(),
-                );
-            }
+        if !attachment.resolveTarget.is_null()
+            && !view_belongs_to_device(attachment.resolveTarget, device)
+        {
+            return Some("subpass resolve target must belong to the command encoder device".into());
         }
     }
     if let Some(depth_stencil) = descriptor.depthStencilAttachment.as_ref() {
-        if !depth_stencil.view.is_null() {
-            let view = clone_handle::<WGPUTextureViewImpl>(depth_stencil.view, "WGPUTextureView");
-            if !view._device.same(device) {
-                return Some(
-                    "subpass depth-stencil attachment view must belong to the command encoder device"
-                        .into(),
-                );
-            }
+        if !depth_stencil.view.is_null() && !view_belongs_to_device(depth_stencil.view, device) {
+            return Some(
+                "subpass depth-stencil attachment view must belong to the command encoder device"
+                    .into(),
+            );
         }
     }
     None

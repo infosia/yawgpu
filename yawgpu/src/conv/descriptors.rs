@@ -129,7 +129,7 @@ pub unsafe fn map_render_pass_descriptor(
         None
     } else {
         Some(
-            (*clone_handle::<WGPUQuerySetImpl>(value.occlusionQuerySet, "WGPUQuerySet").core)
+            (*borrow_handle::<WGPUQuerySetImpl>(value.occlusionQuerySet, "WGPUQuerySet").core)
                 .clone(),
         )
     };
@@ -258,7 +258,7 @@ pub unsafe fn map_subpass_render_pass_descriptor(
 ) -> core::SubpassRenderPassDescriptor {
     let mut error = None;
     let pass_layout = Arc::clone(
-        &clone_handle::<crate::YaWGPUSubpassPassLayoutImpl>(
+        &borrow_handle::<crate::YaWGPUSubpassPassLayoutImpl>(
             descriptor.passLayout,
             "YaWGPUSubpassPassLayout",
         )
@@ -296,13 +296,14 @@ unsafe fn map_subpass_color_attachment(
         set_first_error(error, "subpass color attachment view must not be null");
         return None;
     } else {
-        Arc::clone(&clone_handle::<WGPUTextureViewImpl>(attachment.view, "WGPUTextureView")._core)
+        Arc::clone(&borrow_handle::<WGPUTextureViewImpl>(attachment.view, "WGPUTextureView")._core)
     };
     let resolve_target = if attachment.resolveTarget.is_null() {
         None
     } else {
         Some(Arc::clone(
-            &clone_handle::<WGPUTextureViewImpl>(attachment.resolveTarget, "WGPUTextureView")._core,
+            &borrow_handle::<WGPUTextureViewImpl>(attachment.resolveTarget, "WGPUTextureView")
+                ._core,
         ))
     };
 
@@ -329,7 +330,7 @@ unsafe fn map_subpass_depth_stencil_attachment(
         );
         return None;
     } else {
-        Arc::clone(&clone_handle::<WGPUTextureViewImpl>(attachment.view, "WGPUTextureView")._core)
+        Arc::clone(&borrow_handle::<WGPUTextureViewImpl>(attachment.view, "WGPUTextureView")._core)
     };
 
     Some(core::SubpassDepthStencilAttachmentBinding {
@@ -346,19 +347,15 @@ unsafe fn map_subpass_depth_stencil_attachment(
     })
 }
 
-unsafe fn render_pass_max_draw_count(mut chain: *const native::WGPUChainedStruct) -> u64 {
+unsafe fn render_pass_max_draw_count(chain: *const native::WGPUChainedStruct) -> u64 {
     const DEFAULT_MAX_DRAW_COUNT: u64 = 50_000_000;
-    while let Some(node) = unsafe { chain.as_ref() } {
-        if node.sType == native::WGPUSType_RenderPassMaxDrawCount {
-            let max_draw_count = unsafe {
-                &*(node as *const native::WGPUChainedStruct
-                    as *const native::WGPURenderPassMaxDrawCount)
-            };
-            return max_draw_count.maxDrawCount;
-        }
-        chain = node.next;
-    }
-    DEFAULT_MAX_DRAW_COUNT
+    find_in_chain::<native::WGPURenderPassMaxDrawCount>(
+        chain,
+        native::WGPUSType_RenderPassMaxDrawCount,
+    )
+    .map_or(DEFAULT_MAX_DRAW_COUNT, |max_draw_count| {
+        max_draw_count.maxDrawCount
+    })
 }
 
 #[cfg(feature = "tiled")]
@@ -379,19 +376,13 @@ unsafe fn slice_or_error<'a, T>(
 }
 
 unsafe fn texture_component_swizzle(
-    mut chain: *const native::WGPUChainedStruct,
+    chain: *const native::WGPUChainedStruct,
 ) -> Option<core::TextureComponentSwizzle> {
-    while let Some(node) = unsafe { chain.as_ref() } {
-        if node.sType == native::WGPUSType_TextureComponentSwizzleDescriptor {
-            let descriptor = unsafe {
-                &*(node as *const native::WGPUChainedStruct
-                    as *const native::WGPUTextureComponentSwizzleDescriptor)
-            };
-            return Some(map_texture_component_swizzle(descriptor.swizzle));
-        }
-        chain = node.next;
-    }
-    None
+    find_in_chain::<native::WGPUTextureComponentSwizzleDescriptor>(
+        chain,
+        native::WGPUSType_TextureComponentSwizzleDescriptor,
+    )
+    .map(|descriptor| map_texture_component_swizzle(descriptor.swizzle))
 }
 
 fn map_component_swizzle(
@@ -463,12 +454,12 @@ unsafe fn map_render_pass_color_attachment(
     if value.view.is_null() {
         return None;
     }
-    let view = clone_handle::<WGPUTextureViewImpl>(value.view, "WGPUTextureView");
+    let view = borrow_handle::<WGPUTextureViewImpl>(value.view, "WGPUTextureView");
     let resolve_target = if value.resolveTarget.is_null() {
         None
     } else {
         Some(Arc::clone(
-            &clone_handle::<WGPUTextureViewImpl>(value.resolveTarget, "WGPUTextureView")._core,
+            &borrow_handle::<WGPUTextureViewImpl>(value.resolveTarget, "WGPUTextureView")._core,
         ))
     };
 
@@ -486,7 +477,7 @@ unsafe fn map_render_pass_color_attachment(
 unsafe fn map_render_pass_depth_stencil_attachment(
     value: &native::WGPURenderPassDepthStencilAttachment,
 ) -> core::RenderPassDepthStencilAttachment {
-    let view = clone_handle::<WGPUTextureViewImpl>(value.view, "WGPUTextureView");
+    let view = borrow_handle::<WGPUTextureViewImpl>(value.view, "WGPUTextureView");
     core::RenderPassDepthStencilAttachment {
         view: Arc::clone(&view._core),
         depth_load_op: map_load_op(value.depthLoadOp),
@@ -503,7 +494,7 @@ unsafe fn map_render_pass_depth_stencil_attachment(
 pub(crate) unsafe fn map_render_pass_timestamp_writes(
     value: &native::WGPUPassTimestampWrites,
 ) -> core::RenderPassTimestampWrites {
-    let query_set = clone_handle::<WGPUQuerySetImpl>(value.querySet, "WGPUQuerySet");
+    let query_set = borrow_handle::<WGPUQuerySetImpl>(value.querySet, "WGPUQuerySet");
     core::RenderPassTimestampWrites {
         query_set: (*query_set.core).clone(),
         beginning_index: map_query_index(value.beginningOfPassWriteIndex),

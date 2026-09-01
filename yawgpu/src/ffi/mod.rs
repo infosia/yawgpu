@@ -85,7 +85,7 @@ use crate::{
 };
 #[cfg(test)]
 use crate::{YaWGPUMslEntryPoint, YaWGPUShaderSourceMSL, YAWGPU_STYPE_SHADER_SOURCE_MSL};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::os::raw::c_void;
 use std::sync::{Arc, Mutex, Weak};
 
@@ -93,7 +93,7 @@ use yawgpu_core as core;
 
 use crate::conv::{
     add_ref_handle, apply_compat_limits_from_chain, arc_to_handle, borrow_handle, clone_handle,
-    fill_compat_limits_chain, free_supported_features, label_from_string_view,
+    fill_compat_limits_chain, find_in_chain, free_supported_features, label_from_string_view,
     map_bind_group_entries, map_bind_group_layout_descriptor, map_buffer_descriptor,
     map_buffer_map_state, map_buffer_usage_to_native, map_color,
     map_compilation_info_request_status_success, map_compilation_message_type_error,
@@ -169,14 +169,10 @@ pub struct WGPUDeviceImpl {
     pub(crate) device_lost_futures: Mutex<Vec<u64>>,
     pub(crate) default_queue: Mutex<Option<Arc<WGPUQueueImpl>>>,
     // These descriptor caches deliberately omit labels, matching Dawn cached-object behavior.
-    pub(crate) shader_module_cache:
-        Mutex<HashMap<ShaderModuleCacheKey, Weak<WGPUShaderModuleImpl>>>,
-    pub(crate) pipeline_layout_cache:
-        Mutex<HashMap<PipelineLayoutCacheKey, Weak<WGPUPipelineLayoutImpl>>>,
-    pub(crate) compute_pipeline_cache:
-        Mutex<HashMap<ComputePipelineCacheKey, Weak<WGPUComputePipelineImpl>>>,
-    pub(crate) render_pipeline_cache:
-        Mutex<HashMap<RenderPipelineCacheKey, Weak<WGPURenderPipelineImpl>>>,
+    pub(crate) shader_module_cache: ObjectCache<ShaderModuleCacheKey>,
+    pub(crate) pipeline_layout_cache: ObjectCache<PipelineLayoutCacheKey>,
+    pub(crate) compute_pipeline_cache: ObjectCache<ComputePipelineCacheKey>,
+    pub(crate) render_pipeline_cache: ObjectCache<RenderPipelineCacheKey>,
 }
 
 /// Owns the core object and retained handles for the WGPU Instance handle.
@@ -441,14 +437,14 @@ pub struct WGPUSurfaceImpl {
 }
 
 /// Tracks the lifecycle state for surface configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct SurfaceConfigurationState {
     device: Arc<core::Device>,
     format: native::WGPUTextureFormat,
     usage: native::WGPUTextureUsage,
     width: u32,
     height: u32,
-    view_formats: Vec<native::WGPUTextureFormat>,
+    view_formats: Vec<core::TextureFormat>,
     _present_mode: native::WGPUPresentMode,
     _alpha_mode: native::WGPUCompositeAlphaMode,
 }
@@ -696,7 +692,11 @@ impl WGPUInstanceImpl {
         count
     }
 
-    fn wait_any(&self, future_ids: &[core::FutureId]) -> core::WaitAnyResult {
+    fn wait_any(
+        &self,
+        future_ids: &[core::FutureId],
+        callbacks_to_fire: &mut Vec<PendingCallback>,
+    ) -> core::WaitAnyResult {
         self.poll_submission_callbacks();
         let result = self.core.future_registry().wait_any(future_ids);
 
@@ -704,14 +704,16 @@ impl WGPUInstanceImpl {
             .pending_callbacks
             .lock()
             .expect("pending callback lock is not poisoned");
-        let callbacks_to_fire = result
-            .callbacks_to_fire
-            .iter()
-            .filter_map(|id| callbacks.remove(&id.get()))
-            .collect::<Vec<_>>();
+        callbacks_to_fire.clear();
+        callbacks_to_fire.extend(
+            result
+                .callbacks_to_fire
+                .iter()
+                .filter_map(|id| callbacks.remove(&id.get())),
+        );
         drop(callbacks);
 
-        for callback in callbacks_to_fire {
+        for callback in callbacks_to_fire.drain(..) {
             unsafe {
                 callback.fire();
             }
@@ -834,6 +836,56 @@ impl WGPUDeviceImpl {
     }
 }
 
+/// Amortized weak-handle cache for structurally keyed FFI objects.
+pub(crate) struct ObjectCache<T: CacheKey> {
+    map: Mutex<HashMap<T, Weak<T::Handle>>>,
+    live_after_last_prune: Mutex<usize>,
+}
+
+impl<T: CacheKey> ObjectCache<T> {
+    /// Creates an empty object cache.
+    pub(crate) fn new() -> Self {
+        Self {
+            map: Mutex::new(HashMap::new()),
+            live_after_last_prune: Mutex::new(0),
+        }
+    }
+}
+
+impl<T: CacheKey> Default for ObjectCache<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+trait CacheableHandle {
+    fn is_cacheable(&self) -> bool;
+}
+
+impl CacheableHandle for WGPUShaderModuleImpl {
+    fn is_cacheable(&self) -> bool {
+        !self._core.is_error()
+    }
+}
+
+impl CacheableHandle for WGPUPipelineLayoutImpl {
+    fn is_cacheable(&self) -> bool {
+        !self._core.is_error()
+    }
+}
+
+impl CacheableHandle for WGPUComputePipelineImpl {
+    fn is_cacheable(&self) -> bool {
+        !self._core.is_error()
+    }
+}
+
+impl CacheableHandle for WGPURenderPipelineImpl {
+    fn is_cacheable(&self) -> bool {
+        !self._core.is_error()
+    }
+}
+
 // yawgpu's FFI cache dedups by a structural descriptor key whose sub-objects
 // are identified by C-handle identity. This matches the webgpu.h-observable
 // pointer equality in Dawn's ObjectCaching tests; deeper engine-internal dedup
@@ -841,44 +893,65 @@ impl WGPUDeviceImpl {
 // Entries are stored as `Weak` (not `Arc`) so that releasing the last public
 // (C) reference to a cached object drops it and runs its `Drop`, reclaiming the
 // backing shader module / HAL pipeline. A live entry still dedups (the `Weak`
-// upgrades while the object is alive); dead entries are pruned on the next miss
-// so the `HashMap` keys (e.g. the full WGSL `String` for shader modules) do not
-// accumulate. See the ABA note on the pipeline cache keys in
+// upgrades while the object is alive); dead entries are pruned when the map
+// grows past an amortized high-water mark, so misses do not scan the whole map
+// every time. See the ABA note on the pipeline cache keys in
 // `compute_pipeline_cache_key` / `render_pipeline_cache_key`.
-fn cache_handle<T>(
-    cache: &Mutex<HashMap<T, Weak<T::Handle>>>,
-    key: T,
-    handle: Arc<T::Handle>,
-) -> Arc<T::Handle>
+fn cache_handle<T>(cache: &ObjectCache<T>, key: T, handle: Arc<T::Handle>) -> Arc<T::Handle>
 where
     T: CacheKey,
 {
-    let mut cache = cache
+    let mut map = cache
+        .map
         .lock()
         .expect("device object cache lock must not poison");
-    if let Some(cached) = cache.get(&key).and_then(Weak::upgrade) {
+    if let Some(cached) = map.get(&key).and_then(Weak::upgrade) {
         return cached;
     }
-    // The lookup missed or the cached entry was dead; prune all dead entries so
-    // their keys are freed too, then record this live object.
-    cache.retain(|_, weak| weak.strong_count() > 0);
-    cache.insert(key, Arc::downgrade(&handle));
+    let live_after_last_prune = *cache
+        .live_after_last_prune
+        .lock()
+        .expect("device object cache prune watermark lock must not poison");
+    if map.len() >= 2 * live_after_last_prune.max(16) {
+        map.retain(|_, weak| weak.strong_count() > 0);
+        *cache
+            .live_after_last_prune
+            .lock()
+            .expect("device object cache prune watermark lock must not poison") = map.len();
+    }
+    map.insert(key, Arc::downgrade(&handle));
     handle
 }
 
 /// Returns the live cached handle for `key`, if any, without inserting or pruning.
-fn cached_handle<T: CacheKey>(
-    cache: &Mutex<HashMap<T, Weak<T::Handle>>>,
-    key: &T,
-) -> Option<Arc<T::Handle>> {
+fn cached_handle<T: CacheKey>(cache: &ObjectCache<T>, key: &T) -> Option<Arc<T::Handle>> {
     cache
+        .map
         .lock()
         .expect("device object cache lock must not poison")
         .get(key)
         .and_then(Weak::upgrade)
 }
 
-trait CacheKey: Eq + std::hash::Hash {
+fn cache_if_valid<T>(
+    cache: &ObjectCache<T>,
+    key: Option<T>,
+    handle: Arc<T::Handle>,
+) -> Arc<T::Handle>
+where
+    T: CacheKey,
+    T::Handle: CacheableHandle,
+{
+    if handle.is_cacheable() {
+        if let Some(key) = key {
+            return cache_handle(cache, key, handle);
+        }
+    }
+    handle
+}
+
+pub(crate) trait CacheKey: Eq + std::hash::Hash {
+    /// Handle type stored by this cache key.
     type Handle;
 }
 
@@ -887,11 +960,12 @@ trait CacheKey: Eq + std::hash::Hash {
 /// Test-only helper used to assert that dead `Weak` entries (and their keys) are
 /// pruned rather than accumulating for the device's lifetime.
 #[cfg(test)]
-fn cache_len<T>(cache: &Mutex<HashMap<T, Weak<T::Handle>>>) -> usize
+fn cache_len<T>(cache: &ObjectCache<T>) -> usize
 where
     T: CacheKey,
 {
     cache
+        .map
         .lock()
         .expect("device object cache lock must not poison")
         .len()
@@ -1051,7 +1125,7 @@ unsafe fn validate_pipeline_layout_devices(
         if layout.is_null() {
             continue;
         }
-        let layout = clone_handle::<WGPUBindGroupLayoutImpl>(*layout, "WGPUBindGroupLayout");
+        let layout = borrow_handle::<WGPUBindGroupLayoutImpl>(*layout, "WGPUBindGroupLayout");
         if !layout._device.same(&device.core) {
             return Some("pipeline layout bind group layout must belong to the same device".into());
         }
@@ -1064,13 +1138,13 @@ unsafe fn validate_compute_pipeline_devices(
     descriptor: &native::WGPUComputePipelineDescriptor,
 ) -> Option<String> {
     let module =
-        clone_handle::<WGPUShaderModuleImpl>(descriptor.compute.module, "WGPUShaderModule");
+        borrow_handle::<WGPUShaderModuleImpl>(descriptor.compute.module, "WGPUShaderModule");
     if !module._device.same(&device.core) {
         return Some("compute pipeline shader module must belong to the same device".into());
     }
     if !descriptor.layout.is_null() {
         let layout =
-            clone_handle::<WGPUPipelineLayoutImpl>(descriptor.layout, "WGPUPipelineLayout");
+            borrow_handle::<WGPUPipelineLayoutImpl>(descriptor.layout, "WGPUPipelineLayout");
         if !layout._device.same(&device.core) {
             return Some("compute pipeline layout must belong to the same device".into());
         }
@@ -1083,13 +1157,13 @@ unsafe fn validate_render_pipeline_devices(
     descriptor: &native::WGPURenderPipelineDescriptor,
 ) -> Option<String> {
     let vertex_module =
-        clone_handle::<WGPUShaderModuleImpl>(descriptor.vertex.module, "WGPUShaderModule");
+        borrow_handle::<WGPUShaderModuleImpl>(descriptor.vertex.module, "WGPUShaderModule");
     if !vertex_module._device.same(&device.core) {
         return Some("render pipeline vertex shader module must belong to the same device".into());
     }
     if let Some(fragment) = descriptor.fragment.as_ref() {
         let fragment_module =
-            clone_handle::<WGPUShaderModuleImpl>(fragment.module, "WGPUShaderModule");
+            borrow_handle::<WGPUShaderModuleImpl>(fragment.module, "WGPUShaderModule");
         if !fragment_module._device.same(&device.core) {
             return Some(
                 "render pipeline fragment shader module must belong to the same device".into(),
@@ -1098,7 +1172,7 @@ unsafe fn validate_render_pipeline_devices(
     }
     if !descriptor.layout.is_null() {
         let layout =
-            clone_handle::<WGPUPipelineLayoutImpl>(descriptor.layout, "WGPUPipelineLayout");
+            borrow_handle::<WGPUPipelineLayoutImpl>(descriptor.layout, "WGPUPipelineLayout");
         if !layout._device.same(&device.core) {
             return Some("render pipeline layout must belong to the same device".into());
         }
@@ -1137,48 +1211,32 @@ unsafe fn has_supported_surface_source(mut chain: *const native::WGPUChainedStru
     false
 }
 
-unsafe fn find_metal_layer_source(
-    mut chain: *const native::WGPUChainedStruct,
-) -> Option<*mut c_void> {
-    while let Some(link) = chain.as_ref() {
-        if link.sType == native::WGPUSType_SurfaceSourceMetalLayer {
-            let source = (link as *const native::WGPUChainedStruct)
-                .cast::<native::WGPUSurfaceSourceMetalLayer>();
-            return source.as_ref().map(|source| source.layer);
-        }
-        chain = link.next;
-    }
-    None
+unsafe fn find_metal_layer_source(chain: *const native::WGPUChainedStruct) -> Option<*mut c_void> {
+    find_in_chain::<native::WGPUSurfaceSourceMetalLayer>(
+        chain,
+        native::WGPUSType_SurfaceSourceMetalLayer,
+    )
+    .map(|source| source.layer)
 }
 
 unsafe fn find_windows_hwnd_source(
-    mut chain: *const native::WGPUChainedStruct,
+    chain: *const native::WGPUChainedStruct,
 ) -> Option<(*mut c_void, *mut c_void)> {
-    while let Some(link) = chain.as_ref() {
-        if link.sType == native::WGPUSType_SurfaceSourceWindowsHWND {
-            let source = (link as *const native::WGPUChainedStruct)
-                .cast::<native::WGPUSurfaceSourceWindowsHWND>();
-            return source
-                .as_ref()
-                .map(|source| (source.hinstance, source.hwnd));
-        }
-        chain = link.next;
-    }
-    None
+    find_in_chain::<native::WGPUSurfaceSourceWindowsHWND>(
+        chain,
+        native::WGPUSType_SurfaceSourceWindowsHWND,
+    )
+    .map(|source| (source.hinstance, source.hwnd))
 }
 
 unsafe fn find_android_native_window_source(
-    mut chain: *const native::WGPUChainedStruct,
+    chain: *const native::WGPUChainedStruct,
 ) -> Option<*mut c_void> {
-    while let Some(link) = chain.as_ref() {
-        if link.sType == native::WGPUSType_SurfaceSourceAndroidNativeWindow {
-            let source = (link as *const native::WGPUChainedStruct)
-                .cast::<native::WGPUSurfaceSourceAndroidNativeWindow>();
-            return source.as_ref().map(|source| source.window);
-        }
-        chain = link.next;
-    }
-    None
+    find_in_chain::<native::WGPUSurfaceSourceAndroidNativeWindow>(
+        chain,
+        native::WGPUSType_SurfaceSourceAndroidNativeWindow,
+    )
+    .map(|source| source.window)
 }
 
 fn real_hal_surface(surface: HalSurface) -> Option<HalSurface> {
@@ -1846,33 +1904,11 @@ impl PendingCallback {
                 userdata2,
                 ..
             } => {
-                if let Some(callback) = callback {
-                    if pipeline._device.is_lost() {
-                        callback(
-                            native::WGPUCreatePipelineAsyncStatus_Success,
-                            arc_to_handle(pipeline),
-                            string_view(b""),
-                            userdata1 as *mut c_void,
-                            userdata2 as *mut c_void,
-                        );
-                    } else if pipeline._core.is_error() {
-                        callback(
-                            native::WGPUCreatePipelineAsyncStatus_ValidationError,
-                            std::ptr::null(),
-                            string_view(b"Pipeline creation failed validation"),
-                            userdata1 as *mut c_void,
-                            userdata2 as *mut c_void,
-                        );
-                    } else {
-                        callback(
-                            native::WGPUCreatePipelineAsyncStatus_Success,
-                            arc_to_handle(pipeline),
-                            string_view(b""),
-                            userdata1 as *mut c_void,
-                            userdata2 as *mut c_void,
-                        );
-                    }
-                }
+                let is_lost = pipeline._device.is_lost();
+                let is_error = pipeline._core.is_error();
+                fire_create_pipeline_async(
+                    callback, pipeline, is_lost, is_error, userdata1, userdata2,
+                );
             }
             Self::CreateRenderPipelineAsync {
                 callback,
@@ -1881,33 +1917,11 @@ impl PendingCallback {
                 userdata2,
                 ..
             } => {
-                if let Some(callback) = callback {
-                    if pipeline._device.is_lost() {
-                        callback(
-                            native::WGPUCreatePipelineAsyncStatus_Success,
-                            arc_to_handle(pipeline),
-                            string_view(b""),
-                            userdata1 as *mut c_void,
-                            userdata2 as *mut c_void,
-                        );
-                    } else if pipeline._core.is_error() {
-                        callback(
-                            native::WGPUCreatePipelineAsyncStatus_ValidationError,
-                            std::ptr::null(),
-                            string_view(b"Pipeline creation failed validation"),
-                            userdata1 as *mut c_void,
-                            userdata2 as *mut c_void,
-                        );
-                    } else {
-                        callback(
-                            native::WGPUCreatePipelineAsyncStatus_Success,
-                            arc_to_handle(pipeline),
-                            string_view(b""),
-                            userdata1 as *mut c_void,
-                            userdata2 as *mut c_void,
-                        );
-                    }
-                }
+                let is_lost = pipeline._device.is_lost();
+                let is_error = pipeline._core.is_error();
+                fire_create_pipeline_async(
+                    callback, pipeline, is_lost, is_error, userdata1, userdata2,
+                );
             }
             Self::PopErrorScope {
                 callback,
@@ -1942,6 +1956,47 @@ impl PendingCallback {
             }
         }
     }
+}
+
+unsafe fn fire_create_pipeline_async<T>(
+    callback: Option<
+        unsafe extern "C" fn(
+            native::WGPUCreatePipelineAsyncStatus,
+            *const T,
+            native::WGPUStringView,
+            *mut c_void,
+            *mut c_void,
+        ),
+    >,
+    pipeline: Arc<T>,
+    is_lost: bool,
+    is_error: bool,
+    userdata1: usize,
+    userdata2: usize,
+) {
+    let Some(callback) = callback else {
+        return;
+    };
+    let status = if !is_lost && is_error {
+        native::WGPUCreatePipelineAsyncStatus_ValidationError
+    } else {
+        native::WGPUCreatePipelineAsyncStatus_Success
+    };
+    let (pipeline, message) = if status == native::WGPUCreatePipelineAsyncStatus_ValidationError {
+        (
+            std::ptr::null(),
+            string_view(b"Pipeline creation failed validation"),
+        )
+    } else {
+        (arc_to_handle(pipeline), string_view(b""))
+    };
+    callback(
+        status,
+        pipeline,
+        message,
+        userdata1 as *mut c_void,
+        userdata2 as *mut c_void,
+    );
 }
 
 fn queue_work_done_message(status: core::QueueWorkDoneStatus) -> &'static str {
@@ -2009,15 +2064,7 @@ unsafe fn create_compute_pipeline_handle(
         bind_group_layout_handles: Mutex::new(Vec::new()),
         label: Mutex::new(label),
     });
-    if !handle._core.is_error() {
-        if let Some(key) = key {
-            cache_handle(&device.compute_pipeline_cache, key, handle)
-        } else {
-            handle
-        }
-    } else {
-        handle
-    }
+    cache_if_valid(&device.compute_pipeline_cache, key, handle)
 }
 
 unsafe fn create_render_pipeline_handle(
@@ -2056,15 +2103,7 @@ unsafe fn create_render_pipeline_handle(
         bind_group_layout_handles: Mutex::new(Vec::new()),
         label: Mutex::new(label),
     });
-    if !handle._core.is_error() {
-        if let Some(key) = key {
-            cache_handle(&device.render_pipeline_cache, key, handle)
-        } else {
-            handle
-        }
-    } else {
-        handle
-    }
+    cache_if_valid(&device.render_pipeline_cache, key, handle)
 }
 
 fn dispatch_optional_error(device: &core::Device, error: Option<String>) {
@@ -2077,6 +2116,12 @@ fn dispatch_optional_device_error(device: &core::Device, error: Option<core::Dev
     if let Some(error) = error {
         device.dispatch_error(error.kind, error.message);
     }
+}
+
+unsafe fn view_belongs_to_device(view: native::WGPUTextureView, device: &core::Device) -> bool {
+    borrow_handle::<WGPUTextureViewImpl>(view, "WGPUTextureView")
+        ._device
+        .same(device)
 }
 
 /// Maps a HAL backend to the corresponding `webgpu.h` backend type.
@@ -2251,21 +2296,16 @@ unsafe fn instance_backend_selection(
     descriptor: *const native::WGPUInstanceDescriptor,
 ) -> Option<InstanceBackendSelection> {
     let descriptor = descriptor.as_ref()?;
-    let mut chain = descriptor.nextInChain;
-    while let Some(node) = chain.as_ref() {
-        if node.sType == YAWGPU_STYPE_INSTANCE_BACKEND_SELECT {
-            let selection =
-                &*(node as *const native::WGPUChainedStruct as *const YaWGPUInstanceBackendSelect);
-            return Some(match selection.backend {
-                YAWGPU_INSTANCE_BACKEND_METAL => InstanceBackendSelection::Metal,
-                YAWGPU_INSTANCE_BACKEND_VULKAN => InstanceBackendSelection::Vulkan,
-                YAWGPU_INSTANCE_BACKEND_GLES => InstanceBackendSelection::Gles,
-                _ => InstanceBackendSelection::Noop,
-            });
-        }
-        chain = node.next;
-    }
-    None
+    find_in_chain::<YaWGPUInstanceBackendSelect>(
+        descriptor.nextInChain,
+        YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
+    )
+    .map(|selection| match selection.backend {
+        YAWGPU_INSTANCE_BACKEND_METAL => InstanceBackendSelection::Metal,
+        YAWGPU_INSTANCE_BACKEND_VULKAN => InstanceBackendSelection::Vulkan,
+        YAWGPU_INSTANCE_BACKEND_GLES => InstanceBackendSelection::Gles,
+        _ => InstanceBackendSelection::Noop,
+    })
 }
 
 #[cfg(feature = "gles")]
@@ -2273,38 +2313,33 @@ unsafe fn gles_context_backend_choice(
     descriptor: *const native::WGPUInstanceDescriptor,
 ) -> Option<yawgpu_hal::gles::BackendChoice> {
     let descriptor = descriptor.as_ref()?;
-    let mut chain = descriptor.nextInChain;
-    while let Some(node) = chain.as_ref() {
-        if node.sType == YAWGPU_STYPE_GLES_CONTEXT_BACKEND {
-            let selection =
-                &*(node as *const native::WGPUChainedStruct as *const YaWGPUGlesContextBackend);
-            return match selection.contextBackend {
-                YAWGPU_GLES_CONTEXT_BACKEND_DEFAULT => None,
-                YAWGPU_GLES_CONTEXT_BACKEND_EGL => Some(yawgpu_hal::gles::BackendChoice::Egl),
-                YAWGPU_GLES_CONTEXT_BACKEND_WGL => {
-                    #[cfg(windows)]
-                    {
-                        Some(yawgpu_hal::gles::BackendChoice::Wgl)
-                    }
-                    #[cfg(not(windows))]
-                    {
-                        eprintln!(
-                            "yawgpu-gles: YAWGPU_GLES_CONTEXT_BACKEND_WGL is unavailable on this host; falling back to egl"
-                        );
-                        Some(yawgpu_hal::gles::BackendChoice::Egl)
-                    }
-                }
-                other => {
-                    eprintln!(
-                        "yawgpu-gles: unknown YaWGPUGlesContextBackend.contextBackend={other}; falling back to egl"
-                    );
-                    Some(yawgpu_hal::gles::BackendChoice::Egl)
-                }
-            };
+    let selection = find_in_chain::<YaWGPUGlesContextBackend>(
+        descriptor.nextInChain,
+        YAWGPU_STYPE_GLES_CONTEXT_BACKEND,
+    )?;
+    match selection.contextBackend {
+        YAWGPU_GLES_CONTEXT_BACKEND_DEFAULT => None,
+        YAWGPU_GLES_CONTEXT_BACKEND_EGL => Some(yawgpu_hal::gles::BackendChoice::Egl),
+        YAWGPU_GLES_CONTEXT_BACKEND_WGL => {
+            #[cfg(windows)]
+            {
+                Some(yawgpu_hal::gles::BackendChoice::Wgl)
+            }
+            #[cfg(not(windows))]
+            {
+                eprintln!(
+                    "yawgpu-gles: YAWGPU_GLES_CONTEXT_BACKEND_WGL is unavailable on this host; falling back to egl"
+                );
+                Some(yawgpu_hal::gles::BackendChoice::Egl)
+            }
         }
-        chain = node.next;
+        other => {
+            eprintln!(
+                "yawgpu-gles: unknown YaWGPUGlesContextBackend.contextBackend={other}; falling back to egl"
+            );
+            Some(yawgpu_hal::gles::BackendChoice::Egl)
+        }
     }
-    None
 }
 
 unsafe fn required_features_from_descriptor(
@@ -7605,7 +7640,7 @@ mod tests {
 
     #[test]
     fn cache_handle_dedups_live_objects() {
-        let cache: Mutex<HashMap<DummyCacheKey, Weak<DummyHandle>>> = Mutex::new(HashMap::new());
+        let cache = ObjectCache::<DummyCacheKey>::new();
         let first = cache_handle(&cache, DummyCacheKey(1), Arc::new(DummyHandle));
         // A second create with the same key while `first` is still alive must
         // return the SAME backing object (dedup preserved).
@@ -7617,7 +7652,7 @@ mod tests {
 
     #[test]
     fn cache_handle_reclaims_and_prunes_dead_objects() {
-        let cache: Mutex<HashMap<DummyCacheKey, Weak<DummyHandle>>> = Mutex::new(HashMap::new());
+        let cache = ObjectCache::<DummyCacheKey>::new();
 
         let first = cache_handle(&cache, DummyCacheKey(1), Arc::new(DummyHandle));
         let first_ptr = Arc::as_ptr(&first);
@@ -7625,7 +7660,7 @@ mod tests {
         // object (and any backing allocation behind its `Drop`) is reclaimed.
         drop(first);
         {
-            let guard = cache.lock().expect("lock");
+            let guard = cache.map.lock().expect("lock");
             let weak = guard.get(&DummyCacheKey(1)).expect("entry present");
             assert_eq!(
                 weak.strong_count(),
@@ -7646,9 +7681,29 @@ mod tests {
         let _third = cache_handle(&cache, DummyCacheKey(2), Arc::new(DummyHandle));
         assert_eq!(
             cache_len(&cache),
-            1,
-            "dead key must be pruned, not retained"
+            2,
+            "dead key is retained until the amortized prune threshold"
         );
+    }
+
+    #[test]
+    fn cache_handle_amortized_prune_bounds_dead_entries_and_keeps_live_hits() {
+        let cache = ObjectCache::<DummyCacheKey>::new();
+        let live = cache_handle(&cache, DummyCacheKey(7), Arc::new(DummyHandle));
+        for key in 100..200 {
+            drop(cache_handle(
+                &cache,
+                DummyCacheKey(key),
+                Arc::new(DummyHandle),
+            ));
+        }
+
+        assert!(
+            cache_len(&cache) < 64,
+            "amortized pruning should keep dead entries bounded"
+        );
+        let live_again = cache_handle(&cache, DummyCacheKey(7), Arc::new(DummyHandle));
+        assert!(Arc::ptr_eq(&live, &live_again));
     }
 
     #[test]
@@ -7669,7 +7724,7 @@ mod tests {
             wgpuShaderModuleRelease(first);
             wgpuShaderModuleRelease(second);
             {
-                let guard = device_impl.shader_module_cache.lock().expect("lock");
+                let guard = device_impl.shader_module_cache.map.lock().expect("lock");
                 let weak = guard
                     .get(&ShaderModuleCacheKey::Wgsl(source.to_owned()))
                     .expect("entry present");

@@ -176,7 +176,7 @@ mod tests {
     use crate::{
         YaWGPUExtent2D, YaWGPUOrigin2D, YAWGPU_EXTERNAL_TEXTURE_ROTATION_ROTATE_0_DEGREES,
     };
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::BTreeMap;
 
     fn instance_impl() -> Arc<WGPUInstanceImpl> {
         Arc::new(WGPUInstanceImpl {
@@ -209,10 +209,10 @@ mod tests {
             },
             device_lost_futures: Mutex::new(Vec::new()),
             default_queue: Mutex::new(None),
-            shader_module_cache: Mutex::new(HashMap::new()),
-            pipeline_layout_cache: Mutex::new(HashMap::new()),
-            compute_pipeline_cache: Mutex::new(HashMap::new()),
-            render_pipeline_cache: Mutex::new(HashMap::new()),
+            shader_module_cache: ObjectCache::new(),
+            pipeline_layout_cache: ObjectCache::new(),
+            compute_pipeline_cache: ObjectCache::new(),
+            render_pipeline_cache: ObjectCache::new(),
         })
     }
 
