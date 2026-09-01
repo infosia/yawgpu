@@ -1,5 +1,14 @@
 use super::*;
 
+wgpu_handle_exports!(
+    refcount:
+    WGPUQuerySetImpl,
+    native::WGPUQuerySet,
+    "WGPUQuerySet",
+    wgpuQuerySetAddRef,
+    wgpuQuerySetRelease
+);
+
 /// Destroys a query set. This operation is idempotent.
 ///
 /// # Safety
@@ -50,26 +59,4 @@ pub unsafe extern "C" fn wgpuQuerySetSetLabel(
     let query_set = borrow_handle(query_set, "WGPUQuerySet");
     let label = string_view_to_str(label).unwrap_or_default();
     query_set.core.set_label(label);
-}
-
-/// Releases one owned reference to a query set handle.
-///
-/// # Safety
-///
-/// `query_set` must be a non-null live yawgpu query set handle.
-/// Returns WGPU query set release.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuQuerySetRelease(query_set: native::WGPUQuerySet) {
-    release_handle(query_set, "WGPUQuerySet");
-}
-
-/// Adds one owned reference to a query set handle.
-///
-/// # Safety
-///
-/// `query_set` must be a non-null live yawgpu query set handle.
-/// Returns WGPU query set add ref.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuQuerySetAddRef(query_set: native::WGPUQuerySet) {
-    add_ref_handle(query_set, "WGPUQuerySet");
 }

@@ -2,25 +2,15 @@ use super::*;
 use crate::conv::map_render_pass_timestamp_writes;
 use yawgpu_core::validate_compute_pass_timestamp_writes;
 
-/// Sets a command encoder label.
-///
-/// # Safety
-///
-/// `command_encoder` must be a non-null live yawgpu command encoder handle.
-/// `label` must point to valid string data according to `WGPUStringView` when
-/// non-empty.
-/// Returns WGPU command encoder set label.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuCommandEncoderSetLabel(
-    command_encoder: native::WGPUCommandEncoder,
-    label: native::WGPUStringView,
-) {
-    let command_encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
-    *command_encoder
-        .label
-        .lock()
-        .expect("label lock must not poison") = label_from_string_view(label);
-}
+wgpu_handle_exports!(
+    refcount_and_label:
+    WGPUCommandEncoderImpl,
+    native::WGPUCommandEncoder,
+    "WGPUCommandEncoder",
+    wgpuCommandEncoderAddRef,
+    wgpuCommandEncoderRelease,
+    wgpuCommandEncoderSetLabel
+);
 
 /// Begins a render pass.
 ///
@@ -541,28 +531,6 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToTexture(
             map_extent_3d(*copy_size),
         ),
     );
-}
-
-/// Releases one owned reference to a command encoder handle.
-///
-/// # Safety
-///
-/// `command_encoder` must be a non-null live yawgpu command encoder handle.
-/// Returns WGPU command encoder release.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuCommandEncoderRelease(command_encoder: native::WGPUCommandEncoder) {
-    release_handle(command_encoder, "WGPUCommandEncoder");
-}
-
-/// Adds one owned reference to a command encoder handle.
-///
-/// # Safety
-///
-/// `command_encoder` must be a non-null live yawgpu command encoder handle.
-/// Returns WGPU command encoder add ref.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuCommandEncoderAddRef(command_encoder: native::WGPUCommandEncoder) {
-    add_ref_handle(command_encoder, "WGPUCommandEncoder");
 }
 
 fn validate_render_pass_descriptor_devices(

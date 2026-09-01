@@ -118,9 +118,7 @@ pub unsafe fn find_in_chain<'a, T>(
 ) -> Option<&'a T> {
     while let Some(node) = chain.as_ref() {
         if node.sType == s_type {
-            return (node as *const native::WGPUChainedStruct)
-                .cast::<T>()
-                .as_ref();
+            return chain.cast::<T>().as_ref();
         }
         chain = node.next;
     }
@@ -140,9 +138,7 @@ pub unsafe fn find_in_chain_mut<'a, T>(
 ) -> Option<&'a mut T> {
     while let Some(node) = chain.as_mut() {
         if node.sType == s_type {
-            return (node as *mut native::WGPUChainedStruct)
-                .cast::<T>()
-                .as_mut();
+            return chain.cast::<T>().as_mut();
         }
         chain = node.next;
     }

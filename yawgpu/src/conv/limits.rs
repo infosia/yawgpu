@@ -67,14 +67,20 @@ pub unsafe fn fill_compat_limits_chain(
     chain: *mut native::WGPUChainedStruct,
     limits: core::Limits,
 ) {
-    if let Some(compat) = find_in_chain_mut::<native::WGPUCompatibilityModeLimits>(
-        chain,
-        native::WGPUSType_CompatibilityModeLimits,
-    ) {
-        compat.maxStorageBuffersInVertexStage = limits.max_storage_buffers_in_vertex_stage;
-        compat.maxStorageBuffersInFragmentStage = limits.max_storage_buffers_in_fragment_stage;
-        compat.maxStorageTexturesInVertexStage = limits.max_storage_textures_in_vertex_stage;
-        compat.maxStorageTexturesInFragmentStage = limits.max_storage_textures_in_fragment_stage;
+    let mut node = chain;
+    while let Some(header) = node.as_ref() {
+        if header.sType == native::WGPUSType_CompatibilityModeLimits {
+            if let Some(compat) = node.cast::<native::WGPUCompatibilityModeLimits>().as_mut() {
+                compat.maxStorageBuffersInVertexStage = limits.max_storage_buffers_in_vertex_stage;
+                compat.maxStorageBuffersInFragmentStage =
+                    limits.max_storage_buffers_in_fragment_stage;
+                compat.maxStorageTexturesInVertexStage =
+                    limits.max_storage_textures_in_vertex_stage;
+                compat.maxStorageTexturesInFragmentStage =
+                    limits.max_storage_textures_in_fragment_stage;
+            }
+        }
+        node = header.next;
     }
 }
 
@@ -96,26 +102,29 @@ pub unsafe fn apply_compat_limits_from_chain(
     limits: &mut core::Limits,
 ) {
     let default = core::Limits::DEFAULT;
-    if let Some(compat) = find_in_chain::<native::WGPUCompatibilityModeLimits>(
-        chain,
-        native::WGPUSType_CompatibilityModeLimits,
-    ) {
-        limits.max_storage_buffers_in_vertex_stage = limit_u32(
-            compat.maxStorageBuffersInVertexStage,
-            default.max_storage_buffers_in_vertex_stage,
-        );
-        limits.max_storage_buffers_in_fragment_stage = limit_u32(
-            compat.maxStorageBuffersInFragmentStage,
-            default.max_storage_buffers_in_fragment_stage,
-        );
-        limits.max_storage_textures_in_vertex_stage = limit_u32(
-            compat.maxStorageTexturesInVertexStage,
-            default.max_storage_textures_in_vertex_stage,
-        );
-        limits.max_storage_textures_in_fragment_stage = limit_u32(
-            compat.maxStorageTexturesInFragmentStage,
-            default.max_storage_textures_in_fragment_stage,
-        );
+    let mut node = chain;
+    while let Some(header) = node.as_ref() {
+        if header.sType == native::WGPUSType_CompatibilityModeLimits {
+            if let Some(compat) = node.cast::<native::WGPUCompatibilityModeLimits>().as_ref() {
+                limits.max_storage_buffers_in_vertex_stage = limit_u32(
+                    compat.maxStorageBuffersInVertexStage,
+                    default.max_storage_buffers_in_vertex_stage,
+                );
+                limits.max_storage_buffers_in_fragment_stage = limit_u32(
+                    compat.maxStorageBuffersInFragmentStage,
+                    default.max_storage_buffers_in_fragment_stage,
+                );
+                limits.max_storage_textures_in_vertex_stage = limit_u32(
+                    compat.maxStorageTexturesInVertexStage,
+                    default.max_storage_textures_in_vertex_stage,
+                );
+                limits.max_storage_textures_in_fragment_stage = limit_u32(
+                    compat.maxStorageTexturesInFragmentStage,
+                    default.max_storage_textures_in_fragment_stage,
+                );
+            }
+        }
+        node = header.next.cast_const();
     }
 }
 

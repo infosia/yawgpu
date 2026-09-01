@@ -1,24 +1,14 @@
 use super::*;
 
-/// Sets a render pass encoder label.
-///
-/// # Safety
-///
-/// `render_pass_encoder` must be a non-null live yawgpu render pass encoder
-/// handle. `label` must point to valid string data according to
-/// `WGPUStringView` when non-empty.
-/// Returns WGPU render pass encoder set label.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuRenderPassEncoderSetLabel(
-    render_pass_encoder: native::WGPURenderPassEncoder,
-    label: native::WGPUStringView,
-) {
-    let render_pass_encoder = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
-    *render_pass_encoder
-        .label
-        .lock()
-        .expect("label lock must not poison") = label_from_string_view(label);
-}
+wgpu_handle_exports!(
+    refcount_and_label:
+    WGPURenderPassEncoderImpl,
+    native::WGPURenderPassEncoder,
+    "WGPURenderPassEncoder",
+    wgpuRenderPassEncoderAddRef,
+    wgpuRenderPassEncoderRelease,
+    wgpuRenderPassEncoderSetLabel
+);
 
 /// Ends a render pass.
 ///
@@ -512,30 +502,4 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderExecuteBundles(
         .map(|bundle| Arc::clone(&bundle.core))
         .collect::<Vec<_>>();
     dispatch_optional_error(&pass.device, pass.core.execute_bundles(&bundles));
-}
-
-/// Releases one owned reference to a render pass encoder handle.
-///
-/// # Safety
-///
-/// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
-/// Returns WGPU render pass encoder release.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuRenderPassEncoderRelease(
-    render_pass_encoder: native::WGPURenderPassEncoder,
-) {
-    release_handle(render_pass_encoder, "WGPURenderPassEncoder");
-}
-
-/// Adds one owned reference to a render pass encoder handle.
-///
-/// # Safety
-///
-/// `render_pass_encoder` must be a non-null live yawgpu render pass encoder.
-/// Returns WGPU render pass encoder add ref.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuRenderPassEncoderAddRef(
-    render_pass_encoder: native::WGPURenderPassEncoder,
-) {
-    add_ref_handle(render_pass_encoder, "WGPURenderPassEncoder");
 }

@@ -1,20 +1,14 @@
 use super::*;
 
-/// Sets a buffer label.
-///
-/// # Safety
-///
-/// `buffer` must be a non-null live yawgpu buffer handle. `label` must point
-/// to valid string data according to `WGPUStringView` when non-empty.
-/// Returns WGPU buffer set label.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuBufferSetLabel(
-    buffer: native::WGPUBuffer,
-    label: native::WGPUStringView,
-) {
-    let buffer = borrow_handle(buffer, "WGPUBuffer");
-    *buffer.label.lock().expect("label lock must not poison") = label_from_string_view(label);
-}
+wgpu_handle_exports!(
+    refcount_and_label:
+    WGPUBufferImpl,
+    native::WGPUBuffer,
+    "WGPUBuffer",
+    wgpuBufferAddRef,
+    wgpuBufferRelease,
+    wgpuBufferSetLabel
+);
 
 /// Destroys a buffer. This operation is idempotent.
 ///
@@ -246,26 +240,4 @@ pub unsafe extern "C" fn wgpuBufferGetSize(buffer: native::WGPUBuffer) -> u64 {
 #[no_mangle]
 pub unsafe extern "C" fn wgpuBufferGetUsage(buffer: native::WGPUBuffer) -> native::WGPUBufferUsage {
     map_buffer_usage_to_native(borrow_handle(buffer, "WGPUBuffer").core.usage())
-}
-
-/// Releases one owned reference to a buffer handle.
-///
-/// # Safety
-///
-/// `buffer` must be a non-null live yawgpu buffer handle.
-/// Returns WGPU buffer release.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuBufferRelease(buffer: native::WGPUBuffer) {
-    release_handle(buffer, "WGPUBuffer");
-}
-
-/// Adds one owned reference to a buffer handle.
-///
-/// # Safety
-///
-/// `buffer` must be a non-null live yawgpu buffer handle.
-/// Returns WGPU buffer add ref.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuBufferAddRef(buffer: native::WGPUBuffer) {
-    add_ref_handle(buffer, "WGPUBuffer");
 }

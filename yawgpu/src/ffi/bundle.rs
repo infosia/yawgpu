@@ -1,44 +1,24 @@
 use super::*;
 
-/// Sets a render bundle label.
-///
-/// # Safety
-///
-/// `render_bundle` must be a non-null live yawgpu render bundle handle.
-/// `label` must point to valid string data according to `WGPUStringView` when
-/// non-empty.
-/// Returns WGPU render bundle set label.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuRenderBundleSetLabel(
-    render_bundle: native::WGPURenderBundle,
-    label: native::WGPUStringView,
-) {
-    let render_bundle = borrow_handle(render_bundle, "WGPURenderBundle");
-    *render_bundle
-        .label
-        .lock()
-        .expect("label lock must not poison") = label_from_string_view(label);
-}
+wgpu_handle_exports!(
+    refcount_and_label:
+    WGPURenderBundleImpl,
+    native::WGPURenderBundle,
+    "WGPURenderBundle",
+    wgpuRenderBundleAddRef,
+    wgpuRenderBundleRelease,
+    wgpuRenderBundleSetLabel
+);
 
-/// Sets a render bundle encoder label.
-///
-/// # Safety
-///
-/// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder
-/// handle. `label` must point to valid string data according to
-/// `WGPUStringView` when non-empty.
-/// Returns WGPU render bundle encoder set label.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuRenderBundleEncoderSetLabel(
-    render_bundle_encoder: native::WGPURenderBundleEncoder,
-    label: native::WGPUStringView,
-) {
-    let render_bundle_encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
-    *render_bundle_encoder
-        .label
-        .lock()
-        .expect("label lock must not poison") = label_from_string_view(label);
-}
+wgpu_handle_exports!(
+    refcount_and_label:
+    WGPURenderBundleEncoderImpl,
+    native::WGPURenderBundleEncoder,
+    "WGPURenderBundleEncoder",
+    wgpuRenderBundleEncoderAddRef,
+    wgpuRenderBundleEncoderRelease,
+    wgpuRenderBundleEncoderSetLabel
+);
 
 /// Sets the render pipeline for a render bundle encoder.
 ///
@@ -408,52 +388,4 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderFinish(
                 .and_then(|descriptor| label_from_string_view(descriptor.label)),
         ),
     }))
-}
-
-/// Releases one owned reference to a render bundle encoder handle.
-///
-/// # Safety
-///
-/// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder.
-/// Returns WGPU render bundle encoder release.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuRenderBundleEncoderRelease(
-    render_bundle_encoder: native::WGPURenderBundleEncoder,
-) {
-    release_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
-}
-
-/// Adds one owned reference to a render bundle encoder handle.
-///
-/// # Safety
-///
-/// `render_bundle_encoder` must be a non-null live yawgpu render bundle encoder.
-/// Returns WGPU render bundle encoder add ref.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuRenderBundleEncoderAddRef(
-    render_bundle_encoder: native::WGPURenderBundleEncoder,
-) {
-    add_ref_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
-}
-
-/// Releases one owned reference to a render bundle handle.
-///
-/// # Safety
-///
-/// `render_bundle` must be a non-null live yawgpu render bundle handle.
-/// Returns WGPU render bundle release.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuRenderBundleRelease(render_bundle: native::WGPURenderBundle) {
-    release_handle(render_bundle, "WGPURenderBundle");
-}
-
-/// Adds one owned reference to a render bundle handle.
-///
-/// # Safety
-///
-/// `render_bundle` must be a non-null live yawgpu render bundle handle.
-/// Returns WGPU render bundle add ref.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuRenderBundleAddRef(render_bundle: native::WGPURenderBundle) {
-    add_ref_handle(render_bundle, "WGPURenderBundle");
 }

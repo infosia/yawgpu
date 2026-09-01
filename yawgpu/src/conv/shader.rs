@@ -24,6 +24,15 @@ pub unsafe fn map_shader_module_descriptor(
     let mut chain = descriptor.nextInChain;
 
     while let Some(node) = chain.as_ref() {
+        let known_source = matches!(
+            node.sType,
+            native::WGPUSType_ShaderSourceWGSL
+                | native::WGPUSType_ShaderSourceSPIRV
+                | YAWGPU_STYPE_SHADER_SOURCE_MSL
+        );
+        if known_source && source.is_some() {
+            return core::ShaderModuleSource::Invalid(EXACTLY_ONE_SOURCE.to_owned());
+        }
         let mapped = match node.sType {
             native::WGPUSType_ShaderSourceWGSL => {
                 let Some(wgsl) = chain.cast::<native::WGPUShaderSourceWGSL>().as_ref() else {
@@ -54,9 +63,7 @@ pub unsafe fn map_shader_module_descriptor(
             _ => None,
         };
         if let Some(mapped) = mapped {
-            if source.replace(mapped).is_some() {
-                return core::ShaderModuleSource::Invalid(EXACTLY_ONE_SOURCE.to_owned());
-            }
+            source = Some(mapped);
         }
 
         chain = node.next;

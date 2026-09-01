@@ -1,40 +1,24 @@
 use super::*;
 
-/// Sets a texture label.
-///
-/// # Safety
-///
-/// `texture` must be a non-null live yawgpu texture handle. `label` must point
-/// to valid string data according to `WGPUStringView` when non-empty.
-/// Returns WGPU texture set label.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuTextureSetLabel(
-    texture: native::WGPUTexture,
-    label: native::WGPUStringView,
-) {
-    let texture = borrow_handle(texture, "WGPUTexture");
-    *texture.label.lock().expect("label lock must not poison") = label_from_string_view(label);
-}
+wgpu_handle_exports!(
+    refcount_and_label:
+    WGPUTextureImpl,
+    native::WGPUTexture,
+    "WGPUTexture",
+    wgpuTextureAddRef,
+    wgpuTextureRelease,
+    wgpuTextureSetLabel
+);
 
-/// Sets a texture view label.
-///
-/// # Safety
-///
-/// `texture_view` must be a non-null live yawgpu texture view handle. `label`
-/// must point to valid string data according to `WGPUStringView` when
-/// non-empty.
-/// Returns WGPU texture view set label.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuTextureViewSetLabel(
-    texture_view: native::WGPUTextureView,
-    label: native::WGPUStringView,
-) {
-    let texture_view = borrow_handle(texture_view, "WGPUTextureView");
-    *texture_view
-        .label
-        .lock()
-        .expect("label lock must not poison") = label_from_string_view(label);
-}
+wgpu_handle_exports!(
+    refcount_and_label:
+    WGPUTextureViewImpl,
+    native::WGPUTextureView,
+    "WGPUTextureView",
+    wgpuTextureViewAddRef,
+    wgpuTextureViewRelease,
+    wgpuTextureViewSetLabel
+);
 
 /// Destroys a texture. This operation is idempotent.
 ///
@@ -201,48 +185,4 @@ pub unsafe extern "C" fn wgpuTextureGetUsage(
     texture: native::WGPUTexture,
 ) -> native::WGPUTextureUsage {
     map_texture_usage_to_native(borrow_handle(texture, "WGPUTexture").core.usage())
-}
-
-/// Releases one owned reference to a texture handle.
-///
-/// # Safety
-///
-/// `texture` must be a non-null live yawgpu texture handle.
-/// Returns WGPU texture release.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuTextureRelease(texture: native::WGPUTexture) {
-    release_handle(texture, "WGPUTexture");
-}
-
-/// Adds one owned reference to a texture handle.
-///
-/// # Safety
-///
-/// `texture` must be a non-null live yawgpu texture handle.
-/// Returns WGPU texture add ref.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuTextureAddRef(texture: native::WGPUTexture) {
-    add_ref_handle(texture, "WGPUTexture");
-}
-
-/// Releases one owned reference to a texture view handle.
-///
-/// # Safety
-///
-/// `texture_view` must be a non-null live yawgpu texture view handle.
-/// Returns WGPU texture view release.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuTextureViewRelease(texture_view: native::WGPUTextureView) {
-    release_handle(texture_view, "WGPUTextureView");
-}
-
-/// Adds one owned reference to a texture view handle.
-///
-/// # Safety
-///
-/// `texture_view` must be a non-null live yawgpu texture view handle.
-/// Returns WGPU texture view add ref.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuTextureViewAddRef(texture_view: native::WGPUTextureView) {
-    add_ref_handle(texture_view, "WGPUTextureView");
 }

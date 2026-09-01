@@ -1,26 +1,13 @@
 use super::*;
 
-/// Releases one owned reference to an adapter handle.
-///
-/// # Safety
-///
-/// `adapter` must be a non-null live yawgpu adapter handle.
-/// Returns WGPU adapter release.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuAdapterRelease(adapter: native::WGPUAdapter) {
-    release_handle(adapter, "WGPUAdapter");
-}
-
-/// Adds one owned reference to an adapter handle.
-///
-/// # Safety
-///
-/// `adapter` must be a non-null live yawgpu adapter handle.
-/// Returns WGPU adapter add ref.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuAdapterAddRef(adapter: native::WGPUAdapter) {
-    add_ref_handle(adapter, "WGPUAdapter");
-}
+wgpu_handle_exports!(
+    refcount:
+    WGPUAdapterImpl,
+    native::WGPUAdapter,
+    "WGPUAdapter",
+    wgpuAdapterAddRef,
+    wgpuAdapterRelease
+);
 
 /// Gets the supported limits for an adapter.
 ///

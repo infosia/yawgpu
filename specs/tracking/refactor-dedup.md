@@ -22,7 +22,8 @@ not silently dropped.
 | H2 | yawgpu-hal (GLES-only dedupe + program cache) | DONE | see log |
 | C1a | yawgpu-core (pipeline creation: C1.1, C1.2, C1.8, C1.13, C1.15) | DONE | fb56a6a |
 | C1b | yawgpu-core (pass recording, copy validation, submit bind resolution) | DONE | see log |
-| F1 | yawgpu (FFI: handle borrowing, chain walks, callbacks, macros) | in progress | |
+| F1a | yawgpu (FFI: F1.1–F1.10 handle borrowing, chain finder, callbacks, cache, surface) | DONE | 3f8dbba |
+| F1b | yawgpu (FFI: F1.11 refcount/label macro + F1a review MINORs; F1.12 reverted) | DONE | see log |
 
 ## H1 — yawgpu-hal: dispatch + Vulkan + Metal + shared helpers
 
@@ -149,3 +150,48 @@ double Vec; `adapter_info_from_core` constant allocation.
   Gates: workspace 1008/0, clippy clean, core
   `--features tiled,shader-passthrough` green, Metal e2e 67/0 + 41/0,
   MoltenVK e2e 48/0 + 33/0. F1 dispatched.
+- 2026-09-02 — C1b committed as 099156d.
+- 2026-09-02 — F1a (F1.1–F1.10) reviewed by a fresh-context agent
+  with explicit focus on borrow-vs-clone lifetime (the uncaptured-error
+  callback is invoked synchronously from `dispatch_error`, so a live
+  borrow across a dispatch would be a UAF): every converted site
+  finishes its use of the borrow before any dispatch; verdict
+  equivalent, 0 CRITICAL / 0 MAJOR. Committed 3f8dbba. Exported
+  `wgpu*` symbols 202 before / 202 after, identical set. MINORs
+  deferred to F1b: `fill_compat_limits_chain` now fills only the
+  first matching node (old: every node) and `apply_compat_limits_from_chain`
+  is first-match (old: last-match) on duplicate sType chains
+  (malformed per webgpu.h); dead `is_error` re-check + double
+  `configured` lock read in `wgpuSurfaceGetCurrentTexture`; provenance
+  narrowing in `find_in_chain`; `ObjectCache` watermark stored in a
+  second mutex; shader source node payload parsed before the
+  exactly-one check. Agent skipped F1.11/F1.12 citing ABI risk →
+  re-dispatched with the nm symbol-diff gate as the proof.
+- 2026-09-02 — F1b: `wgpu_handle_exports!` emits AddRef/Release
+  (+SetLabel) for 20 handle types (−496 lines); hand-written exports
+  kept where the body is not a plain delegation (device, queue,
+  surface, instance, QuerySet label via core, tiled `yawgpu*`
+  exports). F1a MINORs fixed (compat-limits chain: all-nodes fill and
+  last-match-wins restored; single `configured` lock read in
+  GetCurrentTexture; provenance-preserving chain cast; ObjectCache
+  watermark inside the map mutex + saturating_mul; shader duplicate-
+  source check before payload parse). **F1.12 (recording-family
+  generic helpers) was implemented and then REVERTED**: it needed ~10
+  traits/macros (+900/−500, net +405) to share bodies that differ by
+  one noun — more indirection than the duplication it removed. The
+  plain exports stay. Gates: workspace 1011/0, clippy clean, tiled
+  lib green, `wgpu*` symbols 202/202 identical, Metal e2e 21/0,
+  MoltenVK e2e 16/0.
+
+## Outcome
+
+Six commits on `main` (c0649e5 H1, fb56a6a C1a, fdba835 H2, 099156d
+C1b, 3f8dbba F1a, + F1b). Every slice: workspace test + clippy green,
+Metal + MoltenVK e2e green (GLES by equivalence review). One intended
+behaviour change (C1.5 `writeTexture` physical mip bounds). Still open
+from the audits, deliberately deferred (see per-slice "Deferred"
+notes): double `Arc<core::X>` in FFI Impl structs, Metal derived-view
+cache + per-draw scratch reuse, unified HAL render-stream interpreter,
+per-backend bytes-per-block tables, GLES draw-time dirty tracking and
+binding index maps, subpass attachment validation dedupe, single-table
+format caps.

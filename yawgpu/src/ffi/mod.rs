@@ -1,3 +1,47 @@
+macro_rules! wgpu_handle_exports {
+    (refcount: $Impl:ty, $CType:ty, $name:literal, $add_ref:ident, $release:ident) => {
+        #[doc = concat!("Releases one owned reference to a `", stringify!($CType), "`.")]
+        ///
+        /// # Safety
+        ///
+        #[doc = concat!("The handle must be a non-null live yawgpu `", stringify!($CType), "`.")]
+        #[no_mangle]
+        pub unsafe extern "C" fn $release(handle: $CType) {
+            release_handle::<$Impl>(handle, $name);
+        }
+
+        #[doc = concat!("Increments the reference count of a `", stringify!($CType), "`.")]
+        ///
+        /// # Safety
+        ///
+        #[doc = concat!("The handle must be a non-null live yawgpu `", stringify!($CType), "`.")]
+        #[no_mangle]
+        pub unsafe extern "C" fn $add_ref(handle: $CType) {
+            add_ref_handle::<$Impl>(handle, $name);
+        }
+    };
+    (
+        refcount_and_label: $Impl:ty, $CType:ty, $name:literal,
+        $add_ref:ident, $release:ident, $set_label:ident
+    ) => {
+        wgpu_handle_exports!(refcount: $Impl, $CType, $name, $add_ref, $release);
+
+        #[doc = concat!("Sets the debug label for a `", stringify!($CType), "`.")]
+        ///
+        /// # Safety
+        ///
+        #[doc = concat!("The handle must be a non-null live yawgpu `", stringify!($CType), "`.")]
+        /// `label` must point to valid string data according to `WGPUStringView`
+        /// when non-empty.
+        #[no_mangle]
+        pub unsafe extern "C" fn $set_label(handle: $CType, label: native::WGPUStringView) {
+            let handle = borrow_handle::<$Impl>(handle, $name);
+            *handle.label.lock().expect("label lock must not poison") =
+                label_from_string_view(label);
+        }
+    };
+}
+
 /// Adapter module.
 pub mod adapter;
 /// Bindings module.
@@ -838,16 +882,22 @@ impl WGPUDeviceImpl {
 
 /// Amortized weak-handle cache for structurally keyed FFI objects.
 pub(crate) struct ObjectCache<T: CacheKey> {
-    map: Mutex<HashMap<T, Weak<T::Handle>>>,
-    live_after_last_prune: Mutex<usize>,
+    inner: Mutex<ObjectCacheInner<T>>,
+}
+
+struct ObjectCacheInner<T: CacheKey> {
+    map: HashMap<T, Weak<T::Handle>>,
+    live_after_last_prune: usize,
 }
 
 impl<T: CacheKey> ObjectCache<T> {
     /// Creates an empty object cache.
     pub(crate) fn new() -> Self {
         Self {
-            map: Mutex::new(HashMap::new()),
-            live_after_last_prune: Mutex::new(0),
+            inner: Mutex::new(ObjectCacheInner {
+                map: HashMap::new(),
+                live_after_last_prune: 0,
+            }),
         }
     }
 }
@@ -901,34 +951,29 @@ fn cache_handle<T>(cache: &ObjectCache<T>, key: T, handle: Arc<T::Handle>) -> Ar
 where
     T: CacheKey,
 {
-    let mut map = cache
-        .map
+    let mut cache = cache
+        .inner
         .lock()
         .expect("device object cache lock must not poison");
-    if let Some(cached) = map.get(&key).and_then(Weak::upgrade) {
+    if let Some(cached) = cache.map.get(&key).and_then(Weak::upgrade) {
         return cached;
     }
-    let live_after_last_prune = *cache
-        .live_after_last_prune
-        .lock()
-        .expect("device object cache prune watermark lock must not poison");
-    if map.len() >= 2 * live_after_last_prune.max(16) {
-        map.retain(|_, weak| weak.strong_count() > 0);
-        *cache
-            .live_after_last_prune
-            .lock()
-            .expect("device object cache prune watermark lock must not poison") = map.len();
+    let watermark = cache.live_after_last_prune.max(16).saturating_mul(2);
+    if cache.map.len() >= watermark {
+        cache.map.retain(|_, weak| weak.strong_count() > 0);
+        cache.live_after_last_prune = cache.map.len();
     }
-    map.insert(key, Arc::downgrade(&handle));
+    cache.map.insert(key, Arc::downgrade(&handle));
     handle
 }
 
 /// Returns the live cached handle for `key`, if any, without inserting or pruning.
 fn cached_handle<T: CacheKey>(cache: &ObjectCache<T>, key: &T) -> Option<Arc<T::Handle>> {
     cache
-        .map
+        .inner
         .lock()
         .expect("device object cache lock must not poison")
+        .map
         .get(key)
         .and_then(Weak::upgrade)
 }
@@ -965,9 +1010,10 @@ where
     T: CacheKey,
 {
     cache
-        .map
+        .inner
         .lock()
         .expect("device object cache lock must not poison")
+        .map
         .len()
 }
 
@@ -7660,8 +7706,8 @@ mod tests {
         // object (and any backing allocation behind its `Drop`) is reclaimed.
         drop(first);
         {
-            let guard = cache.map.lock().expect("lock");
-            let weak = guard.get(&DummyCacheKey(1)).expect("entry present");
+            let guard = cache.inner.lock().expect("lock");
+            let weak = guard.map.get(&DummyCacheKey(1)).expect("entry present");
             assert_eq!(
                 weak.strong_count(),
                 0,
@@ -7724,8 +7770,9 @@ mod tests {
             wgpuShaderModuleRelease(first);
             wgpuShaderModuleRelease(second);
             {
-                let guard = device_impl.shader_module_cache.map.lock().expect("lock");
+                let guard = device_impl.shader_module_cache.inner.lock().expect("lock");
                 let weak = guard
+                    .map
                     .get(&ShaderModuleCacheKey::Wgsl(source.to_owned()))
                     .expect("entry present");
                 assert_eq!(

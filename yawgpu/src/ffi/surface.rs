@@ -180,45 +180,33 @@ pub unsafe extern "C" fn wgpuSurfaceGetCurrentTexture(
     };
     surface_texture.nextInChain = std::ptr::null_mut();
     surface_texture.texture = std::ptr::null();
-    if surface.is_error
-        || surface
-            .configured
-            .lock()
-            .expect("surface configuration lock is not poisoned")
-            .is_none()
-    {
+    let config = surface
+        .configured
+        .lock()
+        .expect("surface configuration lock is not poisoned")
+        .as_ref()
+        .map(|config| {
+            (
+                Arc::clone(&config.device),
+                config.usage,
+                config.width,
+                config.height,
+                config.format,
+                config.view_formats.clone(),
+            )
+        });
+    if surface.is_error || config.is_none() {
         surface_texture.status = native::WGPUSurfaceGetCurrentTextureStatus_Error;
         return;
     }
+    let (device, usage, width, height, format, view_formats) =
+        config.expect("surface configuration was checked");
     if let Some(hal) = surface
         .hal
         .lock()
         .expect("surface HAL lock is not poisoned")
         .as_mut()
     {
-        let Some((device, usage, width, height, format, view_formats)) = surface
-            .configured
-            .lock()
-            .expect("surface configuration lock is not poisoned")
-            .as_ref()
-            .map(|config| {
-                (
-                    Arc::clone(&config.device),
-                    config.usage,
-                    config.width,
-                    config.height,
-                    config.format,
-                    config.view_formats.clone(),
-                )
-            })
-        else {
-            surface_texture.status = native::WGPUSurfaceGetCurrentTextureStatus_Error;
-            return;
-        };
-        if surface.is_error {
-            surface_texture.status = native::WGPUSurfaceGetCurrentTextureStatus_Error;
-            return;
-        }
         match hal.acquire_next_texture() {
             Ok(hal_texture) => {
                 let descriptor = core::TextureDescriptor {

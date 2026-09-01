@@ -6,6 +6,16 @@ use crate::{
     YAWGPU_EXTERNAL_TEXTURE_ROTATION_ROTATE_90_DEGREES,
 };
 
+wgpu_handle_exports!(
+    refcount_and_label:
+    WGPUExternalTextureImpl,
+    native::WGPUExternalTexture,
+    "WGPUExternalTexture",
+    wgpuExternalTextureAddRef,
+    wgpuExternalTextureRelease,
+    wgpuExternalTextureSetLabel
+);
+
 /// Creates an external texture on a device.
 ///
 /// # Safety
@@ -51,46 +61,6 @@ pub unsafe extern "C" fn yawgpuDeviceCreateExternalTexture(
             std::ptr::null()
         }
     }
-}
-
-/// Sets the debug label for an external texture.
-///
-/// # Safety
-///
-/// `external_texture` must be a non-null live yawgpu external texture handle.
-/// Returns WGPU external texture set label.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuExternalTextureSetLabel(
-    external_texture: native::WGPUExternalTexture,
-    label: native::WGPUStringView,
-) {
-    let external_texture = borrow_handle(external_texture, "WGPUExternalTexture");
-    *external_texture
-        .label
-        .lock()
-        .expect("label lock must not poison") = label_from_string_view(label);
-}
-
-/// Adds one owned reference to an external texture handle.
-///
-/// # Safety
-///
-/// `external_texture` must be a non-null live yawgpu external texture handle.
-/// Returns WGPU external texture add ref.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuExternalTextureAddRef(external_texture: native::WGPUExternalTexture) {
-    add_ref_handle(external_texture, "WGPUExternalTexture");
-}
-
-/// Releases one owned reference to an external texture handle.
-///
-/// # Safety
-///
-/// `external_texture` must be a non-null live yawgpu external texture handle.
-/// Returns WGPU external texture release.
-#[no_mangle]
-pub unsafe extern "C" fn wgpuExternalTextureRelease(external_texture: native::WGPUExternalTexture) {
-    release_handle(external_texture, "WGPUExternalTexture");
 }
 
 fn map_external_texture_descriptor(
