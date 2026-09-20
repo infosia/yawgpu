@@ -19,6 +19,13 @@ below and refined as P15.x slices land.
   Wayland, WGL, WebGL, and Emscripten are explicitly **out of scope**
   for Phase 15. The EGL code path is a subset of wgpu-hal/src/gles/egl.rs
   trimmed to the two target platforms.
+  **Post-COMPLETE amendment (2026-09-21):** headless Linux EGL is in
+  practice a *verification* host for this backend — the `e2e_gles_*`
+  suite runs there — and on a machine whose GPU Mesa cannot drive, the
+  default-display path silently lands on Mesa's software rasterizer.
+  "Linux EGL device selection" below specs a Linux-only display
+  cascade to fix that. Linux **windowed** presentation (X11 / Wayland)
+  stays out of scope.
 - **Tier 2 / experimental.** `--features gles` is opt-in; never in
   `default`. No runtime marker is added (no `AdapterInfo` suffix, no
   `log::warn!`, no C `#define`) — the cargo feature is the experimental
@@ -264,6 +271,7 @@ the owning slice's review.
 | GLSL binding numbers (all classes) | `glsl_binding_info` (yawgpu-core) assigns **each resource class its own dense sequence sorted by `(group, binding)`** and forces `dst_group = 0`, so WGSL groups collapse into GL's flat per-class binding spaces without collisions. UBO / SSBO / storage-image remaps are handed to the HAL too, because those GL calls consume the binding number directly; sampled textures and samplers bind through Tint's linked uniform names but still participate in the remap so combined-sampler lowering stays deterministic across groups. This is the **linear binding remap** that multi-bind-group support was waiting on. Without an explicit remap, Tint's `GenerateBindings` renumbers sequentially in declaration order (a `@binding(3)` buffer became `binding = 1`), desyncing GLSL from the HAL. The naga-era `_block_N` name-parse remap was deleted. *(Earlier revisions of this row described an "identity `BindingRemap`" via `tint_bindings_for_glsl`; both the identity property and that function name are obsolete.)* | ☑ (R6 + multi-group remap; pinned by generated-GLSL unit tests in yawgpu-tint/-core) |
 | `textureNumLevels` / `textureNumSamples` (`texture_builtins_from_uniform`) | WIRED (T-G17 exposed the polyfill UBO binding through the shim; c06e516 populates each slot from Tint's `ubo_contents` layout, mapping post-remap binding → WGSL group/binding, filled by the queue with mip-level / sample count). **Cross-stage slot assignment fixed (2026-07-08):** the shim generates GLSL per stage, so each stage's `ubo_contents` was packed from offset 0 independently — vertex and fragment then collided at the same UBO offset for *different* textures (core `merge_texture_metadata_slots` raised `unexpected internal error`, 64 CTS fails in `capability_checks,limits,maxSampledTexturesPerShaderStage`). Fix: the shim sets `ubo_contents[i].offset = resolved_binding.binding` (both the remapped and empty-remaps paths), making the offset a deterministic function of the pipeline-stable resolved binding — vertex and fragment independently compute disjoint offsets for different textures and identical offsets for a shared one. Mirrors Dawn's per-pipeline `EmulatedTextureBuiltinRegistrar` (keyed on FlatBindingIndex; `opengl/PipelineGL.cpp:222-246`) without threading a shared registrar across the two per-stage shim calls. | ☑ (T-G17 + c06e516 + cross-stage offset fix; pinned by yawgpu-tint generated-GLSL test + real-EGL cross-stage HAL test) |
 | Context backend (Windows) | Default: EGL (`libEGL.dll` ⇒ ANGLE platform-display cascade through Vulkan → D3D11). Opt-in fallback: WGL (`opengl32.dll` + `WGL_EXT_create_context_es2_profile`) selected via `YAWGPU_GLES_BACKEND=wgl`, or programmatically through `YaWGPUGlesContextBackend` (`YAWGPU_STYPE_GLES_CONTEXT_BACKEND`) chained onto `WGPUInstanceDescriptor.nextInChain`. Resolution is chain `EGL`/`WGL` value > env var > default EGL; `DEFAULT` defers to the env var, WGL on non-Windows falls back to EGL, and the chain entry is ignored when the resolved instance backend is not GLES. Both routes converge on the same `glow::Context` API below the make-current seam; `GlesInstanceInner` / `GlesAdapter` / `GlesDeviceInner` / `GlesSurfaceInner` are static enums (`Egl(...)` / `Wgl(...)`) per CLAUDE.md "no `dyn Trait`". WGL surface (HWND): `ChoosePixelFormat`/`SetPixelFormat` with the same descriptor as the helper HWND (shared HGLRC), `wglMakeCurrent(surface.hdc, hglrc)` + glow blit + `SwapBuffers(hdc)` for present; `RestoreCurrent` Drop guard re-binds the helper HDC. | ☑ (P15.6 EGL + post-COMPLETE WGL context + post-COMPLETE WGL surface slices + programmatic override; WGL verified on `OpenGL ES 3.2 NVIDIA 595.95` — **15/15 e2e green, re-run 2026-08-08 after the command-stream move (`88cfe58`)** — + `examples/triangle` runs 60 frames clean) |
+| Context display (Linux) | Today: `eglGetDisplay(EGL_DEFAULT_DISPLAY)` unconditionally on every non-Windows target. Correct on Android; on a desktop Linux host libglvnd hands it to Mesa, which silently resolves to the **software rasterizer** (`llvmpipe`) when it cannot drive the installed GPU — invisible in the test log, because the adapter name is a constant. Spec'd fix: a Linux-only `EGL_PLATFORM_DEVICE_EXT` cascade over `eglQueryDevicesEXT` that prefers a **validated** hardware device and falls back to the default display, plus a `YAWGPU_GLES_EGL_DEVICE` override and renderer strings in the adapter name. See "Linux EGL device selection" below. | ◐ **spec'd 2026-09-21 — NOT implemented** |
 | Surface (Android) | `eglCreateWindowSurface(ANativeWindow*)` via `GlesInstance::create_surface_from_android_native_window`. Reuses the existing `choose_config` (RGBA8 + GLES3 + PBUFFER_BIT). | ☑ (P15.6; code path implemented; manual visual verification via Android-side example) |
 | Surface (Windows ANGLE) | `eglCreateWindowSurface(HWND)` via `GlesInstance::create_surface_from_windows_hwnd`. ANGLE accepts the pbuffer-capable config for window surfaces too. | ☑ (P15.6; manual visual verification via `examples/triangle`) |
 | Present | Back-buffer (`GlesTexture` allocated at `configure()` with `RENDER_ATTACHMENT \| COPY_SRC`) blitted via transient read-FBO + `glBlitFramebuffer` to default FBO, then `eglSwapBuffers`. `RestoreCurrent` Drop guard re-binds the pbuffer after swap (even on error). | ☑ (P15.6) |
@@ -275,6 +283,242 @@ the owning slice's review.
 | Framebuffer fetch (`@color(N)`) | `HalError` ("GLES render-pass framebuffer fetch is unsupported") when the stream carries any `framebuffer_fetch_color_slots`. Unreachable through core today because the slots are only populated on the multi-subpass path, which GLES never advertises. Note GLES *does* have `EXT_shader_framebuffer_fetch` / `EXT_shader_pixel_local_storage` — mappable in principle, unimplemented. | ✗ (Tier-2; `88cfe58` turned a silently-ignored field into an explicit rejection) |
 | `tiled` feature | Not advertised on GLES, and rejected at three layers: core never inserts the feature (`tiled_features_supported` matches only Metal/Vulkan, so `tiled_capabilities()` is all-zero), `HalDevice::create_subpass_render_pipeline`'s GLES arm returns `BackendUnavailable` unconditionally, and `HalCopy::SubpassRenderPass` submission returns `QueueSubmissionFailed` ("GLES subpass render pass submission is unsupported"). The HAL arm consumes none of its arguments — which is why a `gles`-only build broke until `6f991e7` re-keyed the unused-parameter suppression on `not(any(metal, vulkan))`. | locked ✗ |
 | `shader-passthrough` feature | Not advertised on GLES; yawgpu.h passthrough APIs reject GLES device | locked ✗ |
+
+## Linux EGL device selection (post-COMPLETE addition)
+
+> **Status: SPEC ONLY — spec'd 2026-09-21, not implemented.** Nothing in
+> this section is in the source yet. The mapping-matrix row "Context
+> display (Linux)" carries the same marker. Implementation is an L1–L4
+> handoff to the coding agent (slices below); this file is the contract
+> it is reviewed against.
+
+### Problem (measured, 2026-09-21)
+
+The `cfg(not(windows))` arm of `get_and_initialize_display`
+(`yawgpu-hal/src/gles/egl.rs`) calls `eglGetDisplay(EGL_DEFAULT_DISPLAY)`
+unconditionally — correct on Android, where the platform EGL maps the
+default display to the device's own GPU driver, but wrong on a desktop
+Linux host. On the Linux dev host (NVIDIA GeForce RTX 5060 Ti / driver
+595.91.07, plus an AMD Raphael iGPU; Ubuntu, Mesa 26.0.8) libglvnd
+dispatches the default display to the **Mesa** EGL vendor, Mesa cannot
+drive the NVIDIA card, and the display silently resolves to the
+**software rasterizer**:
+
+```
+libEGL warning: pci id for fd 4: 10de:2d04, driver (null)
+libEGL warning: egl: failed to create dri2 screen
+EGL 1.5 vendor=Mesa Project
+GL_VERSION  = OpenGL ES 3.2 Mesa 26.0.8-1ubuntu0.3
+GL_RENDERER = llvmpipe (LLVM 21.1.8, 256 bits)
+```
+
+The whole `e2e_gles_*` suite (15 tests) passes on that display, and
+`GlesAdapter::name()` returns the constant `"yawgpu GLES Adapter (EGL)"`,
+so **the fallback is invisible in the test log** — a "real-GPU GLES run
+on Linux" is today indistinguishable from a software run. Two
+consequences:
+
+1. Linux GLES real-GPU verification is not actually happening; the e2e
+   suite is exercising llvmpipe.
+2. A GLES CTS sweep on this host would measure llvmpipe's conformance,
+   not hardware's. That matters now because the Tier-2 catalogue at the
+   end of this file was measured on crocus/Haswell — a host that no
+   longer exists — and several of its entries are hardware-specific
+   (`GL_MAX_VERTEX_IMAGE_UNIFORMS = 0` on crocus; **16** on this host's
+   radeonsi, **32** on llvmpipe).
+
+Hardware EGL displays *are* reachable on the same host.
+`eglQueryDevicesEXT` returns 4 devices:
+
+| idx | DRM node | device extensions | `eglInitialize` |
+|---:|---|---|---|
+| 0 | `/dev/dri/card1` | `EGL_NV_device_cuda EGL_EXT_device_drm …` | ok — vendor **NVIDIA** |
+| 1 | `/dev/dri/card1` | `EGL_EXT_device_drm …` | fails `EGL_NOT_INITIALIZED` (0x3001) — Mesa's view of the NVIDIA node |
+| 2 | `/dev/dri/card2` | `EGL_EXT_device_drm …` | ok — vendor Mesa (AMD radeonsi) |
+| 3 | — | `EGL_MESA_device_software` | ok — vendor Mesa (llvmpipe) |
+
+The Mesa-driven AMD iGPU is additionally reachable today through the
+driver-level `DRI_PRIME=1` env var (verified: `radeonsi,
+raphael_mendocino`, `e2e_gles_*` 14/14 green), but that route only ever
+reaches Mesa devices — never the NVIDIA one — and is not something
+yawgpu controls.
+
+### Decisions
+
+**D1 — Linux-only display cascade.** Gated `#[cfg(target_os = "linux")]`,
+which excludes Android by construction (Rust's `target_os = "android"`
+is a distinct value). The Windows/ANGLE arm and the existing
+default-display arm are untouched. Order:
+
+1. Read the client (no-display) extension string,
+   `eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS)`. Require
+   `EGL_EXT_device_enumeration` (or `EGL_EXT_device_base`) **and**
+   `EGL_EXT_platform_device`. Either absent → step 4, so an old or
+   minimal EGL behaves exactly as today.
+2. `eglQueryDevicesEXT` → for each device read its own extension string
+   (`eglQueryDeviceStringEXT(dev, EGL_EXTENSIONS)`); a device
+   advertising `EGL_MESA_device_software` is **software**, everything
+   else is **hardware**.
+3. For each hardware device, in enumeration order:
+   `eglGetPlatformDisplayEXT(EGL_PLATFORM_DEVICE_EXT, dev, NULL)` →
+   `eglInitialize` → **validate per D2**. Accept the first that
+   validates; on any failure emit one `yawgpu-gles:` diagnostic and
+   continue to the next device.
+4. Fallback: `eglGetDisplay(EGL_DEFAULT_DISPLAY)` + `eglInitialize` —
+   today's code path, unchanged.
+5. Still nothing → `None` (→ `HalError::BackendUnavailable`), unchanged.
+
+The software device is **never** selected by the cascade in step 3. It
+remains reachable through the default display (step 4 — which is what
+happens today) and through the explicit override (D3). The principle:
+never silently *downgrade* below what the platform default would give,
+and never silently *stay* on software when hardware is available.
+
+A display that `eglInitialize`d but then failed validation is left
+initialized and simply not used — consistent with the existing rule in
+`instance.rs` that yawgpu never calls `eglTerminate` (EGL displays are
+process-global; terminating one would kill it under any other live
+`GlesInstance`).
+
+**D2 — per-candidate validation.** A candidate display is accepted only
+if all of the following succeed, in order: `eglInitialize`;
+`eglBindAPI(EGL_OPENGL_ES_API)`; `choose_config` with the existing
+pbuffer + `EGL_OPENGL_ES3_BIT` attribute list from
+`gles::instance::choose_config`; and the existing throwaway-probe path
+(`query_egl_adapter_caps` — ES 3.1 context + 1×1 pbuffer, already run at
+adapter-enumeration time) on that display/config pair.
+
+Rationale: a successful `eglInitialize` is not proof of a usable
+headless ES 3.1 context (device 1 in the table above initializes
+differently from device 0 on the same DRM node). Accepting a display
+that later fails `create_device` would convert today's *soft* software
+fallback into a *hard* failure — strictly worse. Reuse the existing
+probe; do not add a second probe implementation. If reuse requires
+hoisting `query_egl_adapter_caps` so it can run before
+`EglInstanceState` is built, hoist it.
+
+**D3 — override: `YAWGPU_GLES_EGL_DEVICE`.** Independent of
+`YAWGPU_GLES_BACKEND` (which selects EGL vs WGL); ignored when the
+resolved context backend is not EGL, and on every non-Linux target.
+
+| value | behaviour |
+|---|---|
+| unset / `""` / `auto` | the D1 cascade (default) |
+| `default` | skip the cascade, use `eglGetDisplay(EGL_DEFAULT_DISPLAY)` — today's behaviour, kept as an escape hatch |
+| `software` | the first device advertising `EGL_MESA_device_software` |
+| `<n>` (decimal) | pin `eglQueryDevicesEXT` index `n` |
+| anything else | `yawgpu-gles:` diagnostic, then `auto` |
+
+An explicit ask that cannot be satisfied (index out of range, no
+software device, candidate fails D2 validation) is **not** silently
+substituted with another device: emit a `yawgpu-gles:` diagnostic naming
+the ask, then fall through to the default display (step 4). This mirrors
+`parse_backend`'s existing unknown-value behaviour — diagnose, degrade
+to the documented default, never panic.
+
+**No chain entry.** `YaWGPUGlesContextBackend` exists because Windows
+applications need a programmatic EGL/WGL switch at instance creation.
+Linux device selection is a verification-host concern and the automatic
+behaviour is the right one for applications, so **no**
+`YaWGPUGlesEglDevice` chain struct is added. Revisit only if a
+downstream integrator asks; recorded here so the slice does not invent
+one.
+
+**D4 — observability (required, not optional).** The constant adapter
+name is what hid the software fallback, so the fix is not verifiable
+without this. `GlesAdapterCaps` gains `renderer: String` and
+`version: String`, captured inside the caps probe that already exists
+(no extra context, no extra make-current). `GlesAdapter::name()` then
+returns a string that carries them, e.g.
+`"yawgpu GLES Adapter (EGL) — llvmpipe (LLVM 21.1.8, 256 bits) / OpenGL ES 3.2 Mesa 26.0.8-1ubuntu0.3"`.
+The strings are owned by the adapter, so `name()` keeps its `-> &str`
+signature. This applies to **all** platforms including the WGL arm — the
+same blindness exists there. The selection path additionally emits one
+`yawgpu-gles:`-prefixed line naming the chosen device index and
+renderer, consistent with the surrounding bring-up diagnostics.
+
+Impact: this string reaches `wgpuAdapterGetInfo` through
+`AdapterImpl::name()`. Dawn reports the driver's real renderer string in
+the same field, so this moves *toward* the oracle rather than away from
+it. Any test asserting a fixed GLES adapter name is updated in the same
+commit (`e2e_gles_basic::gles_adapter_name_is_present` asserts only
+non-empty; grep for others before landing).
+
+**D5 — headless-only constraint.** An `EGL_PLATFORM_DEVICE_EXT` display
+is headless: it cannot back `eglCreateWindowSurface`. Linux windowed
+presentation is out of scope for this block (`create_surface_from_*` has
+Android and Windows constructors only; X11 / Wayland remain out of
+scope), so the cascade cannot regress a surface path that does not
+exist. **If Linux windowed presentation is ever added, the cascade must
+be skipped — or the device display rejected — whenever a window surface
+is requested.** Recorded here so a future surface slice does not
+silently inherit a headless display.
+
+### Slices
+
+- **L1 — device-choice parser (no GPU needed).**
+  `pub enum EglDeviceChoice { Auto, Default, Software, Index(u32) }` +
+  `parse_egl_device(Option<&str>) -> EglDeviceChoice` +
+  `egl_device_from_env()`, in `gles/instance.rs` beside `parse_backend`.
+  Inline `#[cfg(test)] mod tests` per CLAUDE.md principle 1, covering:
+  unset, `""`, `auto`, `default`, `software`, `"0"`, `"3"`, `"99"`
+  (→ `Index(99)`; range is a runtime concern, not a parse error),
+  `"-1"`, `"nvidia"` → documented fallback. `///` doc comments on every
+  new public item.
+  *Acceptance:* unit tests green on Noop, no EGL required.
+- **L2 — cascade.** D1 + D2 + D3 wired into
+  `get_and_initialize_display`. Non-Linux behaviour byte-identical.
+  *Acceptance:* `cargo build -p yawgpu --features gles` and
+  `cargo clippy --workspace --all-targets --features gles -- -D warnings`
+  clean on Linux; the Windows/Android arms show no diff.
+- **L3 — observability.** D4.
+  *Acceptance:* adapter name carries `GL_RENDERER` / `GL_VERSION` on the
+  dev host; affected assertions updated in the same commit.
+- **L4 — verification + ledger.** The user runs
+  `cargo test -p yawgpu --features gles --test e2e_gles_<area> -- --ignored`
+  on the Linux host and records in a new
+  `specs/tracking/gles-linux-device-selection.md`: selected device index,
+  `GL_RENDERER`, `GL_VERSION`, and pass counts for each of `auto`,
+  `YAWGPU_GLES_EGL_DEVICE=default`, `YAWGPU_GLES_EGL_DEVICE=software`,
+  and `DRI_PRIME=1`.
+  *Acceptance:* `auto` selects a hardware device and all 15 e2e tests
+  stay green on it.
+
+### Acceptance criteria (block level)
+
+1. On the Linux dev host with no env vars set, the GLES adapter resolves
+   to a **hardware** EGL device; the recorded `GL_RENDERER` is not
+   `llvmpipe`.
+2. `e2e_gles_{basic,buffer,texture,compute,render,smoke}` — **15/15
+   green** under `--ignored` on that device.
+3. `YAWGPU_GLES_EGL_DEVICE=default` reproduces today's behaviour exactly
+   (llvmpipe on this host), proving the escape hatch works.
+4. Android and Windows (ANGLE + WGL) execute no new code — the cascade
+   is `cfg(target_os = "linux")`-gated.
+5. Noop `cargo test --workspace` and
+   `cargo clippy --workspace --all-targets -- -D warnings` green, with
+   and without `--features gles`.
+6. Every new public item has a `///` doc comment and a direct inline
+   unit test (CLAUDE.md principle 1 + code conventions).
+7. No new panic path: every EGL failure in the cascade is a diagnostic
+   plus continue/fall-through — no `unwrap` / `expect` (CLAUDE.md
+   principle 3).
+8. Phase Review clean (fresh no-context subagent over the cumulative
+   diff; no open CRITICAL/MAJOR).
+
+### Out of scope for this addition
+
+- Enumerating every EGL device as a separate `GlesAdapter`. GLES
+  enumerates exactly one adapter today; multi-adapter GLES is its own
+  block if ever wanted.
+- X11 / Wayland window surfaces and any Linux GLES presentation path
+  (see D5).
+- Changing the Windows ANGLE cascade or the WGL fallback.
+- Re-measuring the crocus-era Tier-2 catalogue below. Its host is gone
+  and several entries are hardware-specific, so the numbers need a
+  re-sweep — but that re-sweep is **blocked on this fix**: sweeping the
+  software device would produce a third set of numbers describing
+  neither the old host nor real hardware.
 
 ## Open questions (resolve per slice, record divergences)
 
