@@ -185,7 +185,9 @@ int main(int argc, char **argv) {
             .userdata1 = &map_state,
             .userdata2 = NULL,
         });
-    yawgpu_wait_for_future(context.instance, map_future);
+    if (!yawgpu_wait_for_future(context.instance, map_future)) {
+        fprintf(stderr, "readback map future did not complete in time\n");
+    }
 
     int exit_status = EXIT_SUCCESS;
     bool mapped = false;

@@ -293,7 +293,9 @@ static int run_offscreen(YawgpuContext *ctx, WGPUQueue queue,
                                     .userdata1 = &ms};
     WGPUFuture fut = wgpuBufferMapAsync(readback, WGPUMapMode_Read, 0,
                                         (size_t)buffer_size, cb);
-    yawgpu_wait_for_future(ctx->instance, fut);
+    if (!yawgpu_wait_for_future(ctx->instance, fut)) {
+        fprintf(stderr, "buffer map future did not complete in time\n");
+    }
     if (!ms.called || ms.status != WGPUMapAsyncStatus_Success) {
         fprintf(stderr, "buffer map failed\n");
         return 1;

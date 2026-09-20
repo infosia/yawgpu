@@ -282,7 +282,9 @@ static bool capture_app_run(CaptureApp *app) {
             .userdata1 = &map_state,
             .userdata2 = NULL,
         });
-    yawgpu_wait_for_future(app->context.instance, map_future);
+    if (!yawgpu_wait_for_future(app->context.instance, map_future)) {
+        fprintf(stderr, "readback map future did not complete in time\n");
+    }
     if (!map_state.called || map_state.status != WGPUMapAsyncStatus_Success) {
         fprintf(stderr, "readback map did not complete successfully\n");
         return false;

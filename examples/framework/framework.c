@@ -6,6 +6,8 @@
 
 #include "framework.h"
 
+#include <time.h>
+
 // Captures the result of an async wgpuInstanceRequestAdapter callback.
 typedef struct RequestAdapterState {
     WGPUAdapter adapter;
@@ -175,15 +177,78 @@ WGPUInstance yawgpu_instance_create(void) {
     return wgpuCreateInstance(&descriptor);
 }
 
+// Upper bound on how long yawgpu_wait_for_future keeps polling. Generous
+// compared with the Rust test harness's 5s because an example waits on real
+// GPU work (a full render + texture-to-buffer copy), not just on validation.
+#define YAWGPU_FUTURE_WAIT_TIMEOUT_SECONDS 10.0
+// Fallback bound, used only if the platform refuses to report a wall clock:
+// large enough that real GPU work still finishes, finite so a future that
+// never completes cannot hang the example.
+#define YAWGPU_FUTURE_WAIT_MAX_PASSES 100000000u
+
+// Reads a wall clock, in seconds, for the deadline arithmetic below. C11's
+// timespec_get(TIME_UTC) is used rather than POSIX clock_gettime() because it
+// is the one clock the MSVC, Apple and glibc toolchains all provide under the
+// examples' strict `-std=c17` (C_EXTENSIONS OFF) build. Returns false when the
+// platform declines to supply a time.
+static bool wall_clock_seconds(double *seconds) {
+    struct timespec now;
+    if (timespec_get(&now, TIME_UTC) != TIME_UTC) {
+        return false;
+    }
+    *seconds = (double)now.tv_sec + (double)now.tv_nsec * 1e-9;
+    return true;
+}
+
 // Blocks until `future` is done by processing queued events and then waiting
 // on it. This is how the examples turn async operations into synchronous code.
-void yawgpu_wait_for_future(WGPUInstance instance, WGPUFuture future) {
-    wgpuInstanceProcessEvents(instance);
-    WGPUFutureWaitInfo wait_info = {
-        .future = future,
-        .completed = 0,
-    };
-    (void)wgpuInstanceWaitAny(instance, 1, &wait_info, 0);
+// Returns true if the future completed, false if the wait errored or hit the
+// deadline — so callers can tell "the operation failed" from "we gave up
+// waiting" instead of inferring it from their own callback flag.
+//
+// A single non-blocking pass is *not* enough: wgpuInstanceWaitAny() with a
+// zero timeout is a poll, and since queue submission became asynchronous a
+// future gated on GPU completion legitimately reports "not completed" until
+// the submission it depends on finishes. So poll in a loop, the way a real
+// consumer (and the Rust test harness) does, rather than assuming the first
+// pass already observes the completion.
+bool yawgpu_wait_for_future(WGPUInstance instance, WGPUFuture future) {
+    double start = 0.0;
+    bool clock_available = wall_clock_seconds(&start);
+    unsigned int passes = 0;
+    for (;;) {
+        // ProcessEvents first: AllowProcessEvents callbacks only fire from
+        // this call, so it is what turns backend progress into a completed
+        // future before we look at the future's state.
+        wgpuInstanceProcessEvents(instance);
+        WGPUFutureWaitInfo wait_info = {
+            .future = future,
+            .completed = 0,
+        };
+        WGPUWaitStatus status = wgpuInstanceWaitAny(instance, 1, &wait_info, 0);
+        if (status == WGPUWaitStatus_Error) {
+            // Terminal: the wait itself is invalid (e.g. an unknown future),
+            // so retrying until the deadline would only stall the example.
+            fprintf(stderr, "[yawgpu] waiting on a future failed\n");
+            return false;
+        }
+        if (wait_info.completed) {
+            return true;
+        }
+        // Not done yet. Deliberately no sleep anywhere in this loop: a future
+        // that is already complete — every future on the Noop backend — was
+        // returned above on the first pass, so the immediate path keeps its
+        // original latency, and the examples are single-threaded, which makes
+        // this loop the only thing driving the event loop forward.
+        double now = 0.0;
+        if (clock_available && wall_clock_seconds(&now)) {
+            if (now - start >= YAWGPU_FUTURE_WAIT_TIMEOUT_SECONDS) {
+                return false;
+            }
+        } else if (++passes >= YAWGPU_FUTURE_WAIT_MAX_PASSES) {
+            return false;
+        }
+    }
 }
 
 WGPUAdapter yawgpu_request_adapter(WGPUInstance instance) {
@@ -196,7 +261,9 @@ WGPUAdapter yawgpu_request_adapter(WGPUInstance instance) {
         .userdata2 = NULL,
     };
     WGPUFuture future = wgpuInstanceRequestAdapter(instance, NULL, callback_info);
-    yawgpu_wait_for_future(instance, future);
+    if (!yawgpu_wait_for_future(instance, future)) {
+        fprintf(stderr, "[yawgpu] adapter request did not complete\n");
+    }
     return state.adapter;
 }
 
@@ -215,7 +282,9 @@ WGPUDevice yawgpu_request_device(WGPUInstance instance, WGPUAdapter adapter) {
         .userdata2 = NULL,
     };
     WGPUFuture future = wgpuAdapterRequestDevice(adapter, &descriptor, callback_info);
-    yawgpu_wait_for_future(instance, future);
+    if (!yawgpu_wait_for_future(instance, future)) {
+        fprintf(stderr, "[yawgpu] device request did not complete\n");
+    }
     return state.device;
 }
 

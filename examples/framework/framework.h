@@ -87,8 +87,10 @@ WGPUShaderModule yawgpu_load_wgsl_shader(WGPUDevice device, const char *path);
 // Creates a buffer (mappedAtCreation) and memcpy's `contents` into it.
 WGPUBuffer yawgpu_create_buffer_init(WGPUDevice device,
                                      const YawgpuBufferInitDescriptor *descriptor);
-// Pumps the instance's event loop until `future` completes.
-void yawgpu_wait_for_future(WGPUInstance instance, WGPUFuture future);
+// Pumps the instance's event loop until `future` completes, the wait errors,
+// or an internal deadline expires. Returns true only when the future actually
+// completed, so a caller can tell a failed operation from a wait that gave up.
+bool yawgpu_wait_for_future(WGPUInstance instance, WGPUFuture future);
 // Prints the adapter's vendor/architecture/device/backend info.
 void yawgpu_print_adapter_info(WGPUAdapter adapter);
 
