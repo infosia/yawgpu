@@ -75,22 +75,24 @@ impl GlesInstance {
     #[must_use]
     pub fn enumerate_adapters(&self) -> Vec<GlesAdapter> {
         match self.inner.as_ref() {
-            GlesInstanceInner::Egl(egl_state) => match choose_config(egl_state)
-                .and_then(|config| GlesAdapter::new_egl(Arc::clone(&self.inner), config))
-            {
-                Ok(adapter) => vec![adapter],
-                Err(err) => {
-                    // Diagnostic: an empty enumeration is a legitimate
-                    // spec-level "no adapter" outcome for callers, but on the
-                    // EGL path it always stems from an EGL failure
-                    // (`choose_config` prints the raw EGL error); make the
-                    // mapping visible instead of silently returning empty.
-                    eprintln!(
-                        "yawgpu-gles: enumerate_adapters: choose_config failed ({err:?}); returning no adapters"
-                    );
-                    Vec::new()
+            GlesInstanceInner::Egl(egl_state) => {
+                match choose_config(&egl_state.egl, egl_state.display)
+                    .and_then(|config| GlesAdapter::new_egl(Arc::clone(&self.inner), config))
+                {
+                    Ok(adapter) => vec![adapter],
+                    Err(err) => {
+                        // Diagnostic: an empty enumeration is a legitimate
+                        // spec-level "no adapter" outcome for callers, but on the
+                        // EGL path it always stems from an EGL failure
+                        // (`choose_config` prints the raw EGL error); make the
+                        // mapping visible instead of silently returning empty.
+                        eprintln!(
+                            "yawgpu-gles: enumerate_adapters: choose_config failed ({err:?}); returning no adapters"
+                        );
+                        Vec::new()
+                    }
                 }
-            },
+            }
             #[cfg(windows)]
             GlesInstanceInner::Wgl(_) => match GlesAdapter::new_wgl(Arc::clone(&self.inner)) {
                 Ok(adapter) => vec![adapter],
@@ -135,7 +137,7 @@ impl GlesInstance {
     fn create_window_surface(&self, native: *mut c_void) -> Result<GlesSurface, HalError> {
         match self.inner.as_ref() {
             GlesInstanceInner::Egl(egl_state) => {
-                let config = choose_config(egl_state)?;
+                let config = choose_config(&egl_state.egl, egl_state.display)?;
                 let surface = unsafe {
                     egl_state.egl.create_window_surface(
                         egl_state.display,
@@ -183,7 +185,14 @@ impl GlesInstance {
     }
 }
 
-fn choose_config(instance: &EglInstanceState) -> Result<EglConfig, HalError> {
+/// Chooses the pbuffer-capable ES 3 RGBA8 `EGLConfig` used by every GLES
+/// adapter on the EGL path.
+///
+/// Takes the loaded EGL instance and an already-initialized display rather
+/// than an [`EglInstanceState`] so that the Linux device cascade in
+/// `super::egl` can run it against a candidate display before any
+/// `EglInstanceState` exists.
+pub(super) fn choose_config(egl: &EglInstance, display: EglDisplay) -> Result<EglConfig, HalError> {
     let attribs = [
         egl::SURFACE_TYPE,
         egl::PBUFFER_BIT,
@@ -199,9 +208,7 @@ fn choose_config(instance: &EglInstanceState) -> Result<EglConfig, HalError> {
         8,
         egl::NONE,
     ];
-    instance
-        .egl
-        .choose_first_config(instance.display, &attribs)
+    egl.choose_first_config(display, &attribs)
         .map_err(|err| {
             // Diagnostic: surface the raw EGL error (e.g. EGL_NOT_INITIALIZED
             // when the display was terminated out from under us), consistent
@@ -238,9 +245,21 @@ pub(super) fn parse_backend(value: Option<&str>) -> BackendChoice {
     }
 }
 
+/// Reads `YAWGPU_GLES_EGL_DEVICE` and parses it into an [`EglDeviceChoice`],
+/// mirroring [`backend_from_env`]. An unset variable yields
+/// [`EglDeviceChoice::Auto`], i.e. the default cascade.
+#[cfg(target_os = "linux")]
+pub(super) fn egl_device_from_env() -> EglDeviceChoice {
+    parse_egl_device(std::env::var("YAWGPU_GLES_EGL_DEVICE").ok().as_deref())
+}
+
 /// Selects which EGL display the Linux GLES context backend initializes.
+///
+/// Linux-only: the cascade that consumes it is gated on
+/// `target_os = "linux"`, so the type would be dead code elsewhere.
+#[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EglDeviceChoice {
+pub(super) enum EglDeviceChoice {
     /// Automatic selection: prefer a hardware EGL device, then fall back to
     /// the platform default display.
     Auto,
@@ -266,7 +285,8 @@ pub enum EglDeviceChoice {
 /// concern, not a parse error, so an out-of-range index still parses. Any
 /// other value emits one diagnostic and degrades to
 /// [`EglDeviceChoice::Auto`] rather than failing.
-pub fn parse_egl_device(value: Option<&str>) -> EglDeviceChoice {
+#[cfg(target_os = "linux")]
+pub(super) fn parse_egl_device(value: Option<&str>) -> EglDeviceChoice {
     match value {
         Some("auto") | Some("") | None => EglDeviceChoice::Auto,
         Some("default") => EglDeviceChoice::Default,
@@ -304,6 +324,7 @@ mod tests {
         assert_eq!(parse_backend(Some("wgl")), BackendChoice::Egl);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn parse_egl_device_defaults_to_auto() {
         assert_eq!(parse_egl_device(None), EglDeviceChoice::Auto);
@@ -311,6 +332,7 @@ mod tests {
         assert_eq!(parse_egl_device(Some("auto")), EglDeviceChoice::Auto);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn parse_egl_device_handles_named_choices() {
         assert_eq!(parse_egl_device(Some("default")), EglDeviceChoice::Default);
@@ -320,6 +342,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn parse_egl_device_accepts_decimal_indices() {
         assert_eq!(parse_egl_device(Some("0")), EglDeviceChoice::Index(0));
@@ -328,6 +351,7 @@ mod tests {
         assert_eq!(parse_egl_device(Some("99")), EglDeviceChoice::Index(99));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn parse_egl_device_falls_back_to_auto_on_unknown_values() {
         assert_eq!(parse_egl_device(Some("-1")), EglDeviceChoice::Auto);

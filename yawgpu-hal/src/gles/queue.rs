@@ -8334,16 +8334,16 @@ mod tests {
             })])
             .expect("GLES storage-texture write dispatch must succeed");
 
-        assert_eq!(
-            read_texture_bytes(
+        assert_quarter_half_three_quarters_rgba8(
+            &read_texture_bytes(
                 &device,
                 texture,
                 crate::HalTextureFormat::Rgba8Unorm,
                 16,
                 8,
-                2
+                2,
             ),
-            [64, 128, 191, 255].repeat(4)
+            4,
         );
     }
 
@@ -8805,6 +8805,24 @@ mod tests {
             swizzle: crate::HalTextureComponentSwizzle::default(),
             storage_access: Some(access),
         }
+    }
+
+    /// Asserts an RGBA8Unorm readback of the shader constant
+    /// `vec4(0.25, 0.5, 0.75, 1.0)`, repeated `texels` times.
+    ///
+    /// 0.25 and 0.75 land on 63.75 / 191.25 and round unambiguously to 64 /
+    /// 191, but 0.5 lands on the exact tie 127.5, and GLES leaves the
+    /// tie-break direction implementation-defined (GLES 3.1 §2.3.4.1: the
+    /// conversion is round-to-nearest, ties unspecified). Mesa rounds up to
+    /// 128, NVIDIA's driver rounds down to 127; both are conformant, so
+    /// accept either rather than pinning one vendor.
+    fn assert_quarter_half_three_quarters_rgba8(actual: &[u8], texels: usize) {
+        let rounded_up = [64u8, 128, 191, 255].repeat(texels);
+        let rounded_down = [64u8, 127, 191, 255].repeat(texels);
+        assert!(
+            actual == rounded_up || actual == rounded_down,
+            "expected {rounded_up:?} or {rounded_down:?}, got {actual:?}"
+        );
     }
 
     fn read_texture_bytes(
@@ -10332,11 +10350,11 @@ mod tests {
             ])
             .expect("GLES whole-size uniform render submit plus readback must succeed");
 
-        assert_eq!(
-            readback
+        assert_quarter_half_three_quarters_rgba8(
+            &readback
                 .read(0, 16)
                 .expect("reading GLES whole-size uniform output must succeed"),
-            [64, 128, 191, 255].repeat(4)
+            4,
         );
     }
 }

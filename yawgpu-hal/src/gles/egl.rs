@@ -1,5 +1,7 @@
 use khronos_egl as egl;
 
+#[cfg(target_os = "linux")]
+use super::instance::EglDeviceChoice;
 use super::BACKEND;
 use crate::HalError;
 
@@ -32,6 +34,295 @@ pub(super) const EGL_PLATFORM_ANGLE_MAX_VERSION_MAJOR_ANGLE: egl::Attrib = 0x321
 #[cfg(windows)]
 pub(super) const EGL_PLATFORM_ANGLE_MAX_VERSION_MINOR_ANGLE: egl::Attrib = 0x3211;
 
+// ---------------------------------------------------------------------------
+// Linux EGL device selection (Block 67, "Linux EGL device selection").
+//
+// `eglGetDisplay(EGL_DEFAULT_DISPLAY)` is correct on Android — the platform
+// EGL maps it to the device's own GPU driver — but on a desktop Linux host
+// libglvnd hands it to whichever vendor claims the default display, which
+// silently resolves to Mesa's software rasterizer (llvmpipe) when that vendor
+// cannot drive the installed GPU. The cascade below prefers a *validated*
+// hardware `EGL_PLATFORM_DEVICE_EXT` display and falls back to the default
+// display, so the worst case is exactly today's behaviour.
+//
+// Gated on `target_os = "linux"`, which excludes Android by construction
+// (`target_os = "android"` is a distinct value), and leaves the Windows/ANGLE
+// arm and the default-display arm untouched on every other target.
+//
+// An `EGL_PLATFORM_DEVICE_EXT` display is headless and cannot back
+// `eglCreateWindowSurface`. Linux windowed presentation is out of scope for
+// this block (surface constructors exist for Android and Windows only), so
+// nothing here can regress a surface path. If Linux windowed presentation is
+// ever added, this cascade must be skipped — or the device display rejected —
+// whenever a window surface is requested.
+// ---------------------------------------------------------------------------
+
+/// `EGL_PLATFORM_DEVICE_EXT` from `EGL_EXT_platform_device`. Not exported by
+/// khronos-egl; declared here like the ANGLE constants above.
+#[cfg(target_os = "linux")]
+const EGL_PLATFORM_DEVICE_EXT: egl::Enum = 0x313F;
+
+/// `EGLDeviceEXT` from `EGL_EXT_device_query`; an opaque handle.
+#[cfg(target_os = "linux")]
+type EglDeviceExt = *mut std::ffi::c_void;
+
+#[cfg(target_os = "linux")]
+type EglQueryDevicesExtFn =
+    unsafe extern "system" fn(egl::Int, *mut EglDeviceExt, *mut egl::Int) -> egl::Boolean;
+
+#[cfg(target_os = "linux")]
+type EglQueryDeviceStringExtFn =
+    unsafe extern "system" fn(EglDeviceExt, egl::Int) -> *const std::ffi::c_char;
+
+// Note: `eglGetPlatformDisplayEXT` takes `const EGLint *attrib_list`, not the
+// EGL 1.5 core `EGLAttrib *`, which is why the EGL 1.5 wrapper in khronos-egl
+// cannot be reused here.
+#[cfg(target_os = "linux")]
+type EglGetPlatformDisplayExtFn =
+    unsafe extern "system" fn(egl::Enum, *mut std::ffi::c_void, *const egl::Int) -> egl::EGLDisplay;
+
+/// Returns whether `name` appears as a whole entry in a space-separated EGL
+/// extension string. Substring matching would accept `EGL_EXT_device_base`
+/// for `EGL_EXT_device_b`, so split on whitespace instead.
+#[cfg(target_os = "linux")]
+fn extension_present(extensions: &str, name: &str) -> bool {
+    extensions.split_whitespace().any(|entry| entry == name)
+}
+
+/// Maps an [`EglDeviceChoice`] plus the per-device software flags onto the
+/// enumeration indices the cascade should try, in order.
+///
+/// Returns `None` when the ask is well-formed but unsatisfiable (index out of
+/// range, or no software device present); the caller then diagnoses and falls
+/// through to the default display rather than substituting another device.
+/// [`EglDeviceChoice::Auto`] returns every hardware device in enumeration
+/// order — possibly empty, which is not an error, just an empty candidate
+/// list. The software device is never part of the `Auto` list.
+#[cfg(target_os = "linux")]
+fn resolve_device_candidates(choice: EglDeviceChoice, is_software: &[bool]) -> Option<Vec<usize>> {
+    match choice {
+        // `Default` short-circuits before the cascade ever enumerates.
+        EglDeviceChoice::Default => None,
+        EglDeviceChoice::Auto => Some(
+            (0..is_software.len())
+                .filter(|index| !is_software[*index])
+                .collect(),
+        ),
+        EglDeviceChoice::Software => is_software
+            .iter()
+            .position(|software| *software)
+            .map(|index| vec![index]),
+        EglDeviceChoice::Index(index) => {
+            let index = usize::try_from(index).ok()?;
+            (index < is_software.len()).then(|| vec![index])
+        }
+    }
+}
+
+/// Resolves a client (no-display) EGL entry point through `eglGetProcAddress`
+/// and transmutes it to `T`.
+///
+/// The device-enumeration entry points must resolve before any display
+/// exists, so this works from `&EglInstance` rather than from the
+/// `EglInstanceState` that `adapter::load_egl_proc` takes.
+#[cfg(target_os = "linux")]
+fn load_client_proc<T>(egl: &EglInstance, name: &str) -> Option<T> {
+    let proc = egl.get_proc_address(name)?;
+    // SAFETY: `eglGetProcAddress` returned a non-null address for `name`, and
+    // every caller instantiates `T` with the `extern "system" fn` signature
+    // the EGL extension specification gives for that exact name. Same pattern
+    // as `adapter::load_egl_proc`.
+    Some(unsafe { std::mem::transmute_copy(&proc) })
+}
+
+/// Calls `eglQueryDevicesEXT` twice — once for the count, once for the
+/// handles — and returns the enumerated devices.
+#[cfg(target_os = "linux")]
+fn query_egl_devices(query_devices: EglQueryDevicesExtFn) -> Option<Vec<EglDeviceExt>> {
+    let mut count: egl::Int = 0;
+    // SAFETY: a null device array with `max_devices == 0` is the documented
+    // count-only form; `count` is a live stack local.
+    let ok = unsafe { query_devices(0, std::ptr::null_mut(), &mut count) };
+    if ok != egl::TRUE {
+        eprintln!("yawgpu-gles: eglQueryDevicesEXT(count) failed; using the default display");
+        return None;
+    }
+    let Ok(count_usize) = usize::try_from(count) else {
+        eprintln!(
+            "yawgpu-gles: eglQueryDevicesEXT reported {count} devices; using the default display"
+        );
+        return None;
+    };
+    if count_usize == 0 {
+        eprintln!("yawgpu-gles: eglQueryDevicesEXT reported no devices; using the default display");
+        return None;
+    }
+
+    let mut devices: Vec<EglDeviceExt> = vec![std::ptr::null_mut(); count_usize];
+    let mut written: egl::Int = 0;
+    // SAFETY: `devices` has exactly `count` elements and outlives the call;
+    // `written` is a live stack local.
+    let ok = unsafe { query_devices(count, devices.as_mut_ptr(), &mut written) };
+    if ok != egl::TRUE {
+        eprintln!("yawgpu-gles: eglQueryDevicesEXT(fill) failed; using the default display");
+        return None;
+    }
+    let written = usize::try_from(written).unwrap_or(0).min(count_usize);
+    devices.truncate(written);
+    Some(devices)
+}
+
+/// Returns whether an enumerated device advertises `EGL_MESA_device_software`,
+/// i.e. is a software rasterizer. Everything else counts as hardware.
+#[cfg(target_os = "linux")]
+fn device_is_software(
+    query_device_string: EglQueryDeviceStringExtFn,
+    device: EglDeviceExt,
+) -> bool {
+    // SAFETY: `device` came from `eglQueryDevicesEXT` and stays valid for the
+    // life of the process; `EGL_EXTENSIONS` is a valid `name` for
+    // `eglQueryDeviceStringEXT`.
+    let raw = unsafe { query_device_string(device, egl::EXTENSIONS) };
+    if raw.is_null() {
+        return false;
+    }
+    // SAFETY: EGL owns the returned string and guarantees it is
+    // NUL-terminated and valid for the life of the device handle.
+    let extensions = unsafe { std::ffi::CStr::from_ptr(raw) };
+    extension_present(&extensions.to_string_lossy(), "EGL_MESA_device_software")
+}
+
+/// Opens, initializes and validates one candidate device display (D2).
+///
+/// Validation is `eglInitialize` → `eglBindAPI(EGL_OPENGL_ES_API)` →
+/// `choose_config` → the existing throwaway ES 3.1 context + 1×1 pbuffer caps
+/// probe, because a successful `eglInitialize` alone is not proof of a usable
+/// headless ES 3.1 context. A display that initialized but failed validation
+/// is left alone: EGL displays are process-global and yawgpu never calls
+/// `eglTerminate` (see the `EglInstanceState` comment in `instance.rs`).
+#[cfg(target_os = "linux")]
+fn try_device_display(
+    egl: &EglInstance,
+    get_platform_display: EglGetPlatformDisplayExtFn,
+    device: EglDeviceExt,
+    index: usize,
+) -> Option<EglDisplay> {
+    // SAFETY: `device` came from `eglQueryDevicesEXT`, and a null attribute
+    // list is the documented "no attributes" form for
+    // `eglGetPlatformDisplayEXT`.
+    let raw = unsafe { get_platform_display(EGL_PLATFORM_DEVICE_EXT, device, std::ptr::null()) };
+    if raw.is_null() {
+        eprintln!("yawgpu-gles: eglGetPlatformDisplayEXT failed for EGL device {index}");
+        return None;
+    }
+    // SAFETY: `raw` is the non-null display `eglGetPlatformDisplayEXT` just
+    // returned for `device`.
+    let display = unsafe { EglDisplay::from_ptr(raw) };
+
+    if let Err(err) = egl.initialize(display) {
+        eprintln!("yawgpu-gles: eglInitialize failed for EGL device {index}: {err:?}");
+        return None;
+    }
+    if let Err(err) = egl.bind_api(egl::OPENGL_ES_API) {
+        eprintln!("yawgpu-gles: eglBindAPI failed for EGL device {index}: {err:?}");
+        return None;
+    }
+    let config = match super::instance::choose_config(egl, display) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("yawgpu-gles: no usable EGLConfig on EGL device {index}: {err:?}");
+            return None;
+        }
+    };
+    if let Err(err) = super::adapter::query_egl_adapter_caps(egl, display, config) {
+        eprintln!("yawgpu-gles: ES 3.1 capability probe failed on EGL device {index}: {err:?}");
+        return None;
+    }
+    Some(display)
+}
+
+/// Runs the Linux device cascade and returns the selected display, or `None`
+/// to let the caller fall through to `eglGetDisplay(EGL_DEFAULT_DISPLAY)`.
+///
+/// Every failure is a `yawgpu-gles:` diagnostic plus a fall-through; nothing
+/// here panics. Note the two distinct fallbacks: an *unparseable*
+/// `YAWGPU_GLES_EGL_DEVICE` degrades to `Auto` at parse time, while a
+/// *well-formed but unsatisfiable* ask falls through to the default display
+/// rather than silently selecting some other device.
+#[cfg(target_os = "linux")]
+fn select_linux_device_display(egl: &EglInstance) -> Option<EglDisplay> {
+    let choice = super::instance::egl_device_from_env();
+    if choice == EglDeviceChoice::Default {
+        eprintln!("yawgpu-gles: YAWGPU_GLES_EGL_DEVICE=default; using the default display");
+        return None;
+    }
+
+    let client_extensions = match egl.query_string(None, egl::EXTENSIONS) {
+        Ok(extensions) => extensions.to_string_lossy().into_owned(),
+        Err(err) => {
+            eprintln!(
+                "yawgpu-gles: eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS) failed ({err:?}); using the default display"
+            );
+            return None;
+        }
+    };
+    let has_enumeration = extension_present(&client_extensions, "EGL_EXT_device_enumeration")
+        || extension_present(&client_extensions, "EGL_EXT_device_base");
+    if !has_enumeration || !extension_present(&client_extensions, "EGL_EXT_platform_device") {
+        eprintln!(
+            "yawgpu-gles: EGL device enumeration unavailable (EGL_EXT_device_enumeration / EGL_EXT_platform_device missing); using the default display"
+        );
+        return None;
+    }
+
+    let (Some(query_devices), Some(query_device_string), Some(get_platform_display)) = (
+        load_client_proc::<EglQueryDevicesExtFn>(egl, "eglQueryDevicesEXT"),
+        load_client_proc::<EglQueryDeviceStringExtFn>(egl, "eglQueryDeviceStringEXT"),
+        load_client_proc::<EglGetPlatformDisplayExtFn>(egl, "eglGetPlatformDisplayEXT"),
+    ) else {
+        eprintln!(
+            "yawgpu-gles: EGL device extension entry points did not resolve; using the default display"
+        );
+        return None;
+    };
+
+    let devices = query_egl_devices(query_devices)?;
+    let is_software: Vec<bool> = devices
+        .iter()
+        .map(|device| device_is_software(query_device_string, *device))
+        .collect();
+
+    let Some(candidates) = resolve_device_candidates(choice, &is_software) else {
+        eprintln!(
+            "yawgpu-gles: YAWGPU_GLES_EGL_DEVICE={choice:?} cannot be satisfied by the {} enumerated EGL device(s); using the default display",
+            devices.len()
+        );
+        return None;
+    };
+
+    for index in candidates {
+        let Some(device) = devices.get(index) else {
+            continue;
+        };
+        if let Some(display) = try_device_display(egl, get_platform_display, *device, index) {
+            let kind = if is_software[index] {
+                "software"
+            } else {
+                "hardware"
+            };
+            eprintln!(
+                "yawgpu-gles: selected EGL device {index} ({kind}) via EGL_PLATFORM_DEVICE_EXT"
+            );
+            return Some(display);
+        }
+    }
+
+    eprintln!(
+        "yawgpu-gles: no EGL device satisfied YAWGPU_GLES_EGL_DEVICE={choice:?}; using the default display"
+    );
+    None
+}
+
 /// Acquires the EGL display that gives the best chance of an ES 3.1
 /// context. On Windows the loaded EGL is ANGLE (Tier 2 / experimental
 /// target); ANGLE's default-display path often picks the OpenGL backend
@@ -41,7 +332,11 @@ pub(super) const EGL_PLATFORM_ANGLE_MAX_VERSION_MINOR_ANGLE: egl::Attrib = 0x321
 /// hardware. On Android the native EGL implementation already returns a
 /// display backed by the device's GPU driver — typically Mali / Adreno /
 /// PowerVR — which exposes ES 3.1+ directly, so the default-display path
-/// is correct without additional platform attributes. The platform branch
+/// is correct without additional platform attributes. On desktop Linux the
+/// default display often resolves to Mesa's software rasterizer, so a
+/// `EGL_PLATFORM_DEVICE_EXT` cascade over `eglQueryDevicesEXT` runs first and
+/// picks the first *validated* hardware device (overridable through
+/// `YAWGPU_GLES_EGL_DEVICE`). The platform branch
 /// always falls back to `eglGetDisplay(EGL_DEFAULT_DISPLAY)` when the
 /// preferred selection isn't available, so Tier 2 GLES still loads
 /// (just possibly capped at ES 3.0, which then fails the version check
@@ -108,6 +403,16 @@ pub(super) fn get_and_initialize_display(egl: &EglInstance) -> Option<EglDisplay
             }
         }
     }
+    #[cfg(target_os = "linux")]
+    {
+        // Desktop Linux: prefer a validated hardware EGL device over the
+        // default display, which libglvnd may resolve to llvmpipe. Any
+        // failure falls through to the unchanged default-display path below.
+        if let Some(display) = select_linux_device_display(egl) {
+            return Some(display);
+        }
+    }
+
     // Non-Windows (Android / Linux / etc.) and Windows-fallback path: the
     // system EGL's default display is the right choice. Android's native
     // EGL maps it to the device's GPU driver (which advertises ES 3.1+
@@ -156,4 +461,97 @@ pub(super) fn load_egl() -> Result<EglInstance, HalError> {
         eprintln!("yawgpu-gles: load_egl failed: {err}");
         HalError::BackendUnavailable { backend: BACKEND }
     })
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extension_present_matches_whole_entries_only() {
+        let extensions = "EGL_EXT_device_base EGL_EXT_device_enumeration EGL_EXT_platform_device";
+        assert!(extension_present(extensions, "EGL_EXT_device_base"));
+        assert!(extension_present(extensions, "EGL_EXT_platform_device"));
+        // A prefix of a listed entry is not a match.
+        assert!(!extension_present(extensions, "EGL_EXT_device_b"));
+        assert!(!extension_present(extensions, "EGL_MESA_device_software"));
+        assert!(!extension_present("", "EGL_EXT_platform_device"));
+    }
+
+    #[test]
+    fn extension_present_tolerates_irregular_separators() {
+        let extensions = "  EGL_EXT_device_base   EGL_MESA_device_software\t";
+        assert!(extension_present(extensions, "EGL_MESA_device_software"));
+        assert!(extension_present(extensions, "EGL_EXT_device_base"));
+    }
+
+    #[test]
+    fn auto_lists_hardware_devices_in_enumeration_order() {
+        let is_software = [false, false, false, true];
+        assert_eq!(
+            resolve_device_candidates(EglDeviceChoice::Auto, &is_software),
+            Some(vec![0, 1, 2])
+        );
+    }
+
+    #[test]
+    fn auto_yields_an_empty_candidate_list_when_every_device_is_software() {
+        assert_eq!(
+            resolve_device_candidates(EglDeviceChoice::Auto, &[true]),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            resolve_device_candidates(EglDeviceChoice::Auto, &[]),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn software_picks_the_first_software_device() {
+        assert_eq!(
+            resolve_device_candidates(EglDeviceChoice::Software, &[false, true, true]),
+            Some(vec![1])
+        );
+    }
+
+    #[test]
+    fn software_is_unsatisfiable_without_a_software_device() {
+        assert_eq!(
+            resolve_device_candidates(EglDeviceChoice::Software, &[false, false]),
+            None
+        );
+    }
+
+    #[test]
+    fn index_pins_the_requested_device_including_the_software_one() {
+        let is_software = [false, false, false, true];
+        assert_eq!(
+            resolve_device_candidates(EglDeviceChoice::Index(0), &is_software),
+            Some(vec![0])
+        );
+        assert_eq!(
+            resolve_device_candidates(EglDeviceChoice::Index(3), &is_software),
+            Some(vec![3])
+        );
+    }
+
+    #[test]
+    fn index_out_of_range_is_unsatisfiable() {
+        assert_eq!(
+            resolve_device_candidates(EglDeviceChoice::Index(4), &[false, false, false, true]),
+            None
+        );
+        assert_eq!(
+            resolve_device_candidates(EglDeviceChoice::Index(0), &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn default_never_produces_candidates() {
+        assert_eq!(
+            resolve_device_candidates(EglDeviceChoice::Default, &[false, true]),
+            None
+        );
+    }
 }

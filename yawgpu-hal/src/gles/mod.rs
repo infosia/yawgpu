@@ -29,7 +29,7 @@ mod wgl;
 pub use adapter::GlesAdapter;
 pub use buffer::GlesBuffer;
 pub use device::GlesDevice;
-pub use instance::{parse_egl_device, BackendChoice, EglDeviceChoice, GlesInstance};
+pub use instance::{BackendChoice, GlesInstance};
 pub use pipeline::{GlesComputePipeline, GlesRenderPipeline};
 pub use queue::GlesQueue;
 pub use sampler::GlesSampler;

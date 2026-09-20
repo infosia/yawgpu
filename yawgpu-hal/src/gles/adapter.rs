@@ -4,7 +4,7 @@ use glow::HasContext;
 use khronos_egl as egl;
 
 use super::device::{GlesDevice, GlesDeviceCaps, GlesSampleMaskIFn, GlesTextureViewFn};
-use super::egl::{EglConfig, EglContext, EglSurface};
+use super::egl::{EglConfig, EglContext, EglDisplay, EglInstance, EglSurface};
 use super::format::GlesColorRenderCaps;
 use super::instance::{EglInstanceState, GlesInstanceInner};
 use super::BACKEND;
@@ -58,7 +58,7 @@ impl GlesAdapter {
         let GlesInstanceInner::Egl(egl_state) = instance.as_ref() else {
             return Err(HalError::BackendUnavailable { backend: BACKEND });
         };
-        let caps = query_egl_adapter_caps(egl_state, config)?;
+        let caps = query_egl_adapter_caps(&egl_state.egl, egl_state.display, config)?;
         Ok(Self {
             inner: GlesAdapterInner::Egl {
                 instance,
@@ -321,7 +321,7 @@ fn create_egl_device(
             Ok(surface) => surface,
             Err(err) => {
                 eprintln!("yawgpu-gles: eglCreatePbufferSurface failed: {err:?}");
-                destroy_context(egl_state, context);
+                destroy_context(&egl_state.egl, egl_state.display, context);
                 return Err(HalError::DeviceCreationFailed { backend: BACKEND });
             }
         };
@@ -333,8 +333,8 @@ fn create_egl_device(
         Some(context),
     ) {
         eprintln!("yawgpu-gles: eglMakeCurrent(pbuffer) failed: {err:?}");
-        destroy_surface(egl_state, surface);
-        destroy_context(egl_state, context);
+        destroy_surface(&egl_state.egl, egl_state.display, surface);
+        destroy_context(&egl_state.egl, egl_state.display, context);
         return Err(HalError::DeviceCreationFailed { backend: BACKEND });
     }
 
@@ -350,16 +350,16 @@ fn create_egl_device(
     let version = unsafe { gl.get_parameter_string(glow::VERSION) };
     let Some((major, minor)) = parse_gles_version(&version) else {
         eprintln!("yawgpu-gles: unable to parse GL_VERSION={version:?}");
-        destroy_surface(egl_state, surface);
-        destroy_context(egl_state, context);
+        destroy_surface(&egl_state.egl, egl_state.display, surface);
+        destroy_context(&egl_state.egl, egl_state.display, context);
         return Err(HalError::DeviceCreationFailed { backend: BACKEND });
     };
     if (major, minor) < (3, 1) {
         eprintln!(
             "yawgpu-gles: GLES {major}.{minor} below the required 3.1 (GL_VERSION={version:?})"
         );
-        destroy_surface(egl_state, surface);
-        destroy_context(egl_state, context);
+        destroy_surface(&egl_state.egl, egl_state.display, surface);
+        destroy_context(&egl_state.egl, egl_state.display, context);
         return Err(HalError::DeviceCreationFailed { backend: BACKEND });
     }
 
@@ -386,8 +386,9 @@ fn create_egl_device(
     ))
 }
 
-fn query_egl_adapter_caps(
-    egl_state: &EglInstanceState,
+pub(super) fn query_egl_adapter_caps(
+    egl: &EglInstance,
+    display: EglDisplay,
     config: EglConfig,
 ) -> Result<GlesAdapterCaps, HalError> {
     let attribs_es31 = [
@@ -398,18 +399,13 @@ fn query_egl_adapter_caps(
         egl::NONE,
     ];
     let attribs_es3 = [egl::CONTEXT_CLIENT_VERSION, 3, egl::NONE];
-    let context = match egl_state
-        .egl
-        .create_context(egl_state.display, config, None, &attribs_es31)
-    {
+    let context = match egl.create_context(display, config, None, &attribs_es31) {
         Ok(ctx) => ctx,
         Err(err) => {
             eprintln!(
                 "yawgpu-gles: eglCreateContext(limit probe ES 3.1) failed: {err:?}; retrying with ES 3"
             );
-            egl_state
-                .egl
-                .create_context(egl_state.display, config, None, &attribs_es3)
+            egl.create_context(display, config, None, &attribs_es3)
                 .map_err(|err2| {
                     eprintln!("yawgpu-gles: eglCreateContext(limit probe ES 3) failed: {err2:?}");
                     HalError::BackendUnavailable { backend: BACKEND }
@@ -418,36 +414,25 @@ fn query_egl_adapter_caps(
     };
 
     let pbuffer_attribs = [egl::WIDTH, 1, egl::HEIGHT, 1, egl::NONE];
-    let surface =
-        match egl_state
-            .egl
-            .create_pbuffer_surface(egl_state.display, config, &pbuffer_attribs)
-        {
-            Ok(surface) => surface,
-            Err(err) => {
-                eprintln!("yawgpu-gles: eglCreatePbufferSurface(limit probe) failed: {err:?}");
-                destroy_context(egl_state, context);
-                return Err(HalError::BackendUnavailable { backend: BACKEND });
-            }
-        };
+    let surface = match egl.create_pbuffer_surface(display, config, &pbuffer_attribs) {
+        Ok(surface) => surface,
+        Err(err) => {
+            eprintln!("yawgpu-gles: eglCreatePbufferSurface(limit probe) failed: {err:?}");
+            destroy_context(egl, display, context);
+            return Err(HalError::BackendUnavailable { backend: BACKEND });
+        }
+    };
 
-    if let Err(err) = egl_state.egl.make_current(
-        egl_state.display,
-        Some(surface),
-        Some(surface),
-        Some(context),
-    ) {
+    if let Err(err) = egl.make_current(display, Some(surface), Some(surface), Some(context)) {
         eprintln!("yawgpu-gles: eglMakeCurrent(limit probe) failed: {err:?}");
-        destroy_surface(egl_state, surface);
-        destroy_context(egl_state, context);
+        destroy_surface(egl, display, surface);
+        destroy_context(egl, display, context);
         return Err(HalError::BackendUnavailable { backend: BACKEND });
     }
 
     let gl = unsafe {
         glow::Context::from_loader_function(|name| {
-            egl_state
-                .egl
-                .get_proc_address(name)
+            egl.get_proc_address(name)
                 .map(|proc| proc as *const _)
                 .unwrap_or(std::ptr::null())
         })
@@ -455,34 +440,27 @@ fn query_egl_adapter_caps(
     let version = unsafe { gl.get_parameter_string(glow::VERSION) };
     let Some((major, minor)) = parse_gles_version(&version) else {
         eprintln!("yawgpu-gles: unable to parse GL_VERSION during limit probe: {version:?}");
-        let _ = egl_state
-            .egl
-            .make_current(egl_state.display, None, None, None);
-        destroy_surface(egl_state, surface);
-        destroy_context(egl_state, context);
+        let _ = egl.make_current(display, None, None, None);
+        destroy_surface(egl, display, surface);
+        destroy_context(egl, display, context);
         return Err(HalError::BackendUnavailable { backend: BACKEND });
     };
     if (major, minor) < (3, 1) {
         eprintln!(
             "yawgpu-gles: limit probe found GLES {major}.{minor} below the required 3.1 (GL_VERSION={version:?})"
         );
-        let _ = egl_state
-            .egl
-            .make_current(egl_state.display, None, None, None);
-        destroy_surface(egl_state, surface);
-        destroy_context(egl_state, context);
+        let _ = egl.make_current(display, None, None, None);
+        destroy_surface(egl, display, surface);
+        destroy_context(egl, display, context);
         return Err(HalError::BackendUnavailable { backend: BACKEND });
     }
     let extensions = gl.supported_extensions();
     let caps = query_gles_adapter_caps(&gl, extensions);
-    let _ = egl_state
-        .egl
-        .make_current(egl_state.display, None, None, None);
-    destroy_surface(egl_state, surface);
-    destroy_context(egl_state, context);
+    let _ = egl.make_current(display, None, None, None);
+    destroy_surface(egl, display, surface);
+    destroy_context(egl, display, context);
     Ok(caps)
 }
-
 pub(super) fn query_gles_adapter_caps(
     gl: &glow::Context,
     extensions: &std::collections::HashSet<String>,
@@ -796,12 +774,12 @@ fn load_egl_proc<T>(instance: &EglInstanceState, name: &str) -> Option<T> {
     Some(unsafe { std::mem::transmute_copy(&proc) })
 }
 
-fn destroy_context(instance: &EglInstanceState, context: EglContext) {
-    let _ = instance.egl.destroy_context(instance.display, context);
+fn destroy_context(egl: &EglInstance, display: EglDisplay, context: EglContext) {
+    let _ = egl.destroy_context(display, context);
 }
 
-fn destroy_surface(instance: &EglInstanceState, surface: EglSurface) {
-    let _ = instance.egl.destroy_surface(instance.display, surface);
+fn destroy_surface(egl: &EglInstance, display: EglDisplay, surface: EglSurface) {
+    let _ = egl.destroy_surface(display, surface);
 }
 
 pub(super) fn parse_gles_version(version: &str) -> Option<(u32, u32)> {
