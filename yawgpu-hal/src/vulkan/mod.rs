@@ -429,10 +429,10 @@ impl VulkanAdapter {
         }
     }
 
-    /// Returns true when 3D BC texture compression is supported by this physical device.
+    /// Returns the base BC support result: Vulkan supports sliced 3D BC whenever BC is supported.
     #[must_use]
     pub fn supports_texture_compression_bc_sliced_3d(&self) -> bool {
-        false
+        self.supports_texture_compression_bc()
     }
 
     /// Returns true when ETC2/EAC texture compression is supported by this physical device.
@@ -459,10 +459,23 @@ impl VulkanAdapter {
         }
     }
 
-    /// Returns true when 3D ASTC texture compression is supported by this physical device.
+    /// Returns true when ASTC LDR is supported and every mapped ASTC LDR format
+    /// supports sampled, optimally tiled 3D images with no additional image flags.
     #[must_use]
     pub fn supports_texture_compression_astc_sliced_3d(&self) -> bool {
-        false
+        astc_sliced_3d_supported(self.supports_texture_compression_astc(), |format| unsafe {
+            self.instance
+                .instance
+                .get_physical_device_image_format_properties(
+                    self.physical_device,
+                    format,
+                    vk::ImageType::TYPE_3D,
+                    vk::ImageTiling::OPTIMAL,
+                    vk::ImageUsageFlags::SAMPLED,
+                    vk::ImageCreateFlags::empty(),
+                )
+                .is_ok()
+        })
     }
 
     /// Returns true when texture view component swizzling is supported by this physical device.
@@ -848,7 +861,7 @@ impl VulkanAdapter {
         // writes (VUID-RuntimeSpirv-NonWritable-06340).
         let fragment_stores_and_atomics =
             supported_features.fragment_stores_and_atomics == vk::TRUE;
-        let mut enabled_features = vk::PhysicalDeviceFeatures::default();
+        let mut enabled_features = enabled_texture_compression_features(&supported_features);
         if occlusion_query_precise {
             enabled_features.occlusion_query_precise = vk::TRUE;
         }
@@ -1027,6 +1040,68 @@ impl Enabled16BitStorageFeatures {
             .storage_input_output16(self.storage_input_output16)
             .storage_push_constant16(self.storage_push_constant16)
     }
+}
+
+/// Maps all ASTC LDR variants through the texture creation format mapping.
+fn astc_ldr_formats() -> impl Iterator<Item = Result<vk::Format, HalError>> {
+    use HalTextureFormat::*;
+    [
+        Astc4x4Unorm,
+        Astc4x4UnormSrgb,
+        Astc5x4Unorm,
+        Astc5x4UnormSrgb,
+        Astc5x5Unorm,
+        Astc5x5UnormSrgb,
+        Astc6x5Unorm,
+        Astc6x5UnormSrgb,
+        Astc6x6Unorm,
+        Astc6x6UnormSrgb,
+        Astc8x5Unorm,
+        Astc8x5UnormSrgb,
+        Astc8x6Unorm,
+        Astc8x6UnormSrgb,
+        Astc8x8Unorm,
+        Astc8x8UnormSrgb,
+        Astc10x5Unorm,
+        Astc10x5UnormSrgb,
+        Astc10x6Unorm,
+        Astc10x6UnormSrgb,
+        Astc10x8Unorm,
+        Astc10x8UnormSrgb,
+        Astc10x10Unorm,
+        Astc10x10UnormSrgb,
+        Astc12x10Unorm,
+        Astc12x10UnormSrgb,
+        Astc12x12Unorm,
+        Astc12x12UnormSrgb,
+    ]
+    .into_iter()
+    .map(|format| format::map_texture_format(format).map(|(format, _)| format))
+}
+
+/// Requires base ASTC support and successful 3D probes for every mapped format.
+fn astc_sliced_3d_supported(
+    astc_supported: bool,
+    mut probe: impl FnMut(vk::Format) -> bool,
+) -> bool {
+    astc_supported && astc_ldr_formats().all(|format| format.is_ok_and(&mut probe))
+}
+
+/// Enables each supported compression family; HAL has no requested-feature set.
+fn enabled_texture_compression_features(
+    supported: &vk::PhysicalDeviceFeatures,
+) -> vk::PhysicalDeviceFeatures {
+    let mut enabled = vk::PhysicalDeviceFeatures::default();
+    if supported.texture_compression_bc == vk::TRUE {
+        enabled.texture_compression_bc = vk::TRUE;
+    }
+    if supported.texture_compression_etc2 == vk::TRUE {
+        enabled.texture_compression_etc2 = vk::TRUE;
+    }
+    if supported.texture_compression_astc_ldr == vk::TRUE {
+        enabled.texture_compression_astc_ldr = vk::TRUE;
+    }
+    enabled
 }
 
 fn shader_float16_supported(extension_present: bool, shader_float16: vk::Bool32) -> bool {
@@ -1444,6 +1519,76 @@ mod tests {
         }
     }
 
+    #[test]
+    fn astc_ldr_formats_cover_all_mapped_blocks() {
+        let formats = astc_ldr_formats().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(formats.len(), 28);
+        let unique = formats
+            .iter()
+            .map(|format| format.as_raw())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), 28);
+        for format in formats {
+            let name = format!("{format:?}");
+            assert!(name.starts_with("ASTC_"), "{name}");
+            assert!(
+                name.ends_with("_UNORM_BLOCK") || name.ends_with("_SRGB_BLOCK"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn astc_sliced_3d_requires_base_support_without_probing() {
+        let mut probes = 0;
+        assert!(!astc_sliced_3d_supported(false, |_| {
+            probes += 1;
+            true
+        }));
+        assert_eq!(probes, 0);
+    }
+
+    #[test]
+    fn astc_sliced_3d_rejects_each_failed_format_probe() {
+        for unsupported in astc_ldr_formats() {
+            let unsupported = unsupported.unwrap();
+            assert!(!astc_sliced_3d_supported(true, |format| format != unsupported));
+        }
+    }
+
+    #[test]
+    fn astc_sliced_3d_accepts_all_successful_format_probes() {
+        let mut probes = Vec::new();
+        assert!(astc_sliced_3d_supported(true, |format| {
+            probes.push(format);
+            true
+        }));
+        assert_eq!(
+            probes,
+            astc_ldr_formats().collect::<Result<Vec<_>, _>>().unwrap()
+        );
+    }
+
+    #[test]
+    fn texture_compression_features_are_enabled_independently() {
+        for bc in [vk::FALSE, vk::TRUE] {
+            for etc2 in [vk::FALSE, vk::TRUE] {
+                for astc in [vk::FALSE, vk::TRUE] {
+                    let supported = vk::PhysicalDeviceFeatures {
+                        texture_compression_bc: bc,
+                        texture_compression_etc2: etc2,
+                        texture_compression_astc_ldr: astc,
+                        ..Default::default()
+                    };
+                    let enabled = enabled_texture_compression_features(&supported);
+                    assert_eq!(enabled.texture_compression_bc, bc);
+                    assert_eq!(enabled.texture_compression_etc2, etc2);
+                    assert_eq!(enabled.texture_compression_astc_ldr, astc);
+                }
+            }
+        }
+    }
+
     /// Core feature-enable logic forwards each available feature into
     /// `enabled_features` and leaves each unavailable feature FALSE.
     #[test]
@@ -1460,6 +1605,9 @@ mod tests {
                 draw_indirect_first_instance: supported,
                 sample_rate_shading: supported,
                 fragment_stores_and_atomics: supported,
+                texture_compression_bc: supported,
+                texture_compression_etc2: supported,
+                texture_compression_astc_ldr: supported,
                 ..Default::default()
             };
             let robust_buffer_access = supported_features.robust_buffer_access == vk::TRUE;
@@ -1474,7 +1622,7 @@ mod tests {
             let sample_rate_shading = supported_features.sample_rate_shading == vk::TRUE;
             let fragment_stores_and_atomics =
                 supported_features.fragment_stores_and_atomics == vk::TRUE;
-            let mut enabled_features = vk::PhysicalDeviceFeatures::default();
+            let mut enabled_features = enabled_texture_compression_features(&supported_features);
             if robust_buffer_access {
                 enabled_features.robust_buffer_access = vk::TRUE;
             }
@@ -1502,6 +1650,12 @@ mod tests {
             if fragment_stores_and_atomics {
                 enabled_features.fragment_stores_and_atomics = vk::TRUE;
             }
+            assert_eq!(enabled_features.texture_compression_bc, expected_enabled);
+            assert_eq!(enabled_features.texture_compression_etc2, expected_enabled);
+            assert_eq!(
+                enabled_features.texture_compression_astc_ldr,
+                expected_enabled
+            );
             assert_eq!(
                 enabled_features.robust_buffer_access, expected_enabled,
                 "robust_buffer_access should be {expected_enabled} when supported={supported}"

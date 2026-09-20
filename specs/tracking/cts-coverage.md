@@ -354,7 +354,10 @@ never a reason to skip a CTS case.
   byte-roundtrips every integer format and asserts non-zero readback for the
   float/packed ones (`e2e_metal_texture::metal_added_uncompressed_color_texture_copy_round_trips_data`).
   Compressed formats (BC/ETC2/EAC/ASTC) remain `Unsupported` — deferred
-  (feature-gated + block-size handling).
+  (feature-gated + block-size handling). *(Superseded: compressed formats were
+  implemented on Vulkan + Metal with per-device feature gating in Audit C —
+  `format-completeness-audit.md` finding #2; Vulkan sliced-3d + e2e completion
+  is Block 73, `texture-compression-vulkan.md`.)*
   **With F-024 closed, every yawgpu finding this suite has surfaced
   (F-005/006/008/009/010/011/014/016/018/020/022/023/024) is resolved**; all
   other open findings (F-001–F-004, F-007, F-012, F-013, F-015, F-017,
@@ -1355,6 +1358,13 @@ never a reason to skip a CTS case.
   storage-texture format/access in render auto-layout.
 
 ## Coverage matrix
+
+> **Historical.** The `cts/validation/**` Rust ports named in the status column
+> were removed from the repository; CTS conformance is now verified externally
+> by webgpu-native-cts (see `CLAUDE.md` → "CTS conformance"). Deferral reasons
+> recorded below (e.g. "compressed-format subcases deferred: Noop lacks
+> feature") describe the state at port time and no longer hold — Noop now
+> advertises all five texture-compression features.
 
 | spec file | cases | related legacy test (info) | status |
 |---|---|---|---|
