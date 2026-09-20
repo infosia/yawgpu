@@ -89,32 +89,83 @@ fn extension_present(extensions: &str, name: &str) -> bool {
     extensions.split_whitespace().any(|entry| entry == name)
 }
 
-/// Maps an [`EglDeviceChoice`] plus the per-device software flags onto the
+/// How an enumerated EGL device is classified for the `Auto` cascade.
+///
+/// Three-valued rather than a `bool` because `eglQueryDeviceStringEXT` can
+/// return NULL. Folding that case into "hardware" would let the software
+/// rasterizer join the `Auto` list and be selected while the diagnostic
+/// claimed `(hardware)` — the silent software fallback D1 forbids. Folding it
+/// into "software" is no better: a genuine hardware device whose query fails
+/// would become unreachable under `Auto`, which then falls through to the
+/// default display and lands back on software. So `Unknown` is its own value:
+/// still eligible for `Auto`, just ordered after every known-hardware device.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EglDeviceKind {
+    /// The device's extension string was read and does not advertise
+    /// `EGL_MESA_device_software`.
+    Hardware,
+    /// The device advertises `EGL_MESA_device_software`.
+    Software,
+    /// The device's extension string could not be read, so it is neither
+    /// confirmed hardware nor confirmed software.
+    Unknown,
+}
+
+#[cfg(target_os = "linux")]
+impl EglDeviceKind {
+    /// The word this kind contributes to the `yawgpu-gles:` selection
+    /// diagnostic, so a log line never claims more than was actually probed.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Hardware => "hardware",
+            Self::Software => "software",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Maps an [`EglDeviceChoice`] plus the per-device classification onto the
 /// enumeration indices the cascade should try, in order.
 ///
 /// Returns `None` when the ask is well-formed but unsatisfiable (index out of
 /// range, or no software device present); the caller then diagnoses and falls
 /// through to the default display rather than substituting another device.
-/// [`EglDeviceChoice::Auto`] returns every hardware device in enumeration
-/// order — possibly empty, which is not an error, just an empty candidate
-/// list. The software device is never part of the `Auto` list.
+/// [`EglDeviceChoice::Auto`] returns every [`EglDeviceKind::Hardware`] device
+/// in enumeration order, followed by every [`EglDeviceKind::Unknown`] one —
+/// possibly empty, which is not an error, just an empty candidate list. A
+/// [`EglDeviceKind::Software`] device is never part of the `Auto` list.
+/// `Software` and `Index` are unaffected by the classification of the devices
+/// they do not name.
 #[cfg(target_os = "linux")]
-fn resolve_device_candidates(choice: EglDeviceChoice, is_software: &[bool]) -> Option<Vec<usize>> {
+fn resolve_device_candidates(
+    choice: EglDeviceChoice,
+    kinds: &[EglDeviceKind],
+) -> Option<Vec<usize>> {
     match choice {
         // `Default` short-circuits before the cascade ever enumerates.
         EglDeviceChoice::Default => None,
-        EglDeviceChoice::Auto => Some(
-            (0..is_software.len())
-                .filter(|index| !is_software[*index])
-                .collect(),
-        ),
-        EglDeviceChoice::Software => is_software
+        EglDeviceChoice::Auto => {
+            let indices_of = |wanted: EglDeviceKind| {
+                kinds
+                    .iter()
+                    .enumerate()
+                    .filter(move |(_, kind)| **kind == wanted)
+                    .map(|(index, _)| index)
+            };
+            Some(
+                indices_of(EglDeviceKind::Hardware)
+                    .chain(indices_of(EglDeviceKind::Unknown))
+                    .collect(),
+            )
+        }
+        EglDeviceChoice::Software => kinds
             .iter()
-            .position(|software| *software)
+            .position(|kind| *kind == EglDeviceKind::Software)
             .map(|index| vec![index]),
         EglDeviceChoice::Index(index) => {
             let index = usize::try_from(index).ok()?;
-            (index < is_software.len()).then(|| vec![index])
+            (index < kinds.len()).then(|| vec![index])
         }
     }
 }
@@ -125,13 +176,25 @@ fn resolve_device_candidates(choice: EglDeviceChoice, is_software: &[bool]) -> O
 /// The device-enumeration entry points must resolve before any display
 /// exists, so this works from `&EglInstance` rather than from the
 /// `EglInstanceState` that `adapter::load_egl_proc` takes.
+///
+/// `T` must be a bare function pointer. `transmute_copy` does not size-check,
+/// so a wider `T` would read past the source with no compile error; the
+/// `debug_assert_eq!` below turns that mis-instantiation into a loud failure
+/// in debug builds instead.
 #[cfg(target_os = "linux")]
 fn load_client_proc<T>(egl: &EglInstance, name: &str) -> Option<T> {
+    debug_assert_eq!(
+        std::mem::size_of::<T>(),
+        std::mem::size_of::<extern "system" fn()>(),
+        "load_client_proc::<T> requires T to be a bare function pointer"
+    );
     let proc = egl.get_proc_address(name)?;
     // SAFETY: `eglGetProcAddress` returned a non-null address for `name`, and
     // every caller instantiates `T` with the `extern "system" fn` signature
-    // the EGL extension specification gives for that exact name. Same pattern
-    // as `adapter::load_egl_proc`.
+    // the EGL extension specification gives for that exact name. The width of
+    // `T` — the part `transmute_copy` itself does not check — is enforced by
+    // the `debug_assert_eq!` above; matching the signature to the name stays a
+    // review obligation, as in `adapter::load_egl_proc`.
     Some(unsafe { std::mem::transmute_copy(&proc) })
 }
 
@@ -172,24 +235,33 @@ fn query_egl_devices(query_devices: EglQueryDevicesExtFn) -> Option<Vec<EglDevic
     Some(devices)
 }
 
-/// Returns whether an enumerated device advertises `EGL_MESA_device_software`,
-/// i.e. is a software rasterizer. Everything else counts as hardware.
+/// Classifies an enumerated device by whether it advertises
+/// `EGL_MESA_device_software`, i.e. is a software rasterizer.
+///
+/// A NULL return from `eglQueryDeviceStringEXT` is [`EglDeviceKind::Unknown`],
+/// not a default of either polarity — see the [`EglDeviceKind`] doc comment
+/// for why neither default is safe. The caller emits the diagnostic, since it
+/// is the one that knows the device's enumeration index.
 #[cfg(target_os = "linux")]
-fn device_is_software(
+fn classify_device(
     query_device_string: EglQueryDeviceStringExtFn,
     device: EglDeviceExt,
-) -> bool {
+) -> EglDeviceKind {
     // SAFETY: `device` came from `eglQueryDevicesEXT` and stays valid for the
     // life of the process; `EGL_EXTENSIONS` is a valid `name` for
     // `eglQueryDeviceStringEXT`.
     let raw = unsafe { query_device_string(device, egl::EXTENSIONS) };
     if raw.is_null() {
-        return false;
+        return EglDeviceKind::Unknown;
     }
     // SAFETY: EGL owns the returned string and guarantees it is
     // NUL-terminated and valid for the life of the device handle.
     let extensions = unsafe { std::ffi::CStr::from_ptr(raw) };
-    extension_present(&extensions.to_string_lossy(), "EGL_MESA_device_software")
+    if extension_present(&extensions.to_string_lossy(), "EGL_MESA_device_software") {
+        EglDeviceKind::Software
+    } else {
+        EglDeviceKind::Hardware
+    }
 }
 
 /// Opens, initializes and validates one candidate device display (D2), and on
@@ -291,12 +363,21 @@ fn select_linux_device_display(egl: &EglInstance) -> Option<EglDisplay> {
     };
 
     let devices = query_egl_devices(query_devices)?;
-    let is_software: Vec<bool> = devices
+    let kinds: Vec<EglDeviceKind> = devices
         .iter()
-        .map(|device| device_is_software(query_device_string, *device))
+        .enumerate()
+        .map(|(index, device)| {
+            let kind = classify_device(query_device_string, *device);
+            if kind == EglDeviceKind::Unknown {
+                eprintln!(
+                    "yawgpu-gles: eglQueryDeviceStringEXT(EGL_EXTENSIONS) returned no string for EGL device {index}; cannot tell hardware from software, so it is tried only after every known-hardware device"
+                );
+            }
+            kind
+        })
         .collect();
 
-    let Some(candidates) = resolve_device_candidates(choice, &is_software) else {
+    let Some(candidates) = resolve_device_candidates(choice, &kinds) else {
         eprintln!(
             "yawgpu-gles: YAWGPU_GLES_EGL_DEVICE={choice:?} cannot be satisfied by the {} enumerated EGL device(s); using the default display",
             devices.len()
@@ -305,17 +386,13 @@ fn select_linux_device_display(egl: &EglInstance) -> Option<EglDisplay> {
     };
 
     for index in candidates {
-        let Some(device) = devices.get(index) else {
+        let (Some(device), Some(kind)) = (devices.get(index), kinds.get(index)) else {
             continue;
         };
         if let Some((display, driver)) =
             try_device_display(egl, get_platform_display, *device, index)
         {
-            let kind = if is_software[index] {
-                "software"
-            } else {
-                "hardware"
-            };
+            let kind = kind.label();
             let renderer = &driver.renderer;
             eprintln!(
                 "yawgpu-gles: selected EGL device {index} ({kind}) via EGL_PLATFORM_DEVICE_EXT: GL_RENDERER={renderer:?}"
@@ -473,6 +550,7 @@ pub(super) fn load_egl() -> Result<EglInstance, HalError> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+    use EglDeviceKind::{Hardware, Software, Unknown};
 
     #[test]
     fn extension_present_matches_whole_entries_only() {
@@ -493,18 +571,36 @@ mod tests {
     }
 
     #[test]
-    fn auto_lists_hardware_devices_in_enumeration_order() {
-        let is_software = [false, false, false, true];
+    fn resolve_device_candidates_auto_lists_hardware_devices_in_enumeration_order() {
+        let kinds = [Hardware, Hardware, Hardware, Software];
         assert_eq!(
-            resolve_device_candidates(EglDeviceChoice::Auto, &is_software),
+            resolve_device_candidates(EglDeviceChoice::Auto, &kinds),
             Some(vec![0, 1, 2])
         );
     }
 
     #[test]
-    fn auto_yields_an_empty_candidate_list_when_every_device_is_software() {
+    fn resolve_device_candidates_auto_orders_unknown_devices_after_hardware() {
+        // A device whose extension string could not be read stays eligible —
+        // excluding it would make a real GPU unreachable and send `Auto` back
+        // to the default display — but it is only tried once every confirmed
+        // hardware device has failed.
+        let kinds = [Unknown, Software, Hardware, Unknown, Hardware];
         assert_eq!(
-            resolve_device_candidates(EglDeviceChoice::Auto, &[true]),
+            resolve_device_candidates(EglDeviceChoice::Auto, &kinds),
+            Some(vec![2, 4, 0, 3])
+        );
+        // Unknown-only enumeration: still a candidate list, not an empty one.
+        assert_eq!(
+            resolve_device_candidates(EglDeviceChoice::Auto, &[Unknown, Unknown]),
+            Some(vec![0, 1])
+        );
+    }
+
+    #[test]
+    fn resolve_device_candidates_auto_yields_an_empty_list_when_every_device_is_software() {
+        assert_eq!(
+            resolve_device_candidates(EglDeviceChoice::Auto, &[Software]),
             Some(Vec::new())
         );
         assert_eq!(
@@ -514,38 +610,56 @@ mod tests {
     }
 
     #[test]
-    fn software_picks_the_first_software_device() {
+    fn resolve_device_candidates_software_picks_the_first_software_device() {
         assert_eq!(
-            resolve_device_candidates(EglDeviceChoice::Software, &[false, true, true]),
+            resolve_device_candidates(EglDeviceChoice::Software, &[Hardware, Software, Software]),
+            Some(vec![1])
+        );
+        // An unknown device is never mistaken for the software one.
+        assert_eq!(
+            resolve_device_candidates(EglDeviceChoice::Software, &[Unknown, Software]),
             Some(vec![1])
         );
     }
 
     #[test]
-    fn software_is_unsatisfiable_without_a_software_device() {
+    fn resolve_device_candidates_software_is_unsatisfiable_without_a_software_device() {
         assert_eq!(
-            resolve_device_candidates(EglDeviceChoice::Software, &[false, false]),
+            resolve_device_candidates(EglDeviceChoice::Software, &[Hardware, Hardware]),
+            None
+        );
+        assert_eq!(
+            resolve_device_candidates(EglDeviceChoice::Software, &[Unknown, Unknown]),
             None
         );
     }
 
     #[test]
-    fn index_pins_the_requested_device_including_the_software_one() {
-        let is_software = [false, false, false, true];
+    fn resolve_device_candidates_index_pins_the_requested_device() {
+        // Including the software one, and including an unknown one: an
+        // explicit index overrides the classification entirely.
+        let kinds = [Hardware, Unknown, Hardware, Software];
         assert_eq!(
-            resolve_device_candidates(EglDeviceChoice::Index(0), &is_software),
+            resolve_device_candidates(EglDeviceChoice::Index(0), &kinds),
             Some(vec![0])
         );
         assert_eq!(
-            resolve_device_candidates(EglDeviceChoice::Index(3), &is_software),
+            resolve_device_candidates(EglDeviceChoice::Index(1), &kinds),
+            Some(vec![1])
+        );
+        assert_eq!(
+            resolve_device_candidates(EglDeviceChoice::Index(3), &kinds),
             Some(vec![3])
         );
     }
 
     #[test]
-    fn index_out_of_range_is_unsatisfiable() {
+    fn resolve_device_candidates_index_out_of_range_is_unsatisfiable() {
         assert_eq!(
-            resolve_device_candidates(EglDeviceChoice::Index(4), &[false, false, false, true]),
+            resolve_device_candidates(
+                EglDeviceChoice::Index(4),
+                &[Hardware, Hardware, Hardware, Software]
+            ),
             None
         );
         assert_eq!(
@@ -555,10 +669,21 @@ mod tests {
     }
 
     #[test]
-    fn default_never_produces_candidates() {
+    fn resolve_device_candidates_default_never_produces_candidates() {
         assert_eq!(
-            resolve_device_candidates(EglDeviceChoice::Default, &[false, true]),
+            resolve_device_candidates(EglDeviceChoice::Default, &[Hardware, Software]),
             None
         );
+        assert_eq!(
+            resolve_device_candidates(EglDeviceChoice::Default, &[Unknown]),
+            None
+        );
+    }
+
+    #[test]
+    fn label_names_each_device_kind() {
+        assert_eq!(Hardware.label(), "hardware");
+        assert_eq!(Software.label(), "software");
+        assert_eq!(Unknown.label(), "unknown");
     }
 }

@@ -21,12 +21,30 @@ fn gles_adapter_name_is_present() {
         .expect("one adapter");
 
     // L3 / D4: the name must carry the driver's own strings, not a constant —
-    // a constant name is exactly what hid the llvmpipe fallback. GL_VERSION on
-    // any conformant ES context starts with "OpenGL ES".
+    // a constant name is exactly what hid the llvmpipe fallback. The shape is
+    // `yawgpu GLES Adapter (<backend>) — <GL_RENDERER> / <GL_VERSION>`, so
+    // split it apart and check both halves rather than looking for a substring
+    // a hard-coded name could also contain. `unknown` is the degraded
+    // placeholder a driver-less name falls back to; on a real GPU neither
+    // segment may be it.
     let name = adapter.name();
     assert!(!name.is_empty());
+    let (prefix, driver) = name
+        .split_once(" — ")
+        .unwrap_or_else(|| panic!("adapter name should carry the driver strings, got {name:?}"));
     assert!(
-        name.contains("OpenGL ES"),
+        prefix.starts_with("yawgpu GLES Adapter ("),
+        "unexpected adapter name prefix, got {name:?}"
+    );
+    let (renderer, version) = driver.split_once(" / ").unwrap_or_else(|| {
+        panic!("adapter name should carry GL_RENDERER / GL_VERSION, got {name:?}")
+    });
+    assert!(
+        !renderer.trim().is_empty() && renderer != "unknown",
+        "adapter name should carry a real GL_RENDERER, got {name:?}"
+    );
+    assert!(
+        version.contains("OpenGL ES"),
         "adapter name should carry GL_VERSION, got {name:?}"
     );
     assert_eq!(adapter.backend(), HalBackend::Gles);

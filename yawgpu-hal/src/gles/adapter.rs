@@ -47,7 +47,6 @@ pub(super) struct GlesAdapterCaps {
 /// These are owned `String`s, so they are returned *alongside* `GlesAdapterCaps`
 /// rather than stored in it: `GlesAdapterCaps` is `Copy` and consumed by value
 /// at several call sites.
-#[derive(Clone, Debug, Default)]
 pub(super) struct GlesDriverInfo {
     /// `GL_RENDERER`, empty when the driver reported nothing usable.
     pub(super) renderer: String,
@@ -486,6 +485,7 @@ pub(super) fn query_egl_adapter_caps(
     destroy_context(egl, display, context);
     Ok((caps, driver))
 }
+
 pub(super) fn query_gles_adapter_caps(
     gl: &glow::Context,
     extensions: &std::collections::HashSet<String>,
@@ -519,10 +519,12 @@ const UNKNOWN_DRIVER_STRING: &str = "unknown";
 
 /// Builds the adapter name from the backend tag and the driver strings.
 ///
-/// Pure and side-effect free so it is unit-testable without EGL/WGL, and total:
-/// a driver that reports an empty (or whitespace-only) string never produces a
-/// broken name, it degrades to `unknown`, and when neither string is usable the
-/// bare backend name is returned.
+/// Pure and side-effect free so it is unit-testable without EGL/WGL, and total
+/// over its inputs: an empty or whitespace-only argument degrades to `unknown`
+/// instead of producing a malformed name, and when neither argument is usable
+/// the bare backend name is returned. That is a totality property of this
+/// function, not a workaround for a known driver: the production callers read
+/// both strings through glow, which does not hand back an empty string here.
 fn format_adapter_name(backend: &str, renderer: &str, version: &str) -> String {
     let renderer = renderer.trim();
     let version = version.trim();
@@ -929,8 +931,8 @@ mod tests {
 
     #[test]
     fn format_adapter_name_degrades_on_empty_driver_strings() {
-        // A driver reporting an empty string for either query must not produce
-        // a broken name.
+        // An empty (or whitespace-only) argument must not produce a broken
+        // name; the function stays total over its inputs.
         assert_eq!(
             format_adapter_name("EGL", "", "OpenGL ES 3.2"),
             "yawgpu GLES Adapter (EGL) — unknown / OpenGL ES 3.2"
@@ -1123,6 +1125,65 @@ mod tests {
 
         assert_eq!(limits.max_texture_dimension_2d, queried.0);
         assert_eq!(limits.max_bindings_per_bind_group, queried.1);
+    }
+
+    #[test]
+    fn name_carries_the_live_gl_renderer() {
+        // Direct coverage for `GlesAdapter::name()`: the name must carry the
+        // driver's own `GL_RENDERER`, which is the field that distinguishes a
+        // software rasterizer from the installed GPU. Comparing against the
+        // string the live context reports keeps the assertion vendor-neutral
+        // and lets it fail if `name()` ever reverts to a constant.
+        //
+        // Skips gracefully when EGL is unavailable, matching
+        // `egl_adapter_limits_match_live_gl_context` above, so the test stays
+        // green on a GPU-less CI box.
+        let instance = match super::super::instance::GlesInstance::new_with_choice(Some(
+            super::super::instance::BackendChoice::Egl,
+        )) {
+            Ok(instance) => instance,
+            Err(error) => {
+                eprintln!("skipping GLES adapter name test; EGL unavailable: {error:?}");
+                return;
+            }
+        };
+        let Some(adapter) = instance.enumerate_adapters().into_iter().next() else {
+            eprintln!("skipping GLES adapter name test; no EGL adapter");
+            return;
+        };
+        let device = match adapter.create_device() {
+            Ok(device) => device,
+            Err(error) => {
+                eprintln!("skipping GLES adapter name test; device unavailable: {error:?}");
+                return;
+            }
+        };
+
+        let (renderer, version) = device
+            .inner_clone()
+            .with_current_context(|gl| unsafe {
+                (
+                    gl.get_parameter_string(glow::RENDERER),
+                    gl.get_parameter_string(glow::VERSION),
+                )
+            })
+            .expect("live GLES context should remain usable");
+
+        let name = adapter.name();
+        assert!(!name.is_empty());
+        let renderer = renderer.trim();
+        assert!(
+            !renderer.is_empty(),
+            "the live context reported no GL_RENDERER, so the test cannot check the name"
+        );
+        assert!(
+            name.contains(renderer),
+            "adapter name should carry GL_RENDERER {renderer:?}, got {name:?}"
+        );
+        assert!(
+            name.contains(version.trim()),
+            "adapter name should carry GL_VERSION {version:?}, got {name:?}"
+        );
     }
 
     fn assert_positive_limits_except_immediates(limits: HalLimits) {

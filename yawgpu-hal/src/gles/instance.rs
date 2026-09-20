@@ -38,6 +38,17 @@ unsafe impl Sync for GlesInstanceInner {}
 // it fails with `EGL_NOT_INITIALIZED`, and live GL contexts on a terminated
 // display are undefined behaviour at the driver level). The display is left
 // initialized for the process lifetime instead — wgpu-hal precedent.
+//
+// The same reasoning covers the displays this state never ends up holding.
+// The Linux `EGL_PLATFORM_DEVICE_EXT` cascade in `super::egl` initializes one
+// display per candidate device and validates it with a throwaway ES 3.1
+// context; a candidate that initializes but fails validation is abandoned
+// without `eglTerminate`, so a single `GlesInstance::new()` can leave several
+// device displays initialized for the process lifetime, not just the one it
+// selected. That is deliberate: each is process-global too, another
+// `GlesInstance` (or another library in the process) may hold the same
+// handle, and the cascade has no way to know it was the only user. The cost
+// is bounded by the number of enumerated EGL devices and paid once.
 
 /// Stores GLES instance data used by validation and backend submission.
 pub struct GlesInstance {
@@ -347,6 +358,9 @@ mod tests {
     fn parse_egl_device_accepts_decimal_indices() {
         assert_eq!(parse_egl_device(Some("0")), EglDeviceChoice::Index(0));
         assert_eq!(parse_egl_device(Some("3")), EglDeviceChoice::Index(3));
+        // `u32::from_str` accepts a leading `+`, so `+3` parses as index 3
+        // rather than degrading to auto (D3 pins this deliberately).
+        assert_eq!(parse_egl_device(Some("+3")), EglDeviceChoice::Index(3));
         // Out-of-range indices are a runtime concern, not a parse error.
         assert_eq!(parse_egl_device(Some("99")), EglDeviceChoice::Index(99));
     }
