@@ -630,15 +630,24 @@ bypassing WGSL and Tint entirely:
     test suite (Noop backend) green
     (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)). The
     **Vulkan backend** is additionally verified **real-GPU on Linux**
-    against the native ICD (`ash` loads `libvulkan.so` at runtime) — on
-    Intel Iris Graphics 5100 (HSW GT3) / Mesa / Vulkan 1.2 the basic,
-    buffer, texture, compute, render, depth, external-texture, and OOM
-    end-to-end suites pass against the live
-    driver. The handful of non-passes are bound to this particular GPU /
-    driver rather than to yawgpu: ETC2 / ASTC compressed-texture
-    roundtrips need compressed-format features this desktop GPU does not
-    expose, and `depthCompare=Equal` is sensitive to Mesa depth-invariance
-    precision. X11 / Wayland windowed surface sources are currently
+    against the native ICD (`ash` loads `libvulkan.so` at runtime), on two
+    vendors: an NVIDIA GeForce RTX 5060 Ti (proprietary driver, Vulkan 1.4)
+    and an AMD Radeon iGPU (RADV / Mesa). The **entire `e2e_vulkan_*`
+    suite** — basic, buffer, texture, texture-compression, compute, render,
+    depth, depth-clip-control, f16, subgroups, immediates, dual-source
+    blending, float32-blendable, texture-formats-tier2, external-texture,
+    OOM, and the threading audit — passes on **both** drivers, 78 tests
+    across 20 targets on each. The C examples build and run against both
+    (`compute` computes the real Collatz sequence on the GPU, `capture`
+    writes its rendered PNG).
+    **Compressed textures**: every BC format round-trips on real hardware —
+    multi-block copies, physical mip chains, 3D textures, sRGB sampled
+    renders, and mismatched logical mip-edge copies. ETC2 / ASTC are not
+    exposed by any ICD available on this host, so those formats are covered
+    through RADV's `vk_require_etc2` / `vk_require_astc` emulation
+    (ETC2 RGB8, EAC R11, ASTC 4x4 / 8x8 / 12x12, and ASTC sliced-3D all
+    round-trip); a driver that advertises them natively needs no such
+    switch. X11 / Wayland windowed surface sources are currently
     recognized-but-inert, so windowed presentation is not yet wired.
   - **Android (`aarch64-linux-android`)** — both Vulkan and OpenGL ES
     backends cross-build from a macOS arm64 host with NDK r30 (see
