@@ -503,14 +503,38 @@ silently inherit a headless display.
     `get_and_initialize_display` consumes them. An `#[allow(dead_code)]`
     was rejected — the repo does not suppress lints to hold a slice
     boundary (`tracking/toolchain-clippy-1-98.md` R1).
-- **L2 — cascade.** D1 + D2 + D3 wired into
+- **L2 — cascade. LANDED 2026-09-21.** D1 + D2 + D3 wired into
   `get_and_initialize_display`, plus the two items L1 deferred: add
   `egl_device_from_env()`, and narrow `EglDeviceChoice` /
   `parse_egl_device` to `pub(super)`, reverting the `gles/mod.rs`
   re-export to its pre-L1 form. Non-Linux behaviour byte-identical.
-  *Acceptance:* `cargo build -p yawgpu --features gles` and
-  `cargo clippy --workspace --all-targets --features gles -- -D warnings`
-  clean on Linux; the Windows/Android arms show no diff.
+  *Acceptance:* met — `auto` selects EGL device 0 (NVIDIA) on the dev
+  host, all eight override modes behave as D3 specifies, and the full
+  `e2e_gles_*` suite is 15/15 green on it. Measurements:
+  `tracking/gles-linux-device-selection.md`.
+
+  Three things this slice settled:
+
+  - **`pub(super)` was not enough — the three parser items are
+    `#[cfg(target_os = "linux")]` too.** Their only consumer is the
+    Linux-gated cascade, so on Windows / macOS / Android a
+    `--features gles` build would hit `dead_code` under `-D warnings`.
+    Consequence to be aware of: the L1 parser unit tests compile and run
+    on Linux only. That is acceptable — the code they cover does not
+    exist elsewhere, and CI is Linux — but it means a non-Linux host
+    cannot verify them.
+  - **`choose_config` and `query_egl_adapter_caps` now take
+    `(&EglInstance, EglDisplay, …)`** instead of `&EglInstanceState`,
+    which owns the instance and therefore cannot be built for a
+    candidate display. This is the hoist D2 authorises; call sites pass
+    `(&state.egl, state.display, …)` and behaviour is unchanged.
+  - **Two `gles/queue.rs` unit tests were pinned to llvmpipe's unorm8
+    tie rounding** and failed on first contact with real hardware
+    (`0.5 × 255 = 127.5`; Mesa rounds up, NVIDIA down, both conformant).
+    Loosened in the tests to accept either tie direction, production
+    code untouched. Detail in the tracking doc — it is the first
+    concrete instance of the blindness this whole section exists to
+    remove.
 - **L3 — observability.** D4.
   *Acceptance:* adapter name carries `GL_RENDERER` / `GL_VERSION` on the
   dev host; affected assertions updated in the same commit.
@@ -549,6 +573,14 @@ silently inherit a headless display.
    principle 3).
 8. Phase Review clean (fresh no-context subagent over the cumulative
    diff; no open CRITICAL/MAJOR).
+
+**Status after L2 (2026-09-21).** 1, 2, 3, 6 and 7 are met and measured in
+`tracking/gles-linux-device-selection.md`. 5 is met on Linux (the
+`--features gles` clippy gate went green in round 4 of
+`tracking/toolchain-clippy-1-98.md`, landed separately). 4 holds by
+construction but was **not compiled** for Android or Windows — only the
+host target is installed here; stated rather than omitted, per that
+document's R4. 8 runs after L3.
 
 ### Out of scope for this addition
 
