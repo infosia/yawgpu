@@ -14,6 +14,11 @@ use crate::{HalError, HalLimits};
 #[derive(Clone)]
 pub struct GlesAdapter {
     inner: GlesAdapterInner,
+    /// Human-readable adapter name, built once at construction from the
+    /// driver's own `GL_RENDERER` / `GL_VERSION` strings so `name()` can keep
+    /// returning `&str`. It is a sibling of `inner` rather than a per-variant
+    /// field so both the EGL and the WGL arm share one code path.
+    name: String,
 }
 
 #[derive(Clone)]
@@ -37,6 +42,19 @@ pub(super) struct GlesAdapterCaps {
     supports_float32_filterable: bool,
 }
 
+/// Driver identification strings captured by the adapter capability probe.
+///
+/// These are owned `String`s, so they are returned *alongside* `GlesAdapterCaps`
+/// rather than stored in it: `GlesAdapterCaps` is `Copy` and consumed by value
+/// at several call sites.
+#[derive(Clone, Debug, Default)]
+pub(super) struct GlesDriverInfo {
+    /// `GL_RENDERER`, empty when the driver reported nothing usable.
+    pub(super) renderer: String,
+    /// `GL_VERSION`, empty when the driver reported nothing usable.
+    pub(super) version: String,
+}
+
 // SAFETY: The adapter is an immutable handle to an EGL config plus the shared
 // instance. Context creation uses EGL calls and returns errors on failure; no
 // Rust-managed mutable state is shared through this type.
@@ -58,13 +76,14 @@ impl GlesAdapter {
         let GlesInstanceInner::Egl(egl_state) = instance.as_ref() else {
             return Err(HalError::BackendUnavailable { backend: BACKEND });
         };
-        let caps = query_egl_adapter_caps(&egl_state.egl, egl_state.display, config)?;
+        let (caps, driver) = query_egl_adapter_caps(&egl_state.egl, egl_state.display, config)?;
         Ok(Self {
             inner: GlesAdapterInner::Egl {
                 instance,
                 config,
                 caps,
             },
+            name: format_adapter_name("EGL", &driver.renderer, &driver.version),
         })
     }
 
@@ -73,20 +92,22 @@ impl GlesAdapter {
         let GlesInstanceInner::Wgl(wgl_state) = instance.as_ref() else {
             return Err(HalError::BackendUnavailable { backend: BACKEND });
         };
-        let caps = super::wgl::query_adapter_caps(Arc::clone(&instance), wgl_state)?;
+        let (caps, driver) = super::wgl::query_adapter_caps(Arc::clone(&instance), wgl_state)?;
         Ok(Self {
             inner: GlesAdapterInner::Wgl { instance, caps },
+            name: format_adapter_name("WGL", &driver.renderer, &driver.version),
         })
     }
 
     /// Returns the adapter name.
+    ///
+    /// The name carries the driver's own `GL_RENDERER` and `GL_VERSION`
+    /// strings, e.g.
+    /// `"yawgpu GLES Adapter (EGL) — llvmpipe (LLVM 21.1.8, 256 bits) / OpenGL ES 3.2 Mesa 26.0.8"`,
+    /// so a test log records which device actually ran.
     #[must_use]
     pub fn name(&self) -> &str {
-        match &self.inner {
-            GlesAdapterInner::Egl { .. } => "yawgpu GLES Adapter (EGL)",
-            #[cfg(windows)]
-            GlesAdapterInner::Wgl { .. } => "yawgpu GLES Adapter (WGL)",
-        }
+        &self.name
     }
 
     /// Returns the backend-reported supported limits.
@@ -390,7 +411,7 @@ pub(super) fn query_egl_adapter_caps(
     egl: &EglInstance,
     display: EglDisplay,
     config: EglConfig,
-) -> Result<GlesAdapterCaps, HalError> {
+) -> Result<(GlesAdapterCaps, GlesDriverInfo), HalError> {
     let attribs_es31 = [
         egl::CONTEXT_MAJOR_VERSION,
         3,
@@ -437,9 +458,12 @@ pub(super) fn query_egl_adapter_caps(
                 .unwrap_or(std::ptr::null())
         })
     };
-    let version = unsafe { gl.get_parameter_string(glow::VERSION) };
-    let Some((major, minor)) = parse_gles_version(&version) else {
-        eprintln!("yawgpu-gles: unable to parse GL_VERSION during limit probe: {version:?}");
+    let driver = query_gles_driver_info(&gl);
+    let Some((major, minor)) = parse_gles_version(&driver.version) else {
+        eprintln!(
+            "yawgpu-gles: unable to parse GL_VERSION during limit probe: {:?}",
+            driver.version
+        );
         let _ = egl.make_current(display, None, None, None);
         destroy_surface(egl, display, surface);
         destroy_context(egl, display, context);
@@ -447,7 +471,8 @@ pub(super) fn query_egl_adapter_caps(
     };
     if (major, minor) < (3, 1) {
         eprintln!(
-            "yawgpu-gles: limit probe found GLES {major}.{minor} below the required 3.1 (GL_VERSION={version:?})"
+            "yawgpu-gles: limit probe found GLES {major}.{minor} below the required 3.1 (GL_VERSION={:?})",
+            driver.version
         );
         let _ = egl.make_current(display, None, None, None);
         destroy_surface(egl, display, surface);
@@ -459,7 +484,7 @@ pub(super) fn query_egl_adapter_caps(
     let _ = egl.make_current(display, None, None, None);
     destroy_surface(egl, display, surface);
     destroy_context(egl, display, context);
-    Ok(caps)
+    Ok((caps, driver))
 }
 pub(super) fn query_gles_adapter_caps(
     gl: &glow::Context,
@@ -470,6 +495,52 @@ pub(super) fn query_gles_adapter_caps(
         color_render_caps: detect_color_render_caps(extensions),
         supports_float32_filterable: detect_float32_filterable_support(extensions),
     }
+}
+
+/// Reads `GL_RENDERER` / `GL_VERSION` from the current context.
+///
+/// Called from the capability probes, which already hold a current context; it
+/// creates no context and issues no make-current of its own. The reads go
+/// through the same `get_parameter_string` entry point the surrounding probes
+/// already use for `GL_VERSION`.
+pub(super) fn query_gles_driver_info(gl: &glow::Context) -> GlesDriverInfo {
+    // SAFETY: the caller holds a current GLES context, which is what
+    // `glGetString` requires; both parameters are core GLES 2.0 queries.
+    unsafe {
+        GlesDriverInfo {
+            renderer: gl.get_parameter_string(glow::RENDERER),
+            version: gl.get_parameter_string(glow::VERSION),
+        }
+    }
+}
+
+/// Placeholder used when the driver reports no usable string for a query.
+const UNKNOWN_DRIVER_STRING: &str = "unknown";
+
+/// Builds the adapter name from the backend tag and the driver strings.
+///
+/// Pure and side-effect free so it is unit-testable without EGL/WGL, and total:
+/// a driver that reports an empty (or whitespace-only) string never produces a
+/// broken name, it degrades to `unknown`, and when neither string is usable the
+/// bare backend name is returned.
+fn format_adapter_name(backend: &str, renderer: &str, version: &str) -> String {
+    let renderer = renderer.trim();
+    let version = version.trim();
+    let base = format!("yawgpu GLES Adapter ({backend})");
+    if renderer.is_empty() && version.is_empty() {
+        return base;
+    }
+    let renderer = if renderer.is_empty() {
+        UNKNOWN_DRIVER_STRING
+    } else {
+        renderer
+    };
+    let version = if version.is_empty() {
+        UNKNOWN_DRIVER_STRING
+    } else {
+        version
+    };
+    format!("{base} — {renderer} / {version}")
 }
 
 pub(super) fn detect_texture_view_support(
@@ -839,6 +910,42 @@ pub(super) fn detect_float32_filterable_support(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_adapter_name_carries_driver_strings() {
+        assert_eq!(
+            format_adapter_name(
+                "EGL",
+                "NVIDIA GeForce RTX 4070",
+                "OpenGL ES 3.2 NVIDIA 580.95.05"
+            ),
+            "yawgpu GLES Adapter (EGL) — NVIDIA GeForce RTX 4070 / OpenGL ES 3.2 NVIDIA 580.95.05"
+        );
+        assert_eq!(
+            format_adapter_name("WGL", "ANGLE (Vulkan)", "OpenGL ES 3.1"),
+            "yawgpu GLES Adapter (WGL) — ANGLE (Vulkan) / OpenGL ES 3.1"
+        );
+    }
+
+    #[test]
+    fn format_adapter_name_degrades_on_empty_driver_strings() {
+        // A driver reporting an empty string for either query must not produce
+        // a broken name.
+        assert_eq!(
+            format_adapter_name("EGL", "", "OpenGL ES 3.2"),
+            "yawgpu GLES Adapter (EGL) — unknown / OpenGL ES 3.2"
+        );
+        assert_eq!(
+            format_adapter_name("EGL", "llvmpipe", "   "),
+            "yawgpu GLES Adapter (EGL) — llvmpipe / unknown"
+        );
+        // Neither string usable: the bare backend name, still non-empty.
+        assert_eq!(
+            format_adapter_name("WGL", "", ""),
+            "yawgpu GLES Adapter (WGL)"
+        );
+        assert!(!format_adapter_name("EGL", "", "").is_empty());
+    }
 
     #[test]
     fn parse_gles_version_accepts_es_versions() {

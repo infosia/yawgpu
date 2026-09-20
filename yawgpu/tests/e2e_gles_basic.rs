@@ -20,7 +20,15 @@ fn gles_adapter_name_is_present() {
         .next()
         .expect("one adapter");
 
-    assert!(!adapter.name().is_empty());
+    // L3 / D4: the name must carry the driver's own strings, not a constant —
+    // a constant name is exactly what hid the llvmpipe fallback. GL_VERSION on
+    // any conformant ES context starts with "OpenGL ES".
+    let name = adapter.name();
+    assert!(!name.is_empty());
+    assert!(
+        name.contains("OpenGL ES"),
+        "adapter name should carry GL_VERSION, got {name:?}"
+    );
     assert_eq!(adapter.backend(), HalBackend::Gles);
 }
 

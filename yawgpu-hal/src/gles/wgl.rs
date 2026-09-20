@@ -29,7 +29,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use super::adapter::{
     detect_base_vertex_support, detect_color_render_caps, detect_cube_map_array_support,
     detect_texture_view_support, detect_vertex_array_bgra_support, parse_gles_version,
-    query_gles_adapter_caps,
+    query_gles_adapter_caps, query_gles_driver_info, GlesDriverInfo,
 };
 use super::device::{
     GlesSampleMaskIFn, GlesTextureViewFn, TextureToBufferComputeProgram,
@@ -140,15 +140,18 @@ impl WglInstanceState {
     }
 }
 
+/// Probes the WGL adapter caps and the driver's identification strings.
+///
+/// The driver strings are read from the same throwaway context the caps probe
+/// already creates (D4 in `specs/blocks/67-gles-backend.md`: the constant
+/// adapter name hid the software fallback on every platform, not just Linux).
 pub(super) fn query_adapter_caps(
     instance: Arc<super::instance::GlesInstanceInner>,
     wgl_state: &WglInstanceState,
-) -> Result<super::adapter::GlesAdapterCaps, HalError> {
+) -> Result<(super::adapter::GlesAdapterCaps, GlesDriverInfo), HalError> {
     let state = WglDeviceState::create(instance, wgl_state)?;
-    Ok(query_gles_adapter_caps(
-        &state.gl,
-        state.gl.supported_extensions(),
-    ))
+    let caps = query_gles_adapter_caps(&state.gl, state.gl.supported_extensions());
+    Ok((caps, query_gles_driver_info(&state.gl)))
 }
 
 unsafe extern "system" fn default_wnd_proc(

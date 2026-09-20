@@ -192,7 +192,8 @@ fn device_is_software(
     extension_present(&extensions.to_string_lossy(), "EGL_MESA_device_software")
 }
 
-/// Opens, initializes and validates one candidate device display (D2).
+/// Opens, initializes and validates one candidate device display (D2), and on
+/// success returns it together with the driver strings the probe reported.
 ///
 /// Validation is `eglInitialize` → `eglBindAPI(EGL_OPENGL_ES_API)` →
 /// `choose_config` → the existing throwaway ES 3.1 context + 1×1 pbuffer caps
@@ -206,7 +207,7 @@ fn try_device_display(
     get_platform_display: EglGetPlatformDisplayExtFn,
     device: EglDeviceExt,
     index: usize,
-) -> Option<EglDisplay> {
+) -> Option<(EglDisplay, super::adapter::GlesDriverInfo)> {
     // SAFETY: `device` came from `eglQueryDevicesEXT`, and a null attribute
     // list is the documented "no attributes" form for
     // `eglGetPlatformDisplayEXT`.
@@ -234,11 +235,14 @@ fn try_device_display(
             return None;
         }
     };
-    if let Err(err) = super::adapter::query_egl_adapter_caps(egl, display, config) {
-        eprintln!("yawgpu-gles: ES 3.1 capability probe failed on EGL device {index}: {err:?}");
-        return None;
-    }
-    Some(display)
+    let driver = match super::adapter::query_egl_adapter_caps(egl, display, config) {
+        Ok((_, driver)) => driver,
+        Err(err) => {
+            eprintln!("yawgpu-gles: ES 3.1 capability probe failed on EGL device {index}: {err:?}");
+            return None;
+        }
+    };
+    Some((display, driver))
 }
 
 /// Runs the Linux device cascade and returns the selected display, or `None`
@@ -304,14 +308,17 @@ fn select_linux_device_display(egl: &EglInstance) -> Option<EglDisplay> {
         let Some(device) = devices.get(index) else {
             continue;
         };
-        if let Some(display) = try_device_display(egl, get_platform_display, *device, index) {
+        if let Some((display, driver)) =
+            try_device_display(egl, get_platform_display, *device, index)
+        {
             let kind = if is_software[index] {
                 "software"
             } else {
                 "hardware"
             };
+            let renderer = &driver.renderer;
             eprintln!(
-                "yawgpu-gles: selected EGL device {index} ({kind}) via EGL_PLATFORM_DEVICE_EXT"
+                "yawgpu-gles: selected EGL device {index} ({kind}) via EGL_PLATFORM_DEVICE_EXT: GL_RENDERER={renderer:?}"
             );
             return Some(display);
         }
