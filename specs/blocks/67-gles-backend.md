@@ -445,16 +445,34 @@ one.
 
 **D4 — observability (required, not optional).** The constant adapter
 name is what hid the software fallback, so the fix is not verifiable
-without this. `GlesAdapterCaps` gains `renderer: String` and
-`version: String`, captured inside the caps probe that already exists
-(no extra context, no extra make-current). `GlesAdapter::name()` then
+without this. The driver's `GL_RENDERER` / `GL_VERSION` are captured
+inside the caps probe that already exists (no extra context, no extra
+make-current). **Corrected at L3 (2026-09-21):** this text originally
+said `GlesAdapterCaps` gains the two `String` fields. It cannot —
+that struct is `#[derive(Clone, Copy, Debug)]` and is consumed by value
+at several call sites, so `String` fields would force dropping `Copy`
+and ripple. What landed instead: the probe returns a small owned
+`GlesDriverInfo { renderer, version }` **alongside** the caps, and
+`GlesAdapter` carries an owned `name: String` as a sibling of `inner`
+(not a per-variant field), so the EGL and WGL arms share one code
+path. `GlesAdapter::name()` then
 returns a string that carries them, e.g.
 `"yawgpu GLES Adapter (EGL) — llvmpipe (LLVM 21.1.8, 256 bits) / OpenGL ES 3.2 Mesa 26.0.8-1ubuntu0.3"`.
 The strings are owned by the adapter, so `name()` keeps its `-> &str`
 signature. This applies to **all** platforms including the WGL arm — the
 same blindness exists there. The selection path additionally emits one
 `yawgpu-gles:`-prefixed line naming the chosen device index and
-renderer, consistent with the surrounding bring-up diagnostics.
+renderer, consistent with the surrounding bring-up diagnostics. That
+line costs slightly more than the one-line change it sounds like: the
+renderer cannot reach it unless the cascade's validation call hands the
+driver info back, so `try_device_display` returns it too. No cascade
+*behaviour* changed.
+
+Note the separator in the name is a literal em dash, so the string that
+reaches `wgpuAdapterGetInfo` is not pure ASCII. Harmless for UTF-8
+consumers, and adapter-info strings are arbitrary driver text for the
+Dawn oracle too, but worth knowing if a comparison is ever byte-
+sensitive.
 
 Impact: this string reaches `wgpuAdapterGetInfo` through
 `AdapterImpl::name()`. Dawn reports the driver's real renderer string in
@@ -535,9 +553,29 @@ silently inherit a headless display.
     code untouched. Detail in the tracking doc — it is the first
     concrete instance of the blindness this whole section exists to
     remove.
-- **L3 — observability.** D4.
-  *Acceptance:* adapter name carries `GL_RENDERER` / `GL_VERSION` on the
-  dev host; affected assertions updated in the same commit.
+- **L3 — observability. LANDED 2026-09-21.** D4.
+  *Acceptance:* met — on the dev host the adapter name is
+  `yawgpu GLES Adapter (EGL) — NVIDIA GeForce RTX 5060 Ti/PCIe/SSE2 / OpenGL ES 3.2 NVIDIA 595.91.07`
+  under `auto` and
+  `yawgpu GLES Adapter (EGL) — llvmpipe (LLVM 21.1.8, 256 bits) / OpenGL ES 3.2 Mesa 26.0.8-1ubuntu0.3`
+  under `YAWGPU_GLES_EGL_DEVICE=3`, so the two runs are distinguishable
+  from the log alone. `gles_adapter_name_is_present` was strengthened
+  from "non-empty" (which the old constant also satisfied) to requiring
+  the driver's version string; no other assertion pinned the name.
+
+  One instruction withdrawn mid-slice: a "never panic" reading of
+  CLAUDE.md principle 3 had produced a `catch_unwind` around glow's
+  `get_parameter_string`, which panics on a NULL string. Removed. The
+  principle governs *our* code returning `Result`, not wrapping a
+  dependency's panic — and three sibling call sites
+  (`adapter.rs`, `wgl.rs`, `queue.rs`) already call that same API raw,
+  so a guard on the fourth is a local anomaly, not a policy. It also
+  buys little: `catch_unwind` is a no-op under `panic = "abort"` and the
+  panic hook prints before unwinding either way. The residual exposure
+  is unchanged from before this block: a driver returning NULL for
+  `GL_RENDERER` / `GL_VERSION` in an already-current context would panic
+  in glow. `format_adapter_name`'s empty-string degradation was kept on
+  its own merits (totality), with unit tests.
 - **L4 — verification + ledger.** The user runs
   `cargo test -p yawgpu --features gles --test e2e_gles_<area> -- --ignored`
   on the Linux host and records in a new

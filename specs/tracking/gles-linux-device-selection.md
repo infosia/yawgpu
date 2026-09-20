@@ -19,11 +19,26 @@ L4 completes it once L3 puts the renderer strings in the adapter name.
 (software). The whole `e2e_gles_*` suite passed there, so nothing in the
 test log distinguished it from a real-GPU run.
 
-## After L2 (`auto`, no env vars)
+## After L2 + L3 (`auto`, no env vars)
 
-`yawgpu-gles: selected EGL device 0 (hardware) via EGL_PLATFORM_DEVICE_EXT`
-→ `EGL_VENDOR="NVIDIA"`. `e2e_gles_*` **15/15 green** on it, and
-`yawgpu-hal --features gles --lib` **213/213**.
+```
+yawgpu-gles: selected EGL device 0 (hardware) via EGL_PLATFORM_DEVICE_EXT: GL_RENDERER="NVIDIA GeForce RTX 5060 Ti/PCIe/SSE2"
+adapter name: yawgpu GLES Adapter (EGL) — NVIDIA GeForce RTX 5060 Ti/PCIe/SSE2 / OpenGL ES 3.2 NVIDIA 595.91.07
+```
+
+`e2e_gles_*` **15/15 green** on it, and `yawgpu-hal --features gles --lib`
+**215/215**.
+
+Under `YAWGPU_GLES_EGL_DEVICE=3` the same two lines read:
+
+```
+yawgpu-gles: selected EGL device 3 (software) via EGL_PLATFORM_DEVICE_EXT: GL_RENDERER="llvmpipe (LLVM 21.1.8, 256 bits)"
+adapter name: yawgpu GLES Adapter (EGL) — llvmpipe (LLVM 21.1.8, 256 bits) / OpenGL ES 3.2 Mesa 26.0.8-1ubuntu0.3
+```
+
+That difference is the whole point of L3: before it, both runs produced the
+identical constant `"yawgpu GLES Adapter (EGL)"` and an otherwise identical
+green log.
 
 ## Selection matrix (measured 2026-09-21, `e2e_gles_basic --ignored --nocapture`)
 
@@ -76,6 +91,7 @@ NVIDIA.
   for those targets: only `x86_64-unknown-linux-gnu` is installed on this
   host. Stated rather than silently omitted, per
   `tracking/toolchain-clippy-1-98.md` R4.
-- `GL_RENDERER` / `GL_VERSION` per mode — needs L3 (D4). L4 fills the table
-  above with them once it lands.
+- Per-mode `GL_RENDERER` / `GL_VERSION` for the six modes other than `auto`
+  and `3`: L3 makes them readable from any run, but only those two were
+  captured in full. L4 fills the rest if it is worth the runs.
 - Windowed presentation: out of scope (D5); a device display is headless.
