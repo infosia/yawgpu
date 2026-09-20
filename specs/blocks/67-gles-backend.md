@@ -271,7 +271,7 @@ the owning slice's review.
 | GLSL binding numbers (all classes) | `glsl_binding_info` (yawgpu-core) assigns **each resource class its own dense sequence sorted by `(group, binding)`** and forces `dst_group = 0`, so WGSL groups collapse into GL's flat per-class binding spaces without collisions. UBO / SSBO / storage-image remaps are handed to the HAL too, because those GL calls consume the binding number directly; sampled textures and samplers bind through Tint's linked uniform names but still participate in the remap so combined-sampler lowering stays deterministic across groups. This is the **linear binding remap** that multi-bind-group support was waiting on. Without an explicit remap, Tint's `GenerateBindings` renumbers sequentially in declaration order (a `@binding(3)` buffer became `binding = 1`), desyncing GLSL from the HAL. The naga-era `_block_N` name-parse remap was deleted. *(Earlier revisions of this row described an "identity `BindingRemap`" via `tint_bindings_for_glsl`; both the identity property and that function name are obsolete.)* | ☑ (R6 + multi-group remap; pinned by generated-GLSL unit tests in yawgpu-tint/-core) |
 | `textureNumLevels` / `textureNumSamples` (`texture_builtins_from_uniform`) | WIRED (T-G17 exposed the polyfill UBO binding through the shim; c06e516 populates each slot from Tint's `ubo_contents` layout, mapping post-remap binding → WGSL group/binding, filled by the queue with mip-level / sample count). **Cross-stage slot assignment fixed (2026-07-08):** the shim generates GLSL per stage, so each stage's `ubo_contents` was packed from offset 0 independently — vertex and fragment then collided at the same UBO offset for *different* textures (core `merge_texture_metadata_slots` raised `unexpected internal error`, 64 CTS fails in `capability_checks,limits,maxSampledTexturesPerShaderStage`). Fix: the shim sets `ubo_contents[i].offset = resolved_binding.binding` (both the remapped and empty-remaps paths), making the offset a deterministic function of the pipeline-stable resolved binding — vertex and fragment independently compute disjoint offsets for different textures and identical offsets for a shared one. Mirrors Dawn's per-pipeline `EmulatedTextureBuiltinRegistrar` (keyed on FlatBindingIndex; `opengl/PipelineGL.cpp:222-246`) without threading a shared registrar across the two per-stage shim calls. | ☑ (T-G17 + c06e516 + cross-stage offset fix; pinned by yawgpu-tint generated-GLSL test + real-EGL cross-stage HAL test) |
 | Context backend (Windows) | Default: EGL (`libEGL.dll` ⇒ ANGLE platform-display cascade through Vulkan → D3D11). Opt-in fallback: WGL (`opengl32.dll` + `WGL_EXT_create_context_es2_profile`) selected via `YAWGPU_GLES_BACKEND=wgl`, or programmatically through `YaWGPUGlesContextBackend` (`YAWGPU_STYPE_GLES_CONTEXT_BACKEND`) chained onto `WGPUInstanceDescriptor.nextInChain`. Resolution is chain `EGL`/`WGL` value > env var > default EGL; `DEFAULT` defers to the env var, WGL on non-Windows falls back to EGL, and the chain entry is ignored when the resolved instance backend is not GLES. Both routes converge on the same `glow::Context` API below the make-current seam; `GlesInstanceInner` / `GlesAdapter` / `GlesDeviceInner` / `GlesSurfaceInner` are static enums (`Egl(...)` / `Wgl(...)`) per CLAUDE.md "no `dyn Trait`". WGL surface (HWND): `ChoosePixelFormat`/`SetPixelFormat` with the same descriptor as the helper HWND (shared HGLRC), `wglMakeCurrent(surface.hdc, hglrc)` + glow blit + `SwapBuffers(hdc)` for present; `RestoreCurrent` Drop guard re-binds the helper HDC. | ☑ (P15.6 EGL + post-COMPLETE WGL context + post-COMPLETE WGL surface slices + programmatic override; WGL verified on `OpenGL ES 3.2 NVIDIA 595.95` — **15/15 e2e green, re-run 2026-08-08 after the command-stream move (`88cfe58`)** — + `examples/triangle` runs 60 frames clean) |
-| Context display (Linux) | Today: `eglGetDisplay(EGL_DEFAULT_DISPLAY)` unconditionally on every non-Windows target. Correct on Android; on a desktop Linux host libglvnd hands it to Mesa, which silently resolves to the **software rasterizer** (`llvmpipe`) when it cannot drive the installed GPU — invisible in the test log, because the adapter name is a constant. Spec'd fix: a Linux-only `EGL_PLATFORM_DEVICE_EXT` cascade over `eglQueryDevicesEXT` that prefers a **validated** hardware device and falls back to the default display, plus a `YAWGPU_GLES_EGL_DEVICE` override and renderer strings in the adapter name. See "Linux EGL device selection" below. | ◐ **spec'd 2026-09-21 — NOT implemented** |
+| Context display (Linux) | Today: `eglGetDisplay(EGL_DEFAULT_DISPLAY)` unconditionally on every non-Windows target. Correct on Android; on a desktop Linux host libglvnd hands it to Mesa, which silently resolves to the **software rasterizer** (`llvmpipe`) when it cannot drive the installed GPU — invisible in the test log, because the adapter name is a constant. Spec'd fix: a Linux-only `EGL_PLATFORM_DEVICE_EXT` cascade over `eglQueryDevicesEXT` that prefers a **validated** hardware device and falls back to the default display, plus a `YAWGPU_GLES_EGL_DEVICE` override and renderer strings in the adapter name. See "Linux EGL device selection" below. | ☑ (L1–L3, 2026-09-21; `auto` selects a validated hardware device, overridable via `YAWGPU_GLES_EGL_DEVICE`) |
 | Surface (Android) | `eglCreateWindowSurface(ANativeWindow*)` via `GlesInstance::create_surface_from_android_native_window`. Reuses the existing `choose_config` (RGBA8 + GLES3 + PBUFFER_BIT). | ☑ (P15.6; code path implemented; manual visual verification via Android-side example) |
 | Surface (Windows ANGLE) | `eglCreateWindowSurface(HWND)` via `GlesInstance::create_surface_from_windows_hwnd`. ANGLE accepts the pbuffer-capable config for window surfaces too. | ☑ (P15.6; manual visual verification via `examples/triangle`) |
 | Present | Back-buffer (`GlesTexture` allocated at `configure()` with `RENDER_ATTACHMENT \| COPY_SRC`) blitted via transient read-FBO + `glBlitFramebuffer` to default FBO, then `eglSwapBuffers`. `RestoreCurrent` Drop guard re-binds the pbuffer after swap (even on error). | ☑ (P15.6) |
@@ -286,11 +286,13 @@ the owning slice's review.
 
 ## Linux EGL device selection (post-COMPLETE addition)
 
-> **Status: SPEC ONLY — spec'd 2026-09-21, not implemented.** Nothing in
-> this section is in the source yet. The mapping-matrix row "Context
-> display (Linux)" carries the same marker. Implementation is an L1–L4
-> handoff to the coding agent (slices below); this file is the contract
-> it is reviewed against.
+> **Status: IMPLEMENTED — L1, L2 and L3 landed 2026-09-21**
+> (`196d2a0`, `c30631d`, `4e71e83`), Phase Review run and its findings
+> fixed. On a desktop Linux host the GLES backend now selects a
+> validated hardware EGL device instead of the platform default display.
+> The slice records below carry the per-slice detail, and the measured
+> behaviour is in `tracking/gles-linux-device-selection.md`. This
+> section stays the behaviour contract the work is reviewed against.
 
 ### Problem (measured, 2026-09-21)
 
@@ -427,6 +429,20 @@ to the documented default, never panic.
   is a **runtime** decision and belongs to the cascade. Falling back to
   `Auto` here would silently hand the user a different device than the
   one they pinned, which is exactly what D3 forbids.
+
+**Enumeration indices are not stable (Phase Review m1, 2026-09-21).**
+`eglQueryDevicesEXT` ordering is implementation-defined, and on the dev
+host it is observably not stable across sessions: indices `1` and `2`
+(the AMD iGPU and a device that fails `eglInitialize`) swapped between
+two measurements the same day, while `0` (NVIDIA) and `3` (llvmpipe)
+stayed put. So `YAWGPU_GLES_EGL_DEVICE=<n>` pins an **enumeration slot,
+not a device** — it is a debugging knob, and `auto`, `software` and
+`default` are the reproducible selectors. This does not weaken the
+cascade (`auto` is defined over the hardware/software split, not over
+indices), but anything that has to name a specific GPU across runs
+should read `GL_RENDERER` back rather than trusting an index. A
+renderer-substring selector would fix that properly; out of scope here,
+noted in the tracking doc as possible future work.
 
 Parse surface, pinned by the L1 unit tests: matching is exact and
 lowercase with no trimming, mirroring `parse_backend` (`"AUTO"` and
@@ -571,10 +587,16 @@ silently inherit a headless display.
   (`adapter.rs`, `wgl.rs`, `queue.rs`) already call that same API raw,
   so a guard on the fourth is a local anomaly, not a policy. It also
   buys little: `catch_unwind` is a no-op under `panic = "abort"` and the
-  panic hook prints before unwinding either way. The residual exposure
-  is unchanged from before this block: a driver returning NULL for
-  `GL_RENDERER` / `GL_VERSION` in an already-current context would panic
-  in glow. `format_adapter_name`'s empty-string degradation was kept on
+  panic hook prints before unwinding either way. **Corrected after the
+  Phase Review (m4):** the earlier claim that the residual exposure was
+  "unchanged" was wrong. The *class* of exposure is pre-existing — glow's
+  `get_parameter_string` panics on a NULL string and on non-UTF-8 driver
+  text — but L3 widens it: the EGL arm previously read `GL_VERSION`
+  only and now also reads `GL_RENDERER` (the more free-form of the two),
+  and the WGL arm previously read neither. It is reachable from the C
+  ABI through `wgpuInstanceRequestAdapter` → `enumerate_adapters`. The
+  decision not to wrap it stands on the reasoning above; the accounting
+  of what it costs is corrected here. `format_adapter_name`'s empty-string degradation was kept on
   its own merits (totality), with unit tests.
 - **L4 — verification + ledger.** The user runs
   `cargo test -p yawgpu --features gles --test e2e_gles_<area> -- --ignored`
@@ -612,13 +634,15 @@ silently inherit a headless display.
 8. Phase Review clean (fresh no-context subagent over the cumulative
    diff; no open CRITICAL/MAJOR).
 
-**Status after L2 (2026-09-21).** 1, 2, 3, 6 and 7 are met and measured in
-`tracking/gles-linux-device-selection.md`. 5 is met on Linux (the
-`--features gles` clippy gate went green in round 4 of
-`tracking/toolchain-clippy-1-98.md`, landed separately). 4 holds by
-construction but was **not compiled** for Android or Windows — only the
-host target is installed here; stated rather than omitted, per that
-document's R4. 8 runs after L3.
+**Status after L3 + Phase Review (2026-09-21).** 1, 2, 3, 6 and 7 are met
+and measured in `tracking/gles-linux-device-selection.md`. 5 is met on
+Linux (the `--features gles` clippy gate went green in round 4 of
+`tracking/toolchain-clippy-1-98.md`, landed separately). 8 is met: the
+Phase Review found 0 CRITICAL, 2 MAJOR and 9 MINOR; both MAJORs and
+eight MINORs are fixed, one MINOR is deferred with written rationale —
+full list and triage in the tracking doc. 4 holds by construction but
+was **not compiled** for Android or Windows: only the host target is
+installed here, stated rather than omitted, per that document's R4.
 
 ### Out of scope for this addition
 
