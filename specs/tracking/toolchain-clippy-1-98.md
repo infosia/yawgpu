@@ -176,3 +176,53 @@ Generalisation worth remembering: a lint fix can change an expression's type and
 so expose a *different* lint at the same site. The R5 `--keep-going` enumeration
 is therefore re-run **after** applying fixes, not only before — the set is not
 static.
+
+## Fourth round — the `--features gles` sites (2026-09-21)
+
+Found while gating Block 67's L1 slice on a Linux host that can build the
+GLES backend. R4 predicted this set exactly: the default gate never compiles
+`#[cfg(feature = "gles")]` targets, so these have been red since the toolchain
+drifted, untouched by any slice.
+
+Enumerated per R5 with
+`cargo clippy --workspace --all-targets --features gles --keep-going --message-format=short -- -D warnings`
+on `b740534`: **13 sites, all `chunks_exact_to_as_chunks`.** All ten
+`yawgpu-hal` sites are inside `#[cfg(test)] mod tests` (queue.rs:4208), so the
+`gles` **lib** target is clean; only the test targets fail.
+
+| file:line | chunk size | shape |
+|---|---|---|
+| `yawgpu-hal/src/gles/queue.rs:4217` | `8` | `.iter()` |
+| `yawgpu-hal/src/gles/queue.rs:4675` | `4` | slice (`for pixel in …`) |
+| `yawgpu-hal/src/gles/queue.rs:4719` | `4` | slice |
+| `yawgpu-hal/src/gles/queue.rs:6852` | `4` | `.iter()` |
+| `yawgpu-hal/src/gles/queue.rs:6974` | `16` | `.iter()` |
+| `yawgpu-hal/src/gles/queue.rs:7098` | `16` | `.iter()` |
+| `yawgpu-hal/src/gles/queue.rs:7797` | `4` | `.iter()` |
+| `yawgpu-hal/src/gles/queue.rs:8453` | `4` | `.iter()` |
+| `yawgpu-hal/src/gles/queue.rs:8748` | `4` | `.iter()` |
+| `yawgpu-hal/src/gles/queue.rs:10157` | `4` | `.iter()` |
+| `yawgpu/tests/e2e_gles_compute.rs:525` | `std::mem::size_of::<u32>()` | `.iter()` — **R6** |
+| `yawgpu/tests/e2e_gles_render.rs:495` | `BYTES_PER_PIXEL` | `.iter()` |
+| `yawgpu/tests/e2e_gles_render.rs:500` | `BYTES_PER_PIXEL` | `.iter()` |
+
+R1 (no `#[allow]`), R2 (`as_chunks::<N>().0` discards the remainder exactly as
+`chunks_exact(N)` did), R3 (only these sites) and R6 (the `size_of` site needs
+a named const, since `as_chunks::<std::mem::size_of::<u32>()>()` is not valid
+const-generic syntax) all apply unchanged. The two `slice` shapes drop the
+`.iter()` in the suggestion — clippy prints the right form per site; do not
+paste one site's suggestion into another. Per the third round's knock-on note,
+re-run the R5 enumeration **after** applying the fixes: the element type
+becomes `&[T; N]`, which can surface a different lint at the same site
+(`manual_contains` did exactly that in round 3).
+
+### Process finding — a per-crate run is not an enumeration
+
+The first pass at this set was run as `cargo clippy -p yawgpu-hal --features
+gles --all-targets` and reported **10** sites. The workspace run reports
+**13**: `-p <crate>` silently excludes the `yawgpu` integration-test targets,
+where the remaining three live.
+
+- **R7 — Enumerate at workspace scope.** R5's `--keep-going` requirement also
+  implies `--workspace`. A findings list produced with `-p <crate>` states that
+  scope explicitly and is not treated as the complete set.

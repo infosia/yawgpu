@@ -416,6 +416,25 @@ the ask, then fall through to the default display (step 4). This mirrors
 `parse_backend`'s existing unknown-value behaviour — diagnose, degrade
 to the documented default, never panic.
 
+**Two distinct fallbacks — do not conflate them** (L1 review, 2026-09-21):
+
+- *Unparseable* value (`"nvidia"`, `"-1"`, `" 0"`) → diagnose, then
+  `Auto`, i.e. run the normal cascade. This is a **parse-time**
+  decision and belongs to `parse_egl_device`.
+- *Well-formed but unsatisfiable* ask (index out of range, no software
+  device present, the named candidate fails D2) → diagnose, then fall
+  through to the **default display** (step 4), **not** to `Auto`. This
+  is a **runtime** decision and belongs to the cascade. Falling back to
+  `Auto` here would silently hand the user a different device than the
+  one they pinned, which is exactly what D3 forbids.
+
+Parse surface, pinned by the L1 unit tests: matching is exact and
+lowercase with no trimming, mirroring `parse_backend` (`"AUTO"` and
+`" 0"` are unknown values, not aliases). The index is parsed with
+`u32::from_str`, which accepts an optional leading `+`, so `"+3"` is
+`Index(3)`; this is accepted rather than special-cased — the value is
+unambiguous and rejecting it would need code that buys nothing.
+
 **No chain entry.** `YaWGPUGlesContextBackend` exists because Windows
 applications need a programmatic EGL/WGL switch at instance creation.
 Linux device selection is a verification-host concern and the automatic
@@ -456,18 +475,39 @@ silently inherit a headless display.
 
 ### Slices
 
-- **L1 — device-choice parser (no GPU needed).**
+- **L1 — device-choice parser (no GPU needed). LANDED 2026-09-21.**
   `pub enum EglDeviceChoice { Auto, Default, Software, Index(u32) }` +
-  `parse_egl_device(Option<&str>) -> EglDeviceChoice` +
-  `egl_device_from_env()`, in `gles/instance.rs` beside `parse_backend`.
-  Inline `#[cfg(test)] mod tests` per CLAUDE.md principle 1, covering:
-  unset, `""`, `auto`, `default`, `software`, `"0"`, `"3"`, `"99"`
+  `parse_egl_device(Option<&str>) -> EglDeviceChoice`, in
+  `gles/instance.rs` beside `parse_backend`. Inline
+  `#[cfg(test)] mod tests` per CLAUDE.md principle 1, covering: unset,
+  `""`, `auto`, `default`, `software`, `"0"`, `"3"`, `"99"`
   (→ `Index(99)`; range is a runtime concern, not a parse error),
-  `"-1"`, `"nvidia"` → documented fallback. `///` doc comments on every
-  new public item.
-  *Acceptance:* unit tests green on Noop, no EGL required.
+  `"-1"`, `"nvidia"`, `"AUTO"`, `" 0"` → documented fallback. `///` doc
+  comments on every new public item.
+  *Acceptance:* unit tests green on Noop, no EGL required — met
+  (`cargo test -p yawgpu-hal --features gles --lib`, 204 passed).
+
+  Two corrections this slice forced, recorded so the next one does not
+  repeat them:
+
+  - **`egl_device_from_env()` moved to L2.** It was listed here, but it
+    has no consumer until the cascade exists, so landing it in L1 is
+    dead code under `-D warnings`.
+  - **Visibility is temporary.** `gles/mod.rs` declares `mod instance;`
+    (private), so a `pub` item inside it is *not* publicly reachable and
+    still trips `dead_code`. L1 therefore extended the existing
+    `pub use instance::{…}` re-export to carry `EglDeviceChoice` and
+    `parse_egl_device`. That widens `yawgpu-hal`'s public surface for a
+    parser, which is not the intended end state: **L2 narrows both to
+    `pub(super)` and reverts the re-export line** once
+    `get_and_initialize_display` consumes them. An `#[allow(dead_code)]`
+    was rejected — the repo does not suppress lints to hold a slice
+    boundary (`tracking/toolchain-clippy-1-98.md` R1).
 - **L2 — cascade.** D1 + D2 + D3 wired into
-  `get_and_initialize_display`. Non-Linux behaviour byte-identical.
+  `get_and_initialize_display`, plus the two items L1 deferred: add
+  `egl_device_from_env()`, and narrow `EglDeviceChoice` /
+  `parse_egl_device` to `pub(super)`, reverting the `gles/mod.rs`
+  re-export to its pre-L1 form. Non-Linux behaviour byte-identical.
   *Acceptance:* `cargo build -p yawgpu --features gles` and
   `cargo clippy --workspace --all-targets --features gles -- -D warnings`
   clean on Linux; the Windows/Android arms show no diff.
@@ -497,7 +537,11 @@ silently inherit a headless display.
    is `cfg(target_os = "linux")`-gated.
 5. Noop `cargo test --workspace` and
    `cargo clippy --workspace --all-targets -- -D warnings` green, with
-   and without `--features gles`.
+   and without `--features gles`. **Note (2026-09-21):** the
+   `--features gles` clippy gate is red on `HEAD` independently of this
+   block — 13 pre-existing `chunks_exact_to_as_chunks` sites, round 4 of
+   `tracking/toolchain-clippy-1-98.md`. This criterion is measured after
+   that separate fix lands; it is not L1/L2/L3 work.
 6. Every new public item has a `///` doc comment and a direct inline
    unit test (CLAUDE.md principle 1 + code conventions).
 7. No new panic path: every EGL failure in the cascade is a diagnostic
