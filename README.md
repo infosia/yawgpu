@@ -91,7 +91,7 @@ yawgpu is a small Cargo workspace of layered crates:
 | **Noop** | reference | CPU-only; always available. Runs the full validation layer with no GPU. Ideal for CI and headless testing. |
 | **Metal** | 1 — supported | Apple platforms. Built with the `metal` feature via the `objc2` family. |
 | **Vulkan** | 1 — supported | Cross-platform. Built with the `vulkan` feature via `ash`; targets **Vulkan 1.1+** (MoltenVK ≥ 1.1 on macOS, native drivers on Linux / Windows / Android). |
-| **OpenGL ES** | 2 — experimental | Opt-in `gles` feature (never in default). Targets Android (native EGL) and Windows (ANGLE by default, host GL via opt-in `YAWGPU_GLES_BACKEND=wgl`). Best-effort: paths that do not cleanly map to GLES 3.1 are rejected at the HAL layer with `HalError`. |
+| **OpenGL ES** | 2 — experimental | Opt-in `gles` feature (never in default). Targets Android (native EGL), Windows (ANGLE by default, host GL via opt-in `YAWGPU_GLES_BACKEND=wgl`), and desktop Linux (EGL; a hardware device is selected through `EGL_PLATFORM_DEVICE_EXT`, overridable with `YAWGPU_GLES_EGL_DEVICE`). Best-effort: paths that do not cleanly map to GLES 3.1 are rejected at the HAL layer with `HalError`. |
 
 Direct3D is intentionally out of scope.
 
@@ -103,6 +103,23 @@ locally available ANGLE binary caps at ES 3.0 (Chromium / CEF builds
 do), set `YAWGPU_GLES_BACKEND=wgl` to bypass ANGLE and use the host
 GL driver via `WGL_EXT_create_context_es2_profile` — verified on
 NVIDIA / AMD / Intel desktop drivers.
+
+On desktop Linux the backend uses the system EGL. `eglGetDisplay(EGL_DEFAULT_DISPLAY)`
+is not enough there: libglvnd hands it to whichever vendor claims the
+default display, and on a host whose GPU that vendor cannot drive it
+resolves to Mesa's **software rasterizer** — silently, since everything
+still works. yawgpu therefore enumerates `eglQueryDevicesEXT` and opens
+the first **validated** hardware device through `EGL_PLATFORM_DEVICE_EXT`,
+falling back to the default display when no device qualifies. Validation
+is not just `eglInitialize`: a candidate must also yield an ES 3.1
+context and a pbuffer config, because a device can enumerate and still
+fail to initialize. Set `YAWGPU_GLES_EGL_DEVICE` to override —
+`auto` (default), `default` (skip the cascade), `software`, or an
+enumeration index. A well-formed request that cannot be satisfied falls
+back to the default display rather than silently substituting a
+different device. The adapter name carries the driver's own
+`GL_RENDERER` / `GL_VERSION`, so which device ran is visible in any log.
+These displays are headless; Linux windowed presentation is not wired.
 
 A backend is chosen at instance-creation time through `YaWGPUInstanceBackendSelect`
 (see below) — applications that only ever want validation can run entirely
@@ -601,9 +618,11 @@ bypassing WGSL and Tint entirely:
   verified against live Metal and Vulkan devices. The Vulkan backend runs **validation-clean**
   under `VK_LAYER_KHRONOS_validation` (zero VUID violations across the
   full `--ignored` suite). The OpenGL ES backend (Tier 2) is verified
-  end-to-end on a host NVIDIA driver via the WGL fallback
-  (`YAWGPU_GLES_BACKEND=wgl`), covering buffer / texture / compute /
-  render e2e suites plus the windowed `triangle` example.
+  end-to-end on real GPUs on two hosts: on Windows against a host NVIDIA
+  driver via the WGL fallback (`YAWGPU_GLES_BACKEND=wgl`), covering
+  buffer / texture / compute / render e2e suites plus the windowed
+  `triangle` example; and on Linux against a native EGL device
+  (`OpenGL ES 3.2 NVIDIA 595.91.07`).
 - **Platform coverage**:
   - **macOS** — builds, unit tests, real-GPU end-to-end tests, and the C
     examples all verified (Metal and Vulkan/MoltenVK).
@@ -649,6 +668,16 @@ bypassing WGSL and Tint entirely:
     round-trip); a driver that advertises them natively needs no such
     switch. X11 / Wayland windowed surface sources are currently
     recognized-but-inert, so windowed presentation is not yet wired.
+    The **OpenGL ES backend (Tier 2)** is also verified real-GPU on this
+    host: the device cascade described under "Backends" selects the
+    NVIDIA EGL device (`OpenGL ES 3.2 NVIDIA 595.91.07`), and the whole
+    `e2e_gles_*` suite — basic, buffer, texture, compute, render, smoke,
+    15 tests — passes on it, as do the 218 `yawgpu-hal --features gles`
+    unit tests. The same suites also pass on the AMD iGPU (radeonsi) and
+    on Mesa's llvmpipe, reachable through `YAWGPU_GLES_EGL_DEVICE`.
+    Being Tier 2, this is a bring-up result, not a conformance claim —
+    the GLES CTS table below is still the Intel/crocus snapshot and
+    predates this host.
   - **Android (`aarch64-linux-android`)** — both Vulkan and OpenGL ES
     backends cross-build from a macOS arm64 host with NDK r30 (see
     "Cross-building for Android" above). Real-device
