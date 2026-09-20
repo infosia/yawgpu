@@ -147,3 +147,106 @@ Apply the `maxFragmentCombinedOutputResources` redistribution (`:796-825`).
    `capability_checks` gap is closed.
 
 Tracking: `specs/tracking/adapter-limits.md`.
+
+---
+
+## Post-COMPLETE slice — P92.4: `maxVertexInputAttributeOffset` overflow aborts on RADV (filed 2026-09-20)
+
+**Severity: CRITICAL.** yawgpu is unusable on any AMD RADV GPU in a build with
+overflow checks on: `wgpuAdapterRequestDevice` aborts the process.
+
+Found on a Linux clean-install bring-up while trying to exercise the
+ETC2/ASTC paths of `e2e_vulkan_texture_compression` through RADV's
+`vk_require_etc2` / `vk_require_astc` emulation. The bug is unrelated to
+compression — it fires on plain device creation.
+
+### Problem
+
+`yawgpu-hal/src/vulkan/mod.rs:375-378`:
+
+```rust
+max_vertex_buffer_array_stride: vk
+    .max_vertex_input_binding_stride
+    .min(vk.max_vertex_input_attribute_offset + 1)
+    .min(2048),
+```
+
+`VkPhysicalDeviceLimits::maxVertexInputAttributeOffset` is a `uint32_t` with no
+spec-mandated upper bound, and **RADV reports `0xFFFFFFFF`** (`u32::MAX`). The
+unchecked `+ 1` therefore overflows. Measured on this host:
+
+| device | `maxVertexInputAttributeOffset` |
+|---|---|
+| NVIDIA GeForce RTX 5060 Ti (proprietary 595.91.07) | 2047 |
+| llvmpipe (Mesa 26.0.8) | 2047 |
+| **AMD Raphael iGPU (RADV, Mesa 26.0.8)** | **4294967295** |
+
+Only RADV trips it, which is why the whole `e2e_vulkan_*` suite is green here:
+adapter selection picks the discrete NVIDIA GPU, so RADV is never exercised.
+
+### Observed
+
+- **Overflow checks on** (`cargo` dev/test profiles): panic `attempt to add with
+  overflow` inside `VulkanAdapter::limits`, reached from
+  `wgpuAdapterRequestDevice`. Because that is an `extern "C"` frame the panic
+  cannot unwind, so it escalates to `panic in a function that cannot unwind` →
+  **`SIGABRT`**. Verified from C: the `device_info` example against RADV dies
+  with `fatal runtime error: failed to initiate panic, error 5, aborting`,
+  exit status 134. This is both a CLAUDE.md principle-3 violation (no panics in
+  library code) and a hard crash of any consuming C application.
+- **Overflow checks off** (release): the add wraps to `0`, so the HAL hands core
+  a `max_vertex_buffer_array_stride` of `0`. The wrong value is then masked by
+  `yawgpu-core/src/limits.rs:194-196`, which floors every advertised limit at the
+  WebGPU default (`.max(default)`, 2048). Verified: a release `device_info`
+  linked against `--features vulkan` reports `maxVertexBufferArrayStride 2048` on
+  RADV and does not crash. **Correct by coincidence, not by construction** — the
+  HAL's computed value is still wrong, and the coincidence only holds while the
+  clamp target equals the default.
+
+### Rules
+
+- **R1 — Saturating arithmetic.** The `+ 1` becomes `saturating_add(1)`, so a
+  driver-reported `u32::MAX` yields `u32::MAX` and the following `.min(2048)`
+  produces the intended 2048. `saturating_sub` is already the idiom two fields
+  below (`max_inter_stage_shader_variables`), so this matches local style.
+
+- **R2 — No other unchecked arithmetic on driver-reported values.** A scan of
+  `VulkanAdapter::limits` found this as the only unchecked add/sub/mul on a `vk.*`
+  field (`max_uniform_buffer_range / 16 * 16` cannot overflow: it divides first).
+  Re-check the whole function; if another is found, fix it under this rule rather
+  than filing separately.
+
+- **R3 — Value correctness, not just absence of panic.** The fix is verified by
+  the *advertised limit on RADV*, not by the process surviving: core's
+  `.max(default)` floor hides a wrong HAL value in release, so a test that only
+  asserts "no crash" would pass against the unfixed code in release.
+
+### Unit test (principle 1)
+
+`VulkanAdapter::limits` takes a `VkPhysicalDeviceLimits`, so the conversion is
+testable without a device. Add a `#[cfg(test)]` test under `--features vulkan`
+that feeds a synthetic `VkPhysicalDeviceLimits` with
+`max_vertex_input_attribute_offset: u32::MAX` (and
+`max_vertex_input_binding_stride: 2048`) and asserts the resulting
+`max_vertex_buffer_array_stride == 2048`. This must fail on the unfixed code
+under `cargo test` (overflow checks on) — confirm that before fixing, so the test
+is known to bite. If the limits conversion is not reachable as a pure function,
+extract the `VkPhysicalDeviceLimits -> Limits` mapping so that it is.
+
+### Verification
+
+- The new unit test passes; confirmed failing (panicking) against the unfixed code.
+- Real RADV, overflow checks on: `VK_DRIVER_FILES=.../radeon_icd.json` with the
+  `e2e_vulkan_basic` suite and the C `device_info` example both succeed, and
+  `device_info` reports `maxVertexBufferArrayStride 2048`.
+- NVIDIA path unchanged: the full `e2e_vulkan_*` suite still passes (78 tests
+  across 20 suites at the time of filing).
+- Noop gate and clippy gate unchanged and green.
+
+### Note
+
+Adapter selection prefers the discrete GPU, so a multi-GPU host hides this.
+Worth considering a `YAWGPU_VULKAN_DEVICE_INDEX`-style override (or reusing an
+existing one, if present) so every installed ICD can be swept — but that is a
+separate item, not this slice. `VK_DRIVER_FILES` already provides the
+per-process escape used above.

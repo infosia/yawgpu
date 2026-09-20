@@ -328,78 +328,7 @@ impl VulkanAdapter {
             vk.max_push_constants_size
         );
 
-        // Ported from Dawn PhysicalDeviceVk.cpp:744-918.
-        // Deferred: NVIDIA's 2GB-4 storage buffer cap and Dawn's
-        // maxFragmentCombinedOutputResources redistribution.
-        HalLimits {
-            max_texture_dimension_1d: vk.max_image_dimension1_d,
-            max_texture_dimension_2d: vk
-                .max_image_dimension2_d
-                .min(vk.max_image_dimension_cube)
-                .min(vk.max_framebuffer_width)
-                .min(vk.max_framebuffer_height)
-                .min(vk.max_viewport_dimensions[0])
-                .min(vk.max_viewport_dimensions[1]),
-            max_texture_dimension_3d: vk.max_image_dimension3_d,
-            max_texture_array_layers: vk.max_image_array_layers,
-            max_bind_groups: vk.max_bound_descriptor_sets.min(4),
-            // Dawn advertised tier max (Limits.cpp:74-75), not the internal
-            // kMax*=16 array ceiling; keeping <= maxUniformBuffersPerShaderStage
-            // (12) keeps the CTS atMaximum single-stage case consistent.
-            max_dynamic_uniform_buffers_per_pipeline_layout: vk
-                .max_descriptor_set_uniform_buffers_dynamic
-                .min(10),
-            max_dynamic_storage_buffers_per_pipeline_layout: vk
-                .max_descriptor_set_storage_buffers_dynamic
-                .min(8),
-            max_sampled_textures_per_shader_stage: vk
-                .max_per_stage_descriptor_sampled_images
-                .min(48),
-            max_samplers_per_shader_stage: vk.max_per_stage_descriptor_samplers.min(16),
-            max_storage_buffers_per_shader_stage: vk
-                .max_per_stage_descriptor_storage_buffers
-                .min(16),
-            max_storage_textures_per_shader_stage: vk
-                .max_per_stage_descriptor_storage_images
-                .min(8),
-            max_uniform_buffers_per_shader_stage: vk
-                .max_per_stage_descriptor_uniform_buffers
-                .min(12),
-            max_uniform_buffer_binding_size: u64::from(vk.max_uniform_buffer_range / 16 * 16),
-            max_storage_buffer_binding_size: u64::from(vk.max_storage_buffer_range),
-            min_uniform_buffer_offset_alignment: vk.min_uniform_buffer_offset_alignment as u32,
-            min_storage_buffer_offset_alignment: vk.min_storage_buffer_offset_alignment as u32,
-            max_vertex_buffers: vk.max_vertex_input_bindings.min(8),
-            max_buffer_size,
-            max_vertex_attributes: vk.max_vertex_input_attributes.min(30),
-            max_vertex_buffer_array_stride: vk
-                .max_vertex_input_binding_stride
-                .min(vk.max_vertex_input_attribute_offset + 1)
-                .min(2048),
-            max_inter_stage_shader_variables: (vk
-                .max_vertex_output_components
-                .min(vk.max_fragment_input_components)
-                / 4)
-            .saturating_sub(2),
-            max_color_attachments: vk.max_color_attachments.min(8),
-            max_compute_workgroup_storage_size: vk.max_compute_shared_memory_size,
-            max_compute_invocations_per_workgroup: vk.max_compute_work_group_invocations,
-            max_compute_workgroup_size_x: vk.max_compute_work_group_size[0],
-            max_compute_workgroup_size_y: vk.max_compute_work_group_size[1],
-            max_compute_workgroup_size_z: vk.max_compute_work_group_size[2],
-            max_compute_workgroups_per_dimension: vk.max_compute_work_group_count[0]
-                .min(vk.max_compute_work_group_count[1])
-                .min(vk.max_compute_work_group_count[2]),
-            // Block 94 S3: Vulkan now executes SetImmediates (push-constant
-            // delivery in encode.rs), so it advertises Dawn's base-tier
-            // `maxImmediateSize` (`kMaxImmediateDataBytes`,
-            // dawn/common/Constants.h). The Vulkan-minimum
-            // `maxPushConstantsSize >= 128` always covers the 64-byte user
-            // region plus the 8-byte internal depth-range constants. GLES
-            // (Tier 2) stays 0 via `HalLimits::DEFAULT`.
-            max_immediate_size: 64,
-            ..HalLimits::DEFAULT
-        }
+        hal_limits_from_vk(vk, max_buffer_size)
     }
 
     fn max_buffer_size(&self) -> u64 {
@@ -1150,6 +1079,90 @@ fn select_max_buffer_size(maintenance4: u64, maintenance3: u64) -> u64 {
     }
 }
 
+/// Maps a Vulkan-reported `VkPhysicalDeviceLimits` (plus the separately queried
+/// `maxBufferSize`) onto the HAL's supported-limits view.
+///
+/// Split out of [`VulkanAdapter::limits`] so the driver-value mapping is
+/// testable without a live device (Block 92 P92.4).
+fn hal_limits_from_vk(vk: vk::PhysicalDeviceLimits, max_buffer_size: u64) -> HalLimits {
+    // Ported from Dawn PhysicalDeviceVk.cpp:744-918.
+    // Deferred: NVIDIA's 2GB-4 storage buffer cap and Dawn's
+    // maxFragmentCombinedOutputResources redistribution.
+    HalLimits {
+        max_texture_dimension_1d: vk.max_image_dimension1_d,
+        max_texture_dimension_2d: vk
+            .max_image_dimension2_d
+            .min(vk.max_image_dimension_cube)
+            .min(vk.max_framebuffer_width)
+            .min(vk.max_framebuffer_height)
+            .min(vk.max_viewport_dimensions[0])
+            .min(vk.max_viewport_dimensions[1]),
+        max_texture_dimension_3d: vk.max_image_dimension3_d,
+        max_texture_array_layers: vk.max_image_array_layers,
+        max_bind_groups: vk.max_bound_descriptor_sets.min(4),
+        // Dawn advertised tier max (Limits.cpp:74-75), not the internal
+        // kMax*=16 array ceiling; keeping <= maxUniformBuffersPerShaderStage
+        // (12) keeps the CTS atMaximum single-stage case consistent.
+        max_dynamic_uniform_buffers_per_pipeline_layout: vk
+            .max_descriptor_set_uniform_buffers_dynamic
+            .min(10),
+        max_dynamic_storage_buffers_per_pipeline_layout: vk
+            .max_descriptor_set_storage_buffers_dynamic
+            .min(8),
+        max_sampled_textures_per_shader_stage: vk
+            .max_per_stage_descriptor_sampled_images
+            .min(48),
+        max_samplers_per_shader_stage: vk.max_per_stage_descriptor_samplers.min(16),
+        max_storage_buffers_per_shader_stage: vk
+            .max_per_stage_descriptor_storage_buffers
+            .min(16),
+        max_storage_textures_per_shader_stage: vk
+            .max_per_stage_descriptor_storage_images
+            .min(8),
+        max_uniform_buffers_per_shader_stage: vk
+            .max_per_stage_descriptor_uniform_buffers
+            .min(12),
+        max_uniform_buffer_binding_size: u64::from(vk.max_uniform_buffer_range / 16 * 16),
+        max_storage_buffer_binding_size: u64::from(vk.max_storage_buffer_range),
+        min_uniform_buffer_offset_alignment: vk.min_uniform_buffer_offset_alignment as u32,
+        min_storage_buffer_offset_alignment: vk.min_storage_buffer_offset_alignment as u32,
+        max_vertex_buffers: vk.max_vertex_input_bindings.min(8),
+        max_buffer_size,
+        max_vertex_attributes: vk.max_vertex_input_attributes.min(30),
+        max_vertex_buffer_array_stride: vk
+            .max_vertex_input_binding_stride
+            // Block 92 P92.4: `maxVertexInputAttributeOffset` has no
+            // spec-mandated upper bound and RADV reports `u32::MAX`, so an
+            // unchecked `+ 1` overflows (abort under overflow checks, wrap to
+            // 0 in release). Saturating keeps the following `.min(2048)` correct.
+            .min(vk.max_vertex_input_attribute_offset.saturating_add(1))
+            .min(2048),
+        max_inter_stage_shader_variables: (vk
+            .max_vertex_output_components
+            .min(vk.max_fragment_input_components)
+            / 4)
+        .saturating_sub(2),
+        max_color_attachments: vk.max_color_attachments.min(8),
+        max_compute_workgroup_storage_size: vk.max_compute_shared_memory_size,
+        max_compute_invocations_per_workgroup: vk.max_compute_work_group_invocations,
+        max_compute_workgroup_size_x: vk.max_compute_work_group_size[0],
+        max_compute_workgroup_size_y: vk.max_compute_work_group_size[1],
+        max_compute_workgroup_size_z: vk.max_compute_work_group_size[2],
+        max_compute_workgroups_per_dimension: vk.max_compute_work_group_count[0]
+            .min(vk.max_compute_work_group_count[1])
+            .min(vk.max_compute_work_group_count[2]),
+        // Block 94 S3: Vulkan now executes SetImmediates (push-constant
+        // delivery in encode.rs), so it advertises Dawn's base-tier
+        // `maxImmediateSize` (`kMaxImmediateDataBytes`,
+        // dawn/common/Constants.h). The Vulkan-minimum
+        // `maxPushConstantsSize >= 128` always covers the 64-byte user
+        // region plus the 8-byte internal depth-range constants. GLES
+        // (Tier 2) stays 0 via `HalLimits::DEFAULT`.
+        max_immediate_size: 64,
+        ..HalLimits::DEFAULT
+    }
+}
+
 fn vulkan_memory_model_available(api_version: u32, extension_present: bool) -> bool {
     let major = vk::api_version_major(api_version);
     let minor = vk::api_version_minor(api_version);
@@ -1262,6 +1275,48 @@ mod tests {
             .iter()
             .map(|name| unsafe { CStr::from_ptr(*name) })
             .collect()
+    }
+
+    /// Block 92 P92.4: RADV reports `maxVertexInputAttributeOffset == u32::MAX`,
+    /// so the `+ 1` used to compute `maxVertexBufferArrayStride` overflowed --
+    /// aborting the process under overflow checks and wrapping to 0 in release.
+    /// The saturating add must yield the intended 2048 instead.
+    #[test]
+    fn hal_limits_from_vk_saturates_max_vertex_input_attribute_offset() {
+        let vk = vk::PhysicalDeviceLimits {
+            max_vertex_input_attribute_offset: u32::MAX,
+            max_vertex_input_binding_stride: 2048,
+            ..Default::default()
+        };
+
+        let limits = hal_limits_from_vk(vk, ASSUMED_MAX_BUFFER_SIZE);
+
+        assert_eq!(limits.max_vertex_buffer_array_stride, 2048);
+    }
+
+    /// A driver-reported offset below the 2048 cap still clamps the stride to
+    /// `offset + 1`, so the saturating add did not change the normal path.
+    #[test]
+    fn hal_limits_from_vk_clamps_stride_to_attribute_offset_plus_one() {
+        let vk = vk::PhysicalDeviceLimits {
+            max_vertex_input_attribute_offset: 2047,
+            max_vertex_input_binding_stride: 4096,
+            ..Default::default()
+        };
+
+        let limits = hal_limits_from_vk(vk, ASSUMED_MAX_BUFFER_SIZE);
+
+        assert_eq!(limits.max_vertex_buffer_array_stride, 2048);
+
+        let vk = vk::PhysicalDeviceLimits {
+            max_vertex_input_attribute_offset: 1023,
+            max_vertex_input_binding_stride: 4096,
+            ..Default::default()
+        };
+
+        let limits = hal_limits_from_vk(vk, ASSUMED_MAX_BUFFER_SIZE);
+
+        assert_eq!(limits.max_vertex_buffer_array_stride, 1024);
     }
 
     #[test]
