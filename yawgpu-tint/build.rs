@@ -12,6 +12,15 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
+// The pure, filesystem-only part of the stub-vs-real decision lives in its own
+// module file so it can also be included by a real test target
+// (`tests/build_probe.rs`): cargo compiles `build.rs` without `--test`, so unit
+// tests written here would never run. See Block 98 R7.
+#[path = "build_probe.rs"]
+mod build_probe;
+
+use build_probe::{android_abi_for_arch, dawn_checkout_usable, dawn_probe_paths};
+
 fn main() {
     println!("cargo:rerun-if-env-changed=YAWGPU_DAWN_DIR");
     println!("cargo:rerun-if-env-changed=ANDROID_NDK_HOME");
@@ -24,11 +33,34 @@ fn main() {
     // Declared so the `have_tint` cfg below does not trip the unexpected-cfg lint.
     println!("cargo:rustc-check-cfg=cfg(have_tint)");
 
+    // The stub-vs-real decision is made by probing the vendored Dawn checkout, so
+    // every probed path is a rerun key. Emitted unconditionally and *before* the
+    // decision: the stub path is the one that has to recover, and cargo treats a
+    // `rerun-if-changed` path that does not exist as dirty, so an absent checkout
+    // re-probes every build and picks the submodule up the moment it appears
+    // (no `cargo clean` needed). A checkout that is complete names only existing
+    // files, so it does not make the script re-run. Both sets come from
+    // `dawn_probe_paths`, never from a second hand-maintained list.
+    if let Some(root) = vendored_dawn_root() {
+        for path in dawn_probe_paths(&root) {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
+
     let Some(dawn_dir) = resolve_dawn_dir() else {
         println!(
-            "cargo:warning=No Dawn checkout found; yawgpu-tint built as a stub \
-             (Tint FFI unavailable). Initialize the third_party/dawn submodule \
-             (and run its tools/fetch_dawn_dependencies.py), or set YAWGPU_DAWN_DIR."
+            "cargo:warning=No Dawn checkout found; yawgpu-tint built as a stub: the \
+             Tint FFI is compiled out and every shader compilation fails at run time."
+        );
+        println!(
+            "cargo:warning=To fix, run the one-time Dawn setup: \
+             `git submodule update --init third_party/dawn`, then \
+             `cd third_party/dawn && python3 tools/fetch_dawn_dependencies.py` \
+             (or point YAWGPU_DAWN_DIR at an existing Dawn checkout)."
+        );
+        println!(
+            "cargo:warning=A stub decision cached by a build that ran before that \
+             setup completed is cleared with `cargo clean -p yawgpu-tint`."
         );
         return;
     };
@@ -138,17 +170,6 @@ fn android_ndk_toolchain_file() -> Option<PathBuf> {
     None
 }
 
-fn android_abi_for_arch(arch: &str) -> Option<&'static str> {
-    match arch {
-        "aarch64" => Some("arm64-v8a"),
-        "arm" => Some("armeabi-v7a"),
-        "x86_64" => Some("x86_64"),
-        "x86" => Some("x86"),
-        "riscv64" => Some("riscv64"),
-        _ => None,
-    }
-}
-
 /// Copies the built Tint shim next to the Cargo target artifacts so it is
 /// discoverable at run time. Needed on Windows (which resolves dependent DLLs
 /// from the executable's directory, not via rpath) and on Apple targets (where
@@ -211,10 +232,10 @@ fn copy_runtime_shim(build_dir: &Path) {
 }
 
 /// Locates a usable Dawn source tree: the explicit `YAWGPU_DAWN_DIR` override
-/// first, otherwise the vendored `third_party/dawn` submodule — but only when
-/// its dependencies have actually been fetched (abseil present), so an
-/// initialized-but-unfetched submodule degrades to the stub instead of a hard
-/// CMake failure.
+/// first (trusted as-is, its contents are not probed), otherwise the vendored
+/// `third_party/dawn` submodule — but only when its dependencies have actually
+/// been fetched (abseil present), so an initialized-but-unfetched submodule
+/// degrades to the stub instead of a hard CMake failure.
 fn resolve_dawn_dir() -> Option<PathBuf> {
     if let Ok(dir) = env::var("YAWGPU_DAWN_DIR") {
         if !dir.is_empty() {
@@ -222,35 +243,19 @@ fn resolve_dawn_dir() -> Option<PathBuf> {
         }
     }
 
-    let manifest = env::var("CARGO_MANIFEST_DIR").ok()?;
-    let vendored = Path::new(&manifest)
-        .parent()?
-        .join("third_party")
-        .join("dawn");
-    let has_dawn = vendored.join("CMakeLists.txt").is_file();
-    let deps_fetched = vendored
-        .join("third_party")
-        .join("abseil-cpp")
-        .join("CMakeLists.txt")
-        .is_file();
-    if has_dawn && deps_fetched {
-        Some(vendored)
-    } else {
-        None
-    }
+    let vendored = vendored_dawn_root()?;
+    dawn_checkout_usable(&vendored).then_some(vendored)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::android_abi_for_arch;
-
-    #[test]
-    fn android_abi_for_arch_maps_supported_targets() {
-        assert_eq!(android_abi_for_arch("aarch64"), Some("arm64-v8a"));
-        assert_eq!(android_abi_for_arch("arm"), Some("armeabi-v7a"));
-        assert_eq!(android_abi_for_arch("x86_64"), Some("x86_64"));
-        assert_eq!(android_abi_for_arch("x86"), Some("x86"));
-        assert_eq!(android_abi_for_arch("riscv64"), Some("riscv64"));
-        assert_eq!(android_abi_for_arch("wasm32"), None);
-    }
+/// The vendored Dawn submodule root (`<workspace>/third_party/dawn`), derived
+/// from `CARGO_MANIFEST_DIR`. `None` only when cargo did not set that variable
+/// (or the manifest dir has no parent), in which case there is nothing to probe.
+fn vendored_dawn_root() -> Option<PathBuf> {
+    let manifest = env::var("CARGO_MANIFEST_DIR").ok()?;
+    Some(
+        Path::new(&manifest)
+            .parent()?
+            .join("third_party")
+            .join("dawn"),
+    )
 }

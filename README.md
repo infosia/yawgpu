@@ -276,7 +276,18 @@ Microsoft Store stub.)
 
 `yawgpu-tint/build.rs` then builds the minimal Tint libraries from source on the
 first `cargo build` (cached afterwards). Without this setup the `yawgpu-tint` crate
-compiles as a non-functional stub. On Windows (MSVC) the shim is a shared library;
+compiles as a non-functional stub.
+
+**Telling a stubbed build apart.** A stubbed build still links and loads, but every
+shader compilation fails at run time: `yawgpu_tint::HAVE_TINT` is `false`, and no
+`libtint_shim.{so,dylib}` / `tint_shim.dll` sits next to the built `libyawgpu.*`.
+The build script re-evaluates the decision whenever the vendored checkout appears
+or disappears, so completing the setup above and re-running `cargo build` is enough
+to go from stub to real. One exception: a tree first built with a pre-2026-09-20
+`build.rs` cached the stub decision per profile (so `debug` and `release` could
+disagree); clear it once with `cargo clean -p yawgpu-tint`.
+
+On Windows (MSVC) the shim is a shared library;
 `build.rs` copies the resulting `tint_shim.dll` next to the Cargo target artifacts
 so tests and binaries load it at run time, and any application shipping the yawgpu
 `.dll` must distribute `tint_shim.dll` alongside it (Windows has no rpath).

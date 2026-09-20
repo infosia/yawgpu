@@ -27,6 +27,20 @@
   `infosia/wgpu` git fork; that fork and the `naga` crate dependency are no longer
   used.)
 
+  **Rerun-key invariant (Block 98, added 2026-09-20).** The stub-vs-real decision
+  is an *input* to the build script, so every path `resolve_dawn_dir()` probes is
+  also emitted as a `cargo:rerun-if-changed=` key, unconditionally and before the
+  decision is made (the stub path is the one that has to recover). Both sets are
+  derived from the single helper `dawn_probe_paths()` in `yawgpu-tint/build.rs` —
+  **a future edit that probes another path must extend that helper, not add a
+  second hand-maintained list.** Cargo treats a missing `rerun-if-changed` path as
+  dirty, so an absent or incomplete checkout re-probes on every build and picks the
+  submodule up the moment it appears (no `cargo clean`), while a complete checkout
+  names only existing files and therefore does not re-run the script. Before this,
+  `cargo build` run ahead of the one-time submodule setup cached a stubbed
+  `libyawgpu.*` per profile — silently, with exit status 0 — and only
+  `cargo clean -p yawgpu-tint` recovered it.
+
   **Windows / MSVC shim build (added 2026-06-27).** The shim links as a shared
   library (`tint_shim.dll`), which on MSVC requires extra handling that the
   Unix-only `build.rs` lacked:
