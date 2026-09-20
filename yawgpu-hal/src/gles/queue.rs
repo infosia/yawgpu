@@ -4214,8 +4214,10 @@ mod tests {
         let bytes = gles_query_resolve_bytes(&[11, 22, 33], 0, 3, &[0, 2])
             .expect("valid query resolve range");
         let values = bytes
-            .chunks_exact(8)
-            .map(|bytes| u64::from_ne_bytes(bytes.try_into().expect("eight-byte query result")))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|bytes| u64::from_ne_bytes(*bytes))
             .collect::<Vec<_>>();
         assert_eq!(values, vec![11, 0, 33]);
     }
@@ -4672,8 +4674,8 @@ mod tests {
             let slice = &bytes
                 [(layer * RGBA8_SLICE_BYTES) as usize..((layer + 1) * RGBA8_SLICE_BYTES) as usize];
             if layer == target_layer {
-                for pixel in slice.chunks_exact(4) {
-                    assert_eq!(pixel, green, "cleared layer {layer} must be opaque green");
+                for pixel in slice.as_chunks::<4>().0 {
+                    assert_eq!(*pixel, green, "cleared layer {layer} must be opaque green");
                 }
             } else {
                 let expected = &seeded[(layer * RGBA8_SLICE_BYTES) as usize
@@ -4716,8 +4718,8 @@ mod tests {
             let bytes_slice = &bytes
                 [(slice * RGBA8_SLICE_BYTES) as usize..((slice + 1) * RGBA8_SLICE_BYTES) as usize];
             if slice == target_slice {
-                for pixel in bytes_slice.chunks_exact(4) {
-                    assert_eq!(pixel, blue, "cleared z-slice {slice} must be opaque blue");
+                for pixel in bytes_slice.as_chunks::<4>().0 {
+                    assert_eq!(*pixel, blue, "cleared z-slice {slice} must be opaque blue");
                 }
             } else {
                 let expected = &seeded[(slice * RGBA8_SLICE_BYTES) as usize
@@ -6849,7 +6851,9 @@ mod tests {
             .read(0, 16 * 4)
             .expect("reading compute sampled-texture output must succeed");
         let actual: Vec<u32> = bytes
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
             .collect();
         let expected: Vec<u32> = pixels.iter().map(|value| u32::from(*value)).collect();
@@ -6971,7 +6975,9 @@ mod tests {
             .read(0, 6 * 16)
             .expect("reading cube-view compute output must succeed");
         let actual: Vec<[u32; 4]> = bytes
-            .chunks_exact(16)
+            .as_chunks::<16>()
+            .0
+            .iter()
             .map(|chunk| {
                 [
                     u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
@@ -7095,7 +7101,9 @@ mod tests {
             .read(0, 2 * 16)
             .expect("reading array-view compute output must succeed");
         let actual: Vec<[u32; 4]> = bytes
-            .chunks_exact(16)
+            .as_chunks::<16>()
+            .0
+            .iter()
             .map(|chunk| {
                 [
                     u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
@@ -7794,7 +7802,9 @@ mod tests {
             2,
         );
         let values: Vec<u32> = readback
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
             .collect();
         assert_eq!(values[0], 0, "zero depth must read back as zero");
@@ -8450,7 +8460,9 @@ mod tests {
         let bytes =
             read_texture_bytes(&device, texture, crate::HalTextureFormat::R32Uint, 16, 8, 2);
         let values = bytes
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
             .collect::<Vec<_>>();
         assert_eq!(values, [2, 3, 4, 5]);
@@ -8745,7 +8757,9 @@ mod tests {
         readback
             .read(0, 16)
             .expect("reading storage array readback buffer must succeed")
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
             .collect()
     }
@@ -10154,7 +10168,9 @@ mod tests {
         // byte 256, proving the whole-size binding resolved to offset 256.
         assert_eq!(&bytes[0..256], &[0x11_u8; 256]);
         let payload: Vec<u32> = bytes[256..272]
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
             .collect();
         assert_eq!(payload, vec![1, 2, 3, 4]);

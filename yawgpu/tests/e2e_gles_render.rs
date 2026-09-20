@@ -491,13 +491,11 @@ fn texture_extent() -> native::WGPUExtent3D {
 }
 
 fn contains_pixel(pixels: &[u8], rgba: [u8; 4]) -> bool {
-    pixels
-        .chunks_exact(BYTES_PER_PIXEL)
-        .any(|pixel| pixel == rgba)
+    pixels.as_chunks::<BYTES_PER_PIXEL>().0.contains(&rgba)
 }
 
 fn contains_pixel_approx(pixels: &[u8], rgba: [u8; 4], tolerance: u8) -> bool {
-    pixels.chunks_exact(BYTES_PER_PIXEL).any(|pixel| {
+    pixels.as_chunks::<BYTES_PER_PIXEL>().0.iter().any(|pixel| {
         pixel
             .iter()
             .zip(rgba.iter())

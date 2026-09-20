@@ -226,3 +226,30 @@ where the remaining three live.
 - **R7 — Enumerate at workspace scope.** R5's `--keep-going` requirement also
   implies `--workspace`. A findings list produced with `-p <crate>` states that
   scope explicitly and is not treated as the complete set.
+
+### Resolved (2026-09-21)
+
+All 13 sites rewritten per R1/R2/R6; the post-fix R5+R7 enumeration is empty.
+Two sites needed more than the mechanical rewrite, both matching a round-3
+precedent:
+
+- `e2e_gles_compute.rs` — R6: a named `const U32_BYTES` for the chunk width,
+  and `u32::from_ne_bytes(*chunk)` in place of
+  `chunk.try_into().expect(...)`, which is infallible once the element is
+  `&[u8; 4]` (same shape as round 3's `e2e_vulkan_compute.rs`).
+- `e2e_gles_render.rs` — the round-3 knock-on, hit again: with element type
+  `&[u8; 4]` the `pixel == rgba` body no longer compiles, and the obvious
+  `.iter().any(|p| *p == rgba)` rewrite trips `manual_contains`. Fixed as
+  round 3 did, `as_chunks::<BYTES_PER_PIXEL>().0.contains(&rgba)`, same
+  predicate. The round-3 generalisation ("a lint fix can change an
+  expression's type and so expose a different lint at the same site") now has
+  a second instance and should be treated as the norm, not a one-off.
+
+Gates after the fix: `--features gles` clippy clean, default clippy clean,
+`cargo test --workspace` 1020 passed / 0 failed, `cargo test -p yawgpu-hal
+--features gles --lib` 204 passed on **both** the default EGL display
+(llvmpipe) and the AMD iGPU (`DRI_PRIME=1`, radeonsi). R2 behaviour
+equivalence additionally confirmed on real GPUs: the whole `e2e_gles_*`
+suite (15 tests) passes under `--ignored` on both drivers — these are the
+assertions whose shape changed, so a semantic drift would show up there
+rather than in the Noop gate.

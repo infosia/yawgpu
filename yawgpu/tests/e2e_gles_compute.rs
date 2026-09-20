@@ -520,10 +520,15 @@ unsafe fn write_u32_buffer(queue: native::WGPUQueue, buffer: native::WGPUBuffer,
 }
 
 unsafe fn read_u32_buffer(instance: native::WGPUInstance, buffer: native::WGPUBuffer) -> Vec<u32> {
+    /// Width of one `u32` in the readback byte stream, as a const-generic argument.
+    const U32_BYTES: usize = std::mem::size_of::<u32>();
+
     let bytes = read_buffer(instance, buffer, 0, BUFFER_SIZE as usize);
     bytes
-        .chunks_exact(std::mem::size_of::<u32>())
-        .map(|chunk| u32::from_ne_bytes(chunk.try_into().expect("chunk is four bytes")))
+        .as_chunks::<U32_BYTES>()
+        .0
+        .iter()
+        .map(|chunk| u32::from_ne_bytes(*chunk))
         .collect()
 }
 
