@@ -629,7 +629,12 @@ pub(super) fn access_mask_for_layout(layout: vk::ImageLayout) -> vk::AccessFlags
             vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
                 | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
         }
-        vk::ImageLayout::GENERAL => vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+        vk::ImageLayout::GENERAL => {
+            vk::AccessFlags::SHADER_READ
+                | vk::AccessFlags::SHADER_WRITE
+                | vk::AccessFlags::TRANSFER_READ
+                | vk::AccessFlags::TRANSFER_WRITE
+        }
         vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => vk::AccessFlags::SHADER_READ,
         vk::ImageLayout::PRESENT_SRC_KHR => vk::AccessFlags::empty(),
         _ => vk::AccessFlags::empty(),
@@ -657,6 +662,7 @@ pub(super) fn stage_mask_for_layout(layout: vk::ImageLayout) -> vk::PipelineStag
             vk::PipelineStageFlags::VERTEX_SHADER
                 | vk::PipelineStageFlags::FRAGMENT_SHADER
                 | vk::PipelineStageFlags::COMPUTE_SHADER
+                | vk::PipelineStageFlags::TRANSFER
         }
         vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => {
             vk::PipelineStageFlags::VERTEX_SHADER
@@ -838,6 +844,14 @@ mod tests {
         assert!(stages.contains(vk::PipelineStageFlags::VERTEX_SHADER));
         assert!(stages.contains(vk::PipelineStageFlags::FRAGMENT_SHADER));
         assert!(stages.contains(vk::PipelineStageFlags::COMPUTE_SHADER));
+    }
+
+    #[test]
+    fn general_layout_synchronizes_same_image_transfer_reads_and_writes() {
+        let layout = image_layout(IMAGE_LAYOUT_GENERAL);
+        let access = access_mask_for_layout(layout);
+        assert!(access.contains(vk::AccessFlags::TRANSFER_READ | vk::AccessFlags::TRANSFER_WRITE));
+        assert!(stage_mask_for_layout(layout).contains(vk::PipelineStageFlags::TRANSFER));
     }
 
     #[test]

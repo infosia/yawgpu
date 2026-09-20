@@ -75,6 +75,119 @@ fn vulkan_texture_texture_round_trip() {
 #[test]
 #[ignore = "manual real-backend test"]
 #[cfg(feature = "vulkan")]
+fn vulkan_same_texture_copy_chains_preserve_layout_tracking() {
+    if let Some(reason) = real_backend_skip_reason(RealBackend::Vulkan) {
+        eprintln!("SKIP: Vulkan backend unavailable: {reason}");
+        return;
+    }
+    unsafe {
+        let instance = create_vulkan_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+        for (name, dimension, base_width, depth, mips, middle_mip) in [
+            (
+                "3D depth slices",
+                native::WGPUTextureDimension_3D,
+                WIDTH,
+                3,
+                1,
+                0,
+            ),
+            (
+                "2D array layers",
+                native::WGPUTextureDimension_2D,
+                WIDTH,
+                3,
+                1,
+                0,
+            ),
+            (
+                "2D mip levels",
+                native::WGPUTextureDimension_2D,
+                WIDTH * 2,
+                1,
+                2,
+                1,
+            ),
+        ] {
+            let descriptor = native::WGPUTextureDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: empty_string_view(),
+                usage: native::WGPUTextureUsage_CopySrc | native::WGPUTextureUsage_CopyDst,
+                dimension,
+                size: native::WGPUExtent3D {
+                    width: base_width,
+                    height: base_width,
+                    depthOrArrayLayers: depth,
+                },
+                format: native::WGPUTextureFormat_RGBA8Unorm,
+                mipLevelCount: mips,
+                sampleCount: 1,
+                viewFormatCount: 0,
+                viewFormats: std::ptr::null(),
+            };
+            let texture = yawgpu::wgpuDeviceCreateTexture(device, &descriptor);
+            assert!(!texture.is_null(), "{name}");
+            let pixels = source_pixels();
+            let source = texture_copy_info(texture);
+            let extent = texture_extent();
+            let layout = native::WGPUTexelCopyBufferLayout {
+                offset: 0,
+                bytesPerRow: WIDTH * BYTES_PER_PIXEL as u32,
+                rowsPerImage: HEIGHT,
+            };
+            yawgpu::wgpuQueueWriteTexture(
+                queue,
+                &source,
+                pixels.as_ptr().cast(),
+                pixels.len(),
+                &layout,
+                &extent,
+            );
+            let mut middle = texture_copy_info(texture);
+            middle.mipLevel = middle_mip;
+            middle.origin.z = if depth > 1 { 1 } else { 0 };
+            let mut destination = texture_copy_info(texture);
+            destination.origin.z = if depth > 1 { 2 } else { 0 };
+            let readback = create_buffer(
+                device,
+                native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+            );
+            let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            yawgpu::wgpuCommandEncoderCopyTextureToTexture(encoder, &source, &middle, &extent);
+            yawgpu::wgpuCommandEncoderCopyTextureToTexture(encoder, &middle, &destination, &extent);
+            yawgpu::wgpuCommandEncoderCopyTextureToBuffer(
+                encoder,
+                &destination,
+                &buffer_copy_info(readback),
+                &extent,
+            );
+            submit_encoder(queue, encoder);
+            assert_eq!(
+                read_unpacked_texture_buffer(instance, readback),
+                pixels,
+                "{name}"
+            );
+            assert!(
+                errors.lock().expect("error lock").is_empty(),
+                "{name}: {:?}",
+                errors
+            );
+            yawgpu::wgpuBufferRelease(readback);
+            yawgpu::wgpuTextureRelease(texture);
+        }
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+#[test]
+#[ignore = "manual real-backend test"]
+#[cfg(feature = "vulkan")]
 fn vulkan_sampler_creation_has_no_device_error() {
     if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
         return;

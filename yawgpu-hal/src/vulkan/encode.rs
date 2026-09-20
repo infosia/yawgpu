@@ -36,6 +36,7 @@ pub(super) fn record_and_submit_copies(
     command_pool: vk::CommandPool,
     copies: &[HalCopy],
 ) -> Result<SubmissionIndex, HalError> {
+    let mut temporary_resources = Vec::new();
     let mut descriptor_pools = Vec::new();
     let mut framebuffers = Vec::new();
     let mut image_views = Vec::new();
@@ -87,7 +88,12 @@ pub(super) fn record_and_submit_copies(
                     encode_texture_to_buffer(&queue.device.device, command_buffer, copy)?;
                 }
                 HalCopy::TextureToTexture(copy) => {
-                    encode_texture_to_texture(&queue.device.device, command_buffer, copy)?;
+                    encode_texture_to_texture(
+                        &queue.device.device,
+                        command_buffer,
+                        copy,
+                        &mut temporary_resources,
+                    )?;
                 }
                 HalCopy::ComputePass(pass) => {
                     let temps = encode_compute_pass(&queue.device.device, command_buffer, pass)?;
@@ -185,7 +191,8 @@ pub(super) fn record_and_submit_copies(
             };
             fence = None;
             let retire_fence = created_fence;
-            let retained = collect_retained_resources(copies);
+            let mut retained = collect_retained_resources(copies);
+            retained.append(&mut temporary_resources);
             let cleanup = retire_ops(
                 command_pool,
                 std::mem::take(&mut descriptor_pools),
@@ -956,6 +963,7 @@ pub(super) fn encode_buffer_to_texture(
     let buffer = buffer.inner()?;
     let texture_inner = texture.inner()?;
     let aspect = buffer_texture_copy_aspect_flags(copy.format, copy.aspect);
+    let region = buffer_image_copy(copy, texture, texture_bytes_per_pixel(copy)?, aspect)?;
     transition_image_aspect(
         device,
         command_buffer,
@@ -964,7 +972,6 @@ pub(super) fn encode_buffer_to_texture(
         vk::ImageLayout::TRANSFER_DST_OPTIMAL,
         IMAGE_LAYOUT_TRANSFER_DST,
     );
-    let region = buffer_image_copy(copy, texture, texture_bytes_per_pixel(copy)?, aspect)?;
     unsafe {
         device.cmd_copy_buffer_to_image(
             command_buffer,
@@ -995,6 +1002,7 @@ pub(super) fn encode_texture_to_buffer(
     let buffer = buffer.inner()?;
     let texture_inner = texture.inner()?;
     let aspect = buffer_texture_copy_aspect_flags(copy.format, copy.aspect);
+    let region = buffer_image_copy(copy, texture, texture_bytes_per_pixel(copy)?, aspect)?;
     transition_image_aspect(
         device,
         command_buffer,
@@ -1003,7 +1011,6 @@ pub(super) fn encode_texture_to_buffer(
         vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
         IMAGE_LAYOUT_TRANSFER_SRC,
     );
-    let region = buffer_image_copy(copy, texture, texture_bytes_per_pixel(copy)?, aspect)?;
     unsafe {
         device.cmd_copy_image_to_buffer(
             command_buffer,
@@ -1022,6 +1029,7 @@ pub(super) fn encode_texture_to_texture(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
     copy: &HalTextureCopy,
+    temporary_resources: &mut Vec<RetainedResource>,
 ) -> Result<(), HalError> {
     let crate::HalTexture::Vulkan(source) = &copy.source else {
         return Err(texture_error("source texture is not Vulkan-backed"));
@@ -1036,22 +1044,94 @@ pub(super) fn encode_texture_to_texture(
     let source_inner = source.inner()?;
     let destination_inner = destination.inner()?;
     let aspect = copy_format_aspect_flags(source.format);
-    transition_image_aspect(
-        device,
-        command_buffer,
-        source_inner,
-        aspect,
-        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-        IMAGE_LAYOUT_TRANSFER_SRC,
-    );
-    transition_image_aspect(
-        device,
-        command_buffer,
-        destination_inner,
-        aspect,
-        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-        IMAGE_LAYOUT_TRANSFER_DST,
-    );
+    let source_extent = compressed_copy_extent(
+        source,
+        copy.source_mip_level,
+        copy.source_origin,
+        copy.extent,
+    )?;
+    let destination_extent = compressed_copy_extent(
+        destination,
+        copy.destination_mip_level,
+        copy.destination_origin,
+        copy.extent,
+    )?;
+    if compressed_copy_needs_temporary_buffer(
+        source_extent,
+        destination_extent,
+        source.format.compressed_block_info().is_some(),
+    ) {
+        let temporary_copy = compressed_temporary_copy(source, destination, copy)?;
+        let buffer = Arc::new(create_buffer(
+            Arc::clone(&source_inner.device),
+            temporary_copy.size,
+            HalBufferUsage {
+                copy_src: true,
+                copy_dst: true,
+                ..Default::default()
+            },
+        )?);
+        let buffer_handle = buffer.buffer;
+        // The existing submission retirement ring owns the allocation through
+        // fence completion, including surface submissions. On recording errors,
+        // the caller drops it after destroying the unsubmitted command pool.
+        temporary_resources.push(RetainedResource::Buffer { _inner: buffer });
+        transition_image_aspect(
+            device,
+            command_buffer,
+            source_inner,
+            aspect,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            IMAGE_LAYOUT_TRANSFER_SRC,
+        );
+        unsafe {
+            device.cmd_copy_image_to_buffer(
+                command_buffer,
+                source_inner.image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                buffer_handle,
+                &[temporary_copy.source],
+            );
+            let barrier = vk::BufferMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .buffer(buffer_handle)
+                .offset(0)
+                .size(temporary_copy.size);
+            device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[barrier],
+                &[],
+            );
+        }
+        // Transition after the read: this also handles a shared VkImage without
+        // splitting subresources or diverging from the whole-image tracker.
+        transition_image_aspect(
+            device,
+            command_buffer,
+            destination_inner,
+            aspect,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            IMAGE_LAYOUT_TRANSFER_DST,
+        );
+        unsafe {
+            device.cmd_copy_buffer_to_image(
+                command_buffer,
+                buffer_handle,
+                destination_inner.image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[temporary_copy.destination],
+            );
+        }
+        return Ok(());
+    }
+    let image_extent = source_extent;
     let region = vk::ImageCopy::default()
         .src_subresource(texture_copy_subresource_layers(
             aspect,
@@ -1079,18 +1159,156 @@ pub(super) fn encode_texture_to_texture(
             copy.destination_origin.y,
             copy.destination_origin.z,
         )?)
-        .extent(texture_copy_extent(source.dimension, copy.extent));
+        .extent(image_extent);
+    let same_image = source_inner.image == destination_inner.image;
+    let (source_layout, destination_layout) =
+        texture_copy_layouts(same_image, region.src_subresource, region.dst_subresource);
+    let mut source_barrier_subresource = region.src_subresource;
+    source_barrier_subresource.aspect_mask = source_inner.aspect_flags;
+    let mut destination_barrier_subresource = region.dst_subresource;
+    destination_barrier_subresource.aspect_mask = destination_inner.aspect_flags;
+    if same_image {
+        // The tracker describes the whole image. Temporarily split disjoint
+        // subresources, then restore GENERAL before another command sees it.
+        transition_image_aspect(
+            device,
+            command_buffer,
+            source_inner,
+            source_inner.aspect_flags,
+            vk::ImageLayout::GENERAL,
+            IMAGE_LAYOUT_GENERAL,
+        );
+        transition_copy_subresource(
+            device,
+            command_buffer,
+            source_inner.image,
+            if source_layout == vk::ImageLayout::GENERAL {
+                image_subresource_layers(
+                    source_inner.aspect_flags,
+                    copy.source_mip_level,
+                    0,
+                    source_inner.array_layers,
+                )
+            } else {
+                source_barrier_subresource
+            },
+            vk::ImageLayout::GENERAL,
+            source_layout,
+        );
+        if source_layout != vk::ImageLayout::GENERAL {
+            transition_copy_subresource(
+                device,
+                command_buffer,
+                destination_inner.image,
+                destination_barrier_subresource,
+                vk::ImageLayout::GENERAL,
+                destination_layout,
+            );
+        }
+    } else {
+        transition_image_aspect(
+            device,
+            command_buffer,
+            source_inner,
+            aspect,
+            source_layout,
+            IMAGE_LAYOUT_TRANSFER_SRC,
+        );
+        transition_image_aspect(
+            device,
+            command_buffer,
+            destination_inner,
+            aspect,
+            destination_layout,
+            IMAGE_LAYOUT_TRANSFER_DST,
+        );
+    }
     unsafe {
         device.cmd_copy_image(
             command_buffer,
             source_inner.image,
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            source_layout,
             destination_inner.image,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            destination_layout,
             &[region],
         );
     }
+    if same_image && source_layout != vk::ImageLayout::GENERAL {
+        for (subresource, layout) in [
+            (source_barrier_subresource, source_layout),
+            (destination_barrier_subresource, destination_layout),
+        ] {
+            transition_copy_subresource(
+                device,
+                command_buffer,
+                source_inner.image,
+                subresource,
+                layout,
+                vk::ImageLayout::GENERAL,
+            );
+        }
+    }
+
     Ok(())
+}
+
+// 3D depth slices all occupy array layer zero of the same mip.
+fn texture_copy_layouts(
+    same_image: bool,
+    source: vk::ImageSubresourceLayers,
+    destination: vk::ImageSubresourceLayers,
+) -> (vk::ImageLayout, vk::ImageLayout) {
+    let layers_overlap = u64::from(source.base_array_layer)
+        < u64::from(destination.base_array_layer) + u64::from(destination.layer_count)
+        && u64::from(destination.base_array_layer)
+            < u64::from(source.base_array_layer) + u64::from(source.layer_count);
+    if same_image && source.mip_level == destination.mip_level && layers_overlap {
+        (vk::ImageLayout::GENERAL, vk::ImageLayout::GENERAL)
+    } else {
+        (
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        )
+    }
+}
+
+fn transition_copy_subresource(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    image: vk::Image,
+    subresource: vk::ImageSubresourceLayers,
+    old_layout: vk::ImageLayout,
+    new_layout: vk::ImageLayout,
+) {
+    // Emit even GENERAL -> GENERAL: consecutive same-image copies need a
+    // transfer write -> read/write dependency despite no layout change.
+    let barrier = vk::ImageMemoryBarrier::default()
+        .old_layout(old_layout)
+        .new_layout(new_layout)
+        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .image(image)
+        .subresource_range(
+            vk::ImageSubresourceRange::default()
+                .aspect_mask(subresource.aspect_mask)
+                .base_mip_level(subresource.mip_level)
+                .level_count(1)
+                .base_array_layer(subresource.base_array_layer)
+                .layer_count(subresource.layer_count),
+        )
+        .src_access_mask(access_mask_for_layout(old_layout))
+        .dst_access_mask(access_mask_for_layout(new_layout));
+    unsafe {
+        device.cmd_pipeline_barrier(
+            command_buffer,
+            stage_mask_for_layout(old_layout),
+            stage_mask_for_layout(new_layout),
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[barrier],
+        );
+    }
 }
 
 /// Records encode into the command stream.
@@ -3609,7 +3827,12 @@ pub(super) fn buffer_image_copy(
             copy.origin.y,
             copy.origin.z,
         )?)
-        .image_extent(texture_copy_extent(texture.dimension, copy.extent)))
+        .image_extent(compressed_copy_extent(
+            texture,
+            copy.mip_level,
+            copy.origin,
+            copy.extent,
+        )?))
 }
 
 /// Validates mip level and returns a descriptive error on failure.
@@ -3645,6 +3868,112 @@ fn texture_copy_offset(
         HalTextureDimension::D3 => to_image_offset(x, y, z),
         HalTextureDimension::D1 | HalTextureDimension::D2 => to_image_offset(x, y, 0),
     }
+}
+
+// WebGPU counts complete compressed blocks at a mip edge. Vulkan instead
+// requires imageExtent to end at the logical mip size, even for partial blocks.
+// Buffer strides still use the original block dimensions in buffer_image_copy.
+fn compressed_copy_extent(
+    texture: &VulkanTexture,
+    mip_level: u32,
+    origin: crate::HalOrigin3d,
+    extent: HalExtent3d,
+) -> Result<vk::Extent3D, HalError> {
+    let Some((_, block_width, block_height)) = texture.format.compressed_block_info() else {
+        return Ok(texture_copy_extent(texture.dimension, extent));
+    };
+    let axis_extent = |base: u32, start: u32, count: u32, block: u32| {
+        let logical = base
+            .checked_shr(mip_level)
+            .ok_or_else(|| texture_error("compressed copy mip level is too large"))?
+            .max(1);
+        let physical = logical
+            .div_ceil(block)
+            .checked_mul(block)
+            .ok_or_else(|| texture_error("compressed copy physical extent overflows"))?;
+        let end = start
+            .checked_add(count)
+            .ok_or_else(|| texture_error("compressed copy range overflows"))?;
+        if start >= logical
+            || end > physical
+            || count == 0
+            || !start.is_multiple_of(block)
+            || !count.is_multiple_of(block)
+        {
+            return Err(texture_error(
+                "compressed copy range exceeds or misaligns the physical mip",
+            ));
+        }
+        Ok(count.min(logical - start))
+    };
+    Ok(texture_copy_extent(
+        texture.dimension,
+        HalExtent3d {
+            width: axis_extent(texture.width, origin.x, extent.width, block_width)?,
+            height: axis_extent(texture.height, origin.y, extent.height, block_height)?,
+            ..extent
+        },
+    ))
+}
+
+fn compressed_copy_needs_temporary_buffer(
+    source: vk::Extent3D,
+    destination: vk::Extent3D,
+    is_compressed: bool,
+) -> bool {
+    is_compressed && source != destination
+}
+
+struct CompressedTemporaryCopy {
+    size: u64,
+    source: vk::BufferImageCopy,
+    destination: vk::BufferImageCopy,
+}
+
+fn compressed_temporary_copy(
+    source: &VulkanTexture,
+    destination: &VulkanTexture,
+    copy: &HalTextureCopy,
+) -> Result<CompressedTemporaryCopy, HalError> {
+    let (block_bytes, block_width, block_height) = source
+        .format
+        .compressed_block_info()
+        .ok_or_else(|| texture_error("temporary compressed copy requires a compressed format"))?;
+    let extent = copy.extent;
+    let size = u64::from(extent.width / block_width)
+        .checked_mul(u64::from(extent.height / block_height))
+        .and_then(|size| size.checked_mul(u64::from(extent.depth_or_array_layers)))
+        .and_then(|size| size.checked_mul(u64::from(block_bytes)))
+        .ok_or_else(|| buffer_error("temporary compressed copy size overflows"))?;
+    let region = |texture: &VulkanTexture, mip, origin: crate::HalOrigin3d| {
+        Ok(vk::BufferImageCopy::default()
+            .buffer_offset(0)
+            .buffer_row_length(extent.width)
+            .buffer_image_height(extent.height)
+            .image_subresource(texture_copy_subresource_layers(
+                copy_format_aspect_flags(texture.format),
+                texture.dimension,
+                mip,
+                origin.z,
+                extent.depth_or_array_layers,
+            ))
+            .image_offset(texture_copy_offset(
+                texture.dimension,
+                origin.x,
+                origin.y,
+                origin.z,
+            )?)
+            .image_extent(compressed_copy_extent(texture, mip, origin, extent)?))
+    };
+    Ok(CompressedTemporaryCopy {
+        size,
+        source: region(source, copy.source_mip_level, copy.source_origin)?,
+        destination: region(
+            destination,
+            copy.destination_mip_level,
+            copy.destination_origin,
+        )?,
+    })
 }
 
 fn texture_copy_extent(dimension: HalTextureDimension, extent: HalExtent3d) -> vk::Extent3D {
@@ -3726,6 +4055,246 @@ mod tests {
         HalSubpassDependency, HalSubpassDepthStencilAttachment, HalSubpassInputAttachment,
         HalSubpassLayout, HalSubpassPassLayout,
     };
+
+    #[test]
+    fn compressed_copy_extent_clamps_mip_edges_and_preserves_depth_and_pitches() {
+        let mut texture =
+            dummy_vulkan_texture(HalTextureDimension::D3, HalTextureFormat::Bc1RgbaUnorm);
+        texture.width = 12;
+        texture.height = 12;
+        let origin = HalOrigin3d { x: 0, y: 0, z: 1 };
+        for (mip, physical, logical) in [(0, 12, 12), (1, 8, 6), (2, 4, 3), (3, 4, 1)] {
+            let extent = HalExtent3d {
+                width: physical,
+                height: physical,
+                depth_or_array_layers: 2,
+            };
+            assert_eq!(
+                compressed_copy_extent(&texture, mip, origin, extent).unwrap(),
+                vk::Extent3D {
+                    width: logical,
+                    height: logical,
+                    depth: 2
+                }
+            );
+        }
+        let edge_origin = HalOrigin3d { x: 4, y: 4, z: 1 };
+        let extent = HalExtent3d {
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 2,
+        };
+        assert_eq!(
+            compressed_copy_extent(&texture, 1, edge_origin, extent).unwrap(),
+            vk::Extent3D {
+                width: 2,
+                height: 2,
+                depth: 2
+            }
+        );
+        let (mut copy, _) = make_copy(256, 3, 8, 8, 2);
+        copy.format = texture.format;
+        copy.mip_level = 1;
+        let region = buffer_image_copy(&copy, &texture, 8, vk::ImageAspectFlags::COLOR).unwrap();
+        assert_eq!(
+            region.image_extent,
+            vk::Extent3D {
+                width: 6,
+                height: 6,
+                depth: 2
+            }
+        );
+        assert_eq!(region.buffer_row_length, 128);
+        assert_eq!(region.buffer_image_height, 12);
+        texture.format = HalTextureFormat::Rgba8Unorm;
+        assert_eq!(
+            compressed_copy_extent(&texture, 1, edge_origin, extent).unwrap(),
+            vk::Extent3D {
+                width: 4,
+                height: 4,
+                depth: 2
+            }
+        );
+    }
+
+    #[test]
+    fn compressed_copy_extent_rejects_invalid_ranges_without_panicking() {
+        let mut texture =
+            dummy_vulkan_texture(HalTextureDimension::D2, HalTextureFormat::Bc1RgbaUnorm);
+        let origin = HalOrigin3d { x: 0, y: 0, z: 0 };
+        let extent = HalExtent3d {
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+        };
+        assert!(compressed_copy_extent(&texture, 32, origin, extent).is_err());
+        assert!(
+            compressed_copy_extent(&texture, 0, HalOrigin3d { x: 4, ..origin }, extent).is_err()
+        );
+        assert!(
+            compressed_copy_extent(&texture, 0, HalOrigin3d { x: 1, ..origin }, extent).is_err()
+        );
+        assert!(
+            compressed_copy_extent(&texture, 0, origin, HalExtent3d { width: 8, ..extent })
+                .is_err()
+        );
+        assert!(compressed_copy_extent(
+            &texture,
+            0,
+            HalOrigin3d {
+                x: u32::MAX,
+                ..origin
+            },
+            extent
+        )
+        .is_err());
+        texture.width = u32::MAX;
+        assert!(compressed_copy_extent(&texture, 0, origin, extent).is_err());
+    }
+
+    #[test]
+    fn compressed_copy_needs_temporary_buffer_only_for_mismatched_compressed_extents() {
+        let source = vk::Extent3D {
+            width: 16,
+            height: 16,
+            depth: 1,
+        };
+        let destination = vk::Extent3D {
+            width: 15,
+            height: 15,
+            depth: 1,
+        };
+        assert!(compressed_copy_needs_temporary_buffer(
+            source,
+            destination,
+            true
+        ));
+        assert!(compressed_copy_needs_temporary_buffer(
+            destination,
+            source,
+            true
+        ));
+        assert!(!compressed_copy_needs_temporary_buffer(
+            source, source, true
+        ));
+        assert!(!compressed_copy_needs_temporary_buffer(
+            source,
+            destination,
+            false
+        ));
+    }
+
+    #[test]
+    fn compressed_temporary_copy_preserves_blocks_mip_edges_and_layers() {
+        for dimension in [HalTextureDimension::D2, HalTextureDimension::D3] {
+            for layers in [1, 3] {
+                let mut source = dummy_vulkan_texture(dimension, HalTextureFormat::Bc1RgbaUnorm);
+                source.width = 16;
+                source.height = 16;
+                let mut destination = source.clone();
+                destination.width = 60;
+                destination.height = 60;
+                let copy = HalTextureCopy {
+                    source: HalTexture::Vulkan(source.clone()),
+                    destination: HalTexture::Vulkan(destination.clone()),
+                    source_mip_level: 0,
+                    destination_mip_level: 2,
+                    source_origin: HalOrigin3d { x: 0, y: 0, z: 1 },
+                    destination_origin: HalOrigin3d { x: 0, y: 0, z: 2 },
+                    extent: HalExtent3d {
+                        width: 16,
+                        height: 16,
+                        depth_or_array_layers: layers,
+                    },
+                };
+                let temporary = compressed_temporary_copy(&source, &destination, &copy).unwrap();
+                assert_eq!(temporary.size, 128 * u64::from(layers));
+                for (region, logical, mip, z) in [
+                    (temporary.source, 16, 0, 1),
+                    (temporary.destination, 15, 2, 2),
+                ] {
+                    assert_eq!(region.buffer_offset, 0);
+                    assert_eq!(region.buffer_row_length, 16);
+                    assert_eq!(region.buffer_image_height, 16);
+                    assert_eq!(region.image_extent.width, logical);
+                    assert_eq!(region.image_extent.height, logical);
+                    assert_eq!(region.image_subresource.mip_level, mip);
+                    if dimension == HalTextureDimension::D3 {
+                        assert_eq!(region.image_extent.depth, layers);
+                        assert_eq!(region.image_subresource.layer_count, 1);
+                        assert_eq!(region.image_subresource.base_array_layer, 0);
+                        assert_eq!(region.image_offset.z, z as i32);
+                    } else {
+                        assert_eq!(region.image_extent.depth, 1);
+                        assert_eq!(region.image_subresource.layer_count, layers);
+                        assert_eq!(region.image_subresource.base_array_layer, z);
+                        assert_eq!(region.image_offset.z, 0);
+                    }
+                }
+                let mut overflow = copy.clone();
+                overflow.extent = HalExtent3d {
+                    width: u32::MAX - 3,
+                    height: u32::MAX - 3,
+                    depth_or_array_layers: u32::MAX,
+                };
+                assert!(compressed_temporary_copy(&source, &destination, &overflow).is_err());
+                let mut invalid = copy.clone();
+                invalid.extent.width = 15;
+                assert!(compressed_temporary_copy(&source, &destination, &invalid).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn texture_copy_layouts_require_general_only_for_shared_subresources() {
+        let layers = |mip, base, count| {
+            image_subresource_layers(vk::ImageAspectFlags::COLOR, mip, base, count)
+        };
+        let transfer = (
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        );
+        let general = (vk::ImageLayout::GENERAL, vk::ImageLayout::GENERAL);
+        assert_eq!(
+            texture_copy_layouts(false, layers(0, 0, 2), layers(0, 0, 2)),
+            transfer
+        );
+        assert_eq!(
+            texture_copy_layouts(true, layers(0, 0, 2), layers(1, 0, 2)),
+            transfer
+        );
+        assert_eq!(
+            texture_copy_layouts(true, layers(0, 0, 2), layers(0, 2, 2)),
+            transfer
+        );
+        assert_eq!(
+            texture_copy_layouts(true, layers(0, 2, 2), layers(0, 0, 2)),
+            transfer
+        );
+        assert_eq!(
+            texture_copy_layouts(true, layers(0, 0, 2), layers(0, 1, 2)),
+            general
+        );
+        assert_eq!(
+            texture_copy_layouts(true, layers(0, 1, 2), layers(0, 0, 2)),
+            general
+        );
+        // Widen the endpoint arithmetic so even maximal layer indices cannot panic.
+        assert_eq!(
+            texture_copy_layouts(true, layers(0, u32::MAX, 1), layers(0, u32::MAX, 1)),
+            general
+        );
+        let slice = |z| {
+            texture_copy_subresource_layers(
+                vk::ImageAspectFlags::COLOR,
+                HalTextureDimension::D3,
+                0,
+                z,
+                1,
+            )
+        };
+        assert_eq!(texture_copy_layouts(true, slice(0), slice(2)), general);
+    }
 
     #[cfg(feature = "tiled")]
     #[test]
@@ -4321,6 +4890,7 @@ mod tests {
         let mut texture =
             dummy_vulkan_texture(HalTextureDimension::D2, HalTextureFormat::Bc1RgbaUnorm);
         texture.bytes_per_pixel = 8;
+        texture.height = 8;
         let copy = HalBufferTextureCopy {
             buffer: HalBuffer::Noop(
                 device

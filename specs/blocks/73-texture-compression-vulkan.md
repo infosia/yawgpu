@@ -75,6 +75,24 @@ With R1 advertised and the feature enabled on the device, a 3D BC texture
 Any HAL defect found is fixed in `yawgpu-hal/src/vulkan/**` with an inline unit
 test. If a case has no clean mapping it returns `HalError` — never a panic.
 
+### R3b — compressed copy extents at mip edges (found in slice 2)
+
+WebGPU copy sizes on a compressed mip are in **physical** (block-rounded)
+texels; Vulkan requires `imageExtent` to end at the **logical** mip size for a
+partial edge block (`VUID-vkCmdCopyImage-srcOffset-00144`-family, 07971/07972
+for buffer copies). The HAL converts the extent per image
+(`compressed_copy_extent`), keeping buffer pitches in block units.
+
+For texture-to-texture copies the converted source and destination extents can
+differ (Dawn's example: source = mip 0 of a 16x16 BC texture, destination =
+mip 2 of a 60x60 one — neither 16x16 nor 15x15 is a legal `vkCmdCopyImage`
+extent). This is a **valid WebGPU operation and must succeed on Tier 1**: when
+the extents differ, the Vulkan HAL performs the copy as texture→temporary
+buffer→texture (Dawn `CommandBufferVk.cpp` `RecordCopyImageWithTemporaryBuffer`,
+toggle `UseTemporaryBufferInCompressedTextureToTextureCopy`, default on for
+Vulkan). The temporary buffer lives until the submission completes. Returning
+`HalError` for this case is not acceptable.
+
 ### R4 — real-GPU e2e coverage
 
 New file `yawgpu/tests/e2e_vulkan_texture_compression.rs` (`#![cfg(feature =
@@ -93,6 +111,7 @@ exercised). Required probes:
 | E6 | 3D BC1 (sliced-3d): 4x4x3, distinct block per slice; write slices 0..3 in one writeTexture; T2B each slice | per-slice bytes identical |
 | E7 | 3D BC1 sampled through a `3d` view at slice centres | each slice's solid colour reads back |
 | E8 | ETC2 (`etc2-rgb8unorm`, `eac-r11unorm`) and ASTC (`astc-4x4-unorm`, `astc-8x8-unorm`, `astc-12x12-unorm`) multi-block round-trip | bytes identical (self-skip when the family is absent — expected on desktop NVIDIA/AMD) |
+| E10 | BC1 T2T with mismatched logical edges (R3b): source mip 0 of 16x16 → destination mip 2 of 60x60 (physical 16x16, logical 15x15), copy size 16x16; T2B the destination mip | destination blocks == source blocks; no device error |
 | E9 | 3D ASTC round-trip | self-skip unless `texture-compression-astc-sliced-3d` |
 
 The run must be clean under `VK_LAYER_KHRONOS_validation` (no VUID output).
