@@ -1705,11 +1705,10 @@ mod real {
         };
         Ok(guard
             .as_slice(word_len)
-            .chunks_exact(2)
-            .map(|pair| MslBufferSizeBinding {
-                group: pair[0],
-                binding: pair[1],
-            })
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[group, binding]| MslBufferSizeBinding { group, binding })
             .collect())
     }
 
