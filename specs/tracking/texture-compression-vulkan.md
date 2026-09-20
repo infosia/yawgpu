@@ -61,12 +61,40 @@ green; clippy `-D warnings` clean with and without `--features vulkan`; under
 `e2e_vulkan_threading_audit` 14/14, zero VUID / Validation Error lines. No open
 CRITICAL/MAJOR → **Block 73 COMPLETE**.
 
+### External CTS re-confirmation (2026-09-20, webgpu-native-cts, native Vulkan, NVIDIA RTX 5060 Ti)
+
+yawgpu rebuilt at `b77d531` (`--release --features vulkan`, `target-vulkan`),
+DLL + matching `tint_shim.dll` dropped into the suite's `build-yawgpu/Release`;
+run with `--isolate --workers 6 --expectations expectations/yawgpu-vulkan.txt`.
+
+| Trees | Result |
+|---|---|
+| `api,operation,command_buffer,copyTextureToTexture:*` + `api,operation,command_buffer,image_copy:*` | pass=2846 skip=5 fail=0 crash=0 |
+| `api,validation,image_copy,*` + `encoding,cmds,copyTextureToTexture:*` + `createTexture:*` + `capability_checks,features,texture_formats:*` | pass=8971 skip=2483 fail=0 crash=0 (1042 passing cases name a compressed format; 57 are 3D BC) |
+
+- **Sliced-3d is now exercised by the CTS.** Against the suite's previous
+  yawgpu DLL (2026-07-04 build, so a coarse baseline, not the immediate
+  pre-change commit) `createTexture` + `texture_formats` went pass 2385→2456,
+  skip 1009→938: exactly **71 cases flipped skip→pass, 0 regressions** —
+  `texture_compression_bc_sliced_3d` (14), `texture_size,3d_texture,compressed_format`
+  (14), `mipLevelCount,format` (14), `texture_usage` (14), `sampleCount,…` (14),
+  `zero_size_and_usage` (1), all `supportsBC=true;supportsBCSliced3D=true` /
+  3D BC variants.
+- Skips are adapter-feature skips: ETC2 540, ASTC 1484 (absent on this GPU), BC
+  364 (the `supportsBC=false` negative parameterisations), 95 other.
+- **Coverage gap in the suite, not in yawgpu:** the compressed *operation*
+  cases (`copyTextureToTexture:color_textures,compressed,{non_array,array}`) are
+  still "deferred" (unported) in webgpu-native-cts, and no compressed-format case
+  runs in the operation trees (0 of 2846). So R3b (mip-edge clamp + temporary
+  buffer fallback) is verified only by the in-repo e2e probes E2/E3/E10, not by
+  the CTS oracle comparison. Porting those two tests in webgpu-native-cts is the
+  follow-up that would close this.
+
 **Open follow-ups (outside this block's gate):**
 - E8 / E9 (ETC2, ASTC, ASTC sliced-3d) need a run on hardware exposing those
   families (Android Vulkan, or MoltenVK on Apple Silicon).
-- External webgpu-native-cts re-confirmation on Vulkan of the compressed-format
-  trees (`image_copy,*`, `copyTextureToTexture` compressed subcases,
-  `createTexture` sliced-3d) — not yet run.
+- Port `copyTextureToTexture:color_textures,compressed,*` in webgpu-native-cts
+  so R3b gets oracle (Dawn) comparison on real hardware.
 - Deferred MINOR #6 (device-local scratch buffer) and #7 (barrier batching).
 
 ### Slice 2 (2026-09-20)
