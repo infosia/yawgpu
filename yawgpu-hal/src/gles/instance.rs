@@ -238,6 +238,51 @@ pub(super) fn parse_backend(value: Option<&str>) -> BackendChoice {
     }
 }
 
+/// Selects which EGL display the Linux GLES context backend initializes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EglDeviceChoice {
+    /// Automatic selection: prefer a hardware EGL device, then fall back to
+    /// the platform default display.
+    Auto,
+    /// Skip device enumeration and use the platform default display.
+    Default,
+    /// Select the first EGL device that advertises a software rasterizer.
+    Software,
+    /// Pin the EGL device reported at this enumeration index.
+    Index(u32),
+}
+
+/// Parses the `YAWGPU_GLES_EGL_DEVICE` environment variable value into an
+/// [`EglDeviceChoice`].
+///
+/// This override is independent of `YAWGPU_GLES_BACKEND` (which selects the
+/// EGL or WGL context backend): it only refines which EGL display is used
+/// once EGL is the resolved context backend. Values are matched exactly, in
+/// lowercase, without trimming.
+///
+/// Unset, empty and `auto` map to [`EglDeviceChoice::Auto`], `default` and
+/// `software` map to their variants, and a decimal value maps to
+/// [`EglDeviceChoice::Index`]. Whether that index exists is a runtime
+/// concern, not a parse error, so an out-of-range index still parses. Any
+/// other value emits one diagnostic and degrades to
+/// [`EglDeviceChoice::Auto`] rather than failing.
+pub fn parse_egl_device(value: Option<&str>) -> EglDeviceChoice {
+    match value {
+        Some("auto") | Some("") | None => EglDeviceChoice::Auto,
+        Some("default") => EglDeviceChoice::Default,
+        Some("software") => EglDeviceChoice::Software,
+        Some(other) => match other.parse::<u32>() {
+            Ok(index) => EglDeviceChoice::Index(index),
+            Err(_) => {
+                eprintln!(
+                    "yawgpu-gles: unknown YAWGPU_GLES_EGL_DEVICE={other:?}; falling back to auto"
+                );
+                EglDeviceChoice::Auto
+            }
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,6 +302,38 @@ mod tests {
 
         #[cfg(not(windows))]
         assert_eq!(parse_backend(Some("wgl")), BackendChoice::Egl);
+    }
+
+    #[test]
+    fn parse_egl_device_defaults_to_auto() {
+        assert_eq!(parse_egl_device(None), EglDeviceChoice::Auto);
+        assert_eq!(parse_egl_device(Some("")), EglDeviceChoice::Auto);
+        assert_eq!(parse_egl_device(Some("auto")), EglDeviceChoice::Auto);
+    }
+
+    #[test]
+    fn parse_egl_device_handles_named_choices() {
+        assert_eq!(parse_egl_device(Some("default")), EglDeviceChoice::Default);
+        assert_eq!(
+            parse_egl_device(Some("software")),
+            EglDeviceChoice::Software
+        );
+    }
+
+    #[test]
+    fn parse_egl_device_accepts_decimal_indices() {
+        assert_eq!(parse_egl_device(Some("0")), EglDeviceChoice::Index(0));
+        assert_eq!(parse_egl_device(Some("3")), EglDeviceChoice::Index(3));
+        // Out-of-range indices are a runtime concern, not a parse error.
+        assert_eq!(parse_egl_device(Some("99")), EglDeviceChoice::Index(99));
+    }
+
+    #[test]
+    fn parse_egl_device_falls_back_to_auto_on_unknown_values() {
+        assert_eq!(parse_egl_device(Some("-1")), EglDeviceChoice::Auto);
+        assert_eq!(parse_egl_device(Some("nvidia")), EglDeviceChoice::Auto);
+        assert_eq!(parse_egl_device(Some("AUTO")), EglDeviceChoice::Auto);
+        assert_eq!(parse_egl_device(Some(" 0")), EglDeviceChoice::Auto);
     }
 
     #[test]
