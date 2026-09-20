@@ -4,8 +4,10 @@ Status: **COMPLETE** — Phase Review clean (0 CRITICAL / 0 MAJOR; 6 of 8 MINOR
 fixed, 2 deferred with rationale). Verified VUID-clean on a native Windows
 Vulkan driver for BC (E1–E7, E10). Known deferrals: ETC2 / ASTC / ASTC
 sliced-3d probes (E8, E9) self-skip on desktop GPUs and are unverified on real
-hardware; external webgpu-native-cts re-confirmation of the compressed-format
-trees on Vulkan is pending. Owner: Dawn-parity backfill.
+hardware. External webgpu-native-cts re-confirmation on native Vulkan: 0 fail /
+0 crash, 71 sliced-3d cases newly executed and passing; the suite's compressed
+`copyTextureToTexture` *operation* cases are still unported there, so R3b is
+covered by the in-repo e2e only. Owner: Dawn-parity backfill.
 
 Compressed textures (BC1–BC7, ETC2/EAC, ASTC LDR, + sRGB variants) are already
 implemented end to end for 2D / 2D-array textures: the core `FormatCaps` table,
