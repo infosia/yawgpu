@@ -246,7 +246,6 @@ pub(super) fn physical_device_name(properties: vk::PhysicalDeviceProperties) -> 
 #[cfg(test)]
 mod tests {
     use super::super::test_helpers::*;
-    use super::super::*;
     use super::*;
 
     #[test]

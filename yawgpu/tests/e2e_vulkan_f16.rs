@@ -147,8 +147,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
         let bytes = read_buffer(instance, readback, out_size as usize);
         let actual: Vec<f32> = bytes
-            .chunks_exact(2)
-            .map(|c| f16_bits_to_f32(u16::from_ne_bytes([c[0], c[1]])))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| f16_bits_to_f32(u16::from_ne_bytes(*c)))
             .collect();
         let expected: Vec<f32> = (1..=ELEMENTS as u32).map(|v| (v * 2) as f32).collect();
         assert_eq!(actual, expected, "f16 compute doubling mismatch");

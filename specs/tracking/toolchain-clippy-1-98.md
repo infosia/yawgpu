@@ -88,3 +88,91 @@ If CI pins an older toolchain, it will not see this failure, and the reverse
 drift (a future lint) will keep landing on contributors first. Pinning the
 gate's toolchain, or running clippy on both the pinned and the current stable,
 is worth considering — recorded as an open question, not scope here.
+
+## Second round — feature-gated targets (2026-09-20)
+
+R3 anticipated this: more pre-existing lints, found only because a slice
+happened to run the gate with `--features vulkan`. All are red on HEAD
+independently of any local change.
+
+**This list was first recorded as two findings. That was wrong** — see
+"Enumerating the true set" below. The complete set is the two here plus the
+seven in the third round.
+
+1. `yawgpu-hal/src/vulkan/device.rs:249` — `use super::super::*;` inside the
+   `#[cfg(test)] mod tests` is unused (`unused-imports`). Delete the line.
+2. `yawgpu/tests/e2e_vulkan_texture_compression.rs:638` —
+   `pixels.chunks_exact(4).enumerate()` trips the same
+   `chunks_exact_to_as_chunks` lint already fixed in `yawgpu-tint`. Same
+   treatment per R1 (no `#[allow]`): `as_chunks::<4>().0.iter().enumerate()`,
+   adjusting the binding for the `&[u8; 4]` element type.
+
+### Process finding — the gate command does not cover what it claims
+
+`cargo clippy --workspace --all-targets -- -D warnings` compiles only the
+default feature set, so every `#[cfg(feature = "vulkan")]` module, every
+`--features vulkan` test target, and the same for `metal` / `gles` /
+`shader-passthrough` / `tiled`, are **never linted by it**. A "clippy gate
+clean" claim made with that command alone is therefore narrower than it sounds
+— which is exactly how (2) above survived the first round of this fix.
+
+- **R4 — The gate is per-feature.** A clippy-clean claim states which feature
+  sets it covers. At minimum the default set and `vulkan` are both run on a host
+  that can build them; `metal` on macOS. Backends the host cannot build are
+  named as not covered rather than silently omitted.
+
+Not in scope here: changing CI to run the per-feature gates. Recorded as an open
+question — CI currently runs the default gate only, so feature-gated lint rot
+reaches contributors first, the same drift this document already describes.
+
+### Enumerating the true set
+
+`cargo clippy` stops scheduling new targets once one fails ("build failed,
+waiting for other jobs to finish..."), so a plain run reports a **partial,
+nondeterministic** subset of the failing targets — three identical runs produced
+three different subsets. The two findings first recorded above were one such
+subset, not the whole.
+
+- **R5 — Enumerate with `--keep-going`.** Any claim about *which* lints remain
+  is made from
+  `cargo clippy --workspace --all-targets --features <f> --keep-going --message-format=short -- -D warnings`.
+  A plain run answers only "clean / not clean", never "these are the findings".
+
+## Third round — the remaining `--features vulkan` sites (2026-09-20)
+
+Enumerated with `--keep-going`; 7 sites, all `chunks_exact_to_as_chunks`, all in
+`--features vulkan` test targets that the default gate never compiles:
+
+| file:line | chunk size |
+|---|---|
+| `yawgpu/tests/e2e_vulkan_compute.rs:533` | `std::mem::size_of::<u32>()` |
+| `yawgpu/tests/e2e_vulkan_f16.rs:150` | `2` |
+| `yawgpu/tests/e2e_vulkan_immediates.rs:607` | `std::mem::size_of::<u32>()` |
+| `yawgpu/tests/e2e_vulkan_render.rs:907` | `BYTES_PER_PIXEL` |
+| `yawgpu/tests/e2e_vulkan_render.rs:917` | `BYTES_PER_PIXEL` |
+| `yawgpu/tests/e2e_vulkan_subgroups.rs:126` | `4` |
+| `yawgpu/tests/e2e_vulkan_texture_formats_tier2.rs:67` | `4` |
+
+R1 applies (no `#[allow]`), R2 applies (`as_chunks::<N>().0` discards the
+remainder exactly as `chunks_exact(N)` did), R3 applies (only these sites).
+
+- **R6 — `size_of` chunk sizes need a named const.** Clippy prints
+  `as_chunks::<std::mem::size_of::<u32>()>()`, which is not valid const-generic
+  argument syntax. Those two sites introduce a named `const` (or use the literal
+  width) instead of pasting the suggestion.
+
+Each rewrite changes the iterator element from `&[T]` to `&[T; N]`, so
+comparisons against an array may need a deref (`*chunk == expected`); the
+assertion's meaning and message must not change.
+
+### Knock-on lint (third round)
+
+Rewriting `e2e_vulkan_render.rs:907` surfaced a lint the original code did not
+trip: with the element type now `&[u8; 4]`, `.iter().any(|p| *p == rgba)` trips
+`clippy::manual_contains`. Fixed on the merits per R1 —
+`pixels.as_chunks::<BYTES_PER_PIXEL>().0.contains(&rgba)`, same predicate.
+
+Generalisation worth remembering: a lint fix can change an expression's type and
+so expose a *different* lint at the same site. The R5 `--keep-going` enumeration
+is therefore re-run **after** applying fixes, not only before — the set is not
+static.

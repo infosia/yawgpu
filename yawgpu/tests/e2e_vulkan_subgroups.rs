@@ -123,8 +123,10 @@ fn main(@builtin(local_invocation_index) li: u32,
 
         let bytes = read_buffer(instance, readback, out_size as usize);
         let words: Vec<u32> = bytes
-            .chunks_exact(4)
-            .map(|c| u32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_ne_bytes(*c))
             .collect();
         let sizes = &words[0..WG];
         let sums = &words[WG..2 * WG];

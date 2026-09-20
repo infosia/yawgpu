@@ -132,7 +132,9 @@ unsafe fn read(
     ctx.submit(encoder);
     let padded = read_buffer(ctx.instance, buffer, len);
     let result = padded
-        .chunks_exact(256)
+        .as_chunks::<256>()
+        .0
+        .iter()
         .flat_map(|row| row[..row_bytes].iter().copied())
         .collect();
     yawgpu::wgpuBufferRelease(buffer);
@@ -635,10 +637,10 @@ fn sampled(srgb: bool, is_3d: bool) {
             4,
         );
         let colors = [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]];
-        for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+        for (index, pixel) in pixels.as_chunks::<4>().0.iter().enumerate() {
             let slice = (index % size.width as usize) / 4;
             assert_eq!(
-                pixel, colors[slice],
+                *pixel, colors[slice],
                 "srgb={srgb}, 3d={is_3d}, pixel {index}, slice {slice}"
             );
         }

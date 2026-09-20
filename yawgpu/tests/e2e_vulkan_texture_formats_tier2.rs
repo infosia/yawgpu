@@ -64,7 +64,9 @@ fn rgba8unorm_round_trip() -> RoundTrip {
         }
     }
     let expected = initial
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|texel| [texel[1], texel[0], 255, texel[3]])
         .collect();
     RoundTrip {

@@ -903,9 +903,7 @@ fn texture_extent() -> native::WGPUExtent3D {
 }
 
 fn contains_pixel(pixels: &[u8], rgba: [u8; 4]) -> bool {
-    pixels
-        .chunks_exact(BYTES_PER_PIXEL)
-        .any(|pixel| pixel == rgba)
+    pixels.as_chunks::<BYTES_PER_PIXEL>().0.contains(&rgba)
 }
 
 /// Returns whether any pixel matches `rgba` within `tolerance` per channel.
@@ -914,7 +912,7 @@ fn contains_pixel(pixels: &[u8], rgba: [u8; 4]) -> bool {
 /// tie (e.g. `0.1 * 255 = 25.5`) is implementation-defined in Vulkan, so the
 /// clear-color background can read back as 25 or 26 depending on the driver.
 fn contains_pixel_approx(pixels: &[u8], rgba: [u8; 4], tolerance: u8) -> bool {
-    pixels.chunks_exact(BYTES_PER_PIXEL).any(|pixel| {
+    pixels.as_chunks::<BYTES_PER_PIXEL>().0.iter().any(|pixel| {
         pixel
             .iter()
             .zip(rgba.iter())
