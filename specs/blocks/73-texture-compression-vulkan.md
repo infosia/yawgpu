@@ -1,6 +1,11 @@
 # Block 73 — Vulkan compressed-texture completion
 
-Status: **IN PROGRESS**. Owner: Dawn-parity backfill.
+Status: **COMPLETE** — Phase Review clean (0 CRITICAL / 0 MAJOR; 6 of 8 MINOR
+fixed, 2 deferred with rationale). Verified VUID-clean on a native Windows
+Vulkan driver for BC (E1–E7, E10). Known deferrals: ETC2 / ASTC / ASTC
+sliced-3d probes (E8, E9) self-skip on desktop GPUs and are unverified on real
+hardware; external webgpu-native-cts re-confirmation of the compressed-format
+trees on Vulkan is pending. Owner: Dawn-parity backfill.
 
 Compressed textures (BC1–BC7, ETC2/EAC, ASTC LDR, + sRGB variants) are already
 implemented end to end for 2D / 2D-array textures: the core `FormatCaps` table,
@@ -39,10 +44,14 @@ Dawn `PhysicalDeviceVk.cpp:270-303`:
   `vk::Format` yawgpu maps (all 14 block sizes × {UNORM, SRGB} = 28 formats),
   `vkGetPhysicalDeviceImageFormatProperties(format, TYPE_3D, OPTIMAL,
   SAMPLED, flags = empty)` returns `VK_SUCCESS` (Dawn
-  `IsTextureCompressionASTCSliced3DSupported`). The format list must be derived
-  from the same table `vulkan/format.rs` uses (no second hand-written list that
-  can drift); a unit test asserts the list has 28 entries and every entry is an
-  ASTC `*_BLOCK` format.
+  `IsTextureCompressionASTCSliced3DSupported`). The `vk::Format` values must be
+  obtained by mapping the ASTC `HalTextureFormat` variants through
+  `vulkan/format.rs` `map_texture_format` (no second hand-written `vk::Format`
+  list that can drift); enumerating the 28 `HalTextureFormat` variants by hand
+  is acceptable (the ASTC LDR set is closed) provided a unit test pins the list
+  to 28 unique entries that are all ASTC `*_BLOCK` formats. The probe result is
+  computed at most once per adapter (cached), since feature enumeration calls it
+  repeatedly.
 - Core `add_texture_compression_features` is unchanged (sliced-3d is only
   inserted when the base family is supported — already the case).
 - Metal / GLES / Noop unchanged.
@@ -104,10 +113,10 @@ exercised). Required probes:
 | # | Probe | Asserts |
 |---|---|---|
 | E1 | every BC format (BC1–BC7, unorm/snorm/ufloat/sfloat + srgb variants — all 14 WebGPU BC formats) 8x8 (4 blocks), writeTexture → T2B | bytes identical; block size 8 or 16 per format |
-| E2 | BC1 mip chain, 12x12 base, 4 mips (12, 6, 3, 1 logical → 12, 8, 4, 4 physical): write every mip, T2B every mip | bytes identical per mip; validates physical-size copy bounds on real HW |
+| E2 | BC1 mip chain, 12x12 base, 4 mips (12, 6, 3, 1 logical → 12, 8, 4, 4 physical): write every mip, T2B every mip | bytes identical per mip, using per-byte-distinct data (so swapped blocks/rows or a wrong `bufferRowLength` are detected); validates physical-size copy bounds on real HW |
 | E3 | BC1 T2T: copy a 2x2-block region between two textures, then T2B the destination | destination bytes == source bytes; untouched blocks stay zero |
 | E4 | BC1 **sampled render**: 4x4 texture with one solid-colour block (`color0 = color1 = 0xF800`, indices 0 → opaque red), sample into an `rgba8unorm` target with a fullscreen triangle, read back | every pixel == (255, 0, 0, 255) |
-| E5 | BC1 sRGB view: same block through `bc1-rgba-unorm-srgb` | red channel 255, alpha 255 (endpoints are 0/1 so sRGB decode is exact) |
+| E5 | BC1 sRGB format: the same block in a texture created as `bc1-rgba-unorm-srgb` (not a `viewFormats` reinterpretation) | red channel 255, alpha 255 (endpoints are 0/1 so sRGB decode is exact) |
 | E6 | 3D BC1 (sliced-3d): 4x4x3, distinct block per slice; write slices 0..3 in one writeTexture; T2B each slice | per-slice bytes identical |
 | E7 | 3D BC1 sampled through a `3d` view at slice centres | each slice's solid colour reads back |
 | E8 | ETC2 (`etc2-rgb8unorm`, `eac-r11unorm`) and ASTC (`astc-4x4-unorm`, `astc-8x8-unorm`, `astc-12x12-unorm`) multi-block round-trip | bytes identical (self-skip when the family is absent — expected on desktop NVIDIA/AMD) |

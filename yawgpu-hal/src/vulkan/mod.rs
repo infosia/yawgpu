@@ -272,6 +272,7 @@ pub struct VulkanAdapter {
     instance: Arc<VulkanInstanceInner>,
     physical_device: vk::PhysicalDevice,
     name: String,
+    astc_sliced_3d_support: Arc<OnceLock<bool>>,
 }
 
 impl VulkanAdapter {
@@ -292,6 +293,7 @@ impl VulkanAdapter {
             instance,
             physical_device,
             name,
+            astc_sliced_3d_support: Arc::new(OnceLock::new()),
         })
     }
 
@@ -429,7 +431,7 @@ impl VulkanAdapter {
         }
     }
 
-    /// Returns the base BC support result: Vulkan supports sliced 3D BC whenever BC is supported.
+    /// Returns true when 3D (sliced) BC textures are supported; on Vulkan this equals base BC support (Dawn parity).
     #[must_use]
     pub fn supports_texture_compression_bc_sliced_3d(&self) -> bool {
         self.supports_texture_compression_bc()
@@ -463,18 +465,20 @@ impl VulkanAdapter {
     /// supports sampled, optimally tiled 3D images with no additional image flags.
     #[must_use]
     pub fn supports_texture_compression_astc_sliced_3d(&self) -> bool {
-        astc_sliced_3d_supported(self.supports_texture_compression_astc(), |format| unsafe {
-            self.instance
-                .instance
-                .get_physical_device_image_format_properties(
-                    self.physical_device,
-                    format,
-                    vk::ImageType::TYPE_3D,
-                    vk::ImageTiling::OPTIMAL,
-                    vk::ImageUsageFlags::SAMPLED,
-                    vk::ImageCreateFlags::empty(),
-                )
-                .is_ok()
+        *self.astc_sliced_3d_support.get_or_init(|| {
+            astc_sliced_3d_supported(self.supports_texture_compression_astc(), |format| unsafe {
+                self.instance
+                    .instance
+                    .get_physical_device_image_format_properties(
+                        self.physical_device,
+                        format,
+                        vk::ImageType::TYPE_3D,
+                        vk::ImageTiling::OPTIMAL,
+                        vk::ImageUsageFlags::SAMPLED,
+                        vk::ImageCreateFlags::empty(),
+                    )
+                    .is_ok()
+            })
         })
     }
 
@@ -1404,6 +1408,44 @@ mod tests {
         // Block 94 S3: Vulkan now executes SetImmediates, so it advertises
         // Dawn's base-tier maxImmediateSize.
         assert_eq!(limits.max_immediate_size, 64);
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_adapter_sliced_3d_compression_matches_base_support_and_is_cached() {
+        let Ok(instance) = VulkanInstance::new() else {
+            eprintln!("SKIP: Vulkan instance unavailable");
+            return;
+        };
+        let Some(adapter) = instance.enumerate_adapters().into_iter().next() else {
+            eprintln!("SKIP: no Vulkan adapter available");
+            return;
+        };
+        let cloned_adapter = adapter.clone();
+        assert!(Arc::ptr_eq(
+            &adapter.astc_sliced_3d_support,
+            &cloned_adapter.astc_sliced_3d_support,
+        ));
+        assert!(adapter.astc_sliced_3d_support.get().is_none());
+        assert_eq!(
+            adapter.supports_texture_compression_bc_sliced_3d(),
+            adapter.supports_texture_compression_bc(),
+        );
+        let astc_sliced_3d = adapter.supports_texture_compression_astc_sliced_3d();
+        assert!(!astc_sliced_3d || adapter.supports_texture_compression_astc());
+        assert_eq!(
+            adapter.supports_texture_compression_astc_sliced_3d(),
+            astc_sliced_3d,
+        );
+        assert_eq!(
+            cloned_adapter.astc_sliced_3d_support.get(),
+            Some(&astc_sliced_3d)
+        );
+        assert_eq!(
+            cloned_adapter.supports_texture_compression_astc_sliced_3d(),
+            astc_sliced_3d,
+        );
     }
 
     #[test]

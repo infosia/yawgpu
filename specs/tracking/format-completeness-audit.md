@@ -32,6 +32,9 @@ instances.
   `vkGetPhysicalDeviceFeatures`; Metal `supportsBCTextureCompression`+`supportsFamily(Apple2)`; GLES false;
   Noop true). Compressed B2T/T2B copies use block sizing (incl. the Round-2 Vulkan `bufferImageHeight`
   block→texel fix for multi-layer copies). Sliced-3d + GLES advertisement deferred.
+  *(Update: Vulkan sliced-3d advertisement, device-level feature enable, mip-edge
+  copy extents and the compressed e2e suite landed in Block 73 —
+  `texture-compression-vulkan.md`. GLES advertisement is still deferred.)*
 - **Verified real-GPU Metal + Vulkan/MoltenVK:** BC1/ETC2/ASTC single-block create+writeTexture+T2B
   round-trip, and a **2-layer** BC1 round-trip (the multi-layer probe that caught the Round-2
   `bufferImageHeight` MAJOR — per-layer block correct after the fix). 13→14 e2e probes per backend green; no

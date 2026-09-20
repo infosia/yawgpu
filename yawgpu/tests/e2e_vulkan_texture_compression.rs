@@ -226,7 +226,14 @@ fn e2_bc1_physical_mip_chain_roundtrip() {
                 (
                     physical,
                     rows,
-                    vec![mip as u8 + 37; (rows * rows * 8) as usize],
+                    (0..rows * rows * 8)
+                        .map(|i| {
+                            (i as u8)
+                                .wrapping_mul(17)
+                                .wrapping_add(3)
+                                .wrapping_add(mip as u8 * 37)
+                        })
+                        .collect::<Vec<_>>(),
                 )
             })
             .collect();
