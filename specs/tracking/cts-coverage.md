@@ -2276,3 +2276,52 @@ naga fork is worse than under-validation":
   green. Raw `--workers` sweeps can now re-baseline the README table without `--isolate`.
 - **Follow-up (separate slice):** surface `ERROR_DEVICE_LOST` to `yawgpu-core` as a WebGPU
   device-loss event so harnesses can recycle a genuinely lost device.
+
+## F-151 — `TransientAttachment` accepted as a render-pass resolve target — RESOLVED on Noop (real-GPU re-confirmation pending)
+
+- **Finding (2026-09-21, webgpu-native-cts `docs/FINDINGS.md` F-151, Dawn-CONFIRMED):**
+  `webgpu:api,validation,render_pass,resolve:resolve_attachment:resolveTargetUsage_transient=true;_valid=false`
+  → yawgpu `fail: "expected validation error, got none"`, Dawn `pass`. Same host for both
+  (Linux, RTX 5060 Ti, driver 595.91, native Vulkan; yawgpu `2807ed3`, CTS `a7a3d06`, Dawn
+  `d25c666dec`), so the two differ only in the implementation under test. The case is 1 subcase
+  and was the **entire `fail` column** of `api/validation` in the 2026-09-21 Linux sweep.
+- **Root cause:** `validate_resolve_target` (`yawgpu-core/src/command_encoder.rs`) checked the
+  resolve target for multisampled source, error view, identity swizzle, `RENDER_ATTACHMENT`
+  usage, `sampleCount == 1`, format match, resolvability, `arrayLayerCount == 1` and size — but
+  had no `TRANSIENT_ATTACHMENT` check at all. A multisample resolve writes the resolved contents
+  *out* of the pass; a transient attachment exists only for the pass's duration and has no memory
+  to write to, so the two usages are mutually exclusive at `beginRenderPass`. This is **not** the
+  creation-time rule at `texture.rs:524` (a transient texture may carry only
+  `TRANSIENT_ATTACHMENT | RENDER_ATTACHMENT`) — the failing case creates exactly that legal
+  combination. The sibling `resolveTargetUsage_copySrcOnly` case already failed correctly, so the
+  surrounding machinery was sound.
+- **Fix:** one rule added inside `validate_resolve_target`, immediately after the
+  `RENDER_ATTACHMENT` check — `"render pass resolveTarget must not have TransientAttachment
+  usage"`. Placing it in the shared function rather than the `beginRenderPass` attachment walk
+  also covers the second caller, the `tiled` subpass color-attachment walk
+  (`subpass.rs`), which reuses it and rewrites the `"render pass "` prefix to
+  `"subpass render pass "` — hence the retained prefix. Contract: `blocks/50-commands.md` →
+  C30/C31.
+- **Depth-stencil resolve:** yawgpu has **no** depth-stencil resolve path, so it does not share
+  the gap and nothing was widened. Neither `RenderPassDepthStencilAttachment` nor the tiled
+  `SubpassDepthStencilAttachmentBinding` has a resolve field, matching the spec
+  (`GPURenderPassDepthStencilAttachment` has no `resolveTarget`).
+- **Verification (Noop):** new inline unit test
+  `render_pass_resolve_target_rejects_transient_attachment_usage` asserts the exact error string
+  for a `RENDER_ATTACHMENT | TRANSIENT_ATTACHMENT` resolve target, and — as a control against
+  over-application — asserts `Ok(())` for the same descriptor with a plain `RenderAttachment`
+  resolve target, the transient bit being the only delta. `cargo test --workspace` exit 0,
+  91 binaries, **1026** passing (baseline 1025, +1 the new test), 0 failed;
+  `cargo clippy --workspace --all-targets -- -D warnings` exit 0, and likewise
+  `-p yawgpu-core --features tiled`. No existing test changed (diff is +36/−0, one file).
+- **Pending:** real-GPU CTS re-run of the case and the whole `render_pass,resolve` file,
+  expecting `fail=0`.
+- **Under-specifications noted in `validate_resolve_target`, listed and deliberately NOT fixed**
+  (next worklist for this area): (1) `mipLevelCount == 1` is enforced at the `beginRenderPass`
+  call site rather than inside the shared function, so the tiled subpass caller never applies it —
+  the same asymmetry as this bug, one rule down; (2) the `RENDER_ATTACHMENT` check reads *texture*
+  usage and so ignores `TextureViewDescriptor.usage` narrowing, unlike the color-attachment path,
+  which reads view usage and has a test pinning that; (3) no cross-device check on render-pass
+  attachments, though copies have one; (4) no `"2d"` view-dimension check for renderable views;
+  (5) the multisample check precedes the error-view check, so error *text* ordering differs from
+  Dawn (cosmetic).

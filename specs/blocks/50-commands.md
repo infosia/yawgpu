@@ -134,6 +134,16 @@ ComputePassEncoder: `SetPipeline`/`SetBindGroup`/`DispatchWorkgroups`/
 - **C29** attachment view arrayLayerCount==1. :353. ☑ (P6.4)
 - **C30/C31** multisample resolve target (count1/format/size/usage)
   & all attachments same sampleCount. :1165/:1276. ☑ (P6.4)
+  - **CTS finding F-151 (2026-09-21):** the resolve-target usage rule was
+    incomplete — it required `RenderAttachment` but never rejected
+    `TransientAttachment`. A resolve writes the resolved contents *out* of the
+    pass, and a transient attachment has no memory to write to, so the two are
+    mutually exclusive: `beginRenderPass` must reject a resolve target whose
+    texture carries `TRANSIENT_ATTACHMENT`. This is distinct from the
+    creation-time rule (a transient texture may carry only
+    `TRANSIENT_ATTACHMENT | RENDER_ATTACHMENT`), which the failing case
+    satisfies. Enforced in `validate_resolve_target`, so the `tiled` subpass
+    caller inherits it. See `specs/tracking/cts-coverage.md` → F-151.
 - **C34/C35** occlusion/timestamp query sets. Defer→P8.
 
 ### P6.5 Pass draw/dispatch state + dynamic state
