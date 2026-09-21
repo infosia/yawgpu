@@ -174,3 +174,50 @@ above, not that, for this change's effect.
 A pass encoder leaked **without** being ended still retains everything, by
 design (D4) — it is legitimately still encoding. The library's obligation is
 to stop amplifying a caller's handle leak, and that is what this delivers.
+
+## Phase Review (2026-09-21)
+
+Clean Review per `specs/reference/workflow.md`: a fresh no-context agent given
+the cumulative diff `d05495b..HEAD`, this block's section, `CLAUDE.md`, the
+naming conventions and `blocks/90-unit-tests.md`. It re-derived D2
+independently — every reader of all 15 cleared fields, across the workspace —
+rather than trusting the diff's comments or the spec's assertion, and
+confirmed the gate results itself.
+
+**0 CRITICAL, 2 MAJOR, 5 MINOR.** Both MAJORs were defects in **this
+section's own field list**, not in the implementation, which had followed the
+list as written.
+
+| id | severity | finding | disposition |
+|---|---|---|---|
+| M1 | MAJOR | `render_commands` was excluded on the stated ground that `end()` always `mem::take`s it. It does not: the take sits inside the `if` for attachments, so a render pass with zero color attachments and no depth-stencil left its recorded commands — and the `Arc`s they own — behind. Reachable from the C ABI, since `begin_render_pass` records the descriptor error and still returns a usable encoder. | **Fixed** — cleared unconditionally; new test `render_pass_end_releases_recorded_commands_without_attachments`, red without the line |
+| M2 | MAJOR | `immediate_data` was listed as "unbounded caller data". It is a fixed 64-byte scratch that `record_set_immediates` / `overlay_written_immediates` index **unchecked** under the documented precondition that it is never reset for the pass's lifetime, which this change silently falsified — arming a latent panic to recover 64 bytes. | **Fixed** — removed from the clear; D1 now excludes it with the reason |
+| m1 | MINOR | The section still opened "SPEC ONLY — not implemented" three commits after it landed, contradicting this ledger. | **Fixed** (spec) |
+| m2 | MINOR | `command_referenced_buffers.clear()` is dead on the pass path — its only writers are the four `push` sites in `render_bundle.rs`. | **No change** — free and correct if a pass-side writer ever appears; recorded so the field count is not read as coverage |
+| m3 | MINOR | `clear_ended_resources` was `pub(crate)` although calling it from the other owner of `PassEncoderState` (the bundle encoder, which has no `ended` flag and reads three of the cleared fields back at `finish()`) would silently produce an empty `RenderBundle`. | **Fixed** — narrowed to a private `fn`, so the invariant is enforced rather than documented |
+| m4 | MINOR | The doc comment justified retaining the scalars as "still read by later validation". None is: each is consumed above the clear point or never read again once `ended`. | **Fixed** — accurate reason |
+| m5 | MINOR | D3's positive half (soft-error paths still clear) had no test; it held only because the clear sits above those branches. | **Fixed** — `pass_end_soft_error_still_releases_bindings`, red when the clear is made conditional on no soft error |
+
+No finding was dropped as a false positive. Both MAJORs were confirmed
+independently against the source before being accepted.
+
+### Final gates
+
+`cargo test --workspace` **1025 passed / 0 failed** (1020 pre-block + 5 new
+tests, **no pre-existing test edited**); `cargo clippy --workspace
+--all-targets -- -D warnings` clean; the same with `--features vulkan
+--keep-going` clean; `cargo fmt -p yawgpu-core --check` clean.
+
+**Block 50's "Pass-encoder resource retention on `end()`" is COMPLETE**: no
+open CRITICAL or MAJOR, the one deferred MINOR (m2) carries its written
+rationale above.
+
+### What the review caught that the implementation could not
+
+Both MAJORs came from the spec asserting something about the code that was
+false — that `end()` always drains `render_commands`, and that
+`immediate_data` was unbounded. The implementer had been told to follow D1's
+list exactly and report gaps rather than improvise, and did; a fresh reader
+checking the spec's claims against the source is what turned them up. Worth
+repeating: the review's value here was in treating the spec as a claim to
+verify, not as ground truth.

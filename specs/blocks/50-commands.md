@@ -297,7 +297,11 @@ ComputePassEncoder: `SetPipeline`/`SetBindGroup`/`DispatchWorkgroups`/
 
 ## Pass-encoder resource retention on `end()` (post-COMPLETE addition)
 
-> **Status: SPEC ONLY — spec'd 2026-09-21, not implemented.**
+> **Status: IMPLEMENTED — C1-C3 landed 2026-09-21 (`20dde2e`).** Phase
+> Review the same day: 0 CRITICAL, 2 MAJOR, 5 MINOR; both MAJORs were
+> defects in this section's own field list and are corrected inline below.
+> Measurements and the finding ledger:
+> `tracking/pass-encoder-retention.md`.
 
 ### Problem (measured 2026-09-21)
 
@@ -354,7 +358,7 @@ existed only to validate or record commands. Clear:
 `index_buffer`, `attachment_textures`, `attachment_texture_uses`,
 `render_color_attachments`, `render_depth_stencil_attachment`,
 `occlusion_query_set`, `command_referenced_buffers`, `scope_buffer_uses`,
-`scope_texture_uses`, `immediate_data`, **`scope_usage_index`**.
+`scope_texture_uses`, **`scope_usage_index`**, **`render_commands`**.
 
 **`scope_usage_index` added 2026-09-21**, after C1/C2 measured that the
 original fourteen do not deliver acceptance criterion 1's "attachment
@@ -371,11 +375,35 @@ successful index insertion has a corresponding owning handle in the scope
 history", which clearing `scope_buffer_uses` / `scope_texture_uses` alone
 would falsify.
 
-`render_commands` is already `mem::take`n and stays that way.
-`immediate_data` holds no `Arc` but is unbounded caller data, so it goes
-for the same reason. Scalar/bookkeeping fields (`ended`,
-`debug_group_depth`, `draw_count`, the occlusion-query index sets, the
-dirty flag, `limits`) are untouched — some are read by later validation.
+**Corrected by the Phase Review, 2026-09-21 — two of this list's original
+entries were wrong:**
+
+- **`render_commands` must be cleared** (M1). This text originally said it
+  "is already `mem::take`n and stays that way". It is not: the `mem::take`
+  in `end()` sits *inside* the `if !render_color_attachments.is_empty() ||
+  render_depth_stencil_attachment.is_some()` branch. A render pass begun
+  with zero color attachments and no depth-stencil takes the `else` arm, so
+  its recorded commands — which own `Arc<RenderPipeline>`,
+  `Arc<BindGroup>`, `Arc<Buffer>`, `Arc<RenderBundle>` — were neither taken
+  nor cleared. That path is reachable: `begin_render_pass` records the
+  descriptor error and still returns a usable encoder, so the leak shape
+  this section exists to fix survived on the error path.
+- **`immediate_data` must NOT be cleared** (M2). It was listed as
+  "unbounded caller data"; it is a fixed 64-byte scratch
+  (`MAX_IMMEDIATE_DATA_BYTES`), allocated once, only ever overwritten
+  byte-range-wise, and `PassEncoderState::new`'s own comment states it "is
+  never reset for the lifetime of the pass". `record_set_immediates` and
+  `overlay_written_immediates` index it **unchecked** under that documented
+  precondition. Clearing it recovers 64 bytes and arms a latent panic
+  behind an invariant the same change silently broke — a bad trade against
+  CLAUDE.md principle 3 and this section's own acceptance criterion 6.
+
+Scalar/bookkeeping fields (`ended`, `debug_group_depth`, `draw_count`, the
+occlusion-query index sets, the dirty flag, `limits`) and the 64-byte
+`immediate_data` scratch are untouched: they are cheap and there is nothing
+to release. (An earlier wording claimed some are "read by later
+validation" — they are not; every one is consumed *above* the clear point
+or never read again once `ended`.)
 
 **Why this is safe.** The parent owns everything execution needs before
 `end()` returns: compute commands are recorded into the `CommandEncoder`

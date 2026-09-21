@@ -162,12 +162,22 @@ impl PassEncoderState {
     /// query set it ever bound: everything execution needs was already recorded
     /// into the parent `CommandEncoder` by the time `end()` returns.
     ///
-    /// Only called from [`PassEncoderInner::end`], after `ended` has been set.
+    /// Private on purpose: [`PassEncoderInner::end`], in this module, is the
+    /// only correct caller, and it calls this after `ended` has been set. The
+    /// other owner of a [`PassEncoderState`] -- `RenderBundleEncoderState` --
+    /// has no `ended` flag and reads `scope_buffer_uses`, `scope_texture_uses`
+    /// and `immediate_data` back out at `finish()` time, so clearing there
+    /// would silently produce an empty bundle.
+    ///
     /// Every read of a field cleared here is gated on `!ended` (D2), so this is
     /// unobservable. Scalar bookkeeping (`ended`, `debug_group_depth`,
     /// `draw_count`, `max_draw_count`, the occlusion-query index sets, the
-    /// compatibility dirty flag, `limits`) is deliberately retained -- some of
-    /// it is still read by later validation.
+    /// compatibility dirty flag, `limits`) and the fixed-size `immediate_data`
+    /// scratch are deliberately retained: they are cheap and own nothing to
+    /// release. `immediate_data` in particular must survive -- it is a
+    /// `MAX_IMMEDIATE_DATA_BYTES` buffer that `record_set_immediates` and
+    /// `overlay_written_immediates` index unchecked, under the documented
+    /// precondition that it is never reset for the lifetime of the pass.
     ///
     /// `scope_usage_index` is cleared with the rest even though it looks like
     /// pure bookkeeping: its texture buckets hold *clones* of
@@ -177,7 +187,7 @@ impl PassEncoderState {
     /// it also *restores* the index's documented invariant -- that every entry
     /// has a corresponding owning handle in the scope history -- which dropping
     /// `scope_buffer_uses` / `scope_texture_uses` on their own would falsify.
-    pub(crate) fn clear_ended_resources(&mut self) {
+    fn clear_ended_resources(&mut self) {
         self.render_pipeline = None;
         self.compute_pipeline = None;
         self.bind_groups.clear();
@@ -195,9 +205,14 @@ impl PassEncoderState {
         // invariants self-evident, and replacing rather than clearing the maps
         // releases their table allocations too.
         self.scope_usage_index = LenientUsageScopeIndex::default();
-        // Holds no `Arc`, but it is unbounded caller data with no reader left;
-        // replace rather than `clear()` so the allocation is actually released.
-        self.immediate_data = Vec::new();
+        // `end()` only `mem::take`s `render_commands` when the pass has at
+        // least one attachment; a render pass begun with zero color
+        // attachments and no depth-stencil takes the other arm and records no
+        // `RenderPassCommand` at all, leaving the recorded commands -- and the
+        // `Arc<RenderPipeline>` / `Arc<BindGroup>` / `Arc<Buffer>` /
+        // `Arc<RenderBundle>` they own -- behind. This runs after that take, so
+        // on the normal path it clears an already-empty vector.
+        self.render_commands.clear();
     }
 
     pub(crate) fn set_render_pipeline(&mut self, pipeline: Arc<RenderPipeline>) {
@@ -2097,6 +2112,7 @@ pub(crate) fn overlay_written_immediates(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render_pass::RenderPassDescriptor;
     #[cfg(feature = "tiled")]
     use crate::test_helpers::input_attachment_layout_entry;
     use crate::test_helpers::{
@@ -3546,5 +3562,92 @@ mod tests {
             Some("pass encoder cannot be used after parent encoder finish".to_owned())
         );
         assert_eq!(Arc::strong_count(&pipeline), caller_refs + 1);
+    }
+
+    #[test]
+    fn render_pass_end_releases_recorded_commands_without_attachments() {
+        // A render pass begun with zero color attachments and no depth-stencil
+        // is a descriptor error, but `begin_render_pass` records it against the
+        // parent and still hands back a usable encoder. `end()` then takes the
+        // arm that builds no `RenderPassCommand`, so nothing `mem::take`s
+        // `render_commands` -- clearing it in `clear_ended_resources` is the
+        // only thing that releases what the recorded commands own.
+        let device = noop_device();
+        let bind_group = empty_bind_group(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_render_pass(&RenderPassDescriptor {
+            max_color_attachments: Limits::DEFAULT.max_color_attachments,
+            color_attachments: Vec::new(),
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            max_draw_count: 50_000_000,
+        });
+        assert_eq!(begin_error, None);
+
+        let bind_group_refs = Arc::strong_count(&bind_group);
+        assert_eq!(
+            pass.set_bind_group(
+                0,
+                Some(Arc::clone(&bind_group)),
+                Vec::new(),
+                device.limits()
+            ),
+            None
+        );
+        // The pass state's `bind_groups` map and the recorded `RenderCommand`
+        // each hold one reference on top of the caller's.
+        assert_eq!(Arc::strong_count(&bind_group), bind_group_refs + 2);
+
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, finish_error) = encoder.finish();
+        assert_eq!(
+            finish_error,
+            Some("render pass requires at least one attachment".to_owned())
+        );
+        drop(command_buffer);
+        drop(encoder);
+
+        // `pass` is still alive here on purpose: an ended-but-leaked handle
+        // must retain nothing, on the descriptor-error path too.
+        assert_eq!(Arc::strong_count(&bind_group), bind_group_refs);
+        drop(pass);
+    }
+
+    #[test]
+    fn pass_end_soft_error_still_releases_bindings() {
+        // D3's positive half: the soft-error paths that run *after*
+        // `ended = true` -- here an unbalanced debug group -- still clear. The
+        // error must reach the parent's sink *and* the bindings must be gone.
+        let device = noop_device();
+        let pipeline = noop_compute_pipeline(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_compute_pass();
+        assert_eq!(begin_error, None);
+
+        let caller_refs = Arc::strong_count(&pipeline);
+        assert_eq!(pass.set_pipeline(Arc::clone(&pipeline)), None);
+        assert_eq!(pass.push_debug_group(), None);
+        // Only the pass state holds the pipeline: nothing was dispatched, so
+        // the parent encoder recorded no command that clones it.
+        assert_eq!(Arc::strong_count(&pipeline), caller_refs + 1);
+
+        // `end()` reports the unbalanced group through the parent's error sink
+        // rather than its return value, and clears on the way out.
+        assert_eq!(pass.end(), None);
+        assert_eq!(Arc::strong_count(&pipeline), caller_refs);
+
+        let (command_buffer, finish_error) = encoder.finish();
+        assert_eq!(
+            finish_error,
+            Some("pass encoder debug group stack is unbalanced".to_owned())
+        );
+        drop(command_buffer);
+        drop(encoder);
+
+        // `pass` is still alive here on purpose.
+        assert_eq!(Arc::strong_count(&pipeline), caller_refs);
+        drop(pass);
     }
 }
