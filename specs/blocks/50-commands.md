@@ -354,7 +354,22 @@ existed only to validate or record commands. Clear:
 `index_buffer`, `attachment_textures`, `attachment_texture_uses`,
 `render_color_attachments`, `render_depth_stencil_attachment`,
 `occlusion_query_set`, `command_referenced_buffers`, `scope_buffer_uses`,
-`scope_texture_uses`, `immediate_data`.
+`scope_texture_uses`, `immediate_data`, **`scope_usage_index`**.
+
+**`scope_usage_index` added 2026-09-21**, after C1/C2 measured that the
+original fourteen do not deliver acceptance criterion 1's "attachment
+textures" for a render pass: `LenientUsageScopeIndex::texture_uses_by_identity`
+stores *clones* of `TextureScopeUse`, and `TextureScopeUse.texture` is an
+`Arc` handle, so a leaked ended render-pass encoder still pinned its
+attachment textures through the private index. Clearing it is safe by the
+same argument as the rest — the index is read only by
+`LenientUsageScopeIndex::validate_and_record`, reached only through
+`record_resource_usage_scope_uses`, i.e. only from `record_pass_command`
+closures. It also *restores* an invariant rather than weakening one: the
+index's own doc comment justifies its raw-address keys with "every
+successful index insertion has a corresponding owning handle in the scope
+history", which clearing `scope_buffer_uses` / `scope_texture_uses` alone
+would falsify.
 
 `render_commands` is already `mem::take`n and stays that way.
 `immediate_data` holds no `Arc` but is unbounded caller data, so it goes
@@ -381,9 +396,12 @@ slice must **enumerate every read of each cleared field and show it is
 gated on `!ended`** (or on a path unreachable after `end()`). A read that
 is not so gated is a finding to report, not something to work around.
 
-**D3 — failure paths leave state untouched.** `end()`'s three early
-returns (already ended, parent finished, not the active pass) return
-before `ended = true` and must not clear anything. The "soft" error paths
+**D3 — failure paths leave state untouched.** `end()`'s early returns
+(already ended, parent finished, not the active pass) return before
+`ended = true` and must not clear anything. Only the first two are
+constructible from the public API with bindings still in place — a pass
+that is not the active pass has necessarily already been ended — so the
+parent-finished path is the one a test should pin (C1 measured this). The "soft" error paths
 that run *after* `ended = true` (unbalanced debug groups, open occlusion
 query, draw count exceeded) still record their error and still clear.
 
@@ -416,7 +434,10 @@ does: the CTS's ended-and-leaked encoders would retain only the
 
 1. After `end()`, the pass encoder holds no strong reference to its bound
    pipeline, bind groups, buffers, attachment textures or query set —
-   pinned by inline unit tests via `Arc::strong_count`.
+   pinned by inline unit tests via `Arc::strong_count`. The
+   attachment-texture half of this needs `scope_usage_index` cleared (see
+   D1) and must have its own assertion; the other resources were not
+   enough to prove it.
 2. `cargo test --workspace` green on Noop with **no test edited to
    accommodate the change**. A test that has to change is a signal the
    behaviour changed observably; stop and report instead.

@@ -122,12 +122,55 @@ makes the library robust against any caller with the same bug.
   modules and compute pipelines but not pass encoders. The harness does leak,
   at 174 sites.
 
-## Status
+## Result (C1-C3 landed 2026-09-21)
 
-- Root cause: **confirmed**, both by refcount instrumentation and by
-  reproducing the difference from a 4-call standalone program.
-- Contract: `specs/blocks/50-commands.md` → "Pass-encoder resource retention
-  on `end()`", slices C1-C3.
-- Implementation: **not started**.
-- Before-numbers to beat, with the CTS side unchanged:
-  `bitwise_or:*` peak RSS **635,708 KB**, `tint program_destroy` **0 / 442**.
+`PassEncoderInner::end()` now calls `PassEncoderState::clear_ended_resources()`
+— 15 field resets — on every path that sets `ended = true`. Measured against
+webgpu-native-cts **`efc9edd`, binary md5 `b160eab4…`, verified identical
+before and after each run**, so the pair isolates this change; the CTS side
+had not yet been rebuilt with its own fix.
+
+| query | cases | before | after |
+|---|---:|---:|---:|
+| `…binary,bitwise:bitwise_or:*` | 48 | 635,708 KB / destroy 0 of 442 | **294,876 KB / 442 of 442** |
+| `…binary,bitwise:*` | 240 | ~1,768 MB / destroy 0 of 1842 | **311,732 KB / 1842 of 1842** |
+
+Both summary lines byte-identical (`pass=36 skip=12` and `pass=204 skip=36`,
+`fail=0 crash=0`). Every Tint program is now destroyed, not merely most.
+
+The shape matters more than either number: **48 cases 288 MB vs 240 cases
+304 MB**. Peak memory no longer scales with case count. That is the plateau
+the investigation was looking for, and it is what makes the area runnable in
+one process.
+
+Gates: `cargo test --workspace` 1023 passed / 0 failed (1020 baseline + 3 new
+tests, **no pre-existing test edited**); both clippy gates clean;
+`cargo fmt -p yawgpu-core --check` clean.
+
+### Note on later measurements
+
+After the above, the webgpu-native-cts binary was rebuilt by separate work on
+that repo's own fix (md5 `6c605d5b…`). Any number taken from that binary
+onward reflects **both** fixes and cannot be attributed to this change; a run
+of `bitwise:*` against it gave 336,100 KB / 1842 destroys. Cite the table
+above, not that, for this change's effect.
+
+### Spec corrections this work forced
+
+- **`scope_usage_index` was missing from D1.** `LenientUsageScopeIndex`
+  stores clones of `TextureScopeUse`, each owning a `Texture` handle, so the
+  original fourteen fields left a leaked ended *render* pass encoder still
+  pinning its attachment textures — which acceptance criterion 1 explicitly
+  named. Found by the implementer, who followed the list as written and
+  reported the gap instead of improvising; D1 and criterion 1 were amended and
+  the field added. Clearing it also restores the index's own documented
+  invariant, which clearing only the scope vectors would have falsified.
+- **D3 said "three early returns".** Only two are constructible from the
+  public API with bindings still in place; a pass that is not the active pass
+  has necessarily already been ended. Wording fixed.
+
+### Not fixed here
+
+A pass encoder leaked **without** being ended still retains everything, by
+design (D4) — it is legitimately still encoding. The library's obligation is
+to stop amplifying a caller's handle leak, and that is what this delivers.
