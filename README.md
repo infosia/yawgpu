@@ -494,90 +494,27 @@ time by Tint into the backend's native language — Metal Shading Language
 for Metal, SPIR-V for Vulkan, GLSL ES for GLES.
 
 16-bit floats are supported through the standard WebGPU **`shader-f16`**
-optional feature: request `WGPUFeatureName_ShaderF16` in the device's
-`requiredFeatures`, then use `enable f16;` in WGSL. Shaders that use `f16`
-without the feature requested are rejected with a validation error. It is
-advertised on Metal (native `half`) and on Vulkan when the device exposes
-`shaderFloat16` (the backend also enables `VK_KHR_16bit_storage` so `f16`
-works in storage/uniform buffers, not just arithmetic); it is not available
-on the Tier-2 GLES backend.
+optional feature, and SIMD-lane collective operations through **`subgroups`**.
+Like every optional feature, each must be requested in the device's
+`requiredFeatures` (then `enable f16;` / `enable subgroups;` in WGSL); using one
+without requesting it is a validation error.
 
-SIMD-lane collective operations are supported through the standard WebGPU
-**`subgroups`** optional feature: request `WGPUFeatureName_Subgroups` in the
-device's `requiredFeatures`, then use `enable subgroups;` in WGSL to access the
-`@builtin(subgroup_size)` / `@builtin(subgroup_invocation_id)` inputs and the
-subgroup built-ins (`subgroupAdd`, `subgroupBallot`, `subgroupBroadcast`,
-`subgroupShuffle`, the quad ops, …). Shaders that use them without the feature
-requested are rejected with a validation error. `WGPUAdapterInfo::subgroupMinSize`
-/ `subgroupMaxSize` report the hardware SIMD width. It is advertised on Metal
-(Apple-family GPU6+ or Metal3, mapped to MSL SIMD-group functions) and on Vulkan
-when the device reports the required subgroup operations in the compute stage
-(mapped to SPIR-V `GroupNonUniform*`); it is not available on the Tier-2 GLES
-backend. The `subgroup_id` and `subgroup_uniformity` WGSL language features are
-reported by `wgpuInstanceGetWGSLLanguageFeatures`, matching Dawn.
+The optional features yawgpu supports on the Tier-1 backends (none are available
+on the Tier-2 GLES backend):
 
-Beyond the shader-authoring features above, yawgpu also supports the standard
-**`depth-clip-control`** optional feature (a rasterization-stage flag, not a
-shader feature): request `WGPUFeatureName_DepthClipControl`, then set
-`primitive.unclippedDepth = true` on a render pipeline to disable near/far depth
-clipping (fragments outside the `[0, 1]` NDC depth range are kept and clamped
-instead of the primitive being clipped). It maps to Metal `MTLDepthClipMode.clamp`
-and Vulkan core `depthClampEnable`; without the feature requested, `unclippedDepth`
-is rejected. It is advertised on Metal and on Vulkan devices that report
-`depthClamp` (matching Dawn); it is not available on the Tier-2 GLES backend.
+| Feature | What it enables |
+|---|---|
+| `shader-f16` | `f16` types in WGSL, including in storage/uniform buffers |
+| `subgroups` | subgroup builtins (`subgroupAdd`, `subgroupBroadcast`, …); `WGPUAdapterInfo` reports the subgroup size range |
+| `depth-clip-control` | `primitive.unclippedDepth` — clamp instead of clip at the near/far planes |
+| `float32-blendable` | blend state on `r32float` / `rg32float` / `rgba32float` color targets |
+| `dual-source-blending` | a second fragment color output (`@blend_src`) and the `src1` blend factors |
+| `indirect-first-instance` | non-zero `firstInstance` in indirect draws |
+| `clip-distances` | `@builtin(clip_distances)` user-defined clip planes |
+| `primitive-index` | `@builtin(primitive_index)` in fragment shaders |
+| `texture-component-swizzle` | per-view `r/g/b/a` component remapping on sampled texture views |
 
-The **`float32-blendable`** optional feature (another rasterization-stage
-capability) lets a render pipeline attach a **blend state to 32-bit-float color
-targets** (`r32float` / `rg32float` / `rgba32float`), which are otherwise
-renderable but not blendable. Request `WGPUFeatureName_Float32Blendable`; a blend
-on those formats is rejected without it. It is advertised on Metal and on Vulkan
-devices whose float32 formats report `COLOR_ATTACHMENT_BLEND` (matching Dawn); it
-is not available on the Tier-2 GLES backend.
-
-The **`dual-source-blending`** optional feature lets a fragment shader emit a
-**second color output** — `enable dual_source_blending;` with
-`@location(0) @blend_src(0)` / `@blend_src(1)` — and use the `src1` /
-`one-minus-src1` / `src1-alpha` / `one-minus-src1-alpha` blend factors, so the
-blend equation can reference a second source (e.g. subpixel-AA font blending).
-Request `WGPUFeatureName_DualSourceBlending`; without it, both the WGSL enable and
-the `src1` blend factors are rejected, and a dual-source pipeline must have a
-single color target. It maps to Metal `MTLBlendFactor::Source1*` and Vulkan
-`VK_BLEND_FACTOR_SRC1_*` (`dualSrcBlend`); advertised on Metal and on Vulkan
-devices reporting `dualSrcBlend`, not on the Tier-2 GLES backend.
-
-The **`indirect-first-instance`** optional feature allows a non-zero
-`firstInstance` in the arguments of `drawIndirect` / `drawIndexedIndirect`
-(without it, an indirect draw's `firstInstance` must be zero). Request
-`WGPUFeatureName_IndirectFirstInstance`; advertised on Metal (indirect draws
-honor `baseInstance` natively) and on Vulkan devices reporting
-`drawIndirectFirstInstance`, not on the Tier-2 GLES backend.
-
-The **`clip-distances`** optional feature lets a vertex shader emit
-`@builtin(clip_distances) array<f32, N>` (N ≤ 8) via `enable clip_distances;`,
-adding user-defined clip planes (a fragment is culled where any clip distance is
-negative). Request `WGPUFeatureName_ClipDistances`; the clip distances consume
-`maxInterStageShaderVariables` slots (`ceil(N/4)`) and lower the max vertex-output
-`@location`. Tint lowers it to Metal `[[clip_distance]]` / SPIR-V `ClipDistance`;
-advertised on Metal and on Vulkan devices reporting `shaderClipDistance`, not on
-the Tier-2 GLES backend.
-
-The **`primitive-index`** optional feature lets a fragment shader read
-`@builtin(primitive_index) idx: u32` (via `enable primitive_index;`) — the index
-of the primitive that generated the fragment. Request
-`WGPUFeatureName_PrimitiveIndex`; Tint lowers it to Metal `[[primitive_id]]` /
-SPIR-V `PrimitiveId`. Advertised on Apple7+ Metal GPUs and on Vulkan devices
-reporting `geometryShader` (the `PrimitiveId` builtin needs the `Geometry`
-capability), not on the Tier-2 GLES backend.
-
-The **`texture-component-swizzle`** optional feature lets a texture *view* remap
-its `r/g/b/a` components (each → one of `r/g/b/a/0/1`) via a
-`WGPUTextureComponentSwizzleDescriptor` on the view descriptor; reads through the
-view see the swizzled channels. Request `WGPUFeatureName_TextureComponentSwizzle`;
-a non-identity swizzle is allowed only on **sampled** views (not on render-pass
-attachments, resolve targets, or storage bindings). It maps to Metal
-`MTLTextureSwizzleChannels` / Vulkan `VkComponentMapping` (depth/stencil formats
-compose over an `R,0,0,1` base). Advertised on Metal (Mac2 / Apple2 GPUs) and
-unconditionally on Vulkan, not on the Tier-2 GLES backend.
+Each is advertised only when the underlying device supports it, matching Dawn.
 
 ### Native shader passthrough (vendor, opt-in, unsafe)
 
@@ -644,43 +581,17 @@ bypassing WGSL and Tint entirely:
     than driver-dependent. The windowed C examples are runtime-verified against native
     Vulkan drivers, and the windowed `triangle` example additionally runs
     through the OpenGL ES backend via the WGL fallback (host GL driver, opt-in).
-  - **Linux (`x86_64-unknown-linux-gnu`)** — the CI host (`ubuntu-latest`):
-    every push builds the workspace and runs the full unit + validation
-    test suite (Noop backend) green
-    (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)). The
-    **Vulkan backend** is additionally verified **real-GPU on Linux**
-    against the native ICD (`ash` loads `libvulkan.so` at runtime), on two
-    vendors: an NVIDIA GeForce RTX 5060 Ti (proprietary driver, Vulkan 1.4)
-    and an AMD Radeon iGPU (RADV / Mesa). The **entire `e2e_vulkan_*`
-    suite** — basic, buffer, texture, texture-compression, compute, render,
-    depth, depth-clip-control, f16, subgroups, immediates, dual-source
-    blending, float32-blendable, texture-formats-tier2, external-texture,
-    OOM, and the threading audit — passes on **both** drivers, 78 tests
-    across 20 targets on each. The C examples build and run against both
-    (`compute` computes the real Collatz sequence on the GPU, `capture`
-    writes its rendered PNG).
-    **Compressed textures**: every BC format round-trips on real hardware —
-    multi-block copies, physical mip chains, 3D textures, sRGB sampled
-    renders, and mismatched logical mip-edge copies. ETC2 / ASTC are not
-    exposed by any ICD available on this host, so those formats are covered
-    through RADV's `vk_require_etc2` / `vk_require_astc` emulation
-    (ETC2 RGB8, EAC R11, ASTC 4x4 / 8x8 / 12x12, and ASTC sliced-3D all
-    round-trip); a driver that advertises them natively needs no such
-    switch. X11 / Wayland windowed surface sources are currently
-    recognized-but-inert, so windowed presentation is not yet wired.
-    The **OpenGL ES backend (Tier 2)** is also verified real-GPU on this
-    host: the device cascade described under "Backends" selects the
-    NVIDIA EGL device (`OpenGL ES 3.2 NVIDIA 595.91.07`), and the whole
-    `e2e_gles_*` suite — basic, buffer, texture, compute, render, smoke,
-    15 tests — passes on it, as do the 218 `yawgpu-hal --features gles`
-    unit tests. The same suites also pass on the AMD iGPU (radeonsi) and
-    on Mesa's llvmpipe, reachable through `YAWGPU_GLES_EGL_DEVICE`.
-    Being Tier 2, this is a bring-up result, not a conformance claim; the
-    CTS sweep on this host is the Linux/NVIDIA GLES table below.
-    On the Vulkan side this host also carries a **full webgpu-native-cts
-    sweep** — all four areas, 2,096,318 subcases, **`crash = 0`** and
-    `fail = 0` once the documented non-defect `xfail`s are applied (see
+  - **Linux (`x86_64-unknown-linux-gnu`)** — the CI host: every push builds the
+    workspace and runs the full unit + validation test suite on the Noop backend
+    (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)). The **Vulkan
+    backend is verified real-GPU** on NVIDIA (proprietary driver) and AMD
+    (RADV / Mesa): the full `e2e_vulkan_*` suite and the C examples pass on
+    both, and the **entire webgpu-native-cts ported suite** runs with zero open
+    defects and zero crashes (see
     [Independent conformance](#independent-conformance--webgpu-native-cts)).
+    The OpenGL ES backend (Tier 2) passes its `e2e_gles_*` suite on NVIDIA,
+    AMD, and Mesa llvmpipe. Windowed presentation (X11 / Wayland) is not yet
+    wired.
   - **Android (`aarch64-linux-android`)** — both Vulkan and OpenGL ES
     backends cross-build from a macOS arm64 host with NDK r30 (see
     "Cross-building for Android" above). Real-device
