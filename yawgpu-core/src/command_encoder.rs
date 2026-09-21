@@ -1770,6 +1770,12 @@ pub(crate) fn validate_resolve_target(
     {
         return Err("render pass resolveTarget requires RenderAttachment usage".to_owned());
     }
+    if resolve_texture
+        .usage()
+        .contains(TextureUsage::TRANSIENT_ATTACHMENT)
+    {
+        return Err("render pass resolveTarget must not have TransientAttachment usage".to_owned());
+    }
     if resolve_texture.sample_count() != 1 {
         return Err("render pass resolveTarget sampleCount must be one".to_owned());
     }
@@ -2742,6 +2748,40 @@ mod tests {
                 "render pass resolveTarget must not use a component-swizzled texture view"
                     .to_owned()
             )
+        );
+    }
+
+    #[test]
+    fn render_pass_resolve_target_rejects_transient_attachment_usage() {
+        let device = noop_device();
+        let color = render_attachment_view_with_format(&device, rgba8_unorm(), 4);
+        let mut descriptor = noop_render_pass_descriptor(color, None);
+        descriptor.color_attachments[0]
+            .as_mut()
+            .expect("color attachment")
+            .resolve_target = Some(transient_render_attachment_view_with_format(
+            &device,
+            rgba8_unorm(),
+        ));
+
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
+            Err("render pass resolveTarget must not have TransientAttachment usage".to_owned())
+        );
+
+        // Control: the same pass with a plain RenderAttachment resolve target stays valid, so the
+        // rule is not over-applied to every resolve target.
+        descriptor.color_attachments[0]
+            .as_mut()
+            .expect("color attachment")
+            .resolve_target = Some(render_attachment_view_with_format(
+            &device,
+            rgba8_unorm(),
+            1,
+        ));
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
+            Ok(())
         );
     }
 
