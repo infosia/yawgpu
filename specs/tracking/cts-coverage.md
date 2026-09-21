@@ -2321,7 +2321,20 @@ naga fork is worse than under-validation":
   call site rather than inside the shared function, so the tiled subpass caller never applies it —
   the same asymmetry as this bug, one rule down; (2) the `RENDER_ATTACHMENT` check reads *texture*
   usage and so ignores `TextureViewDescriptor.usage` narrowing, unlike the color-attachment path,
-  which reads view usage and has a test pinning that; (3) no cross-device check on render-pass
-  attachments, though copies have one; (4) no `"2d"` view-dimension check for renderable views;
-  (5) the multisample check precedes the error-view check, so error *text* ordering differs from
-  Dawn (cosmetic).
+  which reads view usage and has a test pinning that; (3) the `beginRenderPass` and `tiled` subpass
+  paths disagree on the view dimension — the subpass path requires `TextureViewDimension::D2`
+  for its attachment views (`subpass.rs` `validate_subpass_attachment_view`), while the
+  `beginRenderPass` path deliberately admits `D3` (`validate_render_attachment_common` only
+  special-cases `D3` to skip the `arrayLayerCount == 1` rule) and `validate_resolve_target` checks
+  no dimension at all; which of the two is intended needs deciding before either is called a
+  defect; (4) the multisample check precedes the error-view check, so error *text* ordering
+  differs from Dawn (cosmetic — CTS does not assert error strings).
+
+  **Correction (same day):** a fifth item was recorded here and in `fa82b73`'s message claiming
+  "no cross-device check on render-pass attachments". That is **wrong** and is withdrawn. The
+  check exists, at the FFI layer rather than in core:
+  `yawgpu/src/ffi/encoder.rs` calls `validate_render_pass_descriptor_devices`, which covers the
+  color view, **the resolve target**, the depth-stencil view and the occlusion query set; the
+  `tiled` path has the equivalent in `yawgpu/src/ffi/tiled.rs`. The claim came from reading only
+  `yawgpu-core` — `validate_render_pass_descriptor` indeed takes no device, by design, because
+  ownership is checked one layer up. Core-gap follow-up #1 above already recorded this as DONE.
