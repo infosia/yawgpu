@@ -397,6 +397,13 @@ fn create_egl_device(
         texture_view,
     };
 
+    // F-153: arm the process-exit guard now, not at instance creation. The
+    // vendor EGL driver is `dlopen`ed by `eglInitialize`, so registering here
+    // is guaranteed to land *after* the driver's own exit handler — and exit
+    // handlers run last-registered-first, so ours observes the teardown
+    // before the driver performs it.
+    super::exit_guard::arm();
+
     Ok(GlesDevice::from_egl(
         Arc::clone(instance),
         context,

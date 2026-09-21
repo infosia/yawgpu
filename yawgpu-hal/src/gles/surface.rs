@@ -45,6 +45,13 @@ impl Drop for GlesSurfaceInner {
     fn drop(&mut self) {
         match &self.kind {
             GlesSurfaceKind::Egl(kind) => {
+                // F-153: see `EglDeviceState::drop`. `eglMakeCurrent` /
+                // `eglDestroySurface` are forwarded into the vendor
+                // implementation, which may already be unmapped once the
+                // process is inside `exit()`.
+                if super::exit_guard::driver_teardown_started() {
+                    return;
+                }
                 if let GlesInstanceInner::Egl(egl_state) = kind.instance.as_ref() {
                     let _ = egl_state
                         .egl

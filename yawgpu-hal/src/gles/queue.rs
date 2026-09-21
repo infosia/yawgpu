@@ -63,6 +63,21 @@ impl GlesQueue {
 
     /// Waits until all submitted queue work has completed.
     pub fn wait_idle(&self) -> Result<(), HalError> {
+        // F-153: `Device::lose` drains the queue for every backend, including
+        // when the last device reference is released from a C++ static
+        // destructor inside `exit()`. By then the EGL vendor driver may have
+        // unloaded itself, so `glFinish` would jump into unmapped memory.
+        //
+        // Report success rather than an error: GLES submission retains no
+        // asynchronous work (every submit already ends in `flush`, which is
+        // what `completed_submission_index` documents), so there is nothing
+        // left for a drain to wait on and `Device::lose` must not dispatch a
+        // spurious device error into a consumer callback from inside `exit()`.
+        // The latch is only ever armed by the EGL device-creation path, so a
+        // WGL process is unaffected.
+        if super::exit_guard::driver_teardown_started() {
+            return Ok(());
+        }
         self.inner.with_current_context(|gl| unsafe {
             gl.finish();
         })

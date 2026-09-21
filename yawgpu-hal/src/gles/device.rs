@@ -198,6 +198,16 @@ unsafe impl Sync for GlesDeviceInner {}
 
 impl Drop for EglDeviceState {
     fn drop(&mut self) {
+        // F-153: see `with_current_context`. Both halves of this teardown are
+        // unsafe once the EGL driver has unloaded itself — the `glDelete*`
+        // calls for the obvious reason, and the `eglMakeCurrent` /
+        // `eglDestroy*` calls because libglvnd forwards them into the same
+        // unmapped vendor implementation. The process is exiting and the
+        // driver has already dropped everything it owns, so skipping leaks
+        // nothing observable.
+        if super::exit_guard::driver_teardown_started() {
+            return;
+        }
         if let GlesInstanceInner::Egl(egl_state) = self.instance.as_ref() {
             let _ = egl_state.egl.make_current(
                 egl_state.display,
@@ -398,6 +408,20 @@ impl EglDeviceState {
     }
 
     fn with_current_context<R>(&self, f: impl FnOnce(&glow::Context) -> R) -> Result<R, HalError> {
+        // F-153: once the process is inside `exit()` the EGL vendor driver may
+        // already have `dlclose`d its own implementation, leaving every GL
+        // entry point resolvable but pointing into unmapped memory. Nothing
+        // queryable distinguishes that state, so refuse to issue GL work
+        // rather than jump into it. Resource `Drop`s route through here and
+        // discard the result, which turns this into "skip the GL teardown";
+        // a caller doing real work at exit gets a clean `HalError`.
+        if super::exit_guard::driver_teardown_started() {
+            return Err(HalError::QueueSubmissionFailed {
+                backend: BACKEND,
+                message: "GLES context is unusable: the EGL driver unloaded during process exit"
+                    .to_string(),
+            });
+        }
         let _guard = self.current_lock.lock();
         let instance = self.egl_instance()?;
         instance

@@ -16,6 +16,7 @@ mod adapter;
 mod buffer;
 mod device;
 mod egl;
+mod exit_guard;
 mod format;
 mod instance;
 mod pipeline;
