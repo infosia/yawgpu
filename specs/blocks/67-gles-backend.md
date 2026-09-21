@@ -658,6 +658,86 @@ installed here, stated rather than omitted, per that document's R4.
   software device would produce a third set of numbers describing
   neither the old host nor real hardware.
 
+## Process-exit teardown contract (post-COMPLETE addition)
+
+> **Status: IMPLEMENTED — F-153 fixed 2026-09-21.** Before this, *every*
+> GLES process that released its last device from a C++ static destructor
+> exited 139 (SIGSEGV) after completing its work correctly. Measured
+> behaviour and the evidence are in `tracking/cts-coverage.md` → F-153.
+
+### The rule
+
+**No GLES teardown path may issue a GL or EGL call once the process has
+entered `exit()`.** This is a Tier-2 HAL-execution constraint, not a core
+validation rule: `yawgpu-core` is untouched and `Device::lose` still drains
+the queue for every backend, exactly as it does for Vulkan and Metal.
+
+### Why the state is undetectable
+
+On Linux the vendor EGL driver is `dlopen`ed by `eglInitialize`, i.e. during
+`main`, which is *later* than the executable's static-init `__cxa_atexit`
+registrations. glibc runs exit handlers last-registered-first, so the
+driver's handler runs **before** a consumer's namespace-scope static
+destructor and unloads the vendor implementation. libglvnd's dispatch layer
+(`libGLdispatch.so`) and `libEGL_nvidia.so` stay mapped, so every GL entry
+point still *resolves* — it just tail-jumps into an address range that is no
+longer mapped.
+
+Nothing queryable distinguishes this state: from the static destructor
+`eglGetCurrentContext` and `eglGetCurrentDisplay` still return the live
+handles and `eglGetError` still reports `EGL_SUCCESS`, because those queries
+are answered by the still-mapped dispatch layer. A handle-validity guard is
+therefore impossible — the only thing that distinguishes "before the
+driver's exit handler" from "after" is *when* we are.
+
+### The mechanism
+
+`yawgpu-hal/src/gles/exit_guard.rs` registers an `atexit` handler at **EGL
+device creation** — after `eglInitialize` has pulled the vendor driver in,
+so this registration lands later than the driver's and therefore runs
+*earlier*. It sets a latch, and every GLES teardown path checks it:
+
+| path | behaviour once latched |
+|---|---|
+| `EglDeviceState::with_current_context` | returns `HalError`; covers every resource `Drop` routed through it |
+| `EglDeviceState::drop` | skips the whole body — the `glDelete*` calls **and** the `eglMakeCurrent`/`eglDestroy*` calls, which libglvnd forwards into the same unmapped code |
+| `GlesSurfaceInner::drop` (EGL arm) | same |
+| `GlesQueue::wait_idle` | returns `Ok(())` |
+
+`wait_idle` returns success rather than an error deliberately: `Device::lose`
+routes a `wait_idle` failure to `dispatch_error`, and firing a consumer
+callback from inside `exit()` would be a second hazard of the same kind.
+Reporting success is also honest — GLES submission retains no asynchronous
+work (every submit already ends in `flush`, which is what
+`completed_submission_index` documents), so a drain has nothing to wait on.
+
+Skipping is not an observable leak: the process is exiting and the driver has
+already released everything it owns.
+
+The latch is armed only by `create_egl_device`, so a WGL-only process never
+sets it.
+
+### Should `Device::lose` drain the queue on GLES at all?
+
+It buys nothing today, for the reason above — but it is **kept**. It is not
+*wrong* while the driver is alive, removing it would weaken the HAL contract
+if the GLES backend ever grows real fences (P15.2), and it would not have
+fixed F-153 anyway: with the drain neutralised the same run still crashed one
+frame later, in `EglDeviceState::drop` → `glDeleteSampler`. The drain
+short-circuits only once the latch is set.
+
+### WGL
+
+`yawgpu-hal/src/gles/wgl.rs` has the same *shape* — `WglDeviceState::with_current_context`
+is `wglMakeCurrent` + closure, and `WglDeviceState::drop` is `wglMakeCurrent`
++ `glDeleteSampler` + `glDeleteProgram` + `wglMakeCurrent(NULL)` +
+`wglDeleteContext` + `ReleaseDC` + `DestroyWindow`, mirroring both crash
+sites. It is **deliberately not guarded**: whether it actually faults is
+untested (no Windows hardware), and it likely does not, because Windows
+unmaps `LoadLibrary`-refcounted DLLs at `DLL_PROCESS_DETACH`, which runs
+*after* CRT static destructors — the opposite order from glibc. Revisit when
+Windows ANGLE bring-up is verified on hardware.
+
 ## Open questions (resolve per slice, record divergences)
 
 - ~~**naga `glsl-out` coverage smoke**~~ — OBSOLETE. naga is gone from the

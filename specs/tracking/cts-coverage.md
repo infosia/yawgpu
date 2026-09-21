@@ -2338,3 +2338,97 @@ naga fork is worse than under-validation":
   `tiled` path has the equivalent in `yawgpu/src/ffi/tiled.rs`. The claim came from reading only
   `yawgpu-core` — `validate_render_pass_descriptor` indeed takes no device, by design, because
   ownership is checked one layer up. Core-gap follow-up #1 above already recorded this as DONE.
+
+## F-153 — every GLES process SIGSEGVs in device teardown at process exit — RESOLVED and verified on hardware
+
+- **Finding (2026-09-21, webgpu-native-cts `docs/FINDINGS.md` F-153):** *every* GLES run exited
+  `139` (SIGSEGV) after its work had completed correctly —
+  `CTS_YAWGPU_BACKEND=gles ./cts --workers 1 ...` printed `pass=… fail=0 crash=0` and then died.
+  The query did not matter: a 36-case file, a 2,520-case file and a run that only created and
+  dropped a device faulted identically. The same binary against the Vulkan build exited 0. The
+  backtrace was `wgpuDeviceRelease` → `Device::lose` → `GlesQueue::wait_idle` → `gl.finish()`,
+  called from `cts::DeviceCache::~DeviceCache` under `__run_exit_handlers`. Host: Linux, RTX 5060
+  Ti, driver 595.91.07, OpenGL ES 3.2 via `EGL_PLATFORM_DEVICE_EXT` (headless); yawgpu `80219df`.
+- **Blast radius:** `--isolate` runs every case in its own child process, so each child hit the
+  fault and **every case was recorded as a `crash`** — 36/36 on one file, 200/200 on another,
+  making two completely clean files (157/157 and 2,520/2,520 in a plain run) look like a
+  catastrophic backend defect. Until this fix, GLES results were readable only from plain
+  `--workers` runs and per-case crash classification on GLES was meaningless.
+- **Root cause — not handle validity, but the driver's *code* being gone.** The vendor EGL driver
+  is `dlopen`ed by `eglInitialize` (during `main`), which is *later* than the executable's
+  static-init `__cxa_atexit` registrations; glibc runs exit handlers last-registered-first, so the
+  driver's handler runs **before** the consumer's static destructor and unloads the
+  implementation. `LD_DEBUG=files` interleaved with process markers shows
+  `calling fini: libnvidia-eglcore.so.595.91.07` landing between `[main returning]` and
+  `[~DeviceCache]`, and a `/proc/self/maps` diff between `main()` and the static destructor shows
+  exactly those libraries disappearing. `libGLdispatch.so` and `libEGL_nvidia.so` stay mapped, so
+  every GL entry point still resolves (`dladdr(glFinish)` → `libGLdispatch.so`) — it just
+  tail-jumps into unmapped memory (`x/4i $rip` → *Cannot access memory at address
+  0x7ffff50f4940*). **Nothing queryable distinguishes the state**: `eglGetCurrentContext` and
+  `eglGetCurrentDisplay` still return the live handles and `eglGetError` still reports
+  `EGL_SUCCESS`, because the still-mapped dispatch layer answers them. A handle-validity guard was
+  therefore impossible.
+- **The handoff's two hypotheses were both wrong, and the second was load-bearing.** It recorded
+  that "the `Drop` path evidently survives, the `wait_idle` path does not" — an inference, since
+  `Device::lose` drains *before* the `Arc` drop, so `EglDeviceState::drop` never ran. Measured:
+  with `wait_idle` neutralised to `Ok(())` the same run still crashed one frame later, in
+  `EglDeviceState::drop` → `glDeleteSampler`. So "remove the drain" would have moved the crash,
+  not fixed it.
+- **Fix:** new `yawgpu-hal/src/gles/exit_guard.rs` registers an `atexit` handler at **EGL device
+  creation** — after `eglInitialize` pulled the driver in, so the registration lands later than
+  the driver's and therefore runs *earlier*. It sets a latch; `EglDeviceState::with_current_context`
+  (which every GLES resource `Drop` routes through, discarding the result),
+  `EglDeviceState::drop`, `GlesSurfaceInner::drop` and `GlesQueue::wait_idle` each check it and
+  skip their GL/EGL work. `wait_idle` reports `Ok(())` rather than an error because `Device::lose`
+  routes a `wait_idle` failure to `dispatch_error`, and firing a consumer callback from inside
+  `exit()` would be a second hazard of the same kind. Contract:
+  `blocks/67-gles-backend.md` → "Process-exit teardown contract".
+- **`yawgpu-core` untouched.** `Device::lose` still drains for every backend, per CLAUDE.md's
+  Tier-independent rule. The latch is armed only by `create_egl_device`, so WGL is byte-identical
+  and Vulkan/Metal are unaffected. The drain is **kept** on GLES: it buys nothing today
+  (`completed_submission_index` documents that no asynchronous work is retained — every submit
+  already ends in `flush`), but it is not wrong while the driver is alive, removing it would
+  weaken the HAL contract if GLES ever grows real fences (P15.2), and it would not have fixed the
+  bug.
+- **WGL has the same shape and was deliberately not touched** — see the block-67 section for why
+  Windows' `DLL_PROCESS_DETACH` ordering probably makes it benign.
+- **Verification (real GPU, orchestrator-reproduced independently of the implementer).** C++
+  repros linking `libyawgpu.so` through the C ABI, `YAWGPU_BACKEND=gles`, built once and re-run
+  against a pre-fix and a post-fix `.so` (pre-fix confirmed by the absence of the guard's error
+  string in the binary):
+
+  | release site | pre-fix | post-fix |
+  |---|---|---|
+  | end of `main()` | 0 | 0 |
+  | `atexit` handler registered in `main` (after the driver loaded) | 0 | 0 |
+  | namespace-scope static destructor (**the CTS `DeviceCache` shape**) | **139** | **0** |
+  | device created on a worker thread, released from a static destructor | **134** | **0** |
+
+  The two clean rows are the control: the crash is specific to releasing *after* the driver's exit
+  handler, not to `exit()` or to the thread.
+- **Regression test:** `yawgpu/tests/e2e_gles_process_exit.rs::gles_device_released_during_process_exit_exits_cleanly`
+  (`#![cfg(feature = "gles")]`, `#[ignore]`, `real_backend_available(RealBackend::Gles)`). It
+  registers an `atexit` handler *before* `GlesInstance::new()` loads the driver — which is exactly
+  the ordering a static destructor gets — parks the device in a static, and from that handler runs
+  `queue.wait_idle()` then `drop(device)`, both faulting sites. It runs itself as a child process
+  and asserts on the child's exit status, since a crash cannot be observed from inside the
+  faulting process. Red→green confirmed twice, by the implementer and again by the orchestrator
+  on a fully reverted tree: pre-fix the child reports its own body `ok` and *then* dies —
+  `child status: ExitStatus(unix_wait_status(134))` — post-fix `test result: ok. 1 passed`. The
+  child aborts (134) where the C++ CTS shape segfaults (139) because libtest always runs a test
+  body on a worker thread, so `eglMakeCurrent` has real work to do and fails inside the unloaded
+  driver while reporting `EGL_SUCCESS`, which `khronos-egl` `unwrap()`s.
+- **Gates:** `cargo test --workspace` exit 0 (92 binaries, **1026** passing, 0 failed);
+  `cargo clippy --workspace --all-targets -- -D warnings` exit 0; `cargo fmt --all -- --check`
+  exit 0; `cargo clippy -p yawgpu --features gles --all-targets -- -D warnings` exit 0;
+  `cargo test -p yawgpu-hal --features gles --lib` exit 0 (220 passing). Existing GLES e2e suite
+  re-run on hardware with no regression (basic 3, buffer 2, compute 4, render 2, smoke 1,
+  texture 3). Library diff +54 lines across 5 files plus the new guard module.
+- **Follow-up (separate slice, NOT fixed here):** `khronos-egl` 6.0.0's `Instance::make_current`
+  ends in `Err(self.get_error().unwrap())` (`lib.rs:1095`), so **any** `eglMakeCurrent` returning
+  `EGL_FALSE` while `eglGetError` reports `EGL_SUCCESS` panics — from inside a `Drop`, in library
+  code, which CLAUDE.md principle 3 forbids. The exit guard removes the path that reached it here,
+  but the latent panic remains for any other driver producing that combination; it wants a
+  defensive wrapper around the `khronos-egl` make-current calls.
+- **Pending:** re-verification on hardware by the user — a GLES CTS run exits 0, and `--isolate`
+  on GLES reports real per-case results instead of 100% `crash`.
