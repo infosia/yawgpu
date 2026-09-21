@@ -295,6 +295,154 @@ ComputePassEncoder: `SetPipeline`/`SetBindGroup`/`DispatchWorkgroups`/
 >   `&Texture` → `Arc<Buffer>`/`Arc<Texture>` so the encoder can
 >   retain references for submit tracking (FFI updated accordingly).
 
+## Pass-encoder resource retention on `end()` (post-COMPLETE addition)
+
+> **Status: SPEC ONLY — spec'd 2026-09-21, not implemented.**
+
+### Problem (measured 2026-09-21)
+
+`PassEncoderState` holds strong references to everything bound during
+encoding — `compute_pipeline`, `render_pipeline`, `bind_groups`,
+vertex/index buffers, attachment textures, the occlusion query set, the
+usage-scope vectors. `PassEncoderInner::end()` sets `ended = true` and
+`mem::take`s `render_commands`, but **clears none of the rest**. So an
+ended pass encoder goes on pinning every resource it ever bound, for as
+long as its handle lives.
+
+That turns a caller's leaked handle into an unbounded library leak. Found
+by webgpu-native-cts, which leaks pass encoders at 174 call sites (no
+`finalize()` tracking for them; being fixed in that repo separately).
+Measured on one CTS file
+(`shader,execution,expression,binary,bitwise:bitwise_or:*`, yawgpu
+`d05495b`, NVIDIA RTX 5060 Ti):
+
+| counter | value |
+|---|---:|
+| `wgpuDeviceCreateShaderModule` / `…Release` | 476 / 476 |
+| `wgpuDeviceCreateComputePipeline` / `…Release` | 476 / 476 |
+| `wgpuCommandEncoderBeginComputePass` | 476 |
+| `wgpuComputePassEncoderRelease` | **0** |
+| `tint::Program` created / destroyed | 442 / **0** |
+
+Peak RSS 636 MB for 36 passing cases, ~449 MB of it live at process exit
+in `tint::core::constant::Manager`. The retention chain, confirmed by
+refcount instrumentation:
+
+```
+leaked WGPUComputePassEncoder handle
+  -> PassEncoderState.compute_pipeline : Arc<ComputePipeline>
+  -> ComputePipelineInner._shader_module : Arc<ShaderModule>
+  -> ShaderModuleInner._source : Box<ReflectedModule>
+  -> yawgpu_tint::Program
+```
+
+Every C handle is released correctly and the FFI handle itself drops; at
+`wgpuShaderModuleRelease` the core object still shows `strong = 2`, the
+second reference being the pipeline held by the ended pass encoder. The
+same four API calls in a standalone program — no pass encoder — destroy
+the Tint program every time. Full record:
+`tracking/pass-encoder-retention.md`.
+
+### Decisions
+
+**D1 — a successful `end()` drops the pass's encoding-time references.**
+After `end()` returns on any path that sets `ended = true`,
+`PassEncoderState` must hold no strong reference to a resource that
+existed only to validate or record commands. Clear:
+
+`render_pipeline`, `compute_pipeline`, `bind_groups`, `vertex_buffers`,
+`index_buffer`, `attachment_textures`, `attachment_texture_uses`,
+`render_color_attachments`, `render_depth_stencil_attachment`,
+`occlusion_query_set`, `command_referenced_buffers`, `scope_buffer_uses`,
+`scope_texture_uses`, `immediate_data`.
+
+`render_commands` is already `mem::take`n and stays that way.
+`immediate_data` holds no `Arc` but is unbounded caller data, so it goes
+for the same reason. Scalar/bookkeeping fields (`ended`,
+`debug_group_depth`, `draw_count`, the occlusion-query index sets, the
+dirty flag, `limits`) are untouched — some are read by later validation.
+
+**Why this is safe.** The parent owns everything execution needs before
+`end()` returns: compute commands are recorded into the `CommandEncoder`
+at dispatch time (`compute_pass.rs:94,134`), each carrying its own
+`pipeline` `Arc` and a *clone* of `bind_groups`; render commands are
+moved into the parent's `RenderPassCommand` inside `end()` itself. The
+state's copies are redundant the moment the pass ends.
+
+**Precedent.** `subpass.rs:424-425` already does exactly this shape —
+`draw_state.render_pipeline = None; draw_state.bind_groups.clear();` —
+when bundle replay invalidates outer render bindings.
+
+**D2 — error behaviour must not change, and that must be verified, not
+assumed.** Every operation on an ended pass encoder must still produce a
+byte-identical device error. `record_pass_command` checks `ended` before
+touching resource state, so clearing should be unobservable — but the
+slice must **enumerate every read of each cleared field and show it is
+gated on `!ended`** (or on a path unreachable after `end()`). A read that
+is not so gated is a finding to report, not something to work around.
+
+**D3 — failure paths leave state untouched.** `end()`'s three early
+returns (already ended, parent finished, not the active pass) return
+before `ended = true` and must not clear anything. The "soft" error paths
+that run *after* `ended = true` (unbalanced debug groups, open occlusion
+query, draw count exceeded) still record their error and still clear.
+
+**D4 — this bounds the damage, it does not fix leaked handles.** A pass
+encoder that is leaked **without** being ended still retains everything;
+nothing can be done about that, because an unended encoder is
+legitimately still encoding. A released encoder — ended or not — frees
+everything through `Drop` today and keeps doing so. The library's
+obligation is to stop *amplifying* a caller's handle leak, which this
+does: the CTS's ended-and-leaked encoders would retain only the
+`PassEncoderInner` shell.
+
+### Slices
+
+- **C1 — clear on end.** D1 + D3 in `PassEncoderInner::end()`.
+  Inline `#[cfg(test)]` test in `pass.rs`: build a compute pass, set a
+  pipeline, dispatch, `end()`, then assert `Arc::strong_count` of the
+  pipeline is back to the count the caller holds — i.e. the encoder
+  released its reference. A second test asserts the same for a render
+  pass with a bound bind group and vertex buffer. No GPU: Noop.
+- **C2 — the no-regression proof.** D2. Enumerate the reads; run the full
+  Noop suite and the Dawn-ported validation ports, which are where an
+  error-message change would surface.
+- **C3 — real-GPU confirmation.** Re-run the CTS repro *without* fixing
+  the CTS side, so the measurement isolates this change: peak RSS for
+  `bitwise_or:*` must drop from 636 MB, and `tint program destroy` must
+  become non-zero. Record in `tracking/pass-encoder-retention.md`.
+
+### Acceptance criteria
+
+1. After `end()`, the pass encoder holds no strong reference to its bound
+   pipeline, bind groups, buffers, attachment textures or query set —
+   pinned by inline unit tests via `Arc::strong_count`.
+2. `cargo test --workspace` green on Noop with **no test edited to
+   accommodate the change**. A test that has to change is a signal the
+   behaviour changed observably; stop and report instead.
+3. No device-error message, and no error's presence or absence, changes.
+4. With the CTS still leaking pass-encoder handles, its
+   `bitwise_or:*` peak RSS drops from **636 MB to ≤ 300 MB** and Tint
+   program destroys go from 0 to ≥ 400 of 442.
+5. `cargo clippy --workspace --all-targets -- -D warnings` clean, and the
+   same with `--features vulkan`.
+6. No new panic path; no `unwrap`/`expect` added to non-test code.
+7. Phase Review clean (no open CRITICAL/MAJOR).
+
+### Out of scope
+
+- The webgpu-native-cts side (releasing its pass encoders). Independent,
+  tracked in that repo; this change must be correct and measurable on its
+  own without it.
+- Clearing on `CommandEncoder::finish()` or on parent drop. `end()` is
+  the point where the pass provably no longer needs its bindings; extra
+  clearing points are unneeded complexity.
+- Any change to what a `CommandBuffer` retains. A submitted command
+  buffer legitimately holds its pipelines until released.
+- The `ReflectedModule` memoization caches (block 95). They live and die
+  with the module and are not implicated — the module was being kept
+  alive, not leaking on its own.
+
 ## Open questions
 
 - CommandBuffer model: store the recorded command list + referenced
