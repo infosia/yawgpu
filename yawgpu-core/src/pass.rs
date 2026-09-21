@@ -155,6 +155,51 @@ impl PassEncoderState {
         self.index_buffer = None;
     }
 
+    /// Drops the encoding-time resource references a pass no longer needs once
+    /// it has ended (Block 50, "Pass-encoder resource retention on `end()`",
+    /// D1). A pass encoder handle that outlives its `end()` -- a caller leak --
+    /// must not go on pinning every pipeline, bind group, buffer, texture and
+    /// query set it ever bound: everything execution needs was already recorded
+    /// into the parent `CommandEncoder` by the time `end()` returns.
+    ///
+    /// Only called from [`PassEncoderInner::end`], after `ended` has been set.
+    /// Every read of a field cleared here is gated on `!ended` (D2), so this is
+    /// unobservable. Scalar bookkeeping (`ended`, `debug_group_depth`,
+    /// `draw_count`, `max_draw_count`, the occlusion-query index sets, the
+    /// compatibility dirty flag, `limits`) is deliberately retained -- some of
+    /// it is still read by later validation.
+    ///
+    /// `scope_usage_index` is cleared with the rest even though it looks like
+    /// pure bookkeeping: its texture buckets hold *clones* of
+    /// [`TextureScopeUse`], and each of those owns a [`Texture`] handle. Leaving
+    /// it behind is what kept a leaked, ended render pass encoder pinning its
+    /// attachment textures after every other field had been released. Clearing
+    /// it also *restores* the index's documented invariant -- that every entry
+    /// has a corresponding owning handle in the scope history -- which dropping
+    /// `scope_buffer_uses` / `scope_texture_uses` on their own would falsify.
+    pub(crate) fn clear_ended_resources(&mut self) {
+        self.render_pipeline = None;
+        self.compute_pipeline = None;
+        self.bind_groups.clear();
+        self.vertex_buffers.clear();
+        self.index_buffer = None;
+        self.attachment_textures.clear();
+        self.attachment_texture_uses.clear();
+        self.render_color_attachments.clear();
+        self.render_depth_stencil_attachment = None;
+        self.occlusion_query_set = None;
+        self.command_referenced_buffers.clear();
+        self.scope_buffer_uses.clear();
+        self.scope_texture_uses.clear();
+        // A default index is the empty index, so this keeps the type's
+        // invariants self-evident, and replacing rather than clearing the maps
+        // releases their table allocations too.
+        self.scope_usage_index = LenientUsageScopeIndex::default();
+        // Holds no `Arc`, but it is unbounded caller data with no reader left;
+        // replace rather than `clear()` so the allocation is actually released.
+        self.immediate_data = Vec::new();
+    }
+
     pub(crate) fn set_render_pipeline(&mut self, pipeline: Arc<RenderPipeline>) {
         if self
             .render_pipeline
@@ -387,6 +432,11 @@ impl PassEncoderInner {
         } else {
             None
         };
+        // The pass has ended: it will never validate or record another command,
+        // so it must stop pinning what it bound while encoding (Block 50, D1).
+        // Reached only after `ended = true`; the early returns above leave the
+        // state untouched (D3), while the soft-error paths below still clear.
+        state.clear_ended_resources();
         drop(state);
 
         if let Some(command) = render_pass_command {
@@ -2050,9 +2100,9 @@ mod tests {
     #[cfg(feature = "tiled")]
     use crate::test_helpers::input_attachment_layout_entry;
     use crate::test_helpers::{
-        empty_bind_group, noop_device, noop_render_attachment, noop_render_pass_descriptor,
-        noop_render_pipeline, noop_texture, render_pipeline_descriptor, render_shader_module,
-        uniform_layout_entry,
+        empty_bind_group, noop_compute_pipeline, noop_device, noop_render_attachment,
+        noop_render_pass_descriptor, noop_render_pipeline, noop_texture,
+        render_pipeline_descriptor, render_shader_module, uniform_layout_entry,
     };
     use crate::Device;
 
@@ -3356,5 +3406,145 @@ mod tests {
                 .expect_err("missing contiguous vertex slot"),
             "render pass draw requires all declared vertex buffers to be set"
         );
+    }
+
+    // --- Block 50: pass-encoder resource retention on `end()` ---------------
+    //
+    // A pass encoder handle that outlives its `end()` must not keep the
+    // resources it bound alive. The tests below hold the ended pass encoder
+    // deliberately -- that is the leaked-handle shape the fix is about -- drop
+    // everything else, and assert the refcounts are back to the caller's own.
+
+    #[test]
+    fn compute_pass_end_releases_bound_pipeline() {
+        let device = noop_device();
+        let pipeline = noop_compute_pipeline(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_compute_pass();
+        assert_eq!(begin_error, None);
+
+        let caller_refs = Arc::strong_count(&pipeline);
+        assert_eq!(pass.set_pipeline(Arc::clone(&pipeline)), None);
+        assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
+        // The pass state and the dispatch recorded into the parent encoder each
+        // hold one reference on top of the caller's.
+        assert_eq!(Arc::strong_count(&pipeline), caller_refs + 2);
+
+        assert_eq!(pass.end(), None);
+        // `end()` dropped the pass state's reference; only the parent's
+        // recorded dispatch still holds one.
+        assert_eq!(Arc::strong_count(&pipeline), caller_refs + 1);
+
+        // A second `end()` errors and neither repeats nor undoes the clearing.
+        assert_eq!(
+            pass.end(),
+            Some("pass encoder cannot be ended more than once".to_owned())
+        );
+        assert_eq!(Arc::strong_count(&pipeline), caller_refs + 1);
+
+        let (command_buffer, finish_error) = encoder.finish();
+        assert_eq!(finish_error, None);
+        drop(command_buffer);
+        drop(encoder);
+
+        // `pass` is still alive here on purpose: an ended-but-leaked handle
+        // must retain nothing.
+        assert_eq!(Arc::strong_count(&pipeline), caller_refs);
+        drop(pass);
+    }
+
+    #[test]
+    fn render_pass_end_releases_bound_and_attachment_resources() {
+        let device = noop_device();
+        let pipeline = noop_render_pipeline(&device);
+        let bind_group = empty_bind_group(&device);
+        let vertex_buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::VERTEX,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let view = noop_render_attachment(&device);
+        let attachment_texture = view.texture();
+        // Unlike the bindings below, the attachment is retained from the moment
+        // the pass begins, so its baseline is taken before `begin_render_pass`.
+        let attachment_refs = Arc::strong_count(&attachment_texture.inner);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) =
+            encoder.begin_render_pass(&noop_render_pass_descriptor(Arc::clone(&view), None));
+        assert_eq!(begin_error, None);
+        assert!(Arc::strong_count(&attachment_texture.inner) > attachment_refs);
+
+        let pipeline_refs = Arc::strong_count(&pipeline);
+        let bind_group_refs = Arc::strong_count(&bind_group);
+        let vertex_buffer_refs = Arc::strong_count(&vertex_buffer);
+
+        assert_eq!(pass.set_pipeline(Arc::clone(&pipeline)), None);
+        assert_eq!(
+            pass.set_bind_group(
+                0,
+                Some(Arc::clone(&bind_group)),
+                Vec::new(),
+                device.limits()
+            ),
+            None
+        );
+        assert_eq!(
+            pass.set_vertex_buffer(0, Some(Arc::clone(&vertex_buffer)), 0, 16, device.limits()),
+            None
+        );
+        assert!(Arc::strong_count(&pipeline) > pipeline_refs);
+        assert!(Arc::strong_count(&bind_group) > bind_group_refs);
+        assert!(Arc::strong_count(&vertex_buffer) > vertex_buffer_refs);
+
+        assert_eq!(pass.end(), None);
+
+        let (command_buffer, finish_error) = encoder.finish();
+        assert_eq!(finish_error, None);
+        drop(command_buffer);
+        drop(encoder);
+
+        // `pass` is still alive here on purpose.
+        assert_eq!(Arc::strong_count(&pipeline), pipeline_refs);
+        assert_eq!(Arc::strong_count(&bind_group), bind_group_refs);
+        assert_eq!(Arc::strong_count(&vertex_buffer), vertex_buffer_refs);
+        // The attachment texture is reached both directly and through
+        // `scope_usage_index`'s cloned `TextureScopeUse` buckets; `end()` has to
+        // release every one of those for this to hold.
+        assert_eq!(
+            Arc::strong_count(&attachment_texture.inner),
+            attachment_refs
+        );
+        drop(pass);
+        drop(view);
+    }
+
+    #[test]
+    fn pass_end_early_return_leaves_bindings_in_place() {
+        // `end()` returning before it sets `ended` must not clear anything: the
+        // pass has not ended, so its bindings are still live encoding state.
+        let device = noop_device();
+        let pipeline = noop_compute_pipeline(&device);
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_compute_pass();
+        assert_eq!(begin_error, None);
+
+        let caller_refs = Arc::strong_count(&pipeline);
+        assert_eq!(pass.set_pipeline(Arc::clone(&pipeline)), None);
+        assert_eq!(Arc::strong_count(&pipeline), caller_refs + 1);
+
+        // Finishing with the pass still open fails, but marks the parent
+        // finished -- so `end()` now takes the "parent encoder finish" early
+        // return, before `ended = true`.
+        let (command_buffer, finish_error) = encoder.finish();
+        assert_eq!(
+            finish_error,
+            Some("command encoder cannot finish while a pass is open".to_owned())
+        );
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            pass.end(),
+            Some("pass encoder cannot be used after parent encoder finish".to_owned())
+        );
+        assert_eq!(Arc::strong_count(&pipeline), caller_refs + 1);
     }
 }
