@@ -287,7 +287,7 @@ the owning slice's review.
 ## Linux EGL device selection (post-COMPLETE addition)
 
 > **Status: IMPLEMENTED — L1, L2 and L3 landed 2026-09-21**
-> (`196d2a0`, `c30631d`, `4e71e83`), Phase Review run and its findings
+> (`4283601`, `cf74695`, `bd90880`), Phase Review run and its findings
 > fixed. On a desktop Linux host the GLES backend now selects a
 > validated hardware EGL device instead of the platform default display.
 > The slice records below carry the per-slice detail, and the measured

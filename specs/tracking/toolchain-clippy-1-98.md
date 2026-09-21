@@ -186,7 +186,7 @@ drifted, untouched by any slice.
 
 Enumerated per R5 with
 `cargo clippy --workspace --all-targets --features gles --keep-going --message-format=short -- -D warnings`
-on `b740534`: **13 sites, all `chunks_exact_to_as_chunks`.** All ten
+on `831feb8`: **13 sites, all `chunks_exact_to_as_chunks`.** All ten
 `yawgpu-hal` sites are inside `#[cfg(test)] mod tests` (queue.rs:4208), so the
 `gles` **lib** target is clean; only the test targets fail.
 

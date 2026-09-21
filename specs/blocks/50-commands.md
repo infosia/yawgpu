@@ -297,7 +297,7 @@ ComputePassEncoder: `SetPipeline`/`SetBindGroup`/`DispatchWorkgroups`/
 
 ## Pass-encoder resource retention on `end()` (post-COMPLETE addition)
 
-> **Status: IMPLEMENTED — C1-C3 landed 2026-09-21 (`20dde2e`).** Phase
+> **Status: IMPLEMENTED — C1-C3 landed 2026-09-21 (`0d470a1`).** Phase
 > Review the same day: 0 CRITICAL, 2 MAJOR, 5 MINOR; both MAJORs were
 > defects in this section's own field list and are corrected inline below.
 > Measurements and the finding ledger:
@@ -318,7 +318,7 @@ by webgpu-native-cts, which leaks pass encoders at 174 call sites (no
 `finalize()` tracking for them; being fixed in that repo separately).
 Measured on one CTS file
 (`shader,execution,expression,binary,bitwise:bitwise_or:*`, yawgpu
-`d05495b`, NVIDIA RTX 5060 Ti):
+`d6f865b`, NVIDIA RTX 5060 Ti):
 
 | counter | value |
 |---|---:|

@@ -19,7 +19,7 @@ That question was answerable without Dawn, and the answer is yawgpu.
 ## Host
 
 Linux, NVIDIA GeForce RTX 5060 Ti (driver 595.91.07, Vulkan 1.4), Ryzen 7
-7800X3D, 29 GB RAM. yawgpu `d05495b` built `--release --features vulkan`;
+7800X3D, 29 GB RAM. yawgpu `d6f865b` built `--release --features vulkan`;
 webgpu-native-cts `efc9edd`.
 
 ## Method
@@ -178,7 +178,7 @@ to stop amplifying a caller's handle leak, and that is what this delivers.
 ## Phase Review (2026-09-21)
 
 Clean Review per `specs/reference/workflow.md`: a fresh no-context agent given
-the cumulative diff `d05495b..HEAD`, this block's section, `CLAUDE.md`, the
+the cumulative diff `d6f865b..HEAD`, this block's section, `CLAUDE.md`, the
 naming conventions and `blocks/90-unit-tests.md`. It re-derived D2
 independently — every reader of all 15 cleared fields, across the workspace —
 rather than trusting the diff's comments or the spec's assertion, and

@@ -13,7 +13,7 @@ L4 completes it once L3 puts the renderer strings in the adapter name.
 | OS | Ubuntu, `x86_64-unknown-linux-gnu`, Wayland session |
 | EGL devices | 4, per `eglQueryDevicesEXT` (see the block's problem table) |
 
-## Before (HEAD `ec62d43`)
+## Before (HEAD `1cd47e8`)
 
 `eglGetDisplay(EGL_DEFAULT_DISPLAY)` → libglvnd → Mesa → **llvmpipe**
 (software). The whole `e2e_gles_*` suite passed there, so nothing in the
@@ -109,7 +109,7 @@ NVIDIA.
 ## Phase Review (2026-09-21)
 
 Clean Review per `specs/reference/workflow.md`: a fresh subagent with no
-session context, given the cumulative diff `d8fc47f..HEAD`, this block's
+session context, given the cumulative diff `5e79401..HEAD`, this block's
 spec, `CLAUDE.md` and the naming conventions. It ran the gates itself and
 reproduced acceptance criteria 1, 2, 3 and 5.
 
