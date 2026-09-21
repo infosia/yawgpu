@@ -675,9 +675,12 @@ bypassing WGSL and Tint entirely:
     15 tests — passes on it, as do the 218 `yawgpu-hal --features gles`
     unit tests. The same suites also pass on the AMD iGPU (radeonsi) and
     on Mesa's llvmpipe, reachable through `YAWGPU_GLES_EGL_DEVICE`.
-    Being Tier 2, this is a bring-up result, not a conformance claim —
-    the GLES CTS table below is still the Intel/crocus snapshot and
-    predates this host.
+    Being Tier 2, this is a bring-up result, not a conformance claim; the
+    CTS sweep on this host is the Linux/NVIDIA GLES table below.
+    On the Vulkan side this host also carries a **full webgpu-native-cts
+    sweep** — all four areas, 2,096,318 subcases, **`crash = 0`** and
+    `fail = 0` once the documented non-defect `xfail`s are applied (see
+    [Independent conformance](#independent-conformance--webgpu-native-cts)).
   - **Android (`aarch64-linux-android`)** — both Vulkan and OpenGL ES
     backends cross-build from a macOS arm64 host with NDK r30 (see
     "Cross-building for Android" above). Real-device
@@ -740,6 +743,27 @@ interval artifact the Dawn-Vulkan oracle reproduces identically,
 `index_buffer_format_dirtying` cases as Metal, and an NVIDIA memory-model weak
 behaviour Dawn also fails. No crash across the full sweep.
 
+**Native Vulkan** (Linux / NVIDIA RTX 5060 Ti, Tint frontend), per-subcase:
+
+| area | pass | skip | fail | crash |
+|---|---:|---:|---:|---:|
+| `api/validation` | 244,676 | 110,316 | 4‡ | 0 |
+| `api/operation` | 209,360 | 20,233 | 0 | 0 |
+| `shader/execution` | 531,304 | 313,170 | 113‡ | 0 |
+| `shader/validation` | 646,773 | 20,369 | 0 | 0 |
+| **total** | **1,632,113** | **464,088** | **117‡** | **0** |
+
+Swept 2026-09-21 raw on yawgpu `80219df`, NVIDIA driver 595.91, Vulkan 1.4.329 —
+four per-area `--workers 4` runs, 53 minutes, **`crash = 0` across 2,096,318
+subcases**. The same GPU as the Windows table on a different OS, and the two agree
+on `shader/execution`. All 117 fails are again documented non-defects carried as
+`xfail`, so the suite exits `fail = 0` once expectations are applied — the same
+classes as Windows, with one host-dependent substitution: the NVIDIA memory-model
+weak behaviour fires on `memory_model,coherence:corr`'s `atomic_workgroup` variant
+here and on `atomic_storage` on Windows. A Dawn-Vulkan oracle built on each host
+diverges identically, so `expectations/yawgpu-vulkan.txt` carries both and the
+inactive one xpasses benignly.
+
 Shader conformance falls out **by construction**: yawgpu compiles WGSL with the
 same Tint compiler Dawn uses, so the translated MSL / SPIR-V is byte-equivalent
 to the oracle's — the entire `shader/*` surface is Dawn-equivalent with no
@@ -750,32 +774,55 @@ the Dawn oracle on the same GPU, not a yawgpu bug. (MoltenVK on macOS is a
 non-authoritative Vulkan path — it shows a few Vulkan→Metal translation
 artifacts that are green on both native Metal and native Vulkan.)
 
-**Native GLES — Tier 2 / experimental** (Linux / Mesa `crocus` on Intel Haswell, Tint frontend), per-subcase:
+**Native GLES — Tier 2 / experimental**, per-subcase:
 
-> **Not a conformance table.** GLES is yawgpu's Tier 2 / experimental backend (opt-in `gles` feature); this
-> is a **bring-up progress snapshot**, not the `fail = 0` conformance result the Metal/Vulkan tables above are.
-> Run raw (no expectations) on `crocus`, Mesa's **native** GLES driver for Haswell — native ES, closer to an
-> Android device than to ANGLE's ES→D3D/Vulkan translation.
+> **Not a conformance table.** GLES is yawgpu's Tier 2 / experimental backend (opt-in `gles` feature); these
+> are **bring-up progress snapshots**, not the `fail = 0` conformance result the Metal/Vulkan tables above
+> are. Both are run raw (no expectations) against **native** GLES drivers — closer to an Android device than
+> to ANGLE's ES→D3D/Vulkan translation, which is the spec'd Tier-2 target.
+
+Linux / NVIDIA RTX 5060 Ti, OpenGL ES 3.2 via `EGL_PLATFORM_DEVICE_EXT` (headless), driver 595.91.07:
 
 | area | pass | skip | fail | crash |
 |---|---:|---:|---:|---:|
-| `api/validation` (124§) | 194,805 | 157,163 | 347 | 0 |
-| `api/operation` (67) | 132,831 | 76,698 | 19,932 | 0 |
-| `shader/execution` (239) | 308,373 | 516,424 | 10,129 | 0 |
+| `api/validation` (126) | 203,412 | 151,323 | 257 | 0 |
+| `api/operation` (70) | 141,076 | 76,704 | **11,813** | 0 |
+| `shader/execution` (239) | 309,535 | 517,406 | **17,645** | 0 |
 | `shader/validation` (207) | 369,753 | 297,389 | 0 | 0 |
-| **total** | **1,005,762** | **1,047,674** | **30,408** | **0** |
+| **total** | **1,023,776** | **1,042,822** | **29,715** | **0** |
 
-`shader/validation` is fully clean — the WGSL→GLSL-ES path is Tint, the same compiler as the Dawn oracle. The
-`shader/execution` residual is dominated by catalogued Tier-2 boundaries — raw (non-comparison) depth-texture
-reads and GLES hardware/spec limits (vertex-stage storage images, `rg32` storage formats, no native 1D
-textures) — catalogued in [`specs/blocks/67-gles-backend.md`](specs/blocks/67-gles-backend.md). § **2**
-`api/validation` files are **quarantined**, not failing: a zero-dimension indirect dispatch hard-wedges this
-Haswell GPU machine-wide (a Mesa/ANV-class driver defect). Verification here is Linux/Mesa (the spec'd Tier-2
-target is Windows ANGLE); numbers and feature set may change without SemVer guarantees.
+Swept 2026-09-21 raw — `--workers 2` on yawgpu `80219df` built `--features gles`; 10 minutes. Nothing is
+excluded: the 2 `api/validation` files quarantined on the Haswell host below run clean on this driver
+(17/17 and 200/200), so that quarantine is Haswell-specific.
+
+Linux / Mesa `crocus` on Intel Haswell — Mesa's native GLES driver for Haswell:
+
+| area | pass | skip | fail | crash |
+|---|---:|---:|---:|---:|
+| `api/validation` (124§) | 194,827 | 157,163 | 325 | 0 |
+| `api/operation` (67) | 149,727 | 76,698 | **3,036** | 0 |
+| `shader/execution` (239) | 315,602 | 516,424 | **2,900** | 0 |
+| `shader/validation` (207) | 369,753 | 297,389 | 0 | 0 |
+| **total** | **1,029,909** | **1,047,674** | **6,261** | **0** |
+
+`shader/validation` is fully clean on both hosts, and byte-identical between them — the WGSL→GLSL-ES path is
+Tint, the same compiler as the Dawn oracle, so it is driver-independent. The `shader/execution` residual is
+dominated by catalogued Tier-2 boundaries — raw (non-comparison) depth-texture reads and GLES hardware/spec
+limits (vertex-stage storage images, `rg32` storage formats, no native 1D textures) — catalogued in
+[`specs/blocks/67-gles-backend.md`](specs/blocks/67-gles-backend.md). § **2** `api/validation` files are
+**quarantined** on the Haswell host, not failing: a zero-dimension indirect dispatch hard-wedges that GPU
+machine-wide (a Mesa/ANV-class driver defect). Numbers and feature set may change without SemVer guarantees.
+
+**Reading GLES results before 2026-09-21.** Until yawgpu `0ddc929`, every GLES process segfaulted at exit
+while tearing the device down — after its work had completed correctly. Under `--isolate`, where each case
+gets its own child process, that recorded *every* case as a `crash`, which is what made two entirely clean
+files look catastrophic. The defect never touched the reported numbers: the post-fix re-sweep is
+byte-identical to the pre-fix one above. GLES runs now exit 0 and `--isolate` reports real per-case results.
 
 Per-case results and any cross-backend differences are tracked in the suite's
 [`docs/FINDINGS.md`](https://github.com/infosia/webgpu-native-cts/blob/main/docs/FINDINGS.md)
-(yawgpu-Metal sweep 2026-07-02; yawgpu-Vulkan sweep 2026-06-28).
+(yawgpu-Metal sweep 2026-07-02; yawgpu-Vulkan sweeps 2026-06-28 Windows and
+2026-09-21 Linux; yawgpu-GLES sweep 2026-09-21 Linux/NVIDIA).
 
 ## License
 
