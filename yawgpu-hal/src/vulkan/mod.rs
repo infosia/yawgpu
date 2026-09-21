@@ -1109,19 +1109,11 @@ fn hal_limits_from_vk(vk: vk::PhysicalDeviceLimits, max_buffer_size: u64) -> Hal
         max_dynamic_storage_buffers_per_pipeline_layout: vk
             .max_descriptor_set_storage_buffers_dynamic
             .min(8),
-        max_sampled_textures_per_shader_stage: vk
-            .max_per_stage_descriptor_sampled_images
-            .min(48),
+        max_sampled_textures_per_shader_stage: vk.max_per_stage_descriptor_sampled_images.min(48),
         max_samplers_per_shader_stage: vk.max_per_stage_descriptor_samplers.min(16),
-        max_storage_buffers_per_shader_stage: vk
-            .max_per_stage_descriptor_storage_buffers
-            .min(16),
-        max_storage_textures_per_shader_stage: vk
-            .max_per_stage_descriptor_storage_images
-            .min(8),
-        max_uniform_buffers_per_shader_stage: vk
-            .max_per_stage_descriptor_uniform_buffers
-            .min(12),
+        max_storage_buffers_per_shader_stage: vk.max_per_stage_descriptor_storage_buffers.min(16),
+        max_storage_textures_per_shader_stage: vk.max_per_stage_descriptor_storage_images.min(8),
+        max_uniform_buffers_per_shader_stage: vk.max_per_stage_descriptor_uniform_buffers.min(12),
         max_uniform_buffer_binding_size: u64::from(vk.max_uniform_buffer_range / 16 * 16),
         max_storage_buffer_binding_size: u64::from(vk.max_storage_buffer_range),
         min_uniform_buffer_offset_alignment: vk.min_uniform_buffer_offset_alignment as u32,
