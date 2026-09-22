@@ -1368,6 +1368,17 @@ never a reason to skip a CTS case.
   pipeline-layout/shader resource compatibility (createComputePipeline +
   createRenderPipeline); depth-clip-control gating of unclippedDepth;
   storage-texture format/access in render auto-layout.
+  **[2026-09-23 — all closed; kept as history.]** Inter-stage matching was
+  already implemented (see the "P2-core" note above); `unclippedDepth`
+  gating is Block 63 (`depth-clip-control.md`); storage-texture auto-layout
+  is in the 2026-09-22 B4 correction above; override evaluation
+  (workgroup-size / storage-size limits, override-expression errors) is
+  done by the Tint frontend (F-133); pipeline-layout / shader resource
+  compatibility is validated at both create calls. Evidence: the
+  2026-09-21 whole-suite raw sweeps on native Vulkan (Windows and Linux,
+  `webgpu-native-cts` README) report `api/validation` 244,672 pass /
+  **4 fail, all documented `xfail`**, and `shader/validation` 646,773 /
+  **0 fail** — none of the trees named here contributes a failure.
 
 ## Coverage matrix
 
@@ -2122,6 +2133,14 @@ naga fork is worse than under-validation":
 - **Short-circuit `&&`/`||` operand under-validation (~71).** Accepting `bool && vecN<T>` and
   similar; fixing it risked rejecting valid short-circuit code (`false && sqrt(-1)`), so an
   earlier slice reverted the attempt. Left as safe under-validation.
+
+**[2026-09-23 re-measured under Tint — both closed.]** The naga frontend was replaced by
+Tint (Block 98 / `tint-migration-plan.md`), which enforces both rules. Native Vulkan, this
+Windows host, CTS `2f0fb9f`, raw: `shader,validation,statement,loop:*` +
+`shader,validation,statement,for:*` = **108 pass / 0 fail**;
+`shader,validation,expression,binary,short_circuiting_and_or:*` = **896 pass / 0 fail**
+(consistent with the 2026-09-21 whole-suite sweep's `shader/validation` 0 fail). The two
+bullets above are history only; no residual under-validation remains in this section.
 
 ## F-134 — naga `select` const-eval CRASH on nested-Compose bool-vector condition — RESOLVED
 

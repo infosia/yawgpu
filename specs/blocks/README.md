@@ -12,7 +12,10 @@ Format per block:
 - **Async**: futures/callbacks involved, Noop completion behaviour.
 - **Open questions**.
 
-Planned blocks (created lazily, tracked in `../SPEC.md`):
+Bootstrap-era blocks (Phases 0–16, tracked in `../SPEC.md`). Later blocks
+(`6x`–`10x`) are one file per feature / campaign and are listed by the
+directory itself; each carries its own `Status:` line and links its
+`../tracking/<topic>.md` ledger.
 
 | File | Phase |
 |---|---|
@@ -22,8 +25,8 @@ Planned blocks (created lazily, tracked in `../SPEC.md`):
 | `30-shader-binding.md` | 4 |
 | `40-pipeline.md` | 5 |
 | `50-commands.md` | 6 |
-| `60-backends.md` | 7 |
-| `70-surface-query-errorscope.md` | 8 |
+| `60-real-backends.md` | 7 |
+| `70-finalize.md` | 8 |
 | `33-shader-passthrough.md` | 13 (vendor: SPIR-V/MSL passthrough) |
 | `36-external-textures.md` | 16+ (`texture_external`; core binding model + vendor create; CTS F-060) |
 | `55-tiled-rendering.md` | 14 (vendor: TBDR mobile extension) |

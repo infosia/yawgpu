@@ -148,7 +148,12 @@ previous phases beyond what the diff shows); this is deliberate.
 
 ## Version control
 
-The repo is not yet a git repository. Claude runs `git init` during Phase 0
-integration and commits per slice. The coding agent never commits. Commit
-message convention: `phase-N: <area> — <short>` (e.g.
-`phase-2: buffer — port BufferValidationTests`).
+Claude commits per slice on the current branch (`main`; no automatic
+branching). The coding agent never commits. Commit message convention is
+Conventional-Commits style, `type(scope): <short> — <detail>`, where `type`
+is `feat` / `fix` / `test` / `docs` / `refactor` / `cts` / `build` and
+`scope` names the crate or layer (`core`, `hal/vulkan`, `hal/metal`, `ffi`,
+`e2e`, `specs`, …); the block and slice go in the subject, e.g.
+`feat(hal/vulkan): Block 105 S2 — render passes transition attachments and
+bound views per subresource`. The bootstrap-era form `phase-N: <area> —
+<short>` is historical (Phases 0–16).

@@ -445,8 +445,12 @@ P-003 in Block 97. The remaining gaps against Dawn are small and none is
 structural: `queue/write_buffer_then_wait` 1.53×, `bindgroup/create_destroy`
 1.33×, `encode/compute_1_dispatch` 1.14×, `encode/render_draw` 1.16×.
 
-Block 97 **S3** (delete the now-unused per-draw `HalRenderPass` path) and **S4**
-are still open, as is moving GLES off the legacy path.
+Block 97 **S3** is **done** (`88cfe58`: GLES moved to the command stream and
+the per-draw `HalRenderPass` path deleted — `HalCopy` carries only
+`RenderPassCommandStream`, `yawgpu-hal/src/command.rs`). **S4** (re-measure +
+CTS re-run, record a Run section) is still open — backlog E1
+(`backlog.md`). *(Corrected 2026-09-23; the previous wording "S3 and moving
+GLES off the legacy path are still open" was stale.)*
 
 ## Superseded status notes
 

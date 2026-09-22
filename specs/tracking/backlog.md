@@ -114,16 +114,16 @@ reference `> i32::MAX`, `first_instance` indirect, external textures,
 | E7 | Metal subgroup size range hard-coded `(32, 32)`; f16 review MINORs (write-only `VulkanDeviceInner` flags, duplicate feature query). | S | `specs/tracking/subgroups.md:106-108`; `specs/tracking/shader-f16.md:177-183` |
 | E8 | `shader-passthrough`: B5 Phase Review outstanding; gating SPIR-V passthrough behind `WGPUInstanceFeatureName_ShaderSourceSPIRV` deferred. | S / S | `specs/blocks/33-shader-passthrough.md:257-270` |
 
-## Priority F — doc drift (one cleanup commit)
+## Priority F — doc drift (one cleanup commit) — **DONE 2026-09-23** (see progress log)
 
-- `specs/tracking/perf-dawn-baseline.md:447-449` — "S3 and GLES legacy path still open" (see E1).
-- Repo-root `HANDOFF.md` — the texture-formats-tier2 report it carries was fixed in Block 72; reads as open.
-- `specs/blocks/README.md:22-33` — lists `60-backends.md` / `70-surface-query-errorscope.md`, which exist as `60-real-backends.md` / `70-finalize.md`.
-- `specs/reference/workflow.md:151` — "The repo is not yet a git repository".
-- `specs/tracking/cts-coverage.md:2093-2115` — naga-era "intentionally not fixed" under-validations; re-measure under Tint.
-- `specs/tracking/refactor-dedup.md:53` — "GLES real-GPU runs are Windows ANGLE only"; a Linux EGL host now exists.
-- `specs/tracking/cts-coverage.md:1351-1358` — "known core gaps" list partly stale (inter-stage matching already implemented, per `:195`).
-- `README.md:753-772` — GLES table is the Haswell/crocus snapshot (re-sweep blocked, see D10).
+- ~~`specs/tracking/perf-dawn-baseline.md:447-449` — "S3 and GLES legacy path still open" (see E1).~~ Corrected.
+- ~~Repo-root `HANDOFF.md` — the texture-formats-tier2 report it carries was fixed in Block 72; reads as open.~~ The file no longer exists (gitignored working artifact).
+- ~~`specs/blocks/README.md:22-33` — lists `60-backends.md` / `70-surface-query-errorscope.md`, which exist as `60-real-backends.md` / `70-finalize.md`.~~ Corrected.
+- ~~`specs/reference/workflow.md:151` — "The repo is not yet a git repository".~~ Rewritten (current commit convention).
+- ~~`specs/tracking/cts-coverage.md:2093-2115` — naga-era "intentionally not fixed" under-validations; re-measure under Tint.~~ Re-measured on this host: loop/for 108/0, short-circuit 896/0 — both closed.
+- ~~`specs/tracking/refactor-dedup.md:53` — "GLES real-GPU runs are Windows ANGLE only"; a Linux EGL host now exists.~~ Corrected (item itself stays open as E4).
+- ~~`specs/tracking/cts-coverage.md:1351-1358` — "known core gaps" list partly stale (inter-stage matching already implemented, per `:195`).~~ Annotated: all five closed, with sweep evidence.
+- `README.md` GLES tables — already carries both the NVIDIA Linux (ES 3.2) and the Haswell/crocus snapshots; nothing to correct until the D10 re-sweep.
 
 ---
 
@@ -232,4 +232,9 @@ Re-verification after the fixes: `cargo test --workspace` 1093/0, clippy default
   - `VUID-VkImageCreateInfo-imageView2DOn3DImage-04459`: `TYPE_2D_ARRAY_COMPATIBLE` was set on every 3D image (since F-043); now only for 3D colour-attachment images (Dawn rule) — `daf967e`.
   - `VUID-VkImageViewCreateInfo-imageViewFormatSwizzle-04465`: the portability extension was enabled but `VkPhysicalDevicePortabilitySubsetFeaturesKHR` never queried/chained, so every portability feature stayed off; now queried and chained at device creation, and `texture-component-swizzle` is gated on `imageViewFormatSwizzle` on portability devices (unchanged on MoltenVK, which reports it true).
 - `e2e_vulkan_clip_distances` execution case skips on macOS (MoltenVK cannot lower `ClipDistance`; Block 106 verified it on native Vulkan).
+
+### 2026-09-23 — F doc-drift cleanup done; A8 + A9 in progress (Block 107)
+
+- **F done** in one docs commit: `perf-dawn-baseline.md` (S3 done via `88cfe58`, S4 open), `specs/blocks/README.md` (60/70 file names, later-block note), `workflow.md` (git + Conventional-Commits convention), `refactor-dedup.md` (GLES hosts), `cts-coverage.md` ×2 (F-133 residual under-validations re-measured under Tint on this host — `statement,loop`+`statement,for` 108/0, `short_circuiting_and_or` 896/0; the 1363 "known core gaps" list annotated closed with the 2026-09-21 sweep evidence). `HANDOFF.md` does not exist; the README GLES section already has the NVIDIA table.
+- **A8 + A9 → Block 107** (`specs/blocks/107-vulkan-discard-epilogue-shared-layout.md`): R1 drops the eager Vulkan Discard clear (core's Block 104 un-mark + lazy clear covers zero-on-next-read, as on Metal); R2 gives a sampled binding that shares subresources with a storage binding in the same pass `GENERAL` on both the transition and the descriptor, decided by one predicate. One coding-agent handoff; e2e 4–6 red-before-fix under the validation layer on this host.
 

@@ -50,8 +50,10 @@ per-backend bytes-per-block column removal from `map_texture_format`.
 | H2.3 | `GlesClearKind` recomputed via the 478-line format table; `HalTextureFormat::color_clear_kind` already exists | `gles/format.rs:605-638`; `gles/queue.rs:1793, 2957` | use `format.color_clear_kind()` if provably identical |
 | H2.4 | Two `row_spans` precompute loops; per-row staging `Vec`; compute bind loop collects two Vecs then iterates | `gles/queue.rs:3304-3372, 3651-3690, 3426, 359-396` | shared `buffer_texture_row_spans`; hoist staging; share bind loop with render path |
 
-Deferred (cannot be verified here — GLES real-GPU runs are Windows
-ANGLE only): draw-time dirty tracking in `run_render_draw`
+Deferred (not verified on the GLES real-GPU hosts — at the time of the
+audit only Windows ANGLE; since then a Linux NVIDIA EGL host and Windows
+WGL exist, see `gles-linux-device-selection.md` and Block 67 — the item is
+still open as backlog E4): draw-time dirty tracking in `run_render_draw`
 (`gles/queue.rs:2140-2223`), precomputed binding index maps
 (`gles/queue.rs:463-505, 535-559, 800-820, 1042-1055`).
 
