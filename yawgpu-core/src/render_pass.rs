@@ -1875,7 +1875,10 @@ fn fs() -> @location(0) vec4f {
             ]
         ));
         let Some(yawgpu_hal::HalCopy::RenderPassCommandStream(lowered_pass)) =
-            crate::queue::hal_render_pass_execution(recorded_pass)
+            crate::queue::hal_render_pass_execution(
+                recorded_pass,
+                &crate::queue::RenderPassInitPlan::default(),
+            )
         else {
             panic!("expected lowered render pass command stream");
         };

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -608,6 +608,11 @@ impl Queue {
                 extent: hal_extent(write_size),
             });
             let mut copies = Vec::new();
+            // A queue write is not part of a command buffer: its copy is
+            // enqueued before the next submit's command buffers and its
+            // staging failure returns above, so its marks apply immediately
+            // (Block 104 R5).
+            let mut overlay = InitOverlay::default();
             append_texture_write_init_clears(
                 &mut copies,
                 destination_texture,
@@ -615,7 +620,9 @@ impl Queue {
                 origin,
                 write_size,
                 aspect,
+                &mut overlay,
             );
+            overlay.commit();
             copies.push(copy);
             pending.copies.extend(copies);
             return None;
@@ -659,6 +666,8 @@ impl Queue {
             extent: hal_extent(write_size),
         });
         let mut copies = Vec::new();
+        // Marked immediately, as in the repack path above (Block 104 R5).
+        let mut overlay = InitOverlay::default();
         append_texture_write_init_clears(
             &mut copies,
             destination_texture,
@@ -666,7 +675,9 @@ impl Queue {
             origin,
             write_size,
             aspect,
+            &mut overlay,
         );
+        overlay.commit();
         copies.push(copy);
         pending.copies.extend(copies);
         None
@@ -793,6 +804,9 @@ impl Queue {
             batch: &mut pending,
             error: None,
         };
+        // Block 104 R5: the walk records its texture-initialization marks here
+        // and they reach the textures only if the HAL submit below succeeds.
+        let mut init_overlay = InitOverlay::default();
         for (op_index, op) in all_ops.iter().enumerate() {
             let prefix = if matches!(op, CommandExecution::ResolveQuerySet(resolve) if resolve.query_set.kind() == crate::QueryType::Timestamp)
             {
@@ -808,7 +822,7 @@ impl Queue {
             } else {
                 &all_ops[..=op_index]
             };
-            append_hal_command_execution(&mut copies, op, prefix, &mut staging);
+            append_hal_command_execution(&mut copies, op, prefix, &mut staging, &mut init_overlay);
             if staging.error.is_some() {
                 break;
             }
@@ -834,7 +848,10 @@ impl Queue {
             // still flush, as on the validation-error path above, and every
             // chunk (including the ones the aborted walk staged) is retired
             // against that flush so it recycles only once it is provably
-            // unread.
+            // unread. Dropping `init_overlay` unread leaves every texture's
+            // initialization state exactly as it was (Block 104 R5): the
+            // clears the walk planned are discarded with the rest.
+            drop(init_overlay);
             copies.truncate(queued_copy_count);
             if copies.is_empty() {
                 let latest = self.latest_submission_index();
@@ -847,6 +864,11 @@ impl Queue {
         }
 
         let result = self.inner.hal.submit_copies(&copies);
+        if result.is_ok() {
+            // The clears are on the GPU timeline now, so the marks they
+            // justify become visible to later submissions (Block 104 R5).
+            init_overlay.commit();
+        }
         self.finish_pending_submission(chunks, result)
     }
 
@@ -1066,6 +1088,64 @@ fn hal_buffer_texture_layout(
 }
 
 /// Returns HAL command execution.
+/// Buffers the texture-initialization marks one submission's lowering walk
+/// intends to make (Block 104 R5).
+///
+/// Marking the textures during the walk would claim subresources are zeroed
+/// before the clears that zero them have run: a staging or HAL failure then
+/// leaves a texture permanently believed initialized while its memory was
+/// never touched. Every `is_initialized` query of the walk therefore goes
+/// through the overlay — so a read later in the same submission still sees the
+/// effect of an earlier op — and the recorded marks reach the textures only
+/// once `HalQueue::submit_copies` has returned `Ok` ([`InitOverlay::commit`]).
+/// Dropping the overlay discards them.
+#[derive(Debug, Default)]
+struct InitOverlay {
+    /// Intended state per `(texture, mip, layer, aspect)`.
+    marks: HashMap<(usize, u32, u32, InitAspect), bool>,
+    /// One handle per keyed texture, both to apply the marks on commit and to
+    /// keep the identity in `marks` from being reused by another texture.
+    textures: HashMap<usize, Texture>,
+}
+
+impl InitOverlay {
+    /// Returns whether a subresource aspect is initialized, honouring the
+    /// marks recorded so far in this submission.
+    fn is_initialized(&self, texture: &Texture, mip: u32, layer: u32, aspect: InitAspect) -> bool {
+        match self
+            .marks
+            .get(&(texture.init_tracking_id(), mip, layer, aspect))
+        {
+            Some(&initialized) => initialized,
+            None => texture.is_initialized(mip, layer, aspect),
+        }
+    }
+
+    /// Records that a subresource aspect will be initialized (or, with
+    /// `initialized == false`, discarded) by this submission.
+    fn set_initialized(
+        &mut self,
+        texture: &Texture,
+        mip: u32,
+        layer: u32,
+        aspect: InitAspect,
+        initialized: bool,
+    ) {
+        let id = texture.init_tracking_id();
+        self.textures.entry(id).or_insert_with(|| texture.clone());
+        self.marks.insert((id, mip, layer, aspect), initialized);
+    }
+
+    /// Applies every recorded mark to its texture.
+    fn commit(self) {
+        for ((id, mip, layer, aspect), initialized) in self.marks {
+            if let Some(texture) = self.textures.get(&id) {
+                texture.set_initialized(mip, layer, aspect, initialized);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn hal_command_execution(op: &CommandExecution) -> Option<HalCopy> {
     hal_command_execution_with_ops(op, &[op])
@@ -1082,7 +1162,9 @@ fn hal_command_execution_with_ops(
         batch: &mut batch,
         error: None,
     };
-    append_hal_command_execution(&mut copies, op, command_ops, &mut staging);
+    let mut overlay = InitOverlay::default();
+    append_hal_command_execution(&mut copies, op, command_ops, &mut staging, &mut overlay);
+    overlay.commit();
     copies.into_iter().next()
 }
 
@@ -1091,6 +1173,7 @@ fn append_hal_command_execution(
     op: &CommandExecution,
     command_ops: &[&CommandExecution],
     staging: &mut BufferWriteStaging<'_>,
+    overlay: &mut InitOverlay,
 ) {
     match op {
         CommandExecution::BufferWrite(write) => {
@@ -1198,30 +1281,32 @@ fn append_hal_command_execution(
                 destination_offset: resolve.destination_offset,
             }));
         }
-        CommandExecution::TextureCopy(copy) => append_texture_copy_execution(copies, copy),
+        CommandExecution::TextureCopy(copy) => {
+            append_texture_copy_execution(copies, copy, overlay);
+        }
         CommandExecution::ComputePass(pass) => {
-            append_writable_storage_texture_init_clears(copies, &pass.bind_groups);
+            append_bound_texture_init_clears(copies, &pass.bind_groups, overlay);
             if let Some(copy) = hal_compute_pass_execution(pass) {
                 copies.push(copy);
             }
         }
         CommandExecution::RenderPass(pass) => {
-            append_render_stream_storage_texture_init_clears(copies, &pass.commands);
-            append_render_pass_color_attachment_init_clears(copies, pass);
-            if let Some(copy) = hal_render_pass_execution(pass) {
+            append_render_stream_bound_texture_init_clears(copies, &pass.commands, overlay);
+            let plan = append_render_pass_attachment_init_clears(copies, pass, overlay);
+            if let Some(copy) = hal_render_pass_execution(pass, &plan) {
                 copies.push(copy);
             }
         }
         #[cfg(feature = "tiled")]
         CommandExecution::SubpassRenderPass(pass) => {
             for attachment in &pass.color_attachments {
-                append_subpass_attachment_init_clears(copies, &attachment.resource);
+                append_subpass_attachment_init_clears(copies, &attachment.resource, overlay);
             }
             if let Some(attachment) = &pass.depth_stencil_attachment {
-                append_subpass_attachment_init_clears(copies, &attachment.resource);
+                append_subpass_attachment_init_clears(copies, &attachment.resource, overlay);
             }
             for draw in &pass.draws {
-                append_writable_storage_texture_init_clears(copies, &draw.bind_groups);
+                append_bound_texture_init_clears(copies, &draw.bind_groups, overlay);
             }
             if let Some(copy) = hal_subpass_render_pass_execution(pass) {
                 copies.push(copy);
@@ -1436,7 +1521,11 @@ pub(crate) fn hal_texture_copy_execution(copy: &TextureCopyCommand) -> Option<Ha
     }
 }
 
-fn append_texture_copy_execution(copies: &mut Vec<HalCopy>, copy: &TextureCopyCommand) {
+fn append_texture_copy_execution(
+    copies: &mut Vec<HalCopy>,
+    copy: &TextureCopyCommand,
+    overlay: &mut InitOverlay,
+) {
     match copy {
         TextureCopyCommand::BufferToTexture {
             destination,
@@ -1450,6 +1539,7 @@ fn append_texture_copy_execution(copies: &mut Vec<HalCopy>, copy: &TextureCopyCo
                 destination.origin,
                 *copy_size,
                 destination.aspect,
+                overlay,
             );
         }
         TextureCopyCommand::TextureToBuffer {
@@ -1462,6 +1552,7 @@ fn append_texture_copy_execution(copies: &mut Vec<HalCopy>, copy: &TextureCopyCo
                 source.origin,
                 *copy_size,
                 source.aspect,
+                overlay,
             );
         }
         TextureCopyCommand::TextureToTexture {
@@ -1476,6 +1567,7 @@ fn append_texture_copy_execution(copies: &mut Vec<HalCopy>, copy: &TextureCopyCo
                 source.origin,
                 *copy_size,
                 source.aspect,
+                overlay,
             );
             append_texture_write_init_clears(
                 copies,
@@ -1484,6 +1576,7 @@ fn append_texture_copy_execution(copies: &mut Vec<HalCopy>, copy: &TextureCopyCo
                 destination.origin,
                 *copy_size,
                 destination.aspect,
+                overlay,
             );
         }
     }
@@ -1499,22 +1592,14 @@ fn append_texture_read_init_clears(
     origin: Origin3d,
     copy_size: Extent3d,
     aspect: TextureAspect,
+    overlay: &mut InitOverlay,
 ) {
-    if extent_is_empty(copy_size) || !texture_init_clear_supported(texture) {
+    if extent_is_empty(copy_size) || !texture.is_lazy_init_eligible() {
         return;
     }
-    for subresource in texture.copy_subresources(mip_level, origin, copy_size) {
-        if texture.is_initialized(subresource.mip_level, subresource.array_layer) {
-            continue;
-        }
-        append_texture_zero_clear(
-            copies,
-            texture,
-            subresource.mip_level,
-            subresource.array_layer,
-            aspect,
-        );
-        texture.mark_initialized(subresource.mip_level, subresource.array_layer);
+    for subresource in texture.copy_subresources(mip_level, origin, copy_size, aspect) {
+        let pending = uninitialized_aspects(overlay, texture, &subresource);
+        append_texture_subresource_init_clears(copies, texture, &subresource, pending, overlay);
     }
 }
 
@@ -1525,23 +1610,113 @@ fn append_texture_write_init_clears(
     origin: Origin3d,
     copy_size: Extent3d,
     aspect: TextureAspect,
+    overlay: &mut InitOverlay,
 ) {
-    if extent_is_empty(copy_size) || !texture_init_clear_supported(texture) {
+    if extent_is_empty(copy_size) || !texture.is_lazy_init_eligible() {
         return;
     }
-    for subresource in texture.copy_subresources(mip_level, origin, copy_size) {
-        if !subresource.covers_full_subresource
-            && !texture.is_initialized(subresource.mip_level, subresource.array_layer)
-        {
-            append_texture_zero_clear(
-                copies,
+    for subresource in texture.copy_subresources(mip_level, origin, copy_size, aspect) {
+        // A write that covers the whole subresource needs no clear: it
+        // overwrites every texel itself. It still marks the aspects it wrote.
+        let pending = if subresource.covers_full_subresource {
+            InitAspects::default()
+        } else {
+            uninitialized_aspects(overlay, texture, &subresource)
+        };
+        append_texture_subresource_init_clears(copies, texture, &subresource, pending, overlay);
+        for written in subresource.aspects.iter() {
+            overlay.set_initialized(
                 texture,
                 subresource.mip_level,
                 subresource.array_layer,
-                aspect,
+                written,
+                true,
             );
         }
-        texture.mark_initialized(subresource.mip_level, subresource.array_layer);
+    }
+}
+
+/// Returns the aspects of `subresource` this submission has not initialized.
+fn uninitialized_aspects(
+    overlay: &InitOverlay,
+    texture: &Texture,
+    subresource: &TextureCopySubresource,
+) -> InitAspects {
+    let mut pending = InitAspects::default();
+    for aspect in subresource.aspects.iter() {
+        if !overlay.is_initialized(
+            texture,
+            subresource.mip_level,
+            subresource.array_layer,
+            aspect,
+        ) {
+            pending.insert(aspect);
+        }
+    }
+    pending
+}
+
+/// Zeroes `aspects` of one subresource and records them as initialized.
+fn append_texture_subresource_init_clears(
+    copies: &mut Vec<HalCopy>,
+    texture: &Texture,
+    subresource: &TextureCopySubresource,
+    aspects: InitAspects,
+    overlay: &mut InitOverlay,
+) {
+    if aspects.is_empty() {
+        return;
+    }
+    append_texture_aspect_zero_clears(
+        copies,
+        texture,
+        subresource.mip_level,
+        subresource.array_layer,
+        aspects,
+    );
+    for aspect in aspects.iter() {
+        overlay.set_initialized(
+            texture,
+            subresource.mip_level,
+            subresource.array_layer,
+            aspect,
+            true,
+        );
+    }
+}
+
+/// Emits the `ClearTexture` copies that zero `aspects` of one subresource.
+///
+/// Clearing every aspect of the format goes out as a single `All` clear (the
+/// shape Stage 1 always used, and the one that lets a backend zero a combined
+/// depth-stencil subresource in one pass); a strict subset goes out per
+/// aspect, so a `DepthOnly` copy of a `depth24plus-stencil8` texture never
+/// touches the stencil aspect.
+fn append_texture_aspect_zero_clears(
+    copies: &mut Vec<HalCopy>,
+    texture: &Texture,
+    mip_level: u32,
+    array_layer: u32,
+    aspects: InitAspects,
+) {
+    if aspects == texture.init_aspects(TextureAspect::All) {
+        append_texture_zero_clear(
+            copies,
+            texture,
+            mip_level,
+            array_layer,
+            HalTextureAspect::All,
+        );
+        return;
+    }
+    for aspect in aspects.iter() {
+        append_texture_zero_clear(
+            copies,
+            texture,
+            mip_level,
+            array_layer,
+            hal_init_aspect(aspect),
+        );
     }
 }
 
@@ -1550,7 +1725,7 @@ fn append_texture_zero_clear(
     texture: &Texture,
     mip_level: u32,
     array_layer: u32,
-    aspect: TextureAspect,
+    aspect: HalTextureAspect,
 ) {
     let Some(texture_hal) = texture.hal() else {
         return;
@@ -1558,30 +1733,51 @@ fn append_texture_zero_clear(
     copies.push(HalCopy::ClearTexture(HalTextureClear {
         texture: texture_hal,
         format: hal_texture_format(texture.format()),
-        aspect: hal_texture_aspect(aspect),
+        aspect,
         mip_level,
         base_array_layer: array_layer,
         array_layer_count: 1,
     }));
 }
 
-fn texture_init_clear_supported(texture: &Texture) -> bool {
-    texture.is_lazy_init_eligible()
+fn hal_init_aspect(aspect: InitAspect) -> HalTextureAspect {
+    match aspect {
+        // A color format has no other aspect, so `All` names it exactly.
+        InitAspect::Color => HalTextureAspect::All,
+        InitAspect::Depth => HalTextureAspect::DepthOnly,
+        InitAspect::Stencil => HalTextureAspect::StencilOnly,
+    }
 }
 
-fn append_writable_storage_texture_init_clears(
+/// Zeroes the uninitialized subresources every texture binding of
+/// `bind_groups` can read (Block 104 R3).
+///
+/// Every texture binding kind counts, not just a writable storage texture:
+/// a sampled `texture_2d`, a read-only storage texture and (tiled) an input
+/// attachment all observe the contents. External textures are excluded — their
+/// planes are user-provided (vendor path, outside WebGPU).
+///
+/// The input-attachment arm is defensive: such a slot must be left empty in
+/// the bind group (`validate_bind_group_entry` rejects a supplied resource)
+/// because the subpass pass auto-wires it from its own attachments, which
+/// `append_subpass_attachment_init_clears` already clears. It is matched
+/// here so the kind cannot be silently skipped if that ever changes.
+fn append_bound_texture_init_clears(
     copies: &mut Vec<HalCopy>,
     bind_groups: &BTreeMap<u32, BoundBindGroup>,
+    overlay: &mut InitOverlay,
 ) {
-    // TODO(stage2): sampled texture bindings that read uninitialized textures
-    // should inject clears before the pass, matching copy and storage writes.
     for bound in bind_groups.values() {
         let layout_entries = bound.group.layout().entries();
         for layout_entry in layout_entries {
-            let Some(BindingLayoutKind::StorageTexture { access, .. }) = layout_entry.kind else {
-                continue;
+            let tracks_initialization = match layout_entry.kind {
+                Some(BindingLayoutKind::Texture { .. })
+                | Some(BindingLayoutKind::StorageTexture { .. }) => true,
+                #[cfg(feature = "tiled")]
+                Some(BindingLayoutKind::InputAttachment { .. }) => true,
+                _ => false,
             };
-            if access == StorageTextureAccess::ReadOnly {
+            if !tracks_initialization {
                 continue;
             }
             let Some(entry) = bound
@@ -1595,14 +1791,22 @@ fn append_writable_storage_texture_init_clears(
             let BindGroupResource::TextureView { texture_view, .. } = &entry.resource else {
                 continue;
             };
-            append_texture_view_init_clears(copies, texture_view);
+            append_texture_view_init_clears(copies, texture_view, overlay);
         }
     }
 }
 
-fn append_texture_view_init_clears(copies: &mut Vec<HalCopy>, texture_view: &TextureView) {
+fn append_texture_view_init_clears(
+    copies: &mut Vec<HalCopy>,
+    texture_view: &TextureView,
+    overlay: &mut InitOverlay,
+) {
     let texture = texture_view.texture();
     if !texture.is_lazy_init_eligible() {
+        return;
+    }
+    let aspects = texture.init_aspects(texture_view.aspect());
+    if aspects.is_empty() {
         return;
     }
     let mip_start = texture_view.base_mip_level();
@@ -1610,7 +1814,9 @@ fn append_texture_view_init_clears(copies: &mut Vec<HalCopy>, texture_view: &Tex
     for mip_level in mip_start..mip_end {
         match texture.dimension() {
             TextureDimension::D3 => {
-                append_texture_subresource_init_clear_if_needed(copies, &texture, mip_level, 0);
+                append_texture_subresource_init_clear_if_needed(
+                    copies, &texture, mip_level, 0, aspects, overlay,
+                );
             }
             TextureDimension::D1 | TextureDimension::D2 => {
                 let layer_start = texture_view.base_array_layer();
@@ -1621,6 +1827,8 @@ fn append_texture_view_init_clears(copies: &mut Vec<HalCopy>, texture_view: &Tex
                         &texture,
                         mip_level,
                         array_layer,
+                        aspects,
+                        overlay,
                     );
                 }
             }
@@ -1633,38 +1841,199 @@ fn append_texture_subresource_init_clear_if_needed(
     texture: &Texture,
     mip_level: u32,
     array_layer: u32,
+    aspects: InitAspects,
+    overlay: &mut InitOverlay,
 ) {
-    if !texture.is_initialized(mip_level, array_layer) {
-        append_texture_zero_clear(copies, texture, mip_level, array_layer, TextureAspect::All);
-    }
-    texture.mark_initialized(mip_level, array_layer);
+    let subresource = TextureCopySubresource {
+        mip_level,
+        array_layer,
+        aspects,
+        covers_full_subresource: false,
+    };
+    let pending = uninitialized_aspects(overlay, texture, &subresource);
+    append_texture_subresource_init_clears(copies, texture, &subresource, pending, overlay);
 }
 
-fn append_render_pass_color_attachment_init_clears(
+/// Lazy-init decisions for one render pass's attachments (Block 104 R4).
+///
+/// A render pass covers the whole attachment subresource, so an uninitialized
+/// attachment needs no separate clear: rewriting its `Load` to a zero `Clear`
+/// initializes it as part of the pass the backend already encodes.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct RenderPassInitPlan {
+    /// Per color attachment slot, whether `Load` must become a zero `Clear`.
+    color_force_clear: Vec<bool>,
+    /// Whether the depth aspect's `Load` must become a `Clear` of `0.0`.
+    depth_force_clear: bool,
+    /// Whether the stencil aspect's `Load` must become a `Clear` of `0`.
+    stencil_force_clear: bool,
+}
+
+impl RenderPassInitPlan {
+    /// Returns whether the color attachment in `slot` must clear instead of load.
+    fn color_forces_clear(&self, slot: usize) -> bool {
+        self.color_force_clear.get(slot).copied().unwrap_or(false)
+    }
+}
+
+/// Plans the attachment lazy-init of one render pass and emits the clears that
+/// cannot be expressed as a load op.
+fn append_render_pass_attachment_init_clears(
     copies: &mut Vec<HalCopy>,
     pass: &RenderPassCommand,
-) {
-    for attachment in pass.color_attachments.iter().flatten() {
-        append_render_attachment_init_clear_if_needed(
-            copies,
-            &attachment.texture,
-            attachment.mip_level,
-            attachment.array_layer,
-        );
-        if let Some(resolve_target) = &attachment.resolve_target {
-            append_render_attachment_init_clear_if_needed(
-                copies,
-                resolve_target,
-                attachment.resolve_mip_level,
-                attachment.resolve_array_layer,
+    overlay: &mut InitOverlay,
+) -> RenderPassInitPlan {
+    let mut plan = RenderPassInitPlan {
+        color_force_clear: vec![false; pass.color_attachments.len()],
+        ..RenderPassInitPlan::default()
+    };
+    for (slot, attachment) in pass.color_attachments.iter().enumerate() {
+        let Some(attachment) = attachment else {
+            continue;
+        };
+        let texture = &attachment.texture;
+        if texture.is_lazy_init_eligible() {
+            let layer = tracked_init_layer(texture, attachment.array_layer);
+            let stores = matches!(attachment.store_op, StoreOp::Store);
+            if !overlay.is_initialized(texture, attachment.mip_level, layer, InitAspect::Color) {
+                if texture.dimension() == TextureDimension::D3 {
+                    // Rendering into one depth slice marks the whole mip
+                    // initialized, so the other slices must be zeroed before
+                    // the pass (Dawn's 3D branch in
+                    // `LazyClearRenderPassAttachments`).
+                    append_texture_aspect_zero_clears(
+                        copies,
+                        texture,
+                        attachment.mip_level,
+                        layer,
+                        InitAspects::only(InitAspect::Color),
+                    );
+                } else if matches!(attachment.load_op, LoadOp::Load) {
+                    plan.color_force_clear[slot] = true;
+                }
+            }
+            // `Discard` un-marks: the backend drops the rendered contents, so
+            // believing the subresource initialized would hand the next reader
+            // whatever the memory held.
+            overlay.set_initialized(
+                texture,
+                attachment.mip_level,
+                layer,
+                InitAspect::Color,
+                stores,
             );
         }
+        // The resolve target is fully overwritten by the resolve, so it is
+        // marked without any clear of its own.
+        if let Some(resolve_target) = &attachment.resolve_target {
+            if resolve_target.is_lazy_init_eligible() {
+                let layer = tracked_init_layer(resolve_target, attachment.resolve_array_layer);
+                overlay.set_initialized(
+                    resolve_target,
+                    attachment.resolve_mip_level,
+                    layer,
+                    InitAspect::Color,
+                    true,
+                );
+            }
+        }
+    }
+    if let Some(attachment) = &pass.depth_stencil_attachment {
+        let texture = &attachment.texture;
+        if texture.is_lazy_init_eligible() {
+            let layer = tracked_init_layer(texture, attachment.array_layer);
+            // Validation guarantees the attachment view's format is the
+            // texture's, so the texture's aspects are the attachment's.
+            let aspects = texture.init_aspects(TextureAspect::All);
+            if aspects.depth {
+                let loads = matches!(depth_attachment_load_op(attachment), LoadOp::Load);
+                if loads
+                    && !overlay.is_initialized(
+                        texture,
+                        attachment.mip_level,
+                        layer,
+                        InitAspect::Depth,
+                    )
+                {
+                    plan.depth_force_clear = true;
+                }
+                overlay.set_initialized(
+                    texture,
+                    attachment.mip_level,
+                    layer,
+                    InitAspect::Depth,
+                    depth_attachment_stores(attachment),
+                );
+            }
+            if aspects.stencil {
+                let loads = matches!(stencil_attachment_load_op(attachment), LoadOp::Load);
+                if loads
+                    && !overlay.is_initialized(
+                        texture,
+                        attachment.mip_level,
+                        layer,
+                        InitAspect::Stencil,
+                    )
+                {
+                    plan.stencil_force_clear = true;
+                }
+                overlay.set_initialized(
+                    texture,
+                    attachment.mip_level,
+                    layer,
+                    InitAspect::Stencil,
+                    stencil_attachment_stores(attachment),
+                );
+            }
+        }
+    }
+    plan
+}
+
+/// Returns the layer a subresource is tracked under: a 3D texture tracks one
+/// entry per mip, since a render pass or a copy addresses its slices, not
+/// array layers.
+fn tracked_init_layer(texture: &Texture, array_layer: u32) -> u32 {
+    match texture.dimension() {
+        TextureDimension::D3 => 0,
+        TextureDimension::D1 | TextureDimension::D2 => array_layer,
     }
 }
 
-fn append_render_stream_storage_texture_init_clears(
+/// Returns the depth aspect's effective load op. A read-only aspect forbids
+/// *user* writes only, so it always loads (and is lazily cleared like any
+/// other uninitialized aspect, as Dawn does).
+fn depth_attachment_load_op(attachment: &RenderPassDepthStencilExecution) -> LoadOp {
+    if attachment.depth_read_only {
+        LoadOp::Load
+    } else {
+        attachment.depth_load_op
+    }
+}
+
+/// Returns the stencil aspect's effective load op.
+fn stencil_attachment_load_op(attachment: &RenderPassDepthStencilExecution) -> LoadOp {
+    if attachment.stencil_read_only {
+        LoadOp::Load
+    } else {
+        attachment.stencil_load_op
+    }
+}
+
+/// Returns whether the pass keeps the depth aspect's contents.
+fn depth_attachment_stores(attachment: &RenderPassDepthStencilExecution) -> bool {
+    attachment.depth_read_only || matches!(attachment.depth_store_op, StoreOp::Store)
+}
+
+/// Returns whether the pass keeps the stencil aspect's contents.
+fn stencil_attachment_stores(attachment: &RenderPassDepthStencilExecution) -> bool {
+    attachment.stencil_read_only || matches!(attachment.stencil_store_op, StoreOp::Store)
+}
+
+fn append_render_stream_bound_texture_init_clears(
     copies: &mut Vec<HalCopy>,
     commands: &[RenderCommand],
+    overlay: &mut InitOverlay,
 ) {
     for command in commands {
         match command {
@@ -1673,55 +2042,58 @@ fn append_render_stream_storage_texture_init_clears(
                 group: Some(group),
             } => {
                 let groups = BTreeMap::from([(*index, group.clone())]);
-                append_writable_storage_texture_init_clears(copies, &groups);
+                append_bound_texture_init_clears(copies, &groups, overlay);
             }
             RenderCommand::ExecuteRenderBundle(bundle) => {
-                append_render_stream_storage_texture_init_clears(copies, bundle.commands());
+                append_render_stream_bound_texture_init_clears(copies, bundle.commands(), overlay);
             }
             _ => {}
         }
     }
 }
 
+/// Zeroes an uninitialized subpass attachment before the pass (tiled vendor
+/// path). Unlike a `RenderPass`, a subpass pass layout's load ops are fixed by
+/// the layout, so the Stage 1 `ClearTexture` shape is kept here.
 #[cfg(feature = "tiled")]
 fn append_subpass_attachment_init_clears(
     copies: &mut Vec<HalCopy>,
     resource: &SubpassAttachmentResource,
+    overlay: &mut InitOverlay,
 ) {
     let SubpassAttachmentResource::Persistent {
         view,
         resolve_target,
     } = resource;
-    append_render_attachment_init_clear_if_needed(
-        copies,
-        &view.texture(),
-        view.base_mip_level(),
-        view.base_array_layer(),
-    );
+    append_render_attachment_init_clear_if_needed(copies, view, overlay);
     if let Some(resolve_target) = resolve_target {
-        append_render_attachment_init_clear_if_needed(
-            copies,
-            &resolve_target.texture(),
-            resolve_target.base_mip_level(),
-            resolve_target.base_array_layer(),
-        );
+        append_render_attachment_init_clear_if_needed(copies, resolve_target, overlay);
     }
 }
 
+#[cfg(feature = "tiled")]
 fn append_render_attachment_init_clear_if_needed(
     copies: &mut Vec<HalCopy>,
-    texture: &Texture,
-    mip_level: u32,
-    array_layer: u32,
+    view: &TextureView,
+    overlay: &mut InitOverlay,
 ) {
+    let texture = view.texture();
     if !texture.is_lazy_init_eligible() {
         return;
     }
-    let tracked_layer = match texture.dimension() {
-        TextureDimension::D3 => 0,
-        TextureDimension::D1 | TextureDimension::D2 => array_layer,
-    };
-    append_texture_subresource_init_clear_if_needed(copies, texture, mip_level, tracked_layer);
+    let aspects = texture.init_aspects(view.aspect());
+    if aspects.is_empty() {
+        return;
+    }
+    let layer = tracked_init_layer(&texture, view.base_array_layer());
+    append_texture_subresource_init_clear_if_needed(
+        copies,
+        &texture,
+        view.base_mip_level(),
+        layer,
+        aspects,
+        overlay,
+    );
 }
 
 fn extent_is_empty(extent: Extent3d) -> bool {
@@ -1762,14 +2134,17 @@ fn hal_compute_dispatch(dispatch: &ComputeDispatch) -> Option<HalComputeDispatch
 }
 
 /// Returns HAL render pass execution.
-pub(crate) fn hal_render_pass_execution(pass: &RenderPassCommand) -> Option<HalCopy> {
+pub(crate) fn hal_render_pass_execution(
+    pass: &RenderPassCommand,
+    plan: &RenderPassInitPlan,
+) -> Option<HalCopy> {
     let mut state = RenderCommandLoweringState::default();
     let commands = hal_render_commands(&pass.commands, &mut state)?;
     let mut stream = HalRenderPassCommandStream::default();
-    stream.color_targets = hal_render_color_targets(&pass.color_attachments)?;
+    stream.color_targets = hal_render_color_targets(&pass.color_attachments, plan)?;
     stream.framebuffer_fetch_color_slots = render_stream_framebuffer_fetch_slots(&pass.commands);
     stream.depth_stencil_attachment =
-        hal_render_depth_stencil_attachment(pass.depth_stencil_attachment.as_ref())?;
+        hal_render_depth_stencil_attachment(pass.depth_stencil_attachment.as_ref(), plan)?;
     stream.occlusion_query_set = pass.occlusion_query_set.as_ref().and_then(QuerySet::hal);
     stream.commands = commands;
     Some(HalCopy::RenderPassCommandStream(stream))
@@ -2064,10 +2439,12 @@ fn hal_index_format(format: IndexFormat) -> HalIndexFormat {
 
 fn hal_render_color_targets(
     attachments: &[Option<RenderPassColorExecution>],
+    plan: &RenderPassInitPlan,
 ) -> Option<Vec<Option<HalRenderColorTarget>>> {
     attachments
         .iter()
-        .map(|attachment| match attachment {
+        .enumerate()
+        .map(|(slot, attachment)| match attachment {
             Some(attachment) => Some(Some(HalRenderColorTarget {
                 texture: attachment.texture.hal()?,
                 view_format: hal_texture_format(attachment.view_format),
@@ -2081,14 +2458,25 @@ fn hal_render_color_targets(
                 depth_slice: attachment.depth_slice,
                 resolve_mip_level: attachment.resolve_mip_level,
                 resolve_array_layer: attachment.resolve_array_layer,
-                load_op: hal_render_load_op(attachment.load_op),
+                load_op: if plan.color_forces_clear(slot) {
+                    HalRenderLoadOp::Clear
+                } else {
+                    hal_render_load_op(attachment.load_op)
+                },
                 store: matches!(attachment.store_op, StoreOp::Store),
-                clear_color: [
-                    attachment.clear_value.r,
-                    attachment.clear_value.g,
-                    attachment.clear_value.b,
-                    attachment.clear_value.a,
-                ],
+                clear_color: if plan.color_forces_clear(slot) {
+                    // Lazy zero-init replaces the load with a zero clear
+                    // (Block 104 R4); the user's clear value is unused
+                    // because the user asked to load.
+                    [0.0; 4]
+                } else {
+                    [
+                        attachment.clear_value.r,
+                        attachment.clear_value.g,
+                        attachment.clear_value.b,
+                        attachment.clear_value.a,
+                    ]
+                },
             })),
             None => Some(None),
         })
@@ -2097,6 +2485,7 @@ fn hal_render_color_targets(
 
 fn hal_render_depth_stencil_attachment(
     attachment: Option<&RenderPassDepthStencilExecution>,
+    plan: &RenderPassInitPlan,
 ) -> Option<Option<HalRenderDepthStencilAttachment>> {
     match attachment {
         None => Some(None),
@@ -2105,23 +2494,29 @@ fn hal_render_depth_stencil_attachment(
             format: hal_texture_format(attachment.format),
             mip_level: attachment.mip_level,
             array_layer: attachment.array_layer,
-            depth_load_op: if attachment.depth_read_only {
-                HalRenderLoadOp::Load
+            depth_load_op: if plan.depth_force_clear {
+                HalRenderLoadOp::Clear
             } else {
-                hal_render_load_op(attachment.depth_load_op)
+                hal_render_load_op(depth_attachment_load_op(attachment))
             },
-            depth_store: attachment.depth_read_only
-                || matches!(attachment.depth_store_op, StoreOp::Store),
-            depth_clear_value: attachment.depth_clear_value,
+            depth_store: depth_attachment_stores(attachment),
+            depth_clear_value: if plan.depth_force_clear {
+                0.0
+            } else {
+                attachment.depth_clear_value
+            },
             depth_read_only: attachment.depth_read_only,
-            stencil_load_op: if attachment.stencil_read_only {
-                HalRenderLoadOp::Load
+            stencil_load_op: if plan.stencil_force_clear {
+                HalRenderLoadOp::Clear
             } else {
-                hal_render_load_op(attachment.stencil_load_op)
+                hal_render_load_op(stencil_attachment_load_op(attachment))
             },
-            stencil_store: attachment.stencil_read_only
-                || matches!(attachment.stencil_store_op, StoreOp::Store),
-            stencil_clear_value: attachment.stencil_clear_value,
+            stencil_store: stencil_attachment_stores(attachment),
+            stencil_clear_value: if plan.stencil_force_clear {
+                0
+            } else {
+                attachment.stencil_clear_value
+            },
             stencil_read_only: attachment.stencil_read_only,
         })),
     }
@@ -3247,9 +3642,12 @@ fn fs() -> @location(0) vec4<f32> {
         // With per-kind counters texture-space and sampler-space are
         // independent, so both the sampled texture (binding=0) and the sampler
         // (binding=1) get slot 0 in their respective Metal index spaces.
+        // The leading clear is Block 104 R3: a sampled binding of an
+        // uninitialized texture is zeroed before the pass reads it (Stage 1
+        // only cleared writable storage bindings, so this was `[ComputePass]`).
         assert!(matches!(
             submitted.as_slice(),
-            [HalCopy::ComputePass(pass)]
+            [HalCopy::ClearTexture(_), HalCopy::ComputePass(pass)]
                 if pass.bind_textures.len() == 1
                     && pass.bind_textures[0].group == 0
                     && pass.bind_textures[0].binding == 0
@@ -3298,9 +3696,12 @@ fn fs() -> @location(0) vec4<f32> {
             HalQueue::Noop(queue) => queue.submitted_copies(),
             _ => Vec::new(),
         };
+        // A read-only storage binding is cleared before the pass too
+        // (Block 104 R3); Stage 1 skipped `ReadOnly` and lowered to
+        // `[ComputePass]` alone.
         assert!(matches!(
             submitted.as_slice(),
-            [HalCopy::ComputePass(pass)]
+            [HalCopy::ClearTexture(_), HalCopy::ComputePass(pass)]
                 if pass.bind_textures.len() == 1
                     && pass.bind_textures[0].group == 0
                     && pass.bind_textures[0].binding == 0
@@ -3423,7 +3824,7 @@ fn fs() -> @location(0) vec4<f32> {
                 HalCopy::TextureToBuffer(_)
             ] if clear.mip_level == 0 && clear.base_array_layer == 0
         ));
-        assert!(texture.is_initialized(0, 0));
+        assert!(texture.is_initialized(0, 0, InitAspect::Color));
     }
 
     #[test]
@@ -3458,6 +3859,10 @@ fn fs() -> @location(0) vec4<f32> {
         // index spaces.  The sampled texture (binding=0) gets texture-space
         // slot 0 and the sampler (binding=1) gets sampler-space slot 0; the
         // flat `metal_index` is the vertex-stage value in both cases.
+        // The leading clear is now the sampled binding's (Block 104 R3); the
+        // `LoadOp::Clear` attachment of `noop_render_pass_descriptor` no
+        // longer needs one of its own, since the pass's own load op
+        // initializes it (Block 104 R4).
         assert!(matches!(
             submitted.as_slice(),
             [HalCopy::ClearTexture(_), HalCopy::RenderPassCommandStream(pass)]
@@ -4960,11 +5365,11 @@ fn fs() -> @location(0) vec4<f32> {
                     && copy.extent.width == 2
                     && copy.extent.height == 2
         ));
-        assert!(texture.is_initialized(0, 0));
+        assert!(texture.is_initialized(0, 0, InitAspect::Color));
     }
 
     #[test]
-    fn depth_texture_copy_execution_does_not_submit_lazy_init_clear() {
+    fn depth_texture_copy_execution_submits_aspect_clear() {
         let device = noop_device();
         let source = Arc::new(device.create_texture(TextureDescriptor {
             usage: TextureUsage::COPY_SRC,
@@ -5012,16 +5417,91 @@ fn fs() -> @location(0) vec4<f32> {
             },
         };
         let mut copies = Vec::new();
+        let mut overlay = InitOverlay::default();
 
-        append_texture_copy_execution(&mut copies, &copy);
+        append_texture_copy_execution(&mut copies, &copy, &mut overlay);
+        overlay.commit();
 
-        assert!(matches!(copies.as_slice(), [HalCopy::TextureToTexture(_)]));
-        assert!(!source.is_initialized(0, 0));
-        assert!(!destination.is_initialized(0, 0));
+        // Stage 1 left depth textures out of lazy zero-init entirely, so this
+        // used to assert no clear and no marks at all (Block 104 R2 / R6).
+        // A `depth32float` texture has only a depth aspect, so the clear of
+        // the whole aspect set goes out as `All`; the destination is fully
+        // overwritten by the copy, so it is marked without a clear.
+        assert!(matches!(
+            copies.as_slice(),
+            [HalCopy::ClearTexture(clear), HalCopy::TextureToTexture(_)]
+                if clear.aspect == HalTextureAspect::All
+                    && clear.format == yawgpu_hal::HalTextureFormat::Depth32Float
+                    && clear.mip_level == 0
+                    && clear.base_array_layer == 0
+                    && clear.array_layer_count == 1
+        ));
+        assert!(source.is_initialized(0, 0, InitAspect::Depth));
+        assert!(destination.is_initialized(0, 0, InitAspect::Depth));
+    }
+
+    /// A `DepthOnly` copy of a combined format clears and marks only the depth
+    /// aspect; the stencil aspect stays uninitialized (Block 104 R1).
+    #[test]
+    fn combined_depth_stencil_depth_only_copy_clears_depth_and_leaves_stencil_unmarked() {
+        let device = noop_device();
+        let texture = Arc::new(device.create_texture(TextureDescriptor {
+            usage: TextureUsage::COPY_SRC,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format: TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        }));
+        let readback = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 256,
+            mapped_at_creation: false,
+        }));
+        let copy = TextureCopyCommand::TextureToBuffer {
+            source: TexelCopyTextureInfo {
+                texture: Arc::clone(&texture),
+                mip_level: 0,
+                origin: Origin3d { x: 0, y: 0, z: 0 },
+                aspect: TextureAspect::DepthOnly,
+            },
+            destination: TexelCopyBufferInfo {
+                buffer: readback,
+                device: None,
+                layout: TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(4),
+                },
+            },
+            copy_size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+        };
+        let mut copies = Vec::new();
+        let mut overlay = InitOverlay::default();
+
+        append_texture_copy_execution(&mut copies, &copy, &mut overlay);
+        overlay.commit();
+
+        assert!(matches!(
+            copies.as_slice(),
+            [HalCopy::ClearTexture(clear), HalCopy::TextureToBuffer(_)]
+                if clear.aspect == HalTextureAspect::DepthOnly
+        ));
+        assert!(texture.is_initialized(0, 0, InitAspect::Depth));
+        assert!(!texture.is_initialized(0, 0, InitAspect::Stencil));
     }
 
     #[test]
-    fn render_pass_load_color_attachment_clears_before_pass_and_not_before_following_read() {
+    fn render_pass_load_color_attachment_rewrites_load_to_zero_clear() {
         let device = noop_device();
         let queue = device.queue();
         let texture = Arc::new(device.create_texture(TextureDescriptor {
@@ -5111,15 +5591,20 @@ fn fs() -> @location(0) vec4<f32> {
             HalQueue::Noop(queue) => queue.submitted_copies(),
             _ => panic!("expected Noop queue"),
         };
+        // Stage 1 emitted a separate `ClearTexture` before the pass; Block
+        // 104 R4 instead rewrites the attachment's `Load` to a zero `Clear`,
+        // which the backend encodes as part of the pass it already begins.
         assert!(matches!(
             submitted.as_slice(),
             [
-                HalCopy::ClearTexture(clear),
-                HalCopy::RenderPassCommandStream(_),
+                HalCopy::RenderPassCommandStream(pass),
                 HalCopy::TextureToBuffer(_)
-            ] if clear.mip_level == 0 && clear.base_array_layer == 0
+            ] if matches!(pass.color_targets.as_slice(), [Some(target)]
+                if matches!(target.load_op, HalRenderLoadOp::Clear)
+                    && target.clear_color == [0.0, 0.0, 0.0, 0.0]
+                    && target.store)
         ));
-        assert!(texture.is_initialized(0, 0));
+        assert!(texture.is_initialized(0, 0, InitAspect::Color));
     }
 
     #[test]
@@ -5217,13 +5702,735 @@ fn fs() -> @location(0) vec4<f32> {
             submitted.as_slice(),
             [
                 HalCopy::ClearTexture(clear),
-                HalCopy::RenderPassCommandStream(_),
+                HalCopy::RenderPassCommandStream(pass_stream),
                 HalCopy::TextureToBuffer(_)
             ] if clear.mip_level == 0
                 && clear.base_array_layer == 0
                 && clear.array_layer_count == 1
+                // A 3D attachment keeps the whole-mip clear and its `Load`:
+                // the pass writes one depth slice, so the load op cannot
+                // initialize the rest of the mip (Block 104 R4).
+                && matches!(pass_stream.color_targets.as_slice(), [Some(target)]
+                    if matches!(target.load_op, HalRenderLoadOp::Load))
         ));
-        assert!(texture.is_initialized(0, 0));
+        assert!(texture.is_initialized(0, 0, InitAspect::Color));
+    }
+
+    // --- Block 104 lazy zero-init Stage 2 -------------------------------
+
+    fn lazy_init_texture(
+        device: &Device,
+        usage: TextureUsage,
+        format: TextureFormat,
+        size: Extent3d,
+        mip_level_count: u32,
+        sample_count: u32,
+    ) -> Arc<Texture> {
+        Arc::new(device.create_texture(TextureDescriptor {
+            usage,
+            dimension: TextureDimension::D2,
+            size,
+            format,
+            mip_level_count,
+            sample_count,
+            view_formats: Vec::new(),
+        }))
+    }
+
+    fn texture_view_range(
+        texture: &Arc<Texture>,
+        base_mip_level: u32,
+        mip_level_count: u32,
+        base_array_layer: u32,
+        array_layer_count: u32,
+    ) -> Arc<TextureView> {
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: Some(TextureViewDimension::D2),
+            base_mip_level,
+            mip_level_count: Some(mip_level_count),
+            base_array_layer,
+            array_layer_count: Some(array_layer_count),
+            aspect: None,
+            usage: None,
+            swizzle: None,
+        });
+        assert_eq!(error, None);
+        Arc::new(view)
+    }
+
+    fn whole_texture_view(texture: &Arc<Texture>) -> Arc<TextureView> {
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+            swizzle: None,
+        });
+        assert_eq!(error, None);
+        Arc::new(view)
+    }
+
+    fn submitted_copies(queue: &Queue) -> Vec<HalCopy> {
+        match queue.hal() {
+            HalQueue::Noop(queue) => queue.submitted_copies(),
+            _ => panic!("expected Noop queue"),
+        }
+    }
+
+    fn submitted_render_stream(queue: &Queue) -> HalRenderPassCommandStream {
+        submitted_copies(queue)
+            .into_iter()
+            .find_map(|copy| match copy {
+                HalCopy::RenderPassCommandStream(stream) => Some(stream),
+                _ => None,
+            })
+            .expect("render pass command stream")
+    }
+
+    fn color_attachment(
+        view: Arc<TextureView>,
+        load_op: LoadOp,
+        store_op: StoreOp,
+    ) -> RenderPassDescriptor {
+        RenderPassDescriptor {
+            max_color_attachments: Limits::DEFAULT.max_color_attachments,
+            color_attachments: vec![Some(RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                load_op,
+                store_op,
+                clear_value: Color {
+                    r: 0.25,
+                    g: 0.5,
+                    b: 0.75,
+                    a: 1.0,
+                },
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            max_draw_count: 50_000_000,
+        }
+    }
+
+    fn depth_stencil_pass_descriptor(
+        view: Arc<TextureView>,
+        depth: (LoadOp, StoreOp),
+        stencil: (LoadOp, StoreOp),
+    ) -> RenderPassDescriptor {
+        RenderPassDescriptor {
+            max_color_attachments: Limits::DEFAULT.max_color_attachments,
+            color_attachments: Vec::new(),
+            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                view,
+                depth_load_op: depth.0,
+                depth_store_op: depth.1,
+                depth_clear_value: 0.5,
+                depth_read_only: matches!(depth.0, LoadOp::Undefined),
+                stencil_load_op: stencil.0,
+                stencil_store_op: stencil.1,
+                stencil_clear_value: 9,
+                stencil_read_only: matches!(stencil.0, LoadOp::Undefined),
+            }),
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            max_draw_count: 50_000_000,
+        }
+    }
+
+    fn submit_empty_render_pass(device: &Device, descriptor: &RenderPassDescriptor) {
+        let encoder = device.create_command_encoder();
+        let (pass, begin_error) = encoder.begin_render_pass(descriptor);
+        assert_eq!(begin_error, None);
+        assert_eq!(pass.end(), None);
+        let (command_buffer, finish_error) = encoder.finish();
+        assert_eq!(finish_error, None);
+        assert_eq!(device.queue().submit(&[Arc::new(command_buffer)]), None);
+    }
+
+    /// Block 104 R3: a sampled binding reads the texture, so every
+    /// uninitialized subresource the view exposes is zeroed before the pass --
+    /// exactly those, and only on the first read.
+    #[test]
+    fn sampled_texture_binding_read_clears_uninitialized_mips_before_pass() {
+        let device = noop_device();
+        let queue = device.queue();
+        let layout = sampled_texture_bind_group_layout(&device, SHADER_STAGE_COMPUTE);
+        let texture = lazy_init_texture(
+            &device,
+            TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_SRC,
+            rgba8_unorm(),
+            Extent3d {
+                width: 16,
+                height: 16,
+                depth_or_array_layers: 1,
+            },
+            5,
+            1,
+        );
+        let sampler = device.create_sampler(SamplerDescriptor::default());
+        let bind_group = Arc::new(device.create_bind_group(
+            Arc::clone(&layout),
+            vec![
+                BindGroupEntry {
+                    binding: 0,
+                    resource: BindGroupResource::TextureView {
+                        texture_view: texture_view_range(&texture, 1, 3, 0, 1),
+                        device: Arc::new(device.clone()),
+                    },
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: BindGroupResource::Sampler {
+                        sampler: Arc::new(sampler),
+                        device: Arc::new(device.clone()),
+                    },
+                },
+            ],
+        ));
+        assert!(!bind_group.is_error());
+        let pipeline_layout = explicit_pipeline_layout(&device, layout);
+        let pipeline = sampled_compute_pipeline(&device, pipeline_layout);
+        let dispatch = || {
+            let encoder = device.create_command_encoder();
+            let (pass, begin_error) = encoder.begin_compute_pass(None);
+            assert_eq!(begin_error, None);
+            assert_eq!(pass.set_pipeline(Arc::clone(&pipeline)), None);
+            assert_eq!(
+                pass.set_bind_group(
+                    0,
+                    Some(Arc::clone(&bind_group)),
+                    Vec::new(),
+                    device.limits()
+                ),
+                None
+            );
+            assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
+            assert_eq!(pass.end(), None);
+            let (command_buffer, error) = encoder.finish();
+            assert_eq!(error, None);
+            assert_eq!(queue.submit(&[Arc::new(command_buffer)]), None);
+        };
+
+        dispatch();
+
+        let submitted = submitted_copies(&queue);
+        assert!(matches!(
+            submitted.as_slice(),
+            [
+                HalCopy::ClearTexture(first),
+                HalCopy::ClearTexture(second),
+                HalCopy::ClearTexture(third),
+                HalCopy::ComputePass(_)
+            ] if (first.mip_level, first.base_array_layer) == (1, 0)
+                && (second.mip_level, second.base_array_layer) == (2, 0)
+                && (third.mip_level, third.base_array_layer) == (3, 0)
+        ));
+        for mip in [1, 2, 3] {
+            assert!(texture.is_initialized(mip, 0, InitAspect::Color));
+        }
+        // Mips outside the view keep their uninitialized state.
+        assert!(!texture.is_initialized(0, 0, InitAspect::Color));
+        assert!(!texture.is_initialized(4, 0, InitAspect::Color));
+
+        dispatch();
+
+        assert!(matches!(
+            submitted_copies(&queue).as_slice(),
+            [
+                HalCopy::ClearTexture(_),
+                HalCopy::ClearTexture(_),
+                HalCopy::ClearTexture(_),
+                HalCopy::ComputePass(_),
+                HalCopy::ComputePass(_)
+            ]
+        ));
+    }
+
+    /// Block 104 R3: a read-only storage binding reads the texture, so it is
+    /// cleared before the pass exactly like a writable one (Stage 1 skipped
+    /// `StorageTextureAccess::ReadOnly` outright).
+    #[test]
+    fn read_only_storage_texture_binding_clears_before_the_pass() {
+        let device = noop_device();
+        let layout = storage_texture_bind_group_layout(&device);
+        assert!(matches!(
+            layout.entries()[0].kind,
+            Some(BindingLayoutKind::StorageTexture {
+                access: StorageTextureAccess::ReadOnly,
+                ..
+            })
+        ));
+        let bind_group = storage_texture_bind_group(&device, layout);
+        let BindGroupResource::TextureView { texture_view, .. } = &bind_group.entries()[0].resource
+        else {
+            panic!("expected a texture view binding");
+        };
+        let texture = texture_view.texture();
+        let bind_groups = BTreeMap::from([(
+            0,
+            BoundBindGroup {
+                group: Arc::clone(&bind_group),
+                dynamic_offsets: Vec::new(),
+            },
+        )]);
+        let mut copies = Vec::new();
+        let mut overlay = InitOverlay::default();
+
+        append_bound_texture_init_clears(&mut copies, &bind_groups, &mut overlay);
+        overlay.commit();
+
+        assert!(matches!(
+            copies.as_slice(),
+            [HalCopy::ClearTexture(clear)]
+                if clear.mip_level == 0 && clear.base_array_layer == 0
+        ));
+        assert!(texture.is_initialized(0, 0, InitAspect::Color));
+
+        // A second pass over the now-initialized texture emits nothing.
+        let mut second = Vec::new();
+        let mut second_overlay = InitOverlay::default();
+        append_bound_texture_init_clears(&mut second, &bind_groups, &mut second_overlay);
+
+        assert!(second.is_empty());
+    }
+
+    /// Block 104 R3: a bound view's aspect selects what is cleared, so a
+    /// stencil-only view of a combined format leaves the depth aspect alone.
+    #[test]
+    fn stencil_aspect_view_binding_clears_only_the_stencil_aspect() {
+        let device = noop_device();
+        let texture = lazy_init_texture(
+            &device,
+            TextureUsage::TEXTURE_BINDING,
+            TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8),
+            Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            1,
+            1,
+        );
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: Some(TextureViewDimension::D2),
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: Some(1),
+            aspect: Some(TextureAspect::StencilOnly),
+            usage: None,
+            swizzle: None,
+        });
+        assert_eq!(error, None);
+        let mut copies = Vec::new();
+        let mut overlay = InitOverlay::default();
+
+        append_texture_view_init_clears(&mut copies, &view, &mut overlay);
+        overlay.commit();
+
+        assert!(matches!(
+            copies.as_slice(),
+            [HalCopy::ClearTexture(clear)] if clear.aspect == HalTextureAspect::StencilOnly
+        ));
+        assert!(texture.is_initialized(0, 0, InitAspect::Stencil));
+        assert!(!texture.is_initialized(0, 0, InitAspect::Depth));
+    }
+
+    /// Block 104 R4: an uninitialized depth-stencil attachment is zeroed by
+    /// rewriting each aspect's `Load` into a `Clear` of zero, with no separate
+    /// `ClearTexture`.
+    #[test]
+    fn depth_stencil_attachment_load_becomes_zero_clear_per_aspect() {
+        let device = noop_device();
+        let queue = device.queue();
+        let texture = lazy_init_texture(
+            &device,
+            TextureUsage::RENDER_ATTACHMENT,
+            TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8),
+            Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            1,
+            1,
+        );
+        let descriptor = depth_stencil_pass_descriptor(
+            whole_texture_view(&texture),
+            (LoadOp::Load, StoreOp::Store),
+            (LoadOp::Load, StoreOp::Store),
+        );
+
+        submit_empty_render_pass(&device, &descriptor);
+
+        assert!(matches!(
+            submitted_copies(&queue).as_slice(),
+            [HalCopy::RenderPassCommandStream(_)]
+        ));
+        let attachment = submitted_render_stream(&queue)
+            .depth_stencil_attachment
+            .expect("depth-stencil attachment");
+        assert!(matches!(attachment.depth_load_op, HalRenderLoadOp::Clear));
+        assert_eq!(attachment.depth_clear_value, 0.0);
+        assert!(matches!(attachment.stencil_load_op, HalRenderLoadOp::Clear));
+        assert_eq!(attachment.stencil_clear_value, 0);
+        assert!(texture.is_initialized(0, 0, InitAspect::Depth));
+        assert!(texture.is_initialized(0, 0, InitAspect::Stencil));
+    }
+
+    /// Block 104 R1/R4: the rewrite is per aspect -- an already initialized
+    /// depth aspect keeps the user's `Load`.
+    #[test]
+    fn depth_stencil_attachment_keeps_load_for_the_initialized_aspect() {
+        let device = noop_device();
+        let queue = device.queue();
+        let texture = lazy_init_texture(
+            &device,
+            TextureUsage::RENDER_ATTACHMENT,
+            TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8),
+            Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            1,
+            1,
+        );
+        texture.set_initialized(0, 0, InitAspect::Depth, true);
+        let descriptor = depth_stencil_pass_descriptor(
+            whole_texture_view(&texture),
+            (LoadOp::Load, StoreOp::Store),
+            (LoadOp::Load, StoreOp::Discard),
+        );
+
+        submit_empty_render_pass(&device, &descriptor);
+
+        let attachment = submitted_render_stream(&queue)
+            .depth_stencil_attachment
+            .expect("depth-stencil attachment");
+        assert!(matches!(attachment.depth_load_op, HalRenderLoadOp::Load));
+        assert!(matches!(attachment.stencil_load_op, HalRenderLoadOp::Clear));
+        // `Discard` drops the stencil contents the pass produced, so the
+        // aspect goes back to uninitialized.
+        assert!(texture.is_initialized(0, 0, InitAspect::Depth));
+        assert!(!texture.is_initialized(0, 0, InitAspect::Stencil));
+    }
+
+    /// Block 104 R4: a read-only aspect is cleared like any other -- the flag
+    /// forbids user writes, not the implementation's zero fill (Dawn does the
+    /// same in `LazyClearRenderPassAttachments`).
+    #[test]
+    fn read_only_depth_stencil_attachment_is_still_zero_cleared() {
+        let device = noop_device();
+        let queue = device.queue();
+        let texture = lazy_init_texture(
+            &device,
+            TextureUsage::RENDER_ATTACHMENT,
+            TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8),
+            Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            1,
+            1,
+        );
+        let descriptor = depth_stencil_pass_descriptor(
+            whole_texture_view(&texture),
+            (LoadOp::Undefined, StoreOp::Undefined),
+            (LoadOp::Undefined, StoreOp::Undefined),
+        );
+
+        submit_empty_render_pass(&device, &descriptor);
+
+        let attachment = submitted_render_stream(&queue)
+            .depth_stencil_attachment
+            .expect("depth-stencil attachment");
+        assert!(attachment.depth_read_only);
+        assert!(attachment.stencil_read_only);
+        assert!(matches!(attachment.depth_load_op, HalRenderLoadOp::Clear));
+        assert_eq!(attachment.depth_clear_value, 0.0);
+        assert!(matches!(attachment.stencil_load_op, HalRenderLoadOp::Clear));
+        assert_eq!(attachment.stencil_clear_value, 0);
+        assert!(texture.is_initialized(0, 0, InitAspect::Depth));
+        assert!(texture.is_initialized(0, 0, InitAspect::Stencil));
+    }
+
+    /// Block 104 R4: `storeOp: Discard` un-marks the attachment, so the next
+    /// `Load` of the same subresource is rewritten again.
+    #[test]
+    fn discarded_color_attachment_is_unmarked_and_cleared_again_on_the_next_load() {
+        let device = noop_device();
+        let queue = device.queue();
+        let texture = lazy_init_texture(
+            &device,
+            TextureUsage::RENDER_ATTACHMENT,
+            rgba8_unorm(),
+            Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            1,
+            1,
+        );
+
+        submit_empty_render_pass(
+            &device,
+            &color_attachment(
+                whole_texture_view(&texture),
+                LoadOp::Clear,
+                StoreOp::Discard,
+            ),
+        );
+
+        assert!(!texture.is_initialized(0, 0, InitAspect::Color));
+        assert!(matches!(
+            submitted_copies(&queue).as_slice(),
+            [HalCopy::RenderPassCommandStream(_)]
+        ));
+
+        submit_empty_render_pass(
+            &device,
+            &color_attachment(whole_texture_view(&texture), LoadOp::Load, StoreOp::Store),
+        );
+
+        let streams: Vec<_> = submitted_copies(&queue)
+            .into_iter()
+            .filter_map(|copy| match copy {
+                HalCopy::RenderPassCommandStream(stream) => Some(stream),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(streams.len(), 2);
+        assert!(matches!(streams[1].color_targets.as_slice(), [Some(target)]
+            if matches!(target.load_op, HalRenderLoadOp::Clear)
+                && target.clear_color == [0.0, 0.0, 0.0, 0.0]));
+        assert!(texture.is_initialized(0, 0, InitAspect::Color));
+    }
+
+    /// Block 104 R4: the resolve target is fully overwritten by the resolve,
+    /// so it is marked initialized without a clear of its own.
+    #[test]
+    fn resolve_target_is_marked_initialized_without_a_clear() {
+        let device = noop_device();
+        let queue = device.queue();
+        let size = Extent3d {
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+        };
+        let multisampled = lazy_init_texture(
+            &device,
+            TextureUsage::RENDER_ATTACHMENT,
+            rgba8_unorm(),
+            size,
+            1,
+            4,
+        );
+        let resolve = lazy_init_texture(
+            &device,
+            TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+            rgba8_unorm(),
+            size,
+            1,
+            1,
+        );
+        let mut descriptor = color_attachment(
+            whole_texture_view(&multisampled),
+            LoadOp::Clear,
+            StoreOp::Store,
+        );
+        descriptor.color_attachments[0]
+            .as_mut()
+            .expect("color attachment")
+            .resolve_target = Some(whole_texture_view(&resolve));
+
+        submit_empty_render_pass(&device, &descriptor);
+
+        assert!(matches!(
+            submitted_copies(&queue).as_slice(),
+            [HalCopy::RenderPassCommandStream(_)]
+        ));
+        assert!(resolve.is_initialized(0, 0, InitAspect::Color));
+        assert!(multisampled.is_initialized(0, 0, InitAspect::Color));
+    }
+
+    /// Block 104 R5: a read later in the same submission sees the clear an
+    /// earlier partial write already planned, so only one clear is emitted.
+    #[test]
+    fn read_after_partial_write_in_one_submission_emits_one_clear() {
+        let device = noop_device();
+        let queue = device.queue();
+        let texture = lazy_init_texture(
+            &device,
+            TextureUsage::COPY_DST | TextureUsage::COPY_SRC,
+            rgba8_unorm(),
+            Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            1,
+            1,
+        );
+        let source = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_SRC,
+            size: 1024,
+            mapped_at_creation: false,
+        }));
+        let readback = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 1024,
+            mapped_at_creation: false,
+        }));
+        let layout = TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(256),
+            rows_per_image: Some(4),
+        };
+        let encoder = device.create_command_encoder();
+        assert_eq!(
+            encoder.copy_buffer_to_texture(
+                TexelCopyBufferInfo {
+                    buffer: source,
+                    device: None,
+                    layout,
+                },
+                TexelCopyTextureInfo {
+                    texture: Arc::clone(&texture),
+                    mip_level: 0,
+                    origin: Origin3d { x: 0, y: 0, z: 0 },
+                    aspect: TextureAspect::All,
+                },
+                Extent3d {
+                    width: 2,
+                    height: 2,
+                    depth_or_array_layers: 1,
+                },
+            ),
+            None
+        );
+        assert_eq!(
+            encoder.copy_texture_to_buffer(
+                TexelCopyTextureInfo {
+                    texture: Arc::clone(&texture),
+                    mip_level: 0,
+                    origin: Origin3d { x: 0, y: 0, z: 0 },
+                    aspect: TextureAspect::All,
+                },
+                TexelCopyBufferInfo {
+                    buffer: readback,
+                    device: None,
+                    layout,
+                },
+                Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+            ),
+            None
+        );
+        let (command_buffer, finish_error) = encoder.finish();
+        assert_eq!(finish_error, None);
+
+        assert_eq!(queue.submit(&[Arc::new(command_buffer)]), None);
+
+        assert!(matches!(
+            submitted_copies(&queue).as_slice(),
+            [
+                HalCopy::ClearTexture(_),
+                HalCopy::BufferToTexture(_),
+                HalCopy::TextureToBuffer(_)
+            ]
+        ));
+        assert!(texture.is_initialized(0, 0, InitAspect::Color));
+    }
+
+    /// Block 104 R5: a submission that never reaches the HAL leaves every
+    /// initialization mark untouched, so the clear it planned is planned again
+    /// next time instead of being assumed done.
+    #[test]
+    fn failed_submit_leaves_initialization_marks_untouched() {
+        let device = noop_device();
+        let queue = device.queue();
+        let texture = lazy_init_texture(
+            &device,
+            TextureUsage::COPY_SRC,
+            rgba8_unorm(),
+            Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            1,
+            1,
+        );
+        let readback = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 1024,
+            mapped_at_creation: false,
+        }));
+        let written = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let encoder = device.create_command_encoder();
+        assert_eq!(
+            encoder.copy_texture_to_buffer(
+                TexelCopyTextureInfo {
+                    texture: Arc::clone(&texture),
+                    mip_level: 0,
+                    origin: Origin3d { x: 0, y: 0, z: 0 },
+                    aspect: TextureAspect::All,
+                },
+                TexelCopyBufferInfo {
+                    buffer: readback,
+                    device: None,
+                    layout: TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(256),
+                        rows_per_image: Some(4),
+                    },
+                },
+                Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+            ),
+            None
+        );
+        // Ordered after the copy so the walk has already planned the clear
+        // and recorded its mark when the staging failure aborts the submit.
+        assert_eq!(encoder.write_buffer(written, 0, &[7; 4]), None);
+        let (command_buffer, finish_error) = encoder.finish();
+        assert_eq!(finish_error, None);
+        queue.inner.pending_writes.lock().fail_next_stage = true;
+
+        let error = queue.submit(&[Arc::new(command_buffer)]);
+
+        assert_eq!(
+            error,
+            Some(device_error_from_staging(
+                yawgpu_hal::HalError::BufferOperationFailed {
+                    backend: "Noop",
+                    message: "injected staging failure",
+                }
+            ))
+        );
+        assert!(submitted_copies(&queue).is_empty());
+        assert!(!texture.is_initialized(0, 0, InitAspect::Color));
     }
 
     #[test]

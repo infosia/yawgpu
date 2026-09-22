@@ -134,7 +134,110 @@ pub(crate) struct TextureState {
 pub(crate) struct TextureInitState {
     initialized: Vec<bool>,
     array_layer_count: u32,
+    aspects: InitAspects,
     enabled: bool,
+}
+
+/// Identifies one aspect axis of a texture's lazy-initialization state.
+///
+/// Initialization is tracked per mip level, per array layer **and** per aspect
+/// (Block 104 R1): a `depth24plus-stencil8` texture whose depth aspect was
+/// zeroed by a render pass still has an uninitialized stencil aspect, and a
+/// `TextureAspect::DepthOnly` copy must not mark the stencil aspect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum InitAspect {
+    /// The color aspect of a color format.
+    Color,
+    /// The depth aspect of a depth or combined depth-stencil format.
+    Depth,
+    /// The stencil aspect of a stencil or combined depth-stencil format.
+    Stencil,
+}
+
+/// A set of [`InitAspect`]s, ordered color, depth, stencil.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct InitAspects {
+    /// Whether the set contains [`InitAspect::Color`].
+    pub(crate) color: bool,
+    /// Whether the set contains [`InitAspect::Depth`].
+    pub(crate) depth: bool,
+    /// Whether the set contains [`InitAspect::Stencil`].
+    pub(crate) stencil: bool,
+}
+
+impl InitAspects {
+    /// Returns the set holding only `aspect`.
+    pub(crate) fn only(aspect: InitAspect) -> Self {
+        let mut aspects = Self::default();
+        aspects.insert(aspect);
+        aspects
+    }
+
+    /// Returns the aspects a format with these capabilities tracks.
+    ///
+    /// An unsupported format (no capabilities) has no aspect information, so
+    /// it falls back to the single color axis Stage 1 used for every texture.
+    pub(crate) fn from_caps(caps: Option<FormatCaps>) -> Self {
+        caps.map_or(
+            Self {
+                color: true,
+                depth: false,
+                stencil: false,
+            },
+            |caps| Self {
+                color: caps.aspects.color,
+                depth: caps.aspects.depth,
+                stencil: caps.aspects.stencil,
+            },
+        )
+    }
+
+    /// Returns whether the set holds no aspect.
+    pub(crate) fn is_empty(self) -> bool {
+        !self.color && !self.depth && !self.stencil
+    }
+
+    /// Adds `aspect` to the set.
+    pub(crate) fn insert(&mut self, aspect: InitAspect) {
+        match aspect {
+            InitAspect::Color => self.color = true,
+            InitAspect::Depth => self.depth = true,
+            InitAspect::Stencil => self.stencil = true,
+        }
+    }
+
+    /// Returns the intersection of two sets.
+    pub(crate) fn intersection(self, other: Self) -> Self {
+        Self {
+            color: self.color && other.color,
+            depth: self.depth && other.depth,
+            stencil: self.stencil && other.stencil,
+        }
+    }
+
+    /// Returns the aspects in color, depth, stencil order.
+    pub(crate) fn iter(self) -> impl Iterator<Item = InitAspect> {
+        [
+            self.color.then_some(InitAspect::Color),
+            self.depth.then_some(InitAspect::Depth),
+            self.stencil.then_some(InitAspect::Stencil),
+        ]
+        .into_iter()
+        .flatten()
+    }
+
+    /// Returns how many aspects the set holds.
+    fn len(self) -> u32 {
+        u32::from(self.color) + u32::from(self.depth) + u32::from(self.stencil)
+    }
+
+    /// Returns the position of `aspect` among the aspects the set holds, which
+    /// is its stride offset inside [`TextureInitState`].
+    fn index_of(self, aspect: InitAspect) -> Option<u32> {
+        self.iter()
+            .position(|present| present == aspect)
+            .and_then(|index| u32::try_from(index).ok())
+    }
 }
 
 /// Describes one texture subresource touched by a copy region.
@@ -142,6 +245,8 @@ pub(crate) struct TextureInitState {
 pub(crate) struct TextureCopySubresource {
     pub(crate) mip_level: u32,
     pub(crate) array_layer: u32,
+    /// Aspects of this subresource the copy touches (Block 104 R1).
+    pub(crate) aspects: InitAspects,
     pub(crate) covers_full_subresource: bool,
 }
 
@@ -153,13 +258,9 @@ impl Texture {
         is_error: bool,
         features: FeatureSet,
     ) -> Self {
-        let init_enabled = texture_lazy_init_eligible(
-            descriptor.format,
-            descriptor.usage,
-            &features,
-            descriptor.sample_count,
-        );
+        let init_enabled = texture_lazy_init_eligible(descriptor.usage);
         let format_caps = descriptor.format.caps(&features);
+        let init_aspects = InitAspects::from_caps(format_caps);
         Self {
             inner: Arc::new(TextureInner {
                 hal,
@@ -180,6 +281,7 @@ impl Texture {
                     descriptor.mip_level_count,
                     descriptor.size.depth_or_array_layers,
                     descriptor.dimension,
+                    init_aspects,
                     init_enabled,
                 )),
             }),
@@ -240,24 +342,60 @@ impl Texture {
         self.inner.sample_count
     }
 
-    /// Returns whether this texture participates in Stage 1 lazy zero-initialization.
+    /// Returns whether this texture participates in lazy zero-initialization.
     pub(crate) fn is_lazy_init_eligible(&self) -> bool {
-        texture_lazy_init_eligible(
-            self.format(),
-            self.usage(),
-            &self.inner.features,
-            self.sample_count(),
-        )
+        texture_lazy_init_eligible(self.usage())
     }
 
-    /// Returns whether a subresource has been initialized.
-    pub(crate) fn is_initialized(&self, mip: u32, layer: u32) -> bool {
-        self.inner.init_state.lock().is_initialized(mip, layer)
+    /// Returns the identity this texture is keyed by while a submission's
+    /// initialization marks are buffered (Block 104 R5).
+    ///
+    /// The value is the address of the shared inner state, so it is unique
+    /// only for as long as this handle keeps that state alive. A submission's
+    /// overlay holds a handle per texture it touches, which guarantees that.
+    pub(crate) fn init_tracking_id(&self) -> usize {
+        Arc::as_ptr(&self.inner) as usize
     }
 
-    /// Marks a subresource initialized.
-    pub(crate) fn mark_initialized(&self, mip: u32, layer: u32) {
-        self.inner.init_state.lock().mark_initialized(mip, layer);
+    /// Returns the aspects `aspect` selects on this texture's format.
+    ///
+    /// [`TextureAspect::All`] expands to every aspect the format has (both of
+    /// them for a combined depth-stencil format); a single-aspect selection
+    /// that the format does not have yields the empty set.
+    pub(crate) fn init_aspects(&self, aspect: TextureAspect) -> InitAspects {
+        let format_aspects = InitAspects::from_caps(self.format_caps());
+        let requested = match aspect {
+            TextureAspect::All => format_aspects,
+            TextureAspect::DepthOnly => InitAspects::only(InitAspect::Depth),
+            TextureAspect::StencilOnly => InitAspects::only(InitAspect::Stencil),
+        };
+        requested.intersection(format_aspects)
+    }
+
+    /// Returns whether a subresource aspect has been initialized.
+    pub(crate) fn is_initialized(&self, mip: u32, layer: u32, aspect: InitAspect) -> bool {
+        self.inner
+            .init_state
+            .lock()
+            .is_initialized(mip, layer, aspect)
+    }
+
+    /// Sets whether a subresource aspect is initialized.
+    ///
+    /// Passing `false` un-marks it, which is what a `storeOp: Discard`
+    /// attachment does: the backend drops the rendered contents, so the next
+    /// reader must clear again (Block 104 R4).
+    pub(crate) fn set_initialized(
+        &self,
+        mip: u32,
+        layer: u32,
+        aspect: InitAspect,
+        initialized: bool,
+    ) {
+        self.inner
+            .init_state
+            .lock()
+            .set_initialized(mip, layer, aspect, initialized);
     }
 
     /// Enumerates subresources touched by a copy/write region.
@@ -266,7 +404,9 @@ impl Texture {
         mip_level: u32,
         origin: Origin3d,
         copy_size: Extent3d,
+        aspect: TextureAspect,
     ) -> Vec<TextureCopySubresource> {
+        let aspects = self.init_aspects(aspect);
         let subresource = self.subresource_size(mip_level);
         let covers_xy = origin.x == 0
             && origin.y == 0
@@ -276,6 +416,7 @@ impl Texture {
             TextureDimension::D3 => vec![TextureCopySubresource {
                 mip_level,
                 array_layer: 0,
+                aspects,
                 covers_full_subresource: covers_xy
                     && origin.z == 0
                     && copy_size.depth_or_array_layers == subresource.depth_or_array_layers,
@@ -283,12 +424,14 @@ impl Texture {
             TextureDimension::D1 => vec![TextureCopySubresource {
                 mip_level,
                 array_layer: 0,
+                aspects,
                 covers_full_subresource: covers_xy,
             }],
             TextureDimension::D2 => (0..copy_size.depth_or_array_layers)
                 .map(|layer_offset| TextureCopySubresource {
                     mip_level,
                     array_layer: origin.z + layer_offset,
+                    aspects,
                     covers_full_subresource: covers_xy,
                 })
                 .collect(),
@@ -423,6 +566,7 @@ impl TextureInitState {
         mip_level_count: u32,
         depth_or_array_layers: u32,
         dimension: TextureDimension,
+        aspects: InitAspects,
         enabled: bool,
     ) -> Self {
         let array_layer_count = match dimension {
@@ -433,9 +577,9 @@ impl TextureInitState {
             usize::try_from(mip_level_count)
                 .ok()
                 .and_then(|mips| {
-                    usize::try_from(array_layer_count)
-                        .ok()
-                        .and_then(|layers| mips.checked_mul(layers))
+                    let layers = usize::try_from(array_layer_count).ok()?;
+                    let aspect_count = usize::try_from(aspects.len()).ok()?;
+                    mips.checked_mul(layers)?.checked_mul(aspect_count)
                 })
                 .unwrap_or(0)
         } else {
@@ -444,65 +588,56 @@ impl TextureInitState {
         Self {
             initialized: vec![false; len],
             array_layer_count,
+            aspects,
             enabled,
         }
     }
 
-    fn is_initialized(&self, mip: u32, layer: u32) -> bool {
+    fn is_initialized(&self, mip: u32, layer: u32, aspect: InitAspect) -> bool {
         if !self.enabled {
             return false;
         }
-        self.subresource_index(mip, layer)
+        self.subresource_index(mip, layer, aspect)
             .and_then(|index| self.initialized.get(index))
             .copied()
             .unwrap_or(false)
     }
 
-    fn mark_initialized(&mut self, mip: u32, layer: u32) {
+    fn set_initialized(&mut self, mip: u32, layer: u32, aspect: InitAspect, initialized: bool) {
         if !self.enabled {
             return;
         }
-        let Some(index) = self.subresource_index(mip, layer) else {
+        let Some(index) = self.subresource_index(mip, layer, aspect) else {
             return;
         };
-        if let Some(initialized) = self.initialized.get_mut(index) {
-            *initialized = true;
+        if let Some(slot) = self.initialized.get_mut(index) {
+            *slot = initialized;
         }
     }
 
-    fn subresource_index(&self, mip: u32, layer: u32) -> Option<usize> {
+    fn subresource_index(&self, mip: u32, layer: u32, aspect: InitAspect) -> Option<usize> {
         if layer >= self.array_layer_count {
             return None;
         }
+        let aspect_index = self.aspects.index_of(aspect)?;
         let index = mip
             .checked_mul(self.array_layer_count)?
-            .checked_add(layer)?;
+            .checked_add(layer)?
+            .checked_mul(self.aspects.len())?
+            .checked_add(aspect_index)?;
         usize::try_from(index).ok()
     }
 }
 
-fn texture_lazy_init_eligible(
-    format: TextureFormat,
-    usage: TextureUsage,
-    features: &FeatureSet,
-    sample_count: u32,
-) -> bool {
-    // A transient (memoryless) attachment has no observable uninitialized
-    // content (render-attachment-only, never sampled/copied) and its backing
-    // storage cannot be a copy destination (Metal Memoryless rejects blits), so
-    // it never participates in lazy zero-init.
-    if usage.contains(TextureUsage::TRANSIENT_ATTACHMENT) {
-        return false;
-    }
-
-    sample_count == 1
-        && format.caps(features).is_some_and(|caps| {
-            caps.aspects.color
-                && !caps.aspects.depth
-                && !caps.aspects.stencil
-                && caps.block_w == 1
-                && caps.block_h == 1
-        })
+/// Returns whether a texture participates in lazy zero-initialization.
+///
+/// Stage 2 (Block 104 R2) tracks every format, sample count and dimension:
+/// the only exclusion left is a transient (memoryless) attachment, which has
+/// no observable uninitialized content (render-attachment-only, never sampled
+/// or copied) and whose backing storage cannot be a copy destination at all
+/// (Metal Memoryless rejects blits).
+fn texture_lazy_init_eligible(usage: TextureUsage) -> bool {
+    !usage.contains(TextureUsage::TRANSIENT_ATTACHMENT)
 }
 
 /// Validates texture descriptor and returns a descriptive error on failure.
@@ -960,6 +1095,19 @@ mod tests {
         assert_eq!(usage.bits(), raw);
     }
 
+    fn depth_stencil_texture(format: u32) -> Texture {
+        Texture::new(
+            TextureDescriptor {
+                format: TextureFormat::from_raw(format),
+                usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+                ..valid_texture_descriptor()
+            },
+            None,
+            false,
+            FeatureSet::new(),
+        )
+    }
+
     #[test]
     fn texture_is_initialized_starts_false_for_new_texture() {
         let texture = noop_device().create_texture(TextureDescriptor {
@@ -972,12 +1120,12 @@ mod tests {
             ..valid_texture_descriptor()
         });
 
-        assert!(!texture.is_initialized(0, 0));
-        assert!(!texture.is_initialized(1, 1));
+        assert!(!texture.is_initialized(0, 0, InitAspect::Color));
+        assert!(!texture.is_initialized(1, 1, InitAspect::Color));
     }
 
     #[test]
-    fn texture_mark_initialized_sets_one_subresource() {
+    fn texture_set_initialized_marks_one_subresource() {
         let texture = noop_device().create_texture(TextureDescriptor {
             size: Extent3d {
                 width: 4,
@@ -988,41 +1136,150 @@ mod tests {
             ..valid_texture_descriptor()
         });
 
-        texture.mark_initialized(1, 1);
+        texture.set_initialized(1, 1, InitAspect::Color, true);
 
-        assert!(!texture.is_initialized(1, 0));
-        assert!(texture.is_initialized(1, 1));
+        assert!(!texture.is_initialized(1, 0, InitAspect::Color));
+        assert!(texture.is_initialized(1, 1, InitAspect::Color));
     }
 
     #[test]
-    fn texture_lazy_init_eligible_accepts_single_sample_uncompressed_color_only() {
-        let device = noop_device();
-        let texture = device.create_texture(valid_texture_descriptor());
+    fn texture_set_initialized_false_unmarks_a_subresource() {
+        let texture = noop_device().create_texture(valid_texture_descriptor());
+        texture.set_initialized(0, 0, InitAspect::Color, true);
 
-        assert!(texture.is_lazy_init_eligible());
+        texture.set_initialized(0, 0, InitAspect::Color, false);
+
+        assert!(!texture.is_initialized(0, 0, InitAspect::Color));
     }
 
     #[test]
-    fn texture_lazy_init_eligible_rejects_depth_stencil_compressed_and_multisampled() {
-        let device = noop_device();
-        let depth = Texture::new(
-            TextureDescriptor {
-                format: TextureFormat::from_raw(TextureFormat::DEPTH16_UNORM),
-                ..valid_texture_descriptor()
-            },
-            None,
-            false,
-            FeatureSet::new(),
-        );
-        let depth_stencil = Texture::new(
+    fn texture_init_state_tracks_depth_and_stencil_aspects_independently() {
+        let texture = depth_stencil_texture(TextureFormat::DEPTH24_PLUS_STENCIL8);
+
+        texture.set_initialized(0, 0, InitAspect::Depth, true);
+
+        assert!(texture.is_initialized(0, 0, InitAspect::Depth));
+        assert!(!texture.is_initialized(0, 0, InitAspect::Stencil));
+        // The color axis does not exist on this format, so it can neither be
+        // marked nor read as initialized.
+        texture.set_initialized(0, 0, InitAspect::Color, true);
+        assert!(!texture.is_initialized(0, 0, InitAspect::Color));
+    }
+
+    #[test]
+    fn texture_init_state_keeps_every_mip_layer_aspect_slot_distinct() {
+        let texture = Texture::new(
             TextureDescriptor {
                 format: TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8),
+                usage: TextureUsage::RENDER_ATTACHMENT,
+                size: Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 2,
+                },
+                mip_level_count: 2,
                 ..valid_texture_descriptor()
             },
             None,
             false,
             FeatureSet::new(),
         );
+
+        texture.set_initialized(1, 1, InitAspect::Stencil, true);
+
+        assert!(texture.is_initialized(1, 1, InitAspect::Stencil));
+        for (mip, layer, aspect) in [
+            (1, 1, InitAspect::Depth),
+            (1, 0, InitAspect::Stencil),
+            (0, 1, InitAspect::Stencil),
+            (0, 0, InitAspect::Stencil),
+        ] {
+            assert!(
+                !texture.is_initialized(mip, layer, aspect),
+                "mip {mip} layer {layer} {aspect:?} must stay uninitialized"
+            );
+        }
+    }
+
+    #[test]
+    fn texture_init_aspects_expands_all_per_format_and_intersects_single_aspects() {
+        let color = noop_device().create_texture(valid_texture_descriptor());
+        let combined = depth_stencil_texture(TextureFormat::DEPTH24_PLUS_STENCIL8);
+        let depth_only = depth_stencil_texture(TextureFormat::DEPTH16_UNORM);
+        let stencil_only = depth_stencil_texture(TextureFormat::STENCIL8);
+
+        assert_eq!(
+            color.init_aspects(TextureAspect::All),
+            InitAspects::only(InitAspect::Color)
+        );
+        assert_eq!(
+            combined.init_aspects(TextureAspect::All),
+            InitAspects {
+                color: false,
+                depth: true,
+                stencil: true,
+            }
+        );
+        assert_eq!(
+            combined.init_aspects(TextureAspect::DepthOnly),
+            InitAspects::only(InitAspect::Depth)
+        );
+        assert_eq!(
+            combined.init_aspects(TextureAspect::StencilOnly),
+            InitAspects::only(InitAspect::Stencil)
+        );
+        assert_eq!(
+            depth_only.init_aspects(TextureAspect::All),
+            InitAspects::only(InitAspect::Depth)
+        );
+        assert_eq!(
+            stencil_only.init_aspects(TextureAspect::All),
+            InitAspects::only(InitAspect::Stencil)
+        );
+        // A single-aspect selection the format does not have selects nothing.
+        assert!(color.init_aspects(TextureAspect::DepthOnly).is_empty());
+        assert!(depth_only
+            .init_aspects(TextureAspect::StencilOnly)
+            .is_empty());
+    }
+
+    #[test]
+    fn init_aspects_iterates_in_color_depth_stencil_order() {
+        let aspects = InitAspects {
+            color: true,
+            depth: false,
+            stencil: true,
+        };
+
+        assert_eq!(
+            aspects.iter().collect::<Vec<_>>(),
+            vec![InitAspect::Color, InitAspect::Stencil]
+        );
+        assert_eq!(aspects.len(), 2);
+        assert!(InitAspects::default().is_empty());
+    }
+
+    #[test]
+    fn texture_init_tracking_id_is_per_shared_state() {
+        let device = noop_device();
+        let texture = device.create_texture(valid_texture_descriptor());
+        let clone = texture.clone();
+        let other = device.create_texture(valid_texture_descriptor());
+
+        assert_eq!(texture.init_tracking_id(), clone.init_tracking_id());
+        assert_ne!(texture.init_tracking_id(), other.init_tracking_id());
+    }
+
+    #[test]
+    fn texture_lazy_init_eligible_accepts_every_non_transient_texture() {
+        // Stage 1 restricted lazy zero-init to single-sample, uncompressed,
+        // color-only textures; Block 104 R2 widened it to everything but a
+        // transient attachment, so this asserts the inverse of the former
+        // `..._rejects_depth_stencil_compressed_and_multisampled` test.
+        let device = noop_device();
+        let color = device.create_texture(valid_texture_descriptor());
+        let depth = depth_stencil_texture(TextureFormat::DEPTH16_UNORM);
+        let depth_stencil = depth_stencil_texture(TextureFormat::DEPTH24_PLUS_STENCIL8);
         let compressed = Texture::new(
             TextureDescriptor {
                 format: TextureFormat::from_raw(TextureFormat::BC1_RGBA_UNORM),
@@ -1035,7 +1292,7 @@ mod tests {
             },
             None,
             false,
-            FeatureSet::new(),
+            FeatureSet::from([Feature::TextureCompressionBc]),
         );
         let multisampled = device.create_texture(TextureDescriptor {
             usage: TextureUsage::RENDER_ATTACHMENT,
@@ -1043,10 +1300,11 @@ mod tests {
             ..valid_texture_descriptor()
         });
 
-        assert!(!depth.is_lazy_init_eligible());
-        assert!(!depth_stencil.is_lazy_init_eligible());
-        assert!(!compressed.is_lazy_init_eligible());
-        assert!(!multisampled.is_lazy_init_eligible());
+        assert!(color.is_lazy_init_eligible());
+        assert!(depth.is_lazy_init_eligible());
+        assert!(depth_stencil.is_lazy_init_eligible());
+        assert!(compressed.is_lazy_init_eligible());
+        assert!(multisampled.is_lazy_init_eligible());
     }
 
     #[test]
@@ -1070,20 +1328,17 @@ mod tests {
     }
 
     #[test]
-    fn texture_mark_initialized_is_noop_for_ineligible_texture() {
-        let texture = Texture::new(
-            TextureDescriptor {
-                format: TextureFormat::from_raw(TextureFormat::DEPTH32_FLOAT),
-                ..valid_texture_descriptor()
-            },
-            None,
-            false,
-            FeatureSet::new(),
-        );
+    fn texture_set_initialized_is_noop_for_transient_attachment() {
+        // The only ineligible texture left (Block 104 R2): a memoryless
+        // attachment allocates no init state, so marking cannot stick.
+        let texture = noop_device().create_texture(TextureDescriptor {
+            usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::TRANSIENT_ATTACHMENT,
+            ..valid_texture_descriptor()
+        });
 
-        texture.mark_initialized(0, 0);
+        texture.set_initialized(0, 0, InitAspect::Color, true);
 
-        assert!(!texture.is_initialized(0, 0));
+        assert!(!texture.is_initialized(0, 0, InitAspect::Color));
     }
 
     #[test]
@@ -1106,6 +1361,7 @@ mod tests {
                 height: 2,
                 depth_or_array_layers: 2,
             },
+            TextureAspect::All,
         );
 
         assert_eq!(
@@ -1114,14 +1370,53 @@ mod tests {
                 TextureCopySubresource {
                     mip_level: 1,
                     array_layer: 1,
+                    aspects: InitAspects::only(InitAspect::Color),
                     covers_full_subresource: true,
                 },
                 TextureCopySubresource {
                     mip_level: 1,
                     array_layer: 2,
+                    aspects: InitAspects::only(InitAspect::Color),
                     covers_full_subresource: true,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn texture_copy_subresources_reports_the_aspects_the_copy_touches() {
+        let texture = depth_stencil_texture(TextureFormat::DEPTH24_PLUS_STENCIL8);
+        let full = Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        };
+        let origin = Origin3d { x: 0, y: 0, z: 0 };
+
+        let all = texture.copy_subresources(0, origin, full, TextureAspect::All);
+        let depth = texture.copy_subresources(0, origin, full, TextureAspect::DepthOnly);
+
+        assert_eq!(
+            all,
+            vec![TextureCopySubresource {
+                mip_level: 0,
+                array_layer: 0,
+                aspects: InitAspects {
+                    color: false,
+                    depth: true,
+                    stencil: true,
+                },
+                covers_full_subresource: true,
+            }]
+        );
+        assert_eq!(
+            depth,
+            vec![TextureCopySubresource {
+                mip_level: 0,
+                array_layer: 0,
+                aspects: InitAspects::only(InitAspect::Depth),
+                covers_full_subresource: true,
+            }]
         );
     }
 
@@ -1147,10 +1442,12 @@ mod tests {
                     height: 2,
                     depth_or_array_layers: 2,
                 },
+                TextureAspect::All,
             ),
             vec![TextureCopySubresource {
                 mip_level: 1,
                 array_layer: 0,
+                aspects: InitAspects::only(InitAspect::Color),
                 covers_full_subresource: true,
             }]
         );

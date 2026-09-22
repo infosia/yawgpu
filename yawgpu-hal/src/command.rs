@@ -113,6 +113,14 @@ pub struct HalBufferClear {
 }
 
 /// Wraps texture clear data for the selected backend.
+///
+/// The backend must zero the named subresources of the named aspect for **any**
+/// format (color, depth, stencil, combined depth-stencil, compressed) and
+/// **any** sample count; the value is always zero (`0.0` depth, `0` stencil,
+/// zero bytes for a compressed block, `0` color). Block 104 R6 widened that
+/// contract from the color-only, single-sample, uncompressed subset Stage 1
+/// emitted, so a backend that only implements the Stage 1 blit path rejects
+/// the new cases at submit until it is brought up.
 #[derive(Debug, Clone)]
 pub struct HalTextureClear {
     /// Texture.
