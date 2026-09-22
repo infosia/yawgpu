@@ -32,10 +32,12 @@ reproducible under `VK_LAYER_KHRONOS_validation` on a native driver:
    other subresource passes a wrong `oldLayout`
    (VUID-VkImageMemoryBarrier-oldLayout-01197).
 3. **Copy to one layer, sample another.** A `writeTexture` into layer 0
-   and a compute pass sampling layer 1 leave the tracker saying
-   `SHADER_READ_ONLY` for the whole image; a following
-   `copyTextureToBuffer` of layer 0 emits `SHADER_READ_ONLY -> TRANSFER_SRC`
-   while layer 0 is really in `TRANSFER_DST` (same VUID as 2).
+   and a compute pass sampling layer 1 move the *whole* image to
+   `SHADER_READ_ONLY` — over-broad (layer 0 is barriered for a read it is
+   not part of) but self-consistent, so a following `copyTextureToBuffer`
+   of layer 0 is valid today. (Measured in S2: e2e case 2 was already
+   validation-clean before R4; it is kept as the regression guard for the
+   per-range form, where the sampled transition no longer touches layer 0.)
 4. **Tiled subpass passes never transition their bound textures.**
    `encode_subpass_render_pass` transitions attachments only; a
    `draw.bind_textures` entry last written by a copy is sampled in

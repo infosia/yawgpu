@@ -1924,15 +1924,94 @@ fn compute_pass_post_dispatch_barrier_scopes() -> MemoryBarrierScopes {
     }
 }
 
-/// Transitions bind-group textures bound for storage access to `GENERAL`, the
-/// layout their descriptors declare. Textures whose image is listed in
-/// `attachment_images` are skipped: the pass's attachment transitions own their
-/// layout, and barriers cannot be recorded inside a render pass instance anyway.
+/// Returns the single attachment mip/layer; 3D slices share image array layer zero.
+fn attachment_subresource_range_of(
+    dimension: HalTextureDimension,
+    mip_level: u32,
+    array_layer: u32,
+) -> SubresourceRange {
+    SubresourceRange {
+        base_mip_level: mip_level,
+        mip_level_count: 1,
+        base_array_layer: match dimension {
+            HalTextureDimension::D3 => 0,
+            HalTextureDimension::D1 | HalTextureDimension::D2 => array_layer,
+        },
+        array_layer_count: 1,
+    }
+}
+
+/// Returns the exact mip/layer rectangle exposed by a bound texture view.
+fn bound_view_subresource_range(bound: &HalBoundTexture) -> SubresourceRange {
+    SubresourceRange {
+        base_mip_level: bound.base_mip_level,
+        mip_level_count: bound.mip_level_count,
+        base_array_layer: bound.base_array_layer,
+        array_layer_count: bound.array_layer_count,
+    }
+}
+
+/// Subtracts exclusions, merging adjacent layers and then identical mip run lists.
+fn subtract_subresource_ranges(
+    bound: SubresourceRange,
+    exclusions: &[SubresourceRange],
+) -> Vec<SubresourceRange> {
+    let mut result = Vec::new();
+    let mut previous: Vec<SubresourceRange> = Vec::new();
+    for mip in
+        (0..bound.mip_level_count).filter_map(|offset| bound.base_mip_level.checked_add(offset))
+    {
+        let mut runs: Vec<SubresourceRange> = Vec::new();
+        for layer in (0..bound.array_layer_count)
+            .filter_map(|offset| bound.base_array_layer.checked_add(offset))
+        {
+            if exclusions.iter().any(|range| {
+                mip.checked_sub(range.base_mip_level)
+                    .is_some_and(|offset| offset < range.mip_level_count)
+                    && layer
+                        .checked_sub(range.base_array_layer)
+                        .is_some_and(|offset| offset < range.array_layer_count)
+            }) {
+                continue;
+            }
+            if let Some(last) = runs.last_mut() {
+                if last.base_array_layer.checked_add(last.array_layer_count) == Some(layer) {
+                    last.array_layer_count += 1;
+                    continue;
+                }
+            }
+            runs.push(SubresourceRange {
+                base_mip_level: mip,
+                mip_level_count: 1,
+                base_array_layer: layer,
+                array_layer_count: 1,
+            });
+        }
+        let identical = previous.len() == runs.len()
+            && previous.iter().zip(&runs).all(|(a, b)| {
+                a.base_array_layer == b.base_array_layer
+                    && a.array_layer_count == b.array_layer_count
+            });
+        if identical {
+            for run in &mut previous {
+                run.mip_level_count += 1;
+            }
+        } else {
+            result.append(&mut previous);
+            previous = runs;
+        }
+    }
+    result.append(&mut previous);
+    result
+}
+
+/// Transitions storage views to GENERAL outside this pass's attachment subresources.
+/// Attachment intersections stay skipped, preserving Block 105 "Known limitations".
 fn transition_storage_textures(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
     textures: &[HalBoundTexture],
-    attachment_images: &[vk::Image],
+    attachments: &[(vk::Image, SubresourceRange)],
 ) -> Result<(), HalError> {
     for bound in textures
         .iter()
@@ -1942,32 +2021,32 @@ fn transition_storage_textures(
             return Err(texture_error("storage texture is not Vulkan-backed"));
         };
         let inner = texture.inner()?;
-        if attachment_images.contains(&inner.image) {
-            continue;
+        let exclusions: Vec<_> = attachments
+            .iter()
+            .filter_map(|(image, range)| (*image == inner.image).then_some(*range))
+            .collect();
+        for range in subtract_subresource_ranges(bound_view_subresource_range(bound), &exclusions) {
+            transition_image_range(
+                device,
+                command_buffer,
+                inner,
+                range,
+                vk::ImageLayout::GENERAL,
+                IMAGE_LAYOUT_GENERAL,
+            )?;
         }
-        // Whole-image transitions and attachment exclusion remain until the
-        // S2 view-range form (Block 105 R4). Barriers retain full image aspects.
-        transition_image(
-            device,
-            command_buffer,
-            inner,
-            vk::ImageLayout::GENERAL,
-            IMAGE_LAYOUT_GENERAL,
-        )?;
     }
     Ok(())
 }
 
-/// Transitions bind-group textures bound for sampled reads (non-storage
-/// bindings) to `SHADER_READ_ONLY_OPTIMAL`, the layout their descriptors
-/// declare. Textures whose image is listed in `attachment_images` are skipped:
-/// the pass's attachment transitions own their layout, and barriers cannot be
-/// recorded inside a render pass instance anyway.
+/// Transitions sampled views to SHADER_READ_ONLY_OPTIMAL outside attachments.
+/// A read-only depth-stencil attachment sampled in the same pass stays skipped
+/// (Block 105 "Known limitations"); other mips/layers of its image still transition.
 fn transition_sampled_textures(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
     textures: &[HalBoundTexture],
-    attachment_images: &[vk::Image],
+    attachments: &[(vk::Image, SubresourceRange)],
 ) -> Result<(), HalError> {
     for bound in textures
         .iter()
@@ -1977,18 +2056,20 @@ fn transition_sampled_textures(
             return Err(texture_error("sampled texture is not Vulkan-backed"));
         };
         let inner = texture.inner()?;
-        if attachment_images.contains(&inner.image) {
-            continue;
+        let exclusions: Vec<_> = attachments
+            .iter()
+            .filter_map(|(image, range)| (*image == inner.image).then_some(*range))
+            .collect();
+        for range in subtract_subresource_ranges(bound_view_subresource_range(bound), &exclusions) {
+            transition_image_range(
+                device,
+                command_buffer,
+                inner,
+                range,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                IMAGE_LAYOUT_SHADER_READ_ONLY,
+            )?;
         }
-        // Whole-image transitions and attachment exclusion remain until the
-        // S2 view-range form (Block 105 R4). Barriers retain full image aspects.
-        transition_image(
-            device,
-            command_buffer,
-            inner,
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            IMAGE_LAYOUT_SHADER_READ_ONLY,
-        )?;
     }
     Ok(())
 }
@@ -2826,6 +2907,7 @@ fn encode_render_pass_impl(
             }
         }
     }
+    let mut attachments = Vec::new();
     for (slot, texture) in color_textures
         .iter()
         .enumerate()
@@ -2843,55 +2925,69 @@ fn encode_render_pass_impl(
                 IMAGE_LAYOUT_COLOR_ATTACHMENT,
             )
         };
-        transition_image(
+        let target = pass
+            .color_targets
+            .get(slot)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| texture_error("color attachment target is missing"))?;
+        let range = attachment_subresource_range_of(
+            texture.dimension,
+            target.mip_level,
+            target.array_layer,
+        );
+        attachments.push((texture.inner()?.image, range));
+        transition_image_range(
             vk_device,
             command_buffer,
             texture.inner()?,
+            range,
             layout,
             layout_id,
         )?;
     }
-    for texture in resolve_textures.iter().flatten() {
-        transition_image(
+    for (texture, target) in resolve_textures
+        .iter()
+        .copied()
+        .zip(&pass.color_targets)
+        .filter_map(|(texture, target)| texture.zip(target.as_ref()))
+    {
+        let range = attachment_subresource_range_of(
+            texture.dimension,
+            target.resolve_mip_level,
+            target.resolve_array_layer,
+        );
+        attachments.push((texture.inner()?.image, range));
+        transition_image_range(
             vk_device,
             command_buffer,
             texture.inner()?,
+            range,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             IMAGE_LAYOUT_COLOR_ATTACHMENT,
         )?;
     }
-    if let (Some(texture), Some(_attachment)) =
+    if let (Some(texture), Some(attachment)) =
         (depth_stencil_texture, &pass.depth_stencil_attachment)
     {
-        transition_image(
+        let range = attachment_subresource_range_of(
+            texture.dimension,
+            attachment.mip_level,
+            attachment.array_layer,
+        );
+        attachments.push((texture.inner()?.image, range));
+        transition_image_range(
             vk_device,
             command_buffer,
             texture.inner()?,
+            range,
             vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
             IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT,
         )?;
     }
-    // Move sampled bind-group textures to the layout their descriptors declare
-    // before the render pass instance begins (barriers are illegal inside it).
-    // Textures that are also attachments of this pass keep the attachment
-    // layout chosen above.
-    let mut attachment_images = Vec::new();
-    for texture in color_textures.iter().flatten() {
-        attachment_images.push(texture.inner()?.image);
-    }
-    for texture in resolve_textures.iter().flatten() {
-        attachment_images.push(texture.inner()?.image);
-    }
-    if let Some(texture) = depth_stencil_texture {
-        attachment_images.push(texture.inner()?.image);
-    }
-    transition_sampled_textures(vk_device, command_buffer, bind_textures, &attachment_images)?;
-    // Storage-bound textures (e.g. a fragment-stage read-write storage image)
-    // need GENERAL, whose descriptors declare it. Ordered after the sampled
-    // transition so GENERAL wins for a texture bound both sampled and storage,
-    // mirroring the compute-pass encoder. Attachment images keep their
-    // attachment layout.
-    transition_storage_textures(vk_device, command_buffer, bind_textures, &attachment_images)?;
+    // Barriers precede the pass and exclude only attached subresources.
+    transition_sampled_textures(vk_device, command_buffer, bind_textures, &attachments)?;
+    // Storage follows sampled so GENERAL wins for a view bound both ways.
+    transition_storage_textures(vk_device, command_buffer, bind_textures, &attachments)?;
     let color_formats = render_pass_color_formats(&pass.color_targets);
     let resolve_formats = render_pass_resolve_formats(&pass.color_targets)?;
     let render_pass = create_render_pass_for_targets(
@@ -2958,17 +3054,25 @@ fn encode_render_pass_impl(
     unsafe {
         vk_device.cmd_end_render_pass(command_buffer);
     }
-    for texture in color_textures.iter().flatten() {
-        let inner = texture.inner()?;
-        inner
-            .layouts
-            .set(inner.layouts.whole(), IMAGE_LAYOUT_TRANSFER_SRC)?;
+    for (texture, target) in color_attachments.iter().flatten() {
+        texture.inner()?.layouts.set(
+            attachment_subresource_range_of(
+                texture.dimension,
+                target.mip_level,
+                target.array_layer,
+            ),
+            IMAGE_LAYOUT_TRANSFER_SRC,
+        )?;
     }
-    for texture in resolve_textures.iter().flatten() {
-        let inner = texture.inner()?;
-        inner
-            .layouts
-            .set(inner.layouts.whole(), IMAGE_LAYOUT_TRANSFER_SRC)?;
+    for (texture, target) in &resolve_attachments {
+        texture.inner()?.layouts.set(
+            attachment_subresource_range_of(
+                texture.dimension,
+                target.resolve_mip_level,
+                target.resolve_array_layer,
+            ),
+            IMAGE_LAYOUT_TRANSFER_SRC,
+        )?;
     }
     for (texture, target) in color_textures
         .iter()
@@ -2978,10 +3082,16 @@ fn encode_render_pass_impl(
         .filter(|(_, target)| !target.store)
     {
         let inner = texture.inner()?;
-        transition_image(
+        let attachment_range = attachment_subresource_range_of(
+            texture.dimension,
+            target.mip_level,
+            target.array_layer,
+        );
+        transition_image_range(
             vk_device,
             command_buffer,
             inner,
+            attachment_range,
             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
             IMAGE_LAYOUT_TRANSFER_DST,
         )?;
@@ -2995,10 +3105,11 @@ fn encode_render_pass_impl(
                 &[color_attachment_subresource_range(texture, target)],
             );
         }
-        transition_image(
+        transition_image_range(
             vk_device,
             command_buffer,
             inner,
+            attachment_range,
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
             IMAGE_LAYOUT_TRANSFER_SRC,
         )?;
@@ -3013,10 +3124,16 @@ fn encode_render_pass_impl(
         );
         if !discarded_aspects.is_empty() {
             let inner = texture.inner()?;
-            transition_image(
+            let attachment_range = attachment_subresource_range_of(
+                texture.dimension,
+                attachment.mip_level,
+                attachment.array_layer,
+            );
+            transition_image_range(
                 vk_device,
                 command_buffer,
                 inner,
+                attachment_range,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 IMAGE_LAYOUT_TRANSFER_DST,
             )?;
@@ -3034,10 +3151,11 @@ fn encode_render_pass_impl(
                     &[range],
                 );
             }
-            transition_image(
+            transition_image_range(
                 vk_device,
                 command_buffer,
                 inner,
+                attachment_range,
                 vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                 IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT,
             )?;
@@ -4960,6 +5078,113 @@ mod tests {
         assert_eq!(
             subpass_color_tracked_layout(false),
             IMAGE_LAYOUT_TRANSFER_SRC
+        );
+    }
+
+    /// Builds a pure mip/layer rectangle for exclusion tests.
+    fn subresource_range(mip: u32, mips: u32, layer: u32, layers: u32) -> SubresourceRange {
+        SubresourceRange {
+            base_mip_level: mip,
+            mip_level_count: mips,
+            base_array_layer: layer,
+            array_layer_count: layers,
+        }
+    }
+
+    /// Attachment ranges select one mip and layer, with 3D slices sharing layer zero.
+    #[test]
+    fn attachment_subresource_range_of_scopes_dimensions() {
+        for dimension in [HalTextureDimension::D1, HalTextureDimension::D2] {
+            assert_eq!(
+                attachment_subresource_range_of(dimension, 2, 3),
+                subresource_range(2, 1, 3, 1)
+            );
+        }
+        assert_eq!(
+            attachment_subresource_range_of(HalTextureDimension::D3, 2, 3),
+            subresource_range(2, 1, 0, 1)
+        );
+        assert_eq!(
+            attachment_subresource_range_of(HalTextureDimension::D2, 0, 0),
+            subresource_range(0, 1, 0, 1)
+        );
+    }
+
+    /// View ranges preserve both nonzero bases and multi-subresource counts.
+    #[test]
+    fn bound_view_subresource_range_preserves_view_rectangle() {
+        let mut bound = bound_texture(dummy_texture(HalTextureFormat::Rgba8Unorm));
+        assert_eq!(
+            bound_view_subresource_range(&bound),
+            subresource_range(0, 1, 0, 1)
+        );
+        bound.base_mip_level = 2;
+        bound.mip_level_count = 3;
+        bound.base_array_layer = 4;
+        bound.array_layer_count = 5;
+        assert_eq!(
+            bound_view_subresource_range(&bound),
+            subresource_range(2, 3, 4, 5)
+        );
+    }
+
+    /// A mip-zero attachment excludes only that mip from a two-mip view.
+    #[test]
+    fn subtract_subresource_ranges_excludes_attachment_mip() {
+        assert_eq!(
+            subtract_subresource_ranges(
+                subresource_range(0, 2, 0, 1),
+                &[subresource_range(0, 1, 0, 1)]
+            ),
+            vec![subresource_range(1, 1, 0, 1)]
+        );
+    }
+
+    /// Fully contained views have no remaining transition rectangles.
+    #[test]
+    fn subtract_subresource_ranges_contained_is_empty() {
+        assert!(subtract_subresource_ranges(
+            subresource_range(1, 1, 2, 1),
+            &[subresource_range(0, 3, 0, 4)]
+        )
+        .is_empty());
+    }
+
+    /// Disjoint and absent exclusions leave the complete view unchanged.
+    #[test]
+    fn subtract_subresource_ranges_ignores_disjoint_and_absent_exclusions() {
+        let bound = subresource_range(1, 2, 2, 3);
+        for exclusions in [
+            vec![],
+            vec![subresource_range(0, 1, 2, 3)],
+            vec![subresource_range(1, 2, 8, 1)],
+            vec![subresource_range(9, 2, 9, 2)],
+        ] {
+            assert_eq!(subtract_subresource_ranges(bound, &exclusions), vec![bound]);
+        }
+    }
+
+    /// Removing an interior layer leaves two non-overlapping layer runs.
+    #[test]
+    fn subtract_subresource_ranges_splits_layers() {
+        assert_eq!(
+            subtract_subresource_ranges(
+                subresource_range(0, 1, 0, 4),
+                &[subresource_range(0, 1, 1, 1)]
+            ),
+            vec![subresource_range(0, 1, 0, 1), subresource_range(0, 1, 2, 2)]
+        );
+    }
+
+    /// Overlapping exclusions coalesce surviving identical run lists across mips.
+    #[test]
+    fn subtract_subresource_ranges_coalesces_multiple_exclusions() {
+        assert_eq!(
+            subtract_subresource_ranges(
+                subresource_range(2, 3, 1, 6),
+                &[subresource_range(2, 3, 2, 2), subresource_range(2, 3, 3, 2)]
+            ),
+            vec![subresource_range(2, 3, 1, 1), subresource_range(2, 3, 5, 2)]
         );
     }
 
