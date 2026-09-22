@@ -277,14 +277,7 @@ impl MetalQueue {
                         result?;
                     }
                     HalCopy::ClearTexture(clear) => {
-                        let blit = command_buffer.blitCommandEncoder().ok_or_else(|| {
-                            queue_submission_error(
-                                "texture-clear blit encoder creation returned nil",
-                            )
-                        })?;
-                        let result = encode_texture_clear(&blit, clear);
-                        blit.endEncoding();
-                        result?;
+                        encode_texture_clear(&command_buffer, clear)?;
                     }
                     HalCopy::WriteTimestamp(write) => {
                         let HalQuerySet::Metal(query_set) = &write.query_set else {

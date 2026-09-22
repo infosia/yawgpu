@@ -48,10 +48,137 @@ pub(super) fn encode_buffer_clear(
     Ok(())
 }
 
-/// Records texture clear encode into the command stream.
+/// Encoding required to zero a texture subresource.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClearStrategy {
+    RenderPass {
+        depth: bool,
+        stencil: bool,
+        color: bool,
+    },
+    BlockBlit {
+        block: (u32, u32, u32),
+    },
+    TexelBlit,
+}
+
+/// Selects attachments independently so clearing one packed aspect preserves the other.
+fn clear_strategy(
+    format: HalTextureFormat,
+    sample_count: u32,
+    aspect: HalTextureAspect,
+) -> ClearStrategy {
+    let has_depth = format_has_depth_aspect(format);
+    let has_stencil = format_has_stencil_aspect(format);
+    if has_depth || has_stencil || sample_count > 1 {
+        ClearStrategy::RenderPass {
+            depth: has_depth && aspect != HalTextureAspect::StencilOnly,
+            stencil: has_stencil && aspect != HalTextureAspect::DepthOnly,
+            color: !has_depth && !has_stencil,
+        }
+    } else if let Some(block) = format.compressed_block_info() {
+        ClearStrategy::BlockBlit { block }
+    } else {
+        ClearStrategy::TexelBlit
+    }
+}
+
+/// Computes tightly packed block rows, including partial edge blocks.
+fn compressed_clear_layout(
+    width: u32,
+    height: u32,
+    block: (u32, u32, u32),
+) -> Result<(u64, u64), HalError> {
+    let (bytes, block_width, block_height) = block;
+    if block_width == 0 || block_height == 0 {
+        return Err(texture_error("texture clear block dimensions are zero"));
+    }
+    let row = u64::from(width.div_ceil(block_width)) * u64::from(bytes);
+    let image = row
+        .checked_mul(u64::from(height.div_ceil(block_height)))
+        .ok_or_else(|| texture_error("texture clear image bytes overflow"))?;
+    Ok((row, image))
+}
+
+/// Records a zero clear for any format, sample count, and requested aspect.
 pub(super) fn encode_texture_clear(
+    command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+    clear: &HalTextureClear,
+) -> Result<(), HalError> {
+    let HalTexture::Metal(texture) = &clear.texture else {
+        return Err(texture_error("texture is not Metal-backed"));
+    };
+    let strategy = clear_strategy(clear.format, texture.sample_count, clear.aspect);
+    if let ClearStrategy::RenderPass {
+        depth,
+        stencil,
+        color,
+    } = strategy
+    {
+        let end = clear
+            .base_array_layer
+            .checked_add(clear.array_layer_count)
+            .ok_or_else(|| texture_error("texture clear layer range overflows"))?;
+        for layer in clear.base_array_layer..end {
+            let descriptor = MTLRenderPassDescriptor::new();
+            let level = to_ns(u64::from(clear.mip_level))?;
+            let slice = to_ns(u64::from(layer))?;
+            if depth {
+                let attachment = descriptor.depthAttachment();
+                attachment.setTexture(Some(texture.inner()?));
+                attachment.setLevel(level);
+                attachment.setSlice(slice);
+                attachment.setLoadAction(MTLLoadAction::Clear);
+                attachment.setStoreAction(MTLStoreAction::Store);
+                attachment.setClearDepth(0.0);
+            }
+            if stencil {
+                let attachment = descriptor.stencilAttachment();
+                attachment.setTexture(Some(texture.inner()?));
+                attachment.setLevel(level);
+                attachment.setSlice(slice);
+                attachment.setLoadAction(MTLLoadAction::Clear);
+                attachment.setStoreAction(MTLStoreAction::Store);
+                attachment.setClearStencil(0);
+            }
+            if color {
+                let attachment =
+                    unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
+                attachment.setTexture(Some(texture.inner()?));
+                attachment.setLevel(level);
+                attachment.setSlice(slice);
+                attachment.setLoadAction(MTLLoadAction::Clear);
+                attachment.setStoreAction(MTLStoreAction::Store);
+                attachment.setClearColor(MTLClearColor {
+                    red: 0.0,
+                    green: 0.0,
+                    blue: 0.0,
+                    alpha: 0.0,
+                });
+            }
+            let encoder = command_buffer
+                .renderCommandEncoderWithDescriptor(&descriptor)
+                .ok_or_else(|| {
+                    texture_error("texture-clear render encoder creation returned nil")
+                })?;
+            encoder.endEncoding();
+        }
+        Ok(())
+    } else {
+        let blit = command_buffer
+            .blitCommandEncoder()
+            .ok_or_else(|| texture_error("texture-clear blit encoder creation returned nil"))?;
+        let result = encode_texture_clear_blit(&blit, clear, strategy);
+        blit.endEncoding();
+        result
+    }
+}
+
+/// Clears a single-sample color subresource from zeroed staging memory.
+fn encode_texture_clear_blit(
     blit: &ProtocolObject<dyn MTLBlitCommandEncoder>,
     clear: &HalTextureClear,
+    strategy: ClearStrategy,
 ) -> Result<(), HalError> {
     let HalTexture::Metal(texture) = &clear.texture else {
         return Err(texture_error("texture is not Metal-backed"));
@@ -60,12 +187,16 @@ pub(super) fn encode_texture_clear(
         return Ok(());
     }
     let (width, height, depth) = mip_texture_extent(texture, clear.mip_level)?;
-    let bytes_per_row = u64::from(width)
-        .checked_mul(u64::from(texture.bytes_per_pixel))
-        .ok_or_else(|| texture_error("texture clear row bytes overflow"))?;
-    let bytes_per_image = bytes_per_row
-        .checked_mul(u64::from(height))
-        .ok_or_else(|| texture_error("texture clear image bytes overflow"))?;
+    let (bytes_per_row, bytes_per_image) = match strategy {
+        ClearStrategy::BlockBlit { block } => compressed_clear_layout(width, height, block)?,
+        _ => {
+            let row = u64::from(width) * u64::from(texture.bytes_per_pixel);
+            let image = row
+                .checked_mul(u64::from(height))
+                .ok_or_else(|| texture_error("texture clear image bytes overflow"))?;
+            (row, image)
+        }
+    };
     let image_count = match texture.dimension {
         HalTextureDimension::D3 => depth,
         HalTextureDimension::D1 | HalTextureDimension::D2 => clear.array_layer_count,
@@ -1895,6 +2026,356 @@ mod tests {
         HalSubpassAttachmentLayout, HalSubpassColorAttachment, HalSubpassInputAttachment,
         HalSubpassLayout, HalSubpassPassLayout, HalSubpassRenderPassCommand,
     };
+
+    #[test]
+    fn clear_strategy_selects_aspects_samples_and_blocks() {
+        use HalTextureAspect::{All, DepthOnly, StencilOnly};
+        for format in [
+            HalTextureFormat::Depth24PlusStencil8,
+            HalTextureFormat::Depth32FloatStencil8,
+        ] {
+            for (aspect, depth, stencil) in [
+                (All, true, true),
+                (DepthOnly, true, false),
+                (StencilOnly, false, true),
+            ] {
+                for samples in [1, 4] {
+                    assert_eq!(
+                        clear_strategy(format, samples, aspect),
+                        ClearStrategy::RenderPass {
+                            depth,
+                            stencil,
+                            color: false
+                        }
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            clear_strategy(HalTextureFormat::Depth32Float, 1, All),
+            ClearStrategy::RenderPass {
+                depth: true,
+                stencil: false,
+                color: false
+            }
+        );
+        assert_eq!(
+            clear_strategy(HalTextureFormat::Stencil8, 1, StencilOnly),
+            ClearStrategy::RenderPass {
+                depth: false,
+                stencil: true,
+                color: false
+            }
+        );
+        assert_eq!(
+            clear_strategy(HalTextureFormat::Rgba8Unorm, 4, All),
+            ClearStrategy::RenderPass {
+                depth: false,
+                stencil: false,
+                color: true
+            }
+        );
+        assert_eq!(
+            clear_strategy(HalTextureFormat::Rgba8Unorm, 1, All),
+            ClearStrategy::TexelBlit
+        );
+        assert_eq!(
+            clear_strategy(HalTextureFormat::Bc1RgbaUnorm, 1, All),
+            ClearStrategy::BlockBlit { block: (8, 4, 4) }
+        );
+    }
+
+    #[test]
+    fn compressed_clear_layout_rounds_edge_blocks_and_checks_overflow() {
+        for (width, height, expected) in [
+            (8, 8, (16, 32)),
+            (9, 9, (24, 72)),
+            (1, 1, (8, 8)),
+            (4, 4, (8, 8)),
+            (0, 0, (0, 0)),
+        ] {
+            assert_eq!(
+                compressed_clear_layout(width, height, (8, 4, 4)).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            compressed_clear_layout(13, 11, (16, 6, 5)).unwrap(),
+            (48, 144)
+        );
+        assert!(compressed_clear_layout(4, 4, (8, 0, 4)).is_err());
+        assert!(compressed_clear_layout(u32::MAX, u32::MAX, (16, 1, 1)).is_err());
+    }
+
+    fn finish_clear_test_commands(command: &ProtocolObject<dyn MTLCommandBuffer>) {
+        command.commit();
+        command.waitUntilCompleted();
+        assert_eq!(
+            command.status(),
+            MTLCommandBufferStatus::Completed,
+            "{:?}",
+            command.error()
+        );
+    }
+
+    fn clear_test_request(
+        texture: &MetalTexture,
+        aspect: HalTextureAspect,
+        mip_level: u32,
+    ) -> HalTextureClear {
+        HalTextureClear {
+            texture: HalTexture::Metal(texture.clone()),
+            format: texture.format,
+            aspect,
+            mip_level,
+            base_array_layer: 0,
+            array_layer_count: 1,
+        }
+    }
+
+    fn clear_test_copy(
+        texture: &MetalTexture,
+        buffer: &MetalBuffer,
+        aspect: HalTextureAspect,
+        mip_level: u32,
+    ) -> HalBufferTextureCopy {
+        let width = (texture.width >> mip_level).max(1);
+        let height = (texture.height >> mip_level).max(1);
+        let rows = texture
+            .format
+            .compressed_block_info()
+            .map_or(height, |(_, _, h)| height.div_ceil(h));
+        HalBufferTextureCopy {
+            buffer: HalBuffer::Metal(buffer.clone()),
+            buffer_layout: crate::HalBufferTextureLayout {
+                offset: 0,
+                bytes_per_row: 256,
+                rows_per_image: rows,
+            },
+            texture: HalTexture::Metal(texture.clone()),
+            format: texture.format,
+            aspect,
+            mip_level,
+            origin: crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+            extent: HalExtent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        }
+    }
+
+    fn read_clear_test_texture(
+        device: &MetalDevice,
+        texture: &MetalTexture,
+        aspect: HalTextureAspect,
+        mip: u32,
+        row_bytes: usize,
+        rows: usize,
+    ) -> Vec<u8> {
+        let buffer = device
+            .create_buffer(4096, HalBufferUsage::default())
+            .unwrap();
+        buffer.write(0, &[0xa5; 4096]).unwrap();
+        let submission = device
+            .queue()
+            .submit_copies(&[HalCopy::TextureToBuffer(clear_test_copy(
+                texture, &buffer, aspect, mip,
+            ))])
+            .unwrap();
+        device.queue().wait_for_submission(submission).unwrap();
+        let bytes = buffer.read(0, 4096).unwrap();
+        (0..rows)
+            .flat_map(|row| bytes[row * 256..row * 256 + row_bytes].iter().copied())
+            .collect()
+    }
+
+    fn depth_canary(device: &MetalDevice, texture: &MetalTexture, stencil: bool) {
+        let descriptor = MTLRenderPassDescriptor::new();
+        let depth = descriptor.depthAttachment();
+        depth.setTexture(Some(texture.inner().unwrap()));
+        depth.setLoadAction(MTLLoadAction::Clear);
+        depth.setStoreAction(MTLStoreAction::Store);
+        depth.setClearDepth(1.0);
+        if stencil {
+            let attachment = descriptor.stencilAttachment();
+            attachment.setTexture(Some(texture.inner().unwrap()));
+            attachment.setLoadAction(MTLLoadAction::Clear);
+            attachment.setStoreAction(MTLStoreAction::Store);
+            attachment.setClearStencil(255);
+        }
+        let command = device.queue().inner.commandBuffer().unwrap();
+        command
+            .renderCommandEncoderWithDescriptor(&descriptor)
+            .unwrap()
+            .endEncoding();
+        finish_clear_test_commands(&command);
+    }
+
+    #[test]
+    #[cfg(feature = "metal")]
+    #[ignore = "manual real Metal backend test"]
+    fn metal_clear_texture_zeroes_depth32float_after_canary() {
+        let device = metal_device();
+        let mut descriptor = texture_descriptor();
+        descriptor.format = HalTextureFormat::Depth32Float;
+        let texture = device.create_texture(&descriptor).unwrap();
+        depth_canary(&device, &texture, false);
+        assert_eq!(
+            read_clear_test_texture(&device, &texture, HalTextureAspect::DepthOnly, 0, 16, 4),
+            1.0f32.to_ne_bytes().repeat(16)
+        );
+        // Exercise the encoder entry point directly as well as the queue path below.
+        let command = device.queue().inner.commandBuffer().unwrap();
+        encode_texture_clear(
+            &command,
+            &clear_test_request(&texture, HalTextureAspect::DepthOnly, 0),
+        )
+        .unwrap();
+        finish_clear_test_commands(&command);
+        assert_eq!(
+            read_clear_test_texture(&device, &texture, HalTextureAspect::DepthOnly, 0, 16, 4),
+            vec![0; 64]
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "metal")]
+    #[ignore = "manual real Metal backend test"]
+    fn metal_clear_texture_zeroes_stencil_aspect_only() {
+        let device = metal_device();
+        let mut descriptor = texture_descriptor();
+        // Float depth permits exact depth-plane readback on every Metal family.
+        descriptor.format = HalTextureFormat::Depth32FloatStencil8;
+        let texture = device.create_texture(&descriptor).unwrap();
+        depth_canary(&device, &texture, true);
+        assert_eq!(
+            read_clear_test_texture(&device, &texture, HalTextureAspect::StencilOnly, 0, 4, 4),
+            vec![255; 16]
+        );
+        let submission = device
+            .queue()
+            .submit_copies(&[HalCopy::ClearTexture(clear_test_request(
+                &texture,
+                HalTextureAspect::StencilOnly,
+                0,
+            ))])
+            .unwrap();
+        device.queue().wait_for_submission(submission).unwrap();
+        assert_eq!(
+            read_clear_test_texture(&device, &texture, HalTextureAspect::StencilOnly, 0, 4, 4),
+            vec![0; 16]
+        );
+        assert_eq!(
+            read_clear_test_texture(&device, &texture, HalTextureAspect::DepthOnly, 0, 16, 4),
+            1.0f32.to_ne_bytes().repeat(16)
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "metal")]
+    #[ignore = "manual real Metal backend test"]
+    fn metal_clear_texture_zeroes_multisampled_color() {
+        let device = metal_device();
+        let mut descriptor = texture_descriptor();
+        let resolve = device.create_texture(&descriptor).unwrap();
+        descriptor.sample_count = 4;
+        let texture = device.create_texture(&descriptor).unwrap();
+        let pass = MTLRenderPassDescriptor::new();
+        let color = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
+        color.setTexture(Some(texture.inner().unwrap()));
+        color.setLoadAction(MTLLoadAction::Clear);
+        color.setStoreAction(MTLStoreAction::Store);
+        color.setClearColor(MTLClearColor {
+            red: 1.0,
+            green: 0.0,
+            blue: 0.0,
+            alpha: 1.0,
+        });
+        let command = device.queue().inner.commandBuffer().unwrap();
+        command
+            .renderCommandEncoderWithDescriptor(&pass)
+            .unwrap()
+            .endEncoding();
+        finish_clear_test_commands(&command);
+        color.setLoadAction(MTLLoadAction::Load);
+        color.setStoreAction(MTLStoreAction::StoreAndMultisampleResolve);
+        color.setResolveTexture(Some(resolve.inner().unwrap()));
+        let command = device.queue().inner.commandBuffer().unwrap();
+        command
+            .renderCommandEncoderWithDescriptor(&pass)
+            .unwrap()
+            .endEncoding();
+        finish_clear_test_commands(&command);
+        assert_eq!(
+            read_clear_test_texture(&device, &resolve, HalTextureAspect::All, 0, 16, 4),
+            [255, 0, 0, 255].repeat(16)
+        );
+        let submission = device
+            .queue()
+            .submit_copies(&[HalCopy::ClearTexture(clear_test_request(
+                &texture,
+                HalTextureAspect::All,
+                0,
+            ))])
+            .unwrap();
+        device.queue().wait_for_submission(submission).unwrap();
+        let command = device.queue().inner.commandBuffer().unwrap();
+        command
+            .renderCommandEncoderWithDescriptor(&pass)
+            .unwrap()
+            .endEncoding();
+        finish_clear_test_commands(&command);
+        assert_eq!(
+            read_clear_test_texture(&device, &resolve, HalTextureAspect::All, 0, 16, 4),
+            vec![0; 64]
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "metal")]
+    #[ignore = "manual real Metal backend test"]
+    fn metal_clear_texture_zeroes_bc1_mip_and_keeps_canary_mip() {
+        let device = metal_device();
+        let mut descriptor = texture_descriptor();
+        descriptor.format = HalTextureFormat::Bc1RgbaUnorm;
+        descriptor.width = 8;
+        descriptor.height = 8;
+        descriptor.mip_level_count = 2;
+        descriptor.usage.render_attachment = false;
+        let texture = device.create_texture(&descriptor).unwrap();
+        let buffer = device
+            .create_buffer(4096, HalBufferUsage::default())
+            .unwrap();
+        buffer.write(0, &[0xa5; 4096]).unwrap();
+        let copies = [
+            HalCopy::BufferToTexture(clear_test_copy(&texture, &buffer, HalTextureAspect::All, 0)),
+            HalCopy::BufferToTexture(clear_test_copy(&texture, &buffer, HalTextureAspect::All, 1)),
+        ];
+        let submission = device.queue().submit_copies(&copies).unwrap();
+        device.queue().wait_for_submission(submission).unwrap();
+        assert_eq!(
+            read_clear_test_texture(&device, &texture, HalTextureAspect::All, 1, 8, 1),
+            vec![0xa5; 8]
+        );
+        let submission = device
+            .queue()
+            .submit_copies(&[HalCopy::ClearTexture(clear_test_request(
+                &texture,
+                HalTextureAspect::All,
+                1,
+            ))])
+            .unwrap();
+        device.queue().wait_for_submission(submission).unwrap();
+        assert_eq!(
+            read_clear_test_texture(&device, &texture, HalTextureAspect::All, 1, 8, 1),
+            vec![0; 8]
+        );
+        assert_eq!(
+            read_clear_test_texture(&device, &texture, HalTextureAspect::All, 0, 16, 2),
+            vec![0xa5; 32]
+        );
+    }
 
     #[test]
     fn per_stage_slots_resolves_stage_specific_and_flat_fallbacks() {
