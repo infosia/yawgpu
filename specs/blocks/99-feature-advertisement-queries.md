@@ -1,6 +1,6 @@
 # Block 99 — Feature advertisement follows Dawn's device queries
 
-Status: **SPEC (2026-09-22)**. Backlog item **A4** in
+Status: **IMPLEMENTED (2026-09-22)** — HAL in `1c597cd`; real-device inline tests green on M2 Metal + MoltenVK; C-ABI e2e (`e2e_metal_feature_queries.rs`, `e2e_vulkan_feature_queries.rs`) green against direct Metal / `ash` oracles. CTS re-confirm pending (S4 of Block 102). Backlog item **A4** in
 `specs/tracking/backlog.md`. Generalises Block 72 (which fixed
 `texture-formats-tier1/2`) to the remaining `supports_*` entries that
 still return a literal where Dawn queries the device.

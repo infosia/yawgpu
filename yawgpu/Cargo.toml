@@ -24,6 +24,9 @@ bindgen = "0.72"
 [dev-dependencies]
 yawgpu-test = { path = "../yawgpu-test" }
 yawgpu-hal = { path = "../yawgpu-hal" }
+# Direct physical-device oracle for the real-Vulkan feature-advertisement e2e
+# test (Block 99); a plain loader query, independent of the HAL.
+ash = "0.38.0"
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 # Standalone CAMetalLayer construction for the real-Metal surface e2e test.
