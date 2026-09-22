@@ -1,6 +1,6 @@
 # Block 102 — `timestamp-query` executes (Metal + Vulkan)
 
-Status: **SPEC (2026-09-22)**. Backlog item **A1** in
+Status: **S1–S3 IMPLEMENTED (2026-09-22)** — S1 `8fe363a` (core + Noop), S2 Metal + S3 Vulkan landed together (see git log); real-GPU e2e 4/4 on M2 Metal and 4/4 on MoltenVK; Khronos validation layer clean on the Vulkan e2e. S4 (CTS re-run + Phase Review) pending. Backlog item **A1** in
 `specs/tracking/backlog.md`. Depends on Block 99 (the advertisement
 now follows Dawn's device query; on Metal the cached
 `metal_device_supports_counter_sampling` decides the sampling mode
@@ -82,11 +82,28 @@ Metal, Vulkan (and any future backend) share it.
   - stage-boundary devices (all Apple GPUs): end any open encoder, then
     open a blit encoder from an `MTLBlitPassDescriptor` whose
     `sampleBufferAttachments[0]` has `sampleBuffer = set`,
-    `startOfEncoderSampleIndex = MTLCounterDontSample`,
-    `endOfEncoderSampleIndex = index`; encode
+    **`startOfEncoderSampleIndex = index`,
+    `endOfEncoderSampleIndex = MTLCounterDontSample`**; encode
     `fillBuffer(mock, {0,1}, 0)` (Dawn's
     `MetalUseMockBlitEncoderForWriteTimestamp`, default-on: Metal drops
     the sample on an empty encoder); end the encoder.
+    *Deviation from Dawn (measured 2026-09-22, M2 / Apple8, macOS 26):*
+    Dawn samples `endOfEncoderSampleIndex`. On this device a blit pass
+    that requests an end-of-encoder sample **directly after another blit
+    encoder** (any buffer copy or clear, even 256 bytes) fails the whole
+    command buffer with `kIOGPUCommandBufferCallbackErrorOutOfMemory`,
+    while the same descriptor sampling at the start of the encoder works
+    in every ordering (`[W0 C W1 R]`, `[C W0 W1 R]`, `[W0 P W1 R]`, …).
+    Because the encoder is a 1-byte mock fill, start and end are the same
+    instant for the caller.
+  - **Resolve serialization (Dawn `MetalSerializeTimestampGenerationAndResolution`,
+    crbug.com/372698905), carried on Apple8+:** before a timestamp-set
+    resolve the queue encodes `encodeSignalEvent:value:` +
+    `encodeWaitForEvent:value:` on a device-owned `MTLSharedEvent`
+    (monotonic value). Without it a stamp written after a compute or
+    render pass resolves to `0` on the M2 (measured 2026-09-22: the e2e
+    `end must follow begin: [t, 0]`). Both deviations together are what
+    make every ordering pass; each alone leaves a failing case.
   - otherwise (command boundary): on a blit encoder,
     `sampleCountersInBuffer:atSampleIndex:withBarrier:YES`.
 - `ResolveQuerySet` on a timestamp set (blit encoder): zero-fill
@@ -110,14 +127,18 @@ Metal, Vulkan (and any future backend) share it.
 - Buffers created with `query_resolve` usage also get
   `vk::BufferUsageFlags::STORAGE_BUFFER` (Dawn's internal storage usage
   for `QueryResolve`), so the conversion pass can bind the destination.
-- `encode_compute_pass` gains a **global memory barrier before the
-  dispatch** (`src TRANSFER | COMPUTE_SHADER`, `dst COMPUTE_SHADER`,
-  `MEMORY_WRITE → SHADER_READ | SHADER_WRITE`) and **after it**
-  (`src COMPUTE_SHADER`, `dst TRANSFER | COMPUTE_SHADER | HOST`,
-  `SHADER_WRITE → MEMORY_READ | MEMORY_WRITE`). This is what orders the
-  resolve copy → conversion → later copy/map; it also closes a
-  pre-existing gap (the Vulkan HAL had no buffer barrier around compute
-  passes at all — noted in the backlog).
+- `encode_compute_pass` keeps one global memory barrier before and one
+  after the dispatch, widened to the **union** of the F-106 scopes it
+  already had (`transfer_to_compute_barrier` / `compute_to_transfer_barrier`
+  from `c723a82`: indirect / index / vertex-input / vertex / fragment) and
+  the scopes this block needs: before — `src TRANSFER | COMPUTE_SHADER`,
+  `MEMORY_WRITE → SHADER_READ | SHADER_WRITE` (+ F-106 dst); after —
+  `src COMPUTE_SHADER`, `SHADER_WRITE → MEMORY_READ | MEMORY_WRITE`,
+  `dst TRANSFER | COMPUTE_SHADER | HOST` (+ F-106 dst). The resolve
+  additionally ends with a buffer barrier `TRANSFER_WRITE → SHADER_READ |
+  SHADER_WRITE` on the destination range so the conversion pass observes
+  the copied results. *(The earlier draft of this rule said the HAL had no
+  compute-pass barrier at all; that was wrong — F-106 added one.)*
 
 ### R4 — Core
 
@@ -151,6 +172,12 @@ Metal, Vulkan (and any future backend) share it.
 
 - WGSL, adapted from Dawn's `sConvertTimestampsToNanoseconds`: the
   timestamps buffer is `@group(0) @binding(0) var<storage, read_write>`
+  declared as a **flat `array<u32>`** (low word at `2*i`, high word at
+  `2*i + 1`) rather than Dawn's `array<Timestamp>` of structs — loading a
+  whole struct out of a storage buffer becomes a `device`-to-local struct
+  copy in MSL that SPIRV-Cross (MoltenVK) rejects for Tint's
+  robustness-clamped SPIR-V (`no matching constructor for initialization
+  of 'Timestamp'`, found 2026-09-22); scalar loads translate everywhere —
   and the parameters come from **immediates**
   (`var<immediate> params: TimestampParams` — `count`, `multiplier`,
   `right_shift`; 12 bytes) instead of a uniform buffer. No quantization

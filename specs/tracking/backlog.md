@@ -135,3 +135,24 @@ reference `> i32::MAX`, `first_instance` indirect, external textures,
 6. **B4** the three genuine core gaps behind the remaining CTS ignores.
 7. **B5** surface capabilities (cheap, and unblocks real presentation use).
 8. Then C (platform surfaces, CI) and D (GLES) as separate initiatives; F alongside any of the above.
+
+---
+
+## Progress log
+
+### 2026-09-22 — A4, A2, B1, A1 executed (Blocks 99–102)
+
+| Item | Result |
+|---|---|
+| A4 | **Done.** Block 99: `1c597cd` (HAL), `3c502dd` (e2e). Metal `timestamp_query` / `float32_filterable` and Vulkan `timestamp_query` / `depth32float_stencil8` / `rg11b10ufloat_renderable` / `bgra8unorm_storage` / `float32_filterable` now follow Dawn's device queries; the rest are documented literals. |
+| A2 | **Done.** Block 100: `aed7ded`. Encoder writes are snapshotted and lowered in command order through the staging pool. |
+| B1 | **Done.** Block 101: `6482313`. 202/202 header names resolve. |
+| A1 | **Done (S1–S3), S4 in progress.** Block 102: `8fe363a` (core + Noop) + the Metal/Vulkan HAL commit that follows it. e2e 4/4 on M2 Metal and MoltenVK. |
+
+New findings recorded while executing (each with evidence in the block spec):
+
+- **Metal end-of-encoder counter sampling fails after a blit encoder** (Apple8 / macOS 26): Dawn's `endOfEncoderSampleIndex` form errors the command buffer; yawgpu samples at `startOfEncoderSampleIndex` instead. Watch when Dawn or macOS changes (Block 102 R2).
+- **MoltenVK cannot translate a struct load from a storage buffer** in Tint's robustness-clamped SPIR-V (`no matching constructor for initialization of 'Timestamp'`); the conversion shader uses a flat `array<u32>` (Block 102 R5). Any future internal shader must avoid whole-struct loads from `var<storage>`.
+- **A9 (new, S):** Metal `encode_compute_buffer_sizes` / the render equivalent pass `setBytes` with `N * 4` bytes for `tint_storage_buffer_sizes`, but Tint declares `uint4[ceil(N/4)]` (16-byte elements): the Metal API validation layer reports `argument tint_storage_buffer_sizes[0] ... has space for 4 bytes, but argument has a length(16)` on every pipeline that uses `arrayLength`. Harmless on hardware (only the first lanes are read) but an API-validation error; pad the byte slice to a multiple of 16. Found by running the timestamp e2e under `METAL_DEVICE_WRAPPER_TYPE=1`. Evidence: `yawgpu-hal/src/metal/encode.rs` `msl_buffer_sizes`; `third_party/dawn/src/tint/lang/msl/writer/raise/raise.cc:129`.
+- **A5 correction:** the Vulkan HAL *does* barrier around compute passes since F-106 (`c723a82`); Block 102 widened those scopes rather than adding new ones. A5's per-subresource layout item stands.
+- **Metal API validation layer is worth a periodic run**: `METAL_DEVICE_WRAPPER_TYPE=1 MTL_DEBUG_LAYER=1` on the e2e suites surfaced A9 immediately; the CTS runs do not enable it.
