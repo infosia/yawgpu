@@ -172,6 +172,18 @@ never a reason to skip a CTS case.
   usage accumulation (replaced bindings contribute only after use; render
   bundles import recorded usages on execute), and per-view usage-override
   enforcement (sampled/storage bind groups + attachments).
+- **[2026-09-22 correction — superseded]** The in-repo `tests/cts/` ports were
+  removed in `a9218a0`; conformance is verified by the external
+  webgpu-native-cts suite. Re-checked on that suite (Metal, rebased main of
+  2026-09-22): the three "(b) remaining genuine core gaps" below are all
+  closed — `encoding,cmds,render,draw:*` (incl. the `lastStride` /
+  `arrayStrideState` matrices), `render_pipeline,fragment_state:*`
+  (dual-source-blending, implemented in Block 65) and
+  `getBindGroupLayout:*` (storage-texture auto-layout) run **0 fail**
+  (29,577 pass across resolve + draw + fragment_state + getBindGroupLayout).
+  The "(a) test-wiring" and "(d) native-surface" buckets referred to the
+  deleted in-repo ports and no longer exist. Backlog item B4 is closed as
+  stale; the paragraph below is kept as history.
 - **Remaining CTS ignores: ~50** (was ~67; **P1 closed 11**, **P2-core
   closed 6**). P1 wired `capability_checks/limits/*::create_pipeline_layout_at_over`
   aggregation creators (core already validated; no production change).
