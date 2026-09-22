@@ -1,35 +1,32 @@
-//! Real-Metal surface e2e: configuring with the `webgpu.h` INIT zero
-//! sentinels (`WGPUPresentMode_Undefined`, `WGPUCompositeAlphaMode_Auto`)
-//! must succeed and acquire a texture from a standalone `CAMetalLayer`
-//! (externally reported 2026-08-09; contract in
-//! `specs/blocks/70-finalize.md` → Surface → Sentinel resolution), and —
-//! Block 103 (`specs/blocks/103-surface-capabilities.md`) — the surface
-//! capabilities come from the Metal HAL (Dawn's list), so sRGB formats,
-//! `Immediate` / `Mailbox`, `Premultiplied` and `CopySrc` configure, while
-//! modes outside the list keep being rejected.
+//! Real-Vulkan (MoltenVK through `VK_EXT_metal_surface`) surface e2e for
+//! Block 103 (`specs/blocks/103-surface-capabilities.md`): the surface
+//! capabilities are the driver's (`vkGetPhysicalDeviceSurface*`), a
+//! reported non-`Fifo` present mode configures, `CopySrc` reads back, and
+//! modes outside the reported set are rejected.
 
-#![cfg(all(feature = "metal", target_os = "macos"))]
+#![cfg(all(feature = "vulkan", target_os = "macos"))]
 
 use std::os::raw::c_void;
 use std::sync::{Arc, Mutex};
 
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_quartz_core::CAMetalLayer;
 use yawgpu::native;
 use yawgpu::{
-    YaWGPUInstanceBackendSelect, YAWGPU_INSTANCE_BACKEND_METAL,
+    YaWGPUInstanceBackendSelect, YAWGPU_INSTANCE_BACKEND_VULKAN,
     YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
 };
 use yawgpu_test::{real_backend_skip_reason, wait, RealBackend};
 
 #[test]
 #[ignore = "manual real-backend test"]
-fn metal_surface_configure_with_init_sentinels_acquires_texture() {
-    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+fn vulkan_surface_configure_with_init_sentinels_acquires_texture() {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
         return;
     }
 
     unsafe {
-        let instance = create_metal_instance();
+        let instance = create_vulkan_instance();
         let adapter = request_adapter(instance);
         let device = request_device(instance, adapter);
         assert!(!device.is_null());
@@ -41,7 +38,21 @@ fn metal_surface_configure_with_init_sentinels_acquires_texture() {
             Some(move |error| captured_errors.lock().expect("error lock").push(error)),
         );
 
+        // A bare CAMetalLayer has a zero drawable size; MoltenVK derives the
+        // swapchain extent from it, so size it like a 64x64 window first.
         let layer = CAMetalLayer::layer();
+        layer.setBounds(CGRect {
+            origin: CGPoint { x: 0.0, y: 0.0 },
+            size: CGSize {
+                width: 64.0,
+                height: 64.0,
+            },
+        });
+        layer.setContentsScale(1.0);
+        layer.setDrawableSize(CGSize {
+            width: 64.0,
+            height: 64.0,
+        });
         let surface = create_surface_from_layer(
             instance,
             (&*layer as *const CAMetalLayer).cast_mut().cast::<c_void>(),
@@ -97,14 +108,28 @@ fn metal_surface_configure_with_init_sentinels_acquires_texture() {
 /// Block 103: the C ABI reports Dawn's Metal surface capabilities.
 #[test]
 #[ignore = "manual real-backend test"]
-fn metal_surface_capabilities_match_dawn_metal_list() {
-    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+fn vulkan_surface_capabilities_are_driver_reported() {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
         return;
     }
     unsafe {
-        let instance = create_metal_instance();
+        let instance = create_vulkan_instance();
         let adapter = request_adapter(instance);
+        // A bare CAMetalLayer has a zero drawable size; MoltenVK derives the
+        // swapchain extent from it, so size it like a 64x64 window first.
         let layer = CAMetalLayer::layer();
+        layer.setBounds(CGRect {
+            origin: CGPoint { x: 0.0, y: 0.0 },
+            size: CGSize {
+                width: 64.0,
+                height: 64.0,
+            },
+        });
+        layer.setContentsScale(1.0);
+        layer.setDrawableSize(CGSize {
+            width: 64.0,
+            height: 64.0,
+        });
         let surface = create_surface_from_layer(
             instance,
             (&*layer as *const CAMetalLayer).cast_mut().cast::<c_void>(),
@@ -117,37 +142,25 @@ fn metal_surface_capabilities_match_dawn_metal_list() {
         let formats = std::slice::from_raw_parts(caps.formats, caps.formatCount);
         let present_modes = std::slice::from_raw_parts(caps.presentModes, caps.presentModeCount);
         let alpha_modes = std::slice::from_raw_parts(caps.alphaModes, caps.alphaModeCount);
-        assert_eq!(
-            formats,
-            &[
-                native::WGPUTextureFormat_BGRA8Unorm,
-                native::WGPUTextureFormat_BGRA8UnormSrgb,
-                native::WGPUTextureFormat_RGBA16Float,
-                native::WGPUTextureFormat_RGB10A2Unorm,
-            ]
+        assert!(
+            !formats.is_empty(),
+            "driver must report at least one format"
         );
-        assert_eq!(
-            present_modes,
-            &[
-                native::WGPUPresentMode_Fifo,
-                native::WGPUPresentMode_Immediate,
-                native::WGPUPresentMode_Mailbox,
-            ]
+        assert!(
+            formats.contains(&native::WGPUTextureFormat_BGRA8Unorm),
+            "MoltenVK reports BGRA8Unorm: {formats:?}"
         );
-        assert_eq!(
-            alpha_modes,
-            &[
-                native::WGPUCompositeAlphaMode_Opaque,
-                native::WGPUCompositeAlphaMode_Premultiplied,
-            ]
+        assert!(
+            present_modes.contains(&native::WGPUPresentMode_Fifo),
+            "Fifo is mandatory: {present_modes:?}"
         );
-        assert_eq!(
-            caps.usages,
-            native::WGPUTextureUsage_RenderAttachment
-                | native::WGPUTextureUsage_TextureBinding
-                | native::WGPUTextureUsage_CopySrc
-                | native::WGPUTextureUsage_CopyDst
+        assert!(
+            alpha_modes.contains(&native::WGPUCompositeAlphaMode_Opaque),
+            "MoltenVK reports Opaque: {alpha_modes:?}"
         );
+        assert!(caps.usages & native::WGPUTextureUsage_RenderAttachment != 0);
+        assert!(caps.usages & native::WGPUTextureUsage_CopySrc != 0);
+        eprintln!("vulkan surface caps: formats={formats:?} present={present_modes:?} alpha={alpha_modes:?} usages={:#x}", caps.usages);
         yawgpu::wgpuSurfaceCapabilitiesFreeMembers(caps);
 
         yawgpu::wgpuSurfaceRelease(surface);
@@ -160,32 +173,47 @@ fn metal_surface_capabilities_match_dawn_metal_list() {
 /// all configure; the acquired texture can be cleared and read back.
 #[test]
 #[ignore = "manual real-backend test"]
-fn metal_surface_configure_srgb_immediate_premultiplied_and_copy_back() {
-    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+fn vulkan_surface_configure_reported_srgb_and_non_fifo_modes_and_copy_back() {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
         return;
     }
     unsafe {
-        let instance = create_metal_instance();
+        let instance = create_vulkan_instance();
         let adapter = request_adapter(instance);
         let device = request_device(instance, adapter);
         let errors = install_error_capture(device);
         let queue = yawgpu::wgpuDeviceGetQueue(device);
+        // A bare CAMetalLayer has a zero drawable size; MoltenVK derives the
+        // swapchain extent from it, so size it like a 64x64 window first.
         let layer = CAMetalLayer::layer();
+        layer.setBounds(CGRect {
+            origin: CGPoint { x: 0.0, y: 0.0 },
+            size: CGSize {
+                width: 64.0,
+                height: 64.0,
+            },
+        });
+        layer.setContentsScale(1.0);
+        layer.setDrawableSize(CGSize {
+            width: 64.0,
+            height: 64.0,
+        });
         let surface = create_surface_from_layer(
             instance,
             (&*layer as *const CAMetalLayer).cast_mut().cast::<c_void>(),
         );
+        let (format, present_mode, alpha_mode) = pick_reported_modes(surface, adapter);
         let config = native::WGPUSurfaceConfiguration {
             nextInChain: std::ptr::null_mut(),
             device,
-            format: native::WGPUTextureFormat_BGRA8UnormSrgb,
+            format,
             usage: native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_CopySrc,
             width: 64,
             height: 64,
             viewFormatCount: 0,
             viewFormats: std::ptr::null(),
-            alphaMode: native::WGPUCompositeAlphaMode_Premultiplied,
-            presentMode: native::WGPUPresentMode_Immediate,
+            alphaMode: alpha_mode,
+            presentMode: present_mode,
         };
         yawgpu::wgpuSurfaceConfigure(surface, &config);
         assert!(
@@ -206,10 +234,7 @@ fn metal_surface_configure_srgb_immediate_premultiplied_and_copy_back() {
         );
         let texture = surface_texture.texture.cast_mut();
         assert!(!texture.is_null());
-        assert_eq!(
-            yawgpu::wgpuTextureGetFormat(texture),
-            native::WGPUTextureFormat_BGRA8UnormSrgb
-        );
+        assert_eq!(yawgpu::wgpuTextureGetFormat(texture), format);
 
         // Clear to opaque red and read the top-left texel back through CopySrc.
         let view = yawgpu::wgpuTextureCreateView(texture, std::ptr::null());
@@ -226,8 +251,14 @@ fn metal_surface_configure_srgb_immediate_premultiplied_and_copy_back() {
         yawgpu::wgpuCommandBufferRelease(command_buffer);
         yawgpu::wgpuCommandEncoderRelease(encoder);
         let bytes = read_buffer(instance, readback, 4);
-        // BGRA: blue, green, red, alpha.
-        assert_eq!(bytes, vec![0, 0, 255, 255], "sRGB clear-to-red round trip");
+        let expected = if format == native::WGPUTextureFormat_RGBA8Unorm
+            || format == native::WGPUTextureFormat_RGBA8UnormSrgb
+        {
+            vec![255, 0, 0, 255]
+        } else {
+            vec![0, 0, 255, 255]
+        };
+        assert_eq!(bytes, expected, "clear-to-red round trip for {format}");
         assert_eq!(
             yawgpu::wgpuSurfacePresent(surface),
             native::WGPUStatus_Success
@@ -250,83 +281,43 @@ fn metal_surface_configure_srgb_immediate_premultiplied_and_copy_back() {
     }
 }
 
-/// Block 103: `Rgba16Float` configures and presents.
-#[test]
-#[ignore = "manual real-backend test"]
-fn metal_surface_configure_rgba16float_presents() {
-    if real_backend_skip_reason(RealBackend::Metal).is_some() {
-        return;
-    }
-    unsafe {
-        let instance = create_metal_instance();
-        let adapter = request_adapter(instance);
-        let device = request_device(instance, adapter);
-        let errors = install_error_capture(device);
-        let layer = CAMetalLayer::layer();
-        let surface = create_surface_from_layer(
-            instance,
-            (&*layer as *const CAMetalLayer).cast_mut().cast::<c_void>(),
-        );
-        let config = native::WGPUSurfaceConfiguration {
-            nextInChain: std::ptr::null_mut(),
-            device,
-            format: native::WGPUTextureFormat_RGBA16Float,
-            usage: native::WGPUTextureUsage_RenderAttachment,
-            width: 32,
-            height: 32,
-            viewFormatCount: 0,
-            viewFormats: std::ptr::null(),
-            alphaMode: native::WGPUCompositeAlphaMode_Auto,
-            presentMode: native::WGPUPresentMode_Mailbox,
-        };
-        yawgpu::wgpuSurfaceConfigure(surface, &config);
-        let mut surface_texture = native::WGPUSurfaceTexture {
-            nextInChain: std::ptr::null_mut(),
-            texture: std::ptr::null(),
-            status: 0,
-        };
-        yawgpu::wgpuSurfaceGetCurrentTexture(surface, &mut surface_texture);
-        assert_eq!(
-            surface_texture.status,
-            native::WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal
-        );
-        assert_eq!(
-            yawgpu::wgpuSurfacePresent(surface),
-            native::WGPUStatus_Success
-        );
-        assert!(
-            errors.lock().expect("error lock").is_empty(),
-            "unexpected errors: {:?}",
-            errors.lock().expect("error lock")
-        );
-        yawgpu::wgpuTextureRelease(surface_texture.texture.cast_mut());
-        yawgpu::wgpuSurfaceUnconfigure(surface);
-        yawgpu::wgpuSurfaceRelease(surface);
-        yawgpu::wgpuDeviceRelease(device);
-        yawgpu::wgpuAdapterRelease(adapter);
-        yawgpu::wgpuInstanceRelease(instance);
-    }
-}
-
 /// Block 103: modes outside the reported capabilities are still rejected
 /// with the Block 70 messages, and a rejected configure leaves the surface
 /// unconfigured.
 #[test]
 #[ignore = "manual real-backend test"]
-fn metal_surface_configure_rejects_modes_outside_capabilities() {
-    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+fn vulkan_surface_configure_rejects_modes_outside_capabilities() {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
         return;
     }
     unsafe {
-        let instance = create_metal_instance();
+        let instance = create_vulkan_instance();
         let adapter = request_adapter(instance);
         let device = request_device(instance, adapter);
         let errors = install_error_capture(device);
+        // A bare CAMetalLayer has a zero drawable size; MoltenVK derives the
+        // swapchain extent from it, so size it like a 64x64 window first.
         let layer = CAMetalLayer::layer();
+        layer.setBounds(CGRect {
+            origin: CGPoint { x: 0.0, y: 0.0 },
+            size: CGSize {
+                width: 64.0,
+                height: 64.0,
+            },
+        });
+        layer.setContentsScale(1.0);
+        layer.setDrawableSize(CGSize {
+            width: 64.0,
+            height: 64.0,
+        });
         let surface = create_surface_from_layer(
             instance,
             (&*layer as *const CAMetalLayer).cast_mut().cast::<c_void>(),
         );
+        // Every member below is outside any Vulkan surface's reported set:
+        // a depth format, a usage bit swapchains never carry on MoltenVK,
+        // and a present mode / alpha mode that `pick_unreported` finds absent.
+        let (present_mode, alpha_mode) = pick_unreported_modes(surface, adapter);
         let mut config = native::WGPUSurfaceConfiguration {
             nextInChain: std::ptr::null_mut(),
             device,
@@ -337,17 +328,17 @@ fn metal_surface_configure_rejects_modes_outside_capabilities() {
             viewFormatCount: 0,
             viewFormats: std::ptr::null(),
             alphaMode: native::WGPUCompositeAlphaMode_Opaque,
-            presentMode: native::WGPUPresentMode_FifoRelaxed,
+            presentMode: present_mode,
         };
         yawgpu::wgpuSurfaceConfigure(surface, &config);
         config.presentMode = native::WGPUPresentMode_Fifo;
-        config.alphaMode = native::WGPUCompositeAlphaMode_Unpremultiplied;
+        config.alphaMode = alpha_mode;
         yawgpu::wgpuSurfaceConfigure(surface, &config);
         config.alphaMode = native::WGPUCompositeAlphaMode_Opaque;
-        config.format = native::WGPUTextureFormat_RGBA8Unorm;
+        config.format = native::WGPUTextureFormat_Depth32Float;
         yawgpu::wgpuSurfaceConfigure(surface, &config);
         config.format = native::WGPUTextureFormat_BGRA8Unorm;
-        config.usage = native::WGPUTextureUsage_StorageBinding;
+        config.usage = native::WGPUTextureUsage_RenderAttachment | 0x8000_0000;
         yawgpu::wgpuSurfaceConfigure(surface, &config);
         let captured = errors.lock().expect("error lock");
         let messages: Vec<&str> = captured
@@ -382,6 +373,85 @@ fn metal_surface_configure_rejects_modes_outside_capabilities() {
         yawgpu::wgpuAdapterRelease(adapter);
         yawgpu::wgpuInstanceRelease(instance);
     }
+}
+
+/// Picks a driver-reported (format, present mode, alpha mode) triple,
+/// preferring an sRGB format, a non-`Fifo` present mode and a non-`Opaque`
+/// alpha mode when the driver offers them.
+unsafe fn pick_reported_modes(
+    surface: native::WGPUSurface,
+    adapter: native::WGPUAdapter,
+) -> (
+    native::WGPUTextureFormat,
+    native::WGPUPresentMode,
+    native::WGPUCompositeAlphaMode,
+) {
+    let mut caps: native::WGPUSurfaceCapabilities = std::mem::zeroed();
+    assert_eq!(
+        yawgpu::wgpuSurfaceGetCapabilities(surface, adapter, &mut caps),
+        native::WGPUStatus_Success
+    );
+    let formats = std::slice::from_raw_parts(caps.formats, caps.formatCount);
+    let present_modes = std::slice::from_raw_parts(caps.presentModes, caps.presentModeCount);
+    let alpha_modes = std::slice::from_raw_parts(caps.alphaModes, caps.alphaModeCount);
+    let format = formats
+        .iter()
+        .copied()
+        .find(|&f| {
+            f == native::WGPUTextureFormat_BGRA8UnormSrgb
+                || f == native::WGPUTextureFormat_RGBA8UnormSrgb
+        })
+        .or_else(|| {
+            formats.iter().copied().find(|&f| {
+                f == native::WGPUTextureFormat_BGRA8Unorm
+                    || f == native::WGPUTextureFormat_RGBA8Unorm
+            })
+        })
+        .expect("an 8-bit surface format");
+    let present_mode = present_modes
+        .iter()
+        .copied()
+        .find(|&m| m != native::WGPUPresentMode_Fifo)
+        .unwrap_or(native::WGPUPresentMode_Fifo);
+    let alpha_mode = alpha_modes
+        .iter()
+        .copied()
+        .find(|&m| m != native::WGPUCompositeAlphaMode_Opaque)
+        .unwrap_or(native::WGPUCompositeAlphaMode_Opaque);
+    yawgpu::wgpuSurfaceCapabilitiesFreeMembers(caps);
+    (format, present_mode, alpha_mode)
+}
+
+/// Picks a (present mode, alpha mode) pair the driver does NOT report.
+unsafe fn pick_unreported_modes(
+    surface: native::WGPUSurface,
+    adapter: native::WGPUAdapter,
+) -> (native::WGPUPresentMode, native::WGPUCompositeAlphaMode) {
+    let mut caps: native::WGPUSurfaceCapabilities = std::mem::zeroed();
+    assert_eq!(
+        yawgpu::wgpuSurfaceGetCapabilities(surface, adapter, &mut caps),
+        native::WGPUStatus_Success
+    );
+    let present_modes = std::slice::from_raw_parts(caps.presentModes, caps.presentModeCount);
+    let alpha_modes = std::slice::from_raw_parts(caps.alphaModes, caps.alphaModeCount);
+    let present_mode = [
+        native::WGPUPresentMode_Mailbox,
+        native::WGPUPresentMode_Immediate,
+        native::WGPUPresentMode_FifoRelaxed,
+    ]
+    .into_iter()
+    .find(|m| !present_modes.contains(m))
+    .expect("MoltenVK does not report every present mode");
+    let alpha_mode = [
+        native::WGPUCompositeAlphaMode_Unpremultiplied,
+        native::WGPUCompositeAlphaMode_Premultiplied,
+        native::WGPUCompositeAlphaMode_Inherit,
+    ]
+    .into_iter()
+    .find(|m| !alpha_modes.contains(m))
+    .expect("MoltenVK does not report every alpha mode");
+    yawgpu::wgpuSurfaceCapabilitiesFreeMembers(caps);
+    (present_mode, alpha_mode)
 }
 
 unsafe fn install_error_capture(
@@ -529,13 +599,13 @@ unsafe fn create_surface_from_layer(
     surface
 }
 
-unsafe fn create_metal_instance() -> native::WGPUInstance {
+unsafe fn create_vulkan_instance() -> native::WGPUInstance {
     let mut backend = YaWGPUInstanceBackendSelect {
         chain: native::WGPUChainedStruct {
             next: std::ptr::null_mut(),
             sType: YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
         },
-        backend: YAWGPU_INSTANCE_BACKEND_METAL,
+        backend: YAWGPU_INSTANCE_BACKEND_VULKAN,
     };
     let descriptor = native::WGPUInstanceDescriptor {
         nextInChain: (&mut backend.chain) as *mut native::WGPUChainedStruct,

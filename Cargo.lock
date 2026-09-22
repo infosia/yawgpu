@@ -704,6 +704,7 @@ version = "0.1.0"
 dependencies = [
  "ash",
  "bindgen",
+ "objc2-core-foundation",
  "objc2-metal",
  "objc2-quartz-core",
  "yawgpu-core",

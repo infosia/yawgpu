@@ -29,6 +29,8 @@ yawgpu-hal = { path = "../yawgpu-hal" }
 ash = "0.38.0"
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
+# `CGSize` for sizing a standalone CAMetalLayer in the surface e2e tests.
+objc2-core-foundation = { workspace = true }
 # Standalone CAMetalLayer construction for the real-Metal surface e2e test.
 objc2-quartz-core = { workspace = true, features = [
     "CALayer",

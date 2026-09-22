@@ -138,7 +138,7 @@ impl Drop for VulkanSamplerInner {
 /// COLOR_ATTACHMENT or DEPTH_STENCIL_ATTACHMENT plus INPUT_ATTACHMENT, so the
 /// three caller-facing usage bits cover all view-compatible image-usage flags
 /// map_texture_usage can emit.
-fn texture_usage_needs_view(usage: HalTextureUsage) -> bool {
+pub(super) fn texture_usage_needs_view(usage: HalTextureUsage) -> bool {
     usage.texture_binding || usage.storage_binding || usage.render_attachment
 }
 

@@ -23,6 +23,12 @@ pub(crate) struct AdapterInner {
 }
 
 impl Adapter {
+    /// Returns the backend adapter for surface capability queries.
+    #[must_use]
+    pub fn hal(&self) -> &HalAdapter {
+        &self.inner.hal
+    }
+
     /// Constructs this object from the backend HAL object.
     #[must_use]
     pub fn from_hal(hal: HalAdapter) -> Self {
@@ -406,6 +412,13 @@ pub(crate) const MAX_QUERY_COUNT: u32 = 4096;
 mod tests {
     use super::*;
     use crate::test_helpers::*;
+
+    #[test]
+    fn adapter_hal_returns_wrapped_adapter() {
+        let adapter = Adapter::from_hal(hal_noop_adapter());
+        assert!(matches!(adapter.hal(), HalAdapter::Noop(_)));
+        assert!(std::ptr::eq(adapter.hal(), &adapter.inner.hal));
+    }
 
     #[test]
     fn adapter_from_hal_wraps_noop_hal_adapter() {

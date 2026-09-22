@@ -70,7 +70,9 @@ pub use format::{
     HalMipmapFilterMode, HalPrimitiveTopology, HalStencilOperation, HalTextureFormat,
     HalTextureUsage, HalVertexFormat, HalVertexStepMode,
 };
-pub use present::{HalPresentMode, HalSurfaceConfiguration};
+pub use present::{
+    HalCompositeAlphaMode, HalPresentMode, HalSurfaceCapabilities, HalSurfaceConfiguration,
+};
 pub use shader::{
     HalCombinedSampler, HalGlesBindingClass, HalGlesBindingRemap, HalMslBufferSizeBinding,
     HalMslImmediates, HalShaderSource, HalShaderStage, HalTextureMetadataSlot,
@@ -1019,6 +1021,37 @@ pub enum HalSurface {
 }
 
 impl HalSurface {
+    /// Queries configurations supported by this surface and adapter.
+    pub fn capabilities(&self, adapter: &HalAdapter) -> Result<HalSurfaceCapabilities, HalError> {
+        #[allow(unreachable_patterns)]
+        match (self, adapter) {
+            #[cfg(feature = "noop")]
+            (Self::Noop, HalAdapter::Noop(_)) => Ok(HalSurfaceCapabilities {
+                usages: HalTextureUsage {
+                    render_attachment: true,
+                    copy_src: false,
+                    copy_dst: false,
+                    texture_binding: false,
+                    storage_binding: false,
+                    transient: false,
+                },
+                formats: vec![HalTextureFormat::Bgra8Unorm, HalTextureFormat::Rgba8Unorm],
+                present_modes: vec![HalPresentMode::Fifo],
+                alpha_modes: vec![HalCompositeAlphaMode::Opaque],
+            }),
+            #[cfg(feature = "metal")]
+            (Self::Metal(surface), HalAdapter::Metal(_)) => Ok(surface.capabilities()),
+            #[cfg(feature = "vulkan")]
+            (Self::Vulkan(surface), HalAdapter::Vulkan(adapter)) => surface.capabilities(adapter),
+            #[cfg(feature = "gles")]
+            (Self::Gles(_), HalAdapter::Gles(_)) => Ok(gles::GlesSurface::capabilities()),
+            _ => Err(HalError::SwapchainCreationFailed {
+                backend: "surface",
+                message: "surface and adapter backends do not match",
+            }),
+        }
+    }
+
     /// Configures the surface's swapchain for the given format, size, and present mode.
     pub fn configure(
         &mut self,
@@ -1425,6 +1458,7 @@ mod tests {
             640,
             480,
             HalPresentMode::Fifo,
+            crate::HalCompositeAlphaMode::Opaque,
         )
     }
 
@@ -1775,6 +1809,26 @@ mod tests {
 
         assert_eq!(command.layout.subpasses.len(), 1);
         assert!(command.draws.is_empty());
+    }
+
+    #[test]
+    fn hal_surface_capabilities_noop_matches_synthetic_set() {
+        let adapter = HalInstance::new_noop().enumerate_adapters().remove(0);
+        let caps = HalSurface::Noop.capabilities(&adapter).unwrap();
+        assert_eq!(
+            caps.formats,
+            [HalTextureFormat::Bgra8Unorm, HalTextureFormat::Rgba8Unorm]
+        );
+        assert_eq!(caps.present_modes, [HalPresentMode::Fifo]);
+        assert_eq!(caps.alpha_modes, [HalCompositeAlphaMode::Opaque]);
+        assert!(caps.usages.render_attachment);
+        assert!(
+            !caps.usages.copy_src
+                && !caps.usages.copy_dst
+                && !caps.usages.texture_binding
+                && !caps.usages.storage_binding
+                && !caps.usages.transient
+        );
     }
 
     #[test]

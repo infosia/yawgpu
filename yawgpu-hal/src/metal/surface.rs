@@ -1,5 +1,5 @@
 use super::*;
-use crate::HalTextureDimension;
+use crate::{HalCompositeAlphaMode, HalSurfaceCapabilities, HalTextureDimension};
 
 /// Stores metal surface data used by validation and backend submission.
 #[derive(Debug)]
@@ -30,6 +30,37 @@ unsafe impl Send for MetalSurface {}
 unsafe impl Sync for MetalSurface {}
 
 impl MetalSurface {
+    /// Returns the formats and modes supported by CAMetalLayer.
+    #[must_use]
+    pub fn capabilities(&self) -> HalSurfaceCapabilities {
+        HalSurfaceCapabilities {
+            usages: HalTextureUsage {
+                render_attachment: true,
+                texture_binding: true,
+                copy_src: true,
+                copy_dst: true,
+                storage_binding: false,
+                transient: false,
+            },
+            formats: vec![
+                HalTextureFormat::Bgra8Unorm,
+                HalTextureFormat::Bgra8UnormSrgb,
+                HalTextureFormat::Rgba16Float,
+                #[cfg(target_os = "macos")]
+                HalTextureFormat::Rgb10a2Unorm,
+            ],
+            present_modes: vec![
+                HalPresentMode::Fifo,
+                HalPresentMode::Immediate,
+                HalPresentMode::Mailbox,
+            ],
+            alpha_modes: vec![
+                HalCompositeAlphaMode::Opaque,
+                HalCompositeAlphaMode::Premultiplied,
+            ],
+        }
+    }
+
     /// # Safety
     ///
     /// `layer` must be a valid, non-dangling `CAMetalLayer` instance pointer.
@@ -62,11 +93,10 @@ impl MetalSurface {
             width: f64::from(config.width),
             height: f64::from(config.height),
         });
-        let _ = config.usage;
-        match config.present_mode {
-            HalPresentMode::Fifo | HalPresentMode::FifoRelaxed => {}
-            HalPresentMode::Immediate | HalPresentMode::Mailbox => {}
-        }
+        self.layer
+            .setDisplaySyncEnabled(config.present_mode != HalPresentMode::Immediate);
+        self.layer
+            .setOpaque(config.alpha_mode != HalCompositeAlphaMode::Premultiplied);
         self.current_drawable = None;
         self.device = Some(device.device.clone());
         self.config = Some(config);
@@ -138,6 +168,67 @@ mod tests {
     use super::super::test_helpers::*;
     use super::super::*;
     use super::*;
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    fn metal_surface_capabilities_and_resolved_modes() {
+        let device = metal_device();
+        let layer = metal_layer();
+        let raw = (&*layer as *const CAMetalLayer).cast_mut().cast::<c_void>();
+        let mut surface = unsafe { MetalSurface::from_layer(raw) }.unwrap();
+        let caps = surface.capabilities();
+        let expected = vec![
+            HalTextureFormat::Bgra8Unorm,
+            HalTextureFormat::Bgra8UnormSrgb,
+            HalTextureFormat::Rgba16Float,
+            #[cfg(target_os = "macos")]
+            HalTextureFormat::Rgb10a2Unorm,
+        ];
+        assert_eq!(caps.formats, expected);
+        assert_eq!(
+            caps.present_modes,
+            [
+                HalPresentMode::Fifo,
+                HalPresentMode::Immediate,
+                HalPresentMode::Mailbox
+            ]
+        );
+        assert_eq!(
+            caps.alpha_modes,
+            [
+                HalCompositeAlphaMode::Opaque,
+                HalCompositeAlphaMode::Premultiplied
+            ]
+        );
+        assert!(
+            caps.usages.render_attachment
+                && caps.usages.texture_binding
+                && caps.usages.copy_src
+                && caps.usages.copy_dst
+        );
+        assert!(!caps.usages.storage_binding && !caps.usages.transient);
+        for format in caps.formats {
+            let mut config = surface_config();
+            config.format = format;
+            config.present_mode = HalPresentMode::Immediate;
+            config.alpha_mode = HalCompositeAlphaMode::Premultiplied;
+            surface.configure(&device, config).unwrap();
+            assert!(!layer.displaySyncEnabled());
+            assert!(!layer.isOpaque());
+            assert!(!layer.framebufferOnly());
+            assert_eq!(layer.pixelFormat(), map_texture_format(format).unwrap().0);
+            config.present_mode = HalPresentMode::Mailbox;
+            config.alpha_mode = HalCompositeAlphaMode::Opaque;
+            surface.configure(&device, config).unwrap();
+            assert!(layer.displaySyncEnabled());
+            assert!(layer.isOpaque());
+        }
+        let surface = crate::HalSurface::Metal(surface);
+        let noop = crate::HalInstance::new_noop()
+            .enumerate_adapters()
+            .remove(0);
+        assert!(surface.capabilities(&noop).is_err());
+    }
 
     #[test]
     #[ignore = "manual real Metal backend test"]

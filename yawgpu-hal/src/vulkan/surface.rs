@@ -1,5 +1,5 @@
 use super::*;
-use crate::HalTextureDimension;
+use crate::{HalCompositeAlphaMode, HalPresentMode, HalSurfaceCapabilities, HalTextureDimension};
 
 pub(super) const RETIRE_RING_SIZE: usize = 3;
 
@@ -303,6 +303,52 @@ impl Drop for VulkanSurface {
 }
 
 impl VulkanSurface {
+    /// Queries the driver for this surface's supported configurations.
+    pub fn capabilities(
+        &self,
+        adapter: &VulkanAdapter,
+    ) -> Result<HalSurfaceCapabilities, HalError> {
+        if !Arc::ptr_eq(&self.surface_inner.instance, &adapter.instance)
+            || self.surface == vk::SurfaceKHR::null()
+        {
+            return Err(surface_query_error());
+        }
+        let instance = &self.surface_inner.instance;
+        let loader = ash::khr::surface::Instance::new(instance._entry, &instance.instance);
+        let (caps, formats, modes) = unsafe {
+            (
+                loader
+                    .get_physical_device_surface_capabilities(adapter.physical_device, self.surface)
+                    .map_err(|_| surface_query_error())?,
+                loader
+                    .get_physical_device_surface_formats(adapter.physical_device, self.surface)
+                    .map_err(|_| surface_query_error())?,
+                loader
+                    .get_physical_device_surface_present_modes(
+                        adapter.physical_device,
+                        self.surface,
+                    )
+                    .map_err(|_| surface_query_error())?,
+            )
+        };
+        // A driver reports one `VkSurfaceFormatKHR` per (format, colour space)
+        // pair (MoltenVK: every format times a dozen colour spaces), while the
+        // WebGPU capability list is per format — keep the first occurrence so
+        // the preferred entry stays first, as Dawn's list does.
+        Ok(HalSurfaceCapabilities {
+            usages: vk_surface_usages(caps.supported_usage_flags),
+            formats: dedup_preserving_order(
+                formats
+                    .into_iter()
+                    .filter_map(|f| vk_surface_format_to_hal(f.format)),
+            ),
+            present_modes: dedup_preserving_order(
+                modes.into_iter().filter_map(vk_present_mode_to_hal),
+            ),
+            alpha_modes: vk_composite_alpha_modes(caps.supported_composite_alpha),
+        })
+    }
+
     /// Configures the surface's swapchain for the given format, size, and present mode.
     pub fn configure(
         &mut self,
@@ -682,18 +728,34 @@ pub(super) fn create_swapchain(
     }
     .unwrap_or_else(|_| vec![vk::PresentModeKHR::FIFO]);
     let present_mode = select_present_mode(config.present_mode, &present_modes);
-    let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC;
+    let usage = hal_usage_to_vk_image_usage(config.usage);
+    let alpha = hal_alpha_to_vk(config.alpha_mode);
+    if usage.is_empty()
+        || !capabilities.supported_usage_flags.contains(usage)
+        || !capabilities.supported_composite_alpha.contains(alpha)
+        || config.usage.transient
+    {
+        return Err(surface_query_error());
+    }
+    let formats = unsafe {
+        surface_loader.get_physical_device_surface_formats(device.physical_device, surface.surface)
+    }
+    .map_err(|_| surface_query_error())?;
+    let surface_format = formats
+        .iter()
+        .find(|entry| entry.format == format)
+        .ok_or_else(surface_query_error)?;
     let create_info = vk::SwapchainCreateInfoKHR::default()
         .surface(surface.surface)
         .min_image_count(image_count)
         .image_format(format)
-        .image_color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
+        .image_color_space(surface_format.color_space)
         .image_extent(extent)
         .image_array_layers(1)
         .image_usage(usage)
         .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
         .pre_transform(capabilities.current_transform)
-        .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+        .composite_alpha(alpha)
         .present_mode(present_mode)
         .clipped(true);
     let loader = ash::khr::swapchain::Device::new(&device._instance.instance, &device.device);
@@ -719,7 +781,7 @@ pub(super) fn create_swapchain(
                 Arc::clone(&device),
                 image,
                 format,
-                config.format,
+                config,
                 extent,
                 bytes_per_pixel,
                 Arc::clone(&pending_state),
@@ -760,22 +822,26 @@ pub(super) fn create_swapchain_texture(
     device: Arc<VulkanDeviceInner>,
     image: vk::Image,
     vk_format: vk::Format,
-    format: HalTextureFormat,
+    config: HalSurfaceConfiguration,
     extent: vk::Extent2D,
     bytes_per_pixel: u32,
     pending_state: Arc<Mutex<SurfacePendingState>>,
 ) -> Result<VulkanTexture, HalError> {
-    let view_info = vk::ImageViewCreateInfo::default()
-        .image(image)
-        .view_type(vk::ImageViewType::TYPE_2D)
-        .format(vk_format)
-        .subresource_range(color_subresource_range(1, 1));
-    let view = unsafe { device.device.create_image_view(&view_info, None) }.map_err(|_| {
-        HalError::SwapchainCreationFailed {
-            backend: BACKEND,
-            message: "swapchain image view creation failed",
-        }
-    })?;
+    let view = if super::texture::texture_usage_needs_view(config.usage) {
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(vk_format)
+            .subresource_range(color_subresource_range(1, 1));
+        unsafe { device.device.create_image_view(&view_info, None) }.map_err(|_| {
+            HalError::SwapchainCreationFailed {
+                backend: BACKEND,
+                message: "swapchain image view creation failed",
+            }
+        })?
+    } else {
+        vk::ImageView::null()
+    };
     Ok(VulkanTexture {
         inner: Some(Arc::new(VulkanTextureInner {
             device,
@@ -798,13 +864,240 @@ pub(super) fn create_swapchain_texture(
         depth_or_array_layers: 1,
         sample_count: 1,
         bytes_per_pixel,
-        format,
+        format: config.format,
         transient: false,
     })
 }
 
+/// Keeps the first occurrence of every value, in order (`PartialEq`, small lists).
+fn dedup_preserving_order<T: PartialEq>(values: impl IntoIterator<Item = T>) -> Vec<T> {
+    let mut out = Vec::new();
+    for value in values {
+        if !out.contains(&value) {
+            out.push(value);
+        }
+    }
+    out
+}
+
+fn surface_query_error() -> HalError {
+    HalError::SwapchainCreationFailed {
+        backend: BACKEND,
+        message: "surface capabilities query or configuration failed",
+    }
+}
+
+fn vk_surface_format_to_hal(format: vk::Format) -> Option<HalTextureFormat> {
+    Some(match format {
+        vk::Format::R8G8B8A8_UNORM => HalTextureFormat::Rgba8Unorm,
+        vk::Format::R8G8B8A8_SRGB => HalTextureFormat::Rgba8UnormSrgb,
+        vk::Format::B8G8R8A8_UNORM => HalTextureFormat::Bgra8Unorm,
+        vk::Format::B8G8R8A8_SRGB => HalTextureFormat::Bgra8UnormSrgb,
+        vk::Format::A2B10G10R10_UNORM_PACK32 => HalTextureFormat::Rgb10a2Unorm,
+        vk::Format::R16G16B16A16_SFLOAT => HalTextureFormat::Rgba16Float,
+        _ => return None,
+    })
+}
+
+fn vk_present_mode_to_hal(mode: vk::PresentModeKHR) -> Option<HalPresentMode> {
+    Some(match mode {
+        vk::PresentModeKHR::FIFO => HalPresentMode::Fifo,
+        vk::PresentModeKHR::FIFO_RELAXED => HalPresentMode::FifoRelaxed,
+        vk::PresentModeKHR::IMMEDIATE => HalPresentMode::Immediate,
+        vk::PresentModeKHR::MAILBOX => HalPresentMode::Mailbox,
+        _ => return None,
+    })
+}
+
+fn hal_alpha_to_vk(mode: HalCompositeAlphaMode) -> vk::CompositeAlphaFlagsKHR {
+    match mode {
+        HalCompositeAlphaMode::Opaque => vk::CompositeAlphaFlagsKHR::OPAQUE,
+        HalCompositeAlphaMode::Premultiplied => vk::CompositeAlphaFlagsKHR::PRE_MULTIPLIED,
+        HalCompositeAlphaMode::Unpremultiplied => vk::CompositeAlphaFlagsKHR::POST_MULTIPLIED,
+        HalCompositeAlphaMode::Inherit => vk::CompositeAlphaFlagsKHR::INHERIT,
+    }
+}
+
+fn vk_composite_alpha_modes(flags: vk::CompositeAlphaFlagsKHR) -> Vec<HalCompositeAlphaMode> {
+    [
+        HalCompositeAlphaMode::Opaque,
+        HalCompositeAlphaMode::Premultiplied,
+        HalCompositeAlphaMode::Unpremultiplied,
+        HalCompositeAlphaMode::Inherit,
+    ]
+    .into_iter()
+    .filter(|mode| flags.contains(hal_alpha_to_vk(*mode)))
+    .collect()
+}
+
+fn vk_surface_usages(flags: vk::ImageUsageFlags) -> HalTextureUsage {
+    HalTextureUsage {
+        copy_src: flags.contains(vk::ImageUsageFlags::TRANSFER_SRC),
+        copy_dst: flags.contains(vk::ImageUsageFlags::TRANSFER_DST),
+        texture_binding: flags.contains(vk::ImageUsageFlags::SAMPLED),
+        storage_binding: flags.contains(vk::ImageUsageFlags::STORAGE),
+        render_attachment: flags.contains(vk::ImageUsageFlags::COLOR_ATTACHMENT),
+        transient: false,
+    }
+}
+
+fn hal_usage_to_vk_image_usage(usage: HalTextureUsage) -> vk::ImageUsageFlags {
+    let mut flags = vk::ImageUsageFlags::empty();
+    for (enabled, flag) in [
+        (usage.copy_src, vk::ImageUsageFlags::TRANSFER_SRC),
+        (usage.copy_dst, vk::ImageUsageFlags::TRANSFER_DST),
+        (usage.texture_binding, vk::ImageUsageFlags::SAMPLED),
+        (usage.storage_binding, vk::ImageUsageFlags::STORAGE),
+        (
+            usage.render_attachment,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT,
+        ),
+    ] {
+        if enabled {
+            flags |= flag;
+        }
+    }
+    flags
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    fn vulkan_swapchain_texture_skips_view_for_copy_only_usage() {
+        let device = vulkan_device();
+        let mut config = surface_config();
+        config.usage = vk_surface_usages(
+            vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST,
+        );
+        // A null image is safe here: copy-only wrapping must make no image-view calls.
+        let texture = create_swapchain_texture(
+            Arc::clone(&device.inner),
+            vk::Image::null(),
+            vk::Format::B8G8R8A8_UNORM,
+            config,
+            vk::Extent2D {
+                width: 4,
+                height: 4,
+            },
+            4,
+            Arc::new(Mutex::new(SurfacePendingState::new())),
+        )
+        .unwrap();
+        assert_eq!(texture.inner.as_ref().unwrap().view, vk::ImageView::null());
+        assert_eq!(texture.format, config.format);
+    }
+
+    #[test]
+    fn dedup_preserving_order_keeps_first_occurrences() {
+        assert_eq!(
+            dedup_preserving_order([
+                HalTextureFormat::Bgra8Unorm,
+                HalTextureFormat::Rgba16Float,
+                HalTextureFormat::Bgra8Unorm,
+                HalTextureFormat::Bgra8UnormSrgb,
+                HalTextureFormat::Rgba16Float,
+            ]),
+            [
+                HalTextureFormat::Bgra8Unorm,
+                HalTextureFormat::Rgba16Float,
+                HalTextureFormat::Bgra8UnormSrgb,
+            ]
+        );
+        assert!(dedup_preserving_order(Vec::<HalPresentMode>::new()).is_empty());
+    }
+
+    #[test]
+    fn vulkan_surface_format_mapping_filters_unknown_formats() {
+        for (vk, hal) in [
+            (vk::Format::R8G8B8A8_UNORM, HalTextureFormat::Rgba8Unorm),
+            (vk::Format::R8G8B8A8_SRGB, HalTextureFormat::Rgba8UnormSrgb),
+            (vk::Format::B8G8R8A8_UNORM, HalTextureFormat::Bgra8Unorm),
+            (vk::Format::B8G8R8A8_SRGB, HalTextureFormat::Bgra8UnormSrgb),
+            (
+                vk::Format::A2B10G10R10_UNORM_PACK32,
+                HalTextureFormat::Rgb10a2Unorm,
+            ),
+            (
+                vk::Format::R16G16B16A16_SFLOAT,
+                HalTextureFormat::Rgba16Float,
+            ),
+        ] {
+            assert_eq!(vk_surface_format_to_hal(vk), Some(hal));
+        }
+        assert_eq!(vk_surface_format_to_hal(vk::Format::UNDEFINED), None);
+        assert_eq!(vk_surface_format_to_hal(vk::Format::D32_SFLOAT), None);
+    }
+
+    #[test]
+    fn vulkan_surface_present_mapping_preserves_modes() {
+        for (vk, hal) in [
+            (vk::PresentModeKHR::FIFO, HalPresentMode::Fifo),
+            (
+                vk::PresentModeKHR::FIFO_RELAXED,
+                HalPresentMode::FifoRelaxed,
+            ),
+            (vk::PresentModeKHR::IMMEDIATE, HalPresentMode::Immediate),
+            (vk::PresentModeKHR::MAILBOX, HalPresentMode::Mailbox),
+        ] {
+            assert_eq!(vk_present_mode_to_hal(vk), Some(hal));
+            assert_eq!(select_present_mode(hal, &[vk]), vk);
+            assert_eq!(select_present_mode(hal, &[]), vk::PresentModeKHR::FIFO);
+        }
+        assert_eq!(
+            vk_present_mode_to_hal(vk::PresentModeKHR::from_raw(-1)),
+            None
+        );
+    }
+
+    #[test]
+    fn vulkan_surface_alpha_mapping_preserves_dawn_order() {
+        let modes = [
+            HalCompositeAlphaMode::Opaque,
+            HalCompositeAlphaMode::Premultiplied,
+            HalCompositeAlphaMode::Unpremultiplied,
+            HalCompositeAlphaMode::Inherit,
+        ];
+        let mut flags = vk::CompositeAlphaFlagsKHR::empty();
+        assert!(vk_composite_alpha_modes(flags).is_empty());
+        for mode in modes {
+            let flag = hal_alpha_to_vk(mode);
+            assert_eq!(vk_composite_alpha_modes(flag), [mode]);
+            flags |= flag;
+        }
+        assert_eq!(vk_composite_alpha_modes(flags), modes);
+    }
+
+    #[test]
+    fn vulkan_surface_usage_mapping_round_trips_supported_bits() {
+        let bits = [
+            vk::ImageUsageFlags::TRANSFER_SRC,
+            vk::ImageUsageFlags::TRANSFER_DST,
+            vk::ImageUsageFlags::SAMPLED,
+            vk::ImageUsageFlags::STORAGE,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT,
+        ];
+        for mask in 0..32 {
+            let flags = bits
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| mask & (1 << i) != 0)
+                .fold(vk::ImageUsageFlags::empty(), |flags, (_, bit)| flags | *bit);
+            let usage = vk_surface_usages(flags | vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT);
+            assert_eq!(hal_usage_to_vk_image_usage(usage), flags);
+            assert!(!usage.transient);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    fn vulkan_surface_capabilities_rejects_dummy_surface() {
+        let instance = VulkanInstance::new().unwrap();
+        let adapter = instance.enumerate_adapters().remove(0);
+        // The helper has a null VkSurfaceKHR, so a driver query is not valid.
+        assert!(dummy_surface(&instance).capabilities(&adapter).is_err());
+    }
+
     use super::super::test_helpers::*;
     use super::*;
 

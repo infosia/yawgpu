@@ -311,3 +311,40 @@ fn empty_string_view() -> native::WGPUStringView {
         length: 0,
     }
 }
+
+#[test]
+fn surface_view_formats_accept_same_and_srgb_siblings_and_reject_unrelated() {
+    let test = ValidationTest::new();
+    unsafe {
+        let surface = create_surface(test.instance());
+        for (format, sibling, unrelated) in [
+            (
+                native::WGPUTextureFormat_BGRA8Unorm,
+                native::WGPUTextureFormat_BGRA8UnormSrgb,
+                native::WGPUTextureFormat_RGBA8Unorm,
+            ),
+            (
+                native::WGPUTextureFormat_RGBA8Unorm,
+                native::WGPUTextureFormat_RGBA8UnormSrgb,
+                native::WGPUTextureFormat_BGRA8Unorm,
+            ),
+        ] {
+            let mut config = valid_config(test.device());
+            config.format = format;
+            let views = [format, sibling];
+            config.viewFormatCount = views.len();
+            config.viewFormats = views.as_ptr();
+            let errors_before = test.errors().len();
+            yawgpu::wgpuSurfaceConfigure(surface, &config);
+            assert_eq!(test.errors().len(), errors_before);
+            let views = [format, sibling, unrelated];
+            config.viewFormatCount = views.len();
+            config.viewFormats = views.as_ptr();
+            test.assert_device_error_after(
+                || yawgpu::wgpuSurfaceConfigure(surface, &config),
+                Some("surface configuration view format is not compatible"),
+            );
+        }
+        yawgpu::wgpuSurfaceRelease(surface);
+    }
+}

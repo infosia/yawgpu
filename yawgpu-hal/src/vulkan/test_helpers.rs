@@ -87,6 +87,7 @@ pub(crate) fn surface_config() -> HalSurfaceConfiguration {
         4,
         4,
         HalPresentMode::Fifo,
+        crate::HalCompositeAlphaMode::Opaque,
     )
 }
 

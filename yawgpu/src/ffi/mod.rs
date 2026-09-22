@@ -1228,15 +1228,6 @@ unsafe fn validate_render_pipeline_devices(
     None
 }
 
-const SURFACE_FORMATS: [native::WGPUTextureFormat; 2] = [
-    native::WGPUTextureFormat_BGRA8Unorm,
-    native::WGPUTextureFormat_RGBA8Unorm,
-];
-const SURFACE_PRESENT_MODES: [native::WGPUPresentMode; 1] = [native::WGPUPresentMode_Fifo];
-const SURFACE_ALPHA_MODES: [native::WGPUCompositeAlphaMode; 1] =
-    [native::WGPUCompositeAlphaMode_Opaque];
-const SURFACE_USAGES: native::WGPUTextureUsage = native::WGPUTextureUsage_RenderAttachment;
-
 fn is_supported_surface_source(s_type: native::WGPUSType) -> bool {
     matches!(
         s_type,
@@ -1308,8 +1299,23 @@ fn is_real_hal_instance(instance: &HalInstance) -> bool {
 fn hal_surface_format(format: native::WGPUTextureFormat) -> HalTextureFormat {
     match format {
         native::WGPUTextureFormat_RGBA8Unorm => HalTextureFormat::Rgba8Unorm,
+        native::WGPUTextureFormat_RGBA8UnormSrgb => HalTextureFormat::Rgba8UnormSrgb,
         native::WGPUTextureFormat_BGRA8Unorm => HalTextureFormat::Bgra8Unorm,
+        native::WGPUTextureFormat_BGRA8UnormSrgb => HalTextureFormat::Bgra8UnormSrgb,
+        native::WGPUTextureFormat_RGBA16Float => HalTextureFormat::Rgba16Float,
+        native::WGPUTextureFormat_RGB10A2Unorm => HalTextureFormat::Rgb10a2Unorm,
         _ => HalTextureFormat::Unsupported,
+    }
+}
+fn native_surface_format(format: HalTextureFormat) -> native::WGPUTextureFormat {
+    match format {
+        HalTextureFormat::Rgba8Unorm => native::WGPUTextureFormat_RGBA8Unorm,
+        HalTextureFormat::Rgba8UnormSrgb => native::WGPUTextureFormat_RGBA8UnormSrgb,
+        HalTextureFormat::Bgra8Unorm => native::WGPUTextureFormat_BGRA8Unorm,
+        HalTextureFormat::Bgra8UnormSrgb => native::WGPUTextureFormat_BGRA8UnormSrgb,
+        HalTextureFormat::Rgba16Float => native::WGPUTextureFormat_RGBA16Float,
+        HalTextureFormat::Rgb10a2Unorm => native::WGPUTextureFormat_RGB10A2Unorm,
+        _ => native::WGPUTextureFormat_Undefined,
     }
 }
 
@@ -1332,9 +1338,16 @@ fn resolved_present_mode(mode: native::WGPUPresentMode) -> native::WGPUPresentMo
     }
 }
 
-fn resolved_alpha_mode(mode: native::WGPUCompositeAlphaMode) -> native::WGPUCompositeAlphaMode {
+fn resolved_alpha_mode(
+    mode: native::WGPUCompositeAlphaMode,
+    caps: &yawgpu_hal::HalSurfaceCapabilities,
+) -> native::WGPUCompositeAlphaMode {
     if mode == native::WGPUCompositeAlphaMode_Auto {
-        SURFACE_ALPHA_MODES[0]
+        caps.alpha_modes
+            .first()
+            .copied()
+            .map(native_alpha_mode)
+            .unwrap_or(native::WGPUCompositeAlphaMode_Auto)
     } else {
         mode
     }
@@ -1350,27 +1363,125 @@ fn hal_present_mode(mode: native::WGPUPresentMode) -> HalPresentMode {
     }
 }
 
-fn surface_configuration_error(
+fn native_alpha_mode(mode: yawgpu_hal::HalCompositeAlphaMode) -> native::WGPUCompositeAlphaMode {
+    match mode {
+        yawgpu_hal::HalCompositeAlphaMode::Opaque => native::WGPUCompositeAlphaMode_Opaque,
+        yawgpu_hal::HalCompositeAlphaMode::Premultiplied => {
+            native::WGPUCompositeAlphaMode_Premultiplied
+        }
+        yawgpu_hal::HalCompositeAlphaMode::Unpremultiplied => {
+            native::WGPUCompositeAlphaMode_Unpremultiplied
+        }
+        yawgpu_hal::HalCompositeAlphaMode::Inherit => native::WGPUCompositeAlphaMode_Inherit,
+        _ => native::WGPUCompositeAlphaMode_Auto,
+    }
+}
+fn native_present_mode(mode: HalPresentMode) -> native::WGPUPresentMode {
+    match mode {
+        HalPresentMode::Fifo => native::WGPUPresentMode_Fifo,
+        HalPresentMode::FifoRelaxed => native::WGPUPresentMode_FifoRelaxed,
+        HalPresentMode::Immediate => native::WGPUPresentMode_Immediate,
+        HalPresentMode::Mailbox => native::WGPUPresentMode_Mailbox,
+        _ => native::WGPUPresentMode_Undefined,
+    }
+}
+fn native_surface_usage(usage: HalTextureUsage) -> native::WGPUTextureUsage {
+    let mut result = 0;
+    for (enabled, flag) in [
+        (usage.copy_src, native::WGPUTextureUsage_CopySrc),
+        (usage.copy_dst, native::WGPUTextureUsage_CopyDst),
+        (
+            usage.texture_binding,
+            native::WGPUTextureUsage_TextureBinding,
+        ),
+        (
+            usage.storage_binding,
+            native::WGPUTextureUsage_StorageBinding,
+        ),
+        (
+            usage.render_attachment,
+            native::WGPUTextureUsage_RenderAttachment,
+        ),
+    ] {
+        if enabled {
+            result |= flag;
+        }
+    }
+    result
+}
+fn hal_alpha_mode(mode: native::WGPUCompositeAlphaMode) -> yawgpu_hal::HalCompositeAlphaMode {
+    use yawgpu_hal::HalCompositeAlphaMode as A;
+    match mode {
+        native::WGPUCompositeAlphaMode_Premultiplied => A::Premultiplied,
+        native::WGPUCompositeAlphaMode_Unpremultiplied => A::Unpremultiplied,
+        native::WGPUCompositeAlphaMode_Inherit => A::Inherit,
+        _ => A::Opaque,
+    }
+}
+
+unsafe fn surface_configuration_error(
     device: &WGPUDeviceImpl,
     config: &native::WGPUSurfaceConfiguration,
+    caps: &yawgpu_hal::HalSurfaceCapabilities,
 ) -> Option<&'static str> {
     if device.core.is_lost() {
         return Some("surface configuration device is lost");
     }
-    if !SURFACE_FORMATS.contains(&config.format) {
+    if !caps
+        .formats
+        .iter()
+        .any(|f| native_surface_format(*f) == config.format)
+    {
         return Some("surface configuration format is not supported");
     }
-    if config.usage == native::WGPUTextureUsage_None || config.usage & !SURFACE_USAGES != 0 {
+    if config.usage == native::WGPUTextureUsage_None
+        || config.usage & !native_surface_usage(caps.usages) != 0
+    {
         return Some("surface configuration usage is not supported");
     }
     if config.width == 0 || config.height == 0 {
         return Some("surface configuration size must be non-zero");
     }
-    if !SURFACE_PRESENT_MODES.contains(&resolved_present_mode(config.presentMode)) {
+    if !caps
+        .present_modes
+        .iter()
+        .any(|m| native_present_mode(*m) == resolved_present_mode(config.presentMode))
+    {
         return Some("surface configuration present mode is not supported");
     }
-    if !SURFACE_ALPHA_MODES.contains(&resolved_alpha_mode(config.alphaMode)) {
+    if !caps
+        .alpha_modes
+        .iter()
+        .any(|m| native_alpha_mode(*m) == resolved_alpha_mode(config.alphaMode, caps))
+    {
         return Some("surface configuration alpha mode is not supported");
+    }
+    if config.viewFormatCount > 0 {
+        if config.viewFormats.is_null() {
+            return Some("surface configuration viewFormats pointer is null");
+        }
+        let format = config.format;
+        for view in std::slice::from_raw_parts(config.viewFormats, config.viewFormatCount) {
+            let siblings = matches!(
+                (format, *view),
+                (
+                    native::WGPUTextureFormat_BGRA8Unorm,
+                    native::WGPUTextureFormat_BGRA8UnormSrgb
+                ) | (
+                    native::WGPUTextureFormat_BGRA8UnormSrgb,
+                    native::WGPUTextureFormat_BGRA8Unorm
+                ) | (
+                    native::WGPUTextureFormat_RGBA8Unorm,
+                    native::WGPUTextureFormat_RGBA8UnormSrgb
+                ) | (
+                    native::WGPUTextureFormat_RGBA8UnormSrgb,
+                    native::WGPUTextureFormat_RGBA8Unorm
+                )
+            );
+            if *view != format && !siblings {
+                return Some("surface configuration view format is not compatible");
+            }
+        }
     }
     None
 }
@@ -2943,7 +3054,8 @@ mod tests {
         }
     }
 
-    unsafe fn release_handles(
+    /// Releases the handles owned by an inline FFI test.
+    pub(super) unsafe fn release_handles(
         instance: native::WGPUInstance,
         adapter: native::WGPUAdapter,
         device: native::WGPUDevice,
@@ -2959,7 +3071,8 @@ mod tests {
         }
     }
 
-    unsafe fn noop_chain() -> (
+    /// Creates Noop handles for inline FFI tests.
+    pub(super) unsafe fn noop_chain() -> (
         native::WGPUInstance,
         native::WGPUAdapter,
         native::WGPUDevice,
@@ -4216,7 +4329,10 @@ mod tests {
         wgpuInstanceCreateSurface(instance, &descriptor)
     }
 
-    fn valid_surface_config(device: native::WGPUDevice) -> native::WGPUSurfaceConfiguration {
+    /// Returns a valid Noop surface configuration.
+    pub(super) fn valid_surface_config(
+        device: native::WGPUDevice,
+    ) -> native::WGPUSurfaceConfiguration {
         native::WGPUSurfaceConfiguration {
             nextInChain: std::ptr::null_mut(),
             device,
@@ -4264,6 +4380,18 @@ mod tests {
         ));
     }
 
+    /// Queries the synthetic Noop surface capabilities.
+    pub(super) fn noop_surface_caps() -> yawgpu_hal::HalSurfaceCapabilities {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let caps = HalSurface::Noop
+                .capabilities(borrow_handle(adapter, "WGPUAdapter").core.hal())
+                .unwrap();
+            release_handles(instance, adapter, device);
+            caps
+        }
+    }
+
     #[test]
     fn surface_mode_resolvers_replace_sentinels_and_preserve_concrete_modes() {
         assert_eq!(
@@ -4279,15 +4407,18 @@ mod tests {
             native::WGPUPresentMode_Immediate
         );
         assert_eq!(
-            resolved_alpha_mode(native::WGPUCompositeAlphaMode_Auto),
+            resolved_alpha_mode(native::WGPUCompositeAlphaMode_Auto, &noop_surface_caps()),
             native::WGPUCompositeAlphaMode_Opaque
         );
         assert_eq!(
-            resolved_alpha_mode(native::WGPUCompositeAlphaMode_Opaque),
+            resolved_alpha_mode(native::WGPUCompositeAlphaMode_Opaque, &noop_surface_caps()),
             native::WGPUCompositeAlphaMode_Opaque
         );
         assert_eq!(
-            resolved_alpha_mode(native::WGPUCompositeAlphaMode_Premultiplied),
+            resolved_alpha_mode(
+                native::WGPUCompositeAlphaMode_Premultiplied,
+                &noop_surface_caps()
+            ),
             native::WGPUCompositeAlphaMode_Premultiplied
         );
     }
@@ -4300,7 +4431,16 @@ mod tests {
             let mut config = valid_surface_config(device);
             config.presentMode = native::WGPUPresentMode_Undefined;
             config.alphaMode = native::WGPUCompositeAlphaMode_Auto;
-            assert_eq!(surface_configuration_error(device_handle, &config), None);
+            assert_eq!(
+                surface_configuration_error(
+                    device_handle,
+                    &config,
+                    &HalSurface::Noop
+                        .capabilities(device_handle.adapter.hal())
+                        .unwrap()
+                ),
+                None
+            );
 
             config.alphaMode = native::WGPUCompositeAlphaMode_Opaque;
             for present_mode in [
@@ -4310,7 +4450,13 @@ mod tests {
             ] {
                 config.presentMode = present_mode;
                 assert_eq!(
-                    surface_configuration_error(device_handle, &config),
+                    surface_configuration_error(
+                        device_handle,
+                        &config,
+                        &HalSurface::Noop
+                            .capabilities(device_handle.adapter.hal())
+                            .unwrap()
+                    ),
                     Some("surface configuration present mode is not supported")
                 );
             }
@@ -4323,7 +4469,13 @@ mod tests {
             ] {
                 config.alphaMode = alpha_mode;
                 assert_eq!(
-                    surface_configuration_error(device_handle, &config),
+                    surface_configuration_error(
+                        device_handle,
+                        &config,
+                        &HalSurface::Noop
+                            .capabilities(device_handle.adapter.hal())
+                            .unwrap()
+                    ),
                     Some("surface configuration alpha mode is not supported")
                 );
             }

@@ -177,3 +177,9 @@ New findings recorded while executing (each with evidence in the block spec):
 | m12 | MINOR | (a) "S1 placeholder" wording; (b) tests inserted above `use super::*`; (c) `#[cfg(test)] pub(crate)` shim; (d) `RenderPassTimestampWrites` name reused for compute | (a) **Fixed**; (b)(c)(d) **Deferred** — cosmetic; (d) is a pre-existing type reuse the render/compute descriptors share, renaming is a cross-crate API change outside this phase |
 
 Reviewer also confirmed (no finding): chunk retirement against the consuming submission, no lock re-entrancy in the lowering walk, timestamp written-query clamping, conversion params/WGSL byte-equivalent to Dawn `QueryHelper.cpp`, no new panic paths in library code, 202/202 header symbols exported.
+
+### 2026-09-22 (later) — B5, B4, A3 in progress
+
+- **B5 done (Block 103)**: surface capabilities come from the HAL (Metal = Dawn's list; Vulkan = driver query, deduplicated per format). Follow-ups from the MoltenVK validation run, pre-existing: swapchain view usage ⊄ image usage (VUID 02662), present semaphore destroyed while pending (VUID 05149), zero `currentExtent` accepted (VUID 01689). Fix as one small Vulkan task after Block 104 S3.
+- **B4 closed as stale** (`62338d8`).
+- **A3 (Block 104)**: S1 core landed (`60744d8`); S2 Metal / S3 Vulkan HAL clears in flight; e2e files `e2e_{metal,vulkan}_lazy_init.rs` written.

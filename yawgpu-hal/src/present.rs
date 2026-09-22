@@ -12,6 +12,8 @@ pub struct HalSurfaceConfiguration {
     pub width: u32,
     /// Height.
     pub height: u32,
+    /// Composite alpha mode.
+    pub alpha_mode: HalCompositeAlphaMode,
     /// Present mode.
     pub present_mode: HalPresentMode,
 }
@@ -25,6 +27,7 @@ impl HalSurfaceConfiguration {
         width: u32,
         height: u32,
         present_mode: HalPresentMode,
+        alpha_mode: HalCompositeAlphaMode,
     ) -> Self {
         Self {
             format,
@@ -32,13 +35,14 @@ impl HalSurfaceConfiguration {
             width,
             height,
             present_mode,
+            alpha_mode,
         }
     }
 }
 
 /// Enumerates HAL present mode values.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HalPresentMode {
     /// Fifo variant.
     Fifo,
@@ -48,6 +52,34 @@ pub enum HalPresentMode {
     Immediate,
     /// Mailbox variant.
     Mailbox,
+}
+
+/// Alpha compositing used by a presentation surface.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HalCompositeAlphaMode {
+    /// Ignore the image alpha channel.
+    Opaque,
+    /// Color channels are multiplied by alpha.
+    Premultiplied,
+    /// Color channels are independent of alpha.
+    Unpremultiplied,
+    /// Inherit the window system's compositing policy.
+    Inherit,
+}
+
+/// Supported surface configurations, in backend preference order.
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct HalSurfaceCapabilities {
+    /// Supported image usages.
+    pub usages: HalTextureUsage,
+    /// Supported formats, preferred first.
+    pub formats: Vec<HalTextureFormat>,
+    /// Supported presentation modes.
+    pub present_modes: Vec<HalPresentMode>,
+    /// Supported alpha modes; the first resolves Auto.
+    pub alpha_modes: Vec<HalCompositeAlphaMode>,
 }
 
 #[cfg(test)]
@@ -70,6 +102,7 @@ mod tests {
             320,
             240,
             HalPresentMode::Mailbox,
+            crate::HalCompositeAlphaMode::Opaque,
         );
 
         assert!(matches!(config.format, HalTextureFormat::Rgba8Unorm));
@@ -78,6 +111,7 @@ mod tests {
         assert_eq!(config.usage.texture_binding, usage.texture_binding);
         assert_eq!(config.usage.storage_binding, usage.storage_binding);
         assert_eq!(config.usage.render_attachment, usage.render_attachment);
+        assert_eq!(config.alpha_mode, HalCompositeAlphaMode::Opaque);
         assert_eq!(config.width, 320);
         assert_eq!(config.height, 240);
         assert!(matches!(config.present_mode, HalPresentMode::Mailbox));

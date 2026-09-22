@@ -1,6 +1,6 @@
 # Block 103 — Surface capabilities come from the HAL
 
-Status: **SPEC (2026-09-22)**. Backlog item **B5** in
+Status: **IMPLEMENTED (2026-09-22)** — Metal: inline + C-ABI e2e 5/5 (Dawn's list, sRGB + Immediate + Premultiplied + CopySrc readback, Rgba16Float, rejection of unlisted modes); MoltenVK: e2e 4/4 (driver-reported set deduplicated per format — a driver lists one entry per colour space; MoltenVK reports Fifo/Immediate, Opaque/Unpremultiplied/Inherit, usages incl. StorageBinding). **Known follow-ups found by the Khronos validation layer on the MoltenVK surface e2e (both pre-existing, tracked in the backlog progress log):** (1) `VUID-VkImageViewCreateInfo-pNext-02662` — the view of a swapchain image is created with `map_texture_usage`'s `INPUT_ATTACHMENT` bit, which the swapchain image (and MoltenVK's `supportedUsageFlags`) does not carry; the view usage must be intersected with the image usage. (2) `VUID-vkDestroySemaphore-semaphore-05149` — a present semaphore is destroyed while still pending at surface teardown. (3) A bare `CAMetalLayer` reports `currentExtent (0,0)`; `create_swapchain` passes it through (VUID 01689) — reject a zero extent with `SwapchainCreationFailed` instead. Backlog item **B5** in
 `specs/tracking/backlog.md`. Extends Block 70 "Surface" (descriptor
 validation, sentinel resolution) and Block 85 (Win32 surface).
 

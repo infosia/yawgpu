@@ -107,6 +107,24 @@ impl std::fmt::Debug for GlesSurface {
 }
 
 impl GlesSurface {
+    /// Returns the supported EGL surface configuration set.
+    #[must_use]
+    pub fn capabilities() -> crate::HalSurfaceCapabilities {
+        crate::HalSurfaceCapabilities {
+            usages: HalTextureUsage {
+                render_attachment: true,
+                copy_src: false,
+                copy_dst: false,
+                texture_binding: false,
+                storage_binding: false,
+                transient: false,
+            },
+            formats: vec![HalTextureFormat::Rgba8Unorm, HalTextureFormat::Bgra8Unorm],
+            present_modes: vec![HalPresentMode::Fifo],
+            alpha_modes: vec![crate::HalCompositeAlphaMode::Opaque],
+        }
+    }
+
     pub(super) fn from_egl_window(
         instance: Arc<GlesInstanceInner>,
         window_surface: EglSurface,
@@ -476,6 +494,28 @@ fn blit_back_buffer_to_window(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gles_surface_capabilities_matches_constant_set() {
+        let caps = super::GlesSurface::capabilities();
+        assert_eq!(
+            caps.formats,
+            [
+                crate::HalTextureFormat::Rgba8Unorm,
+                crate::HalTextureFormat::Bgra8Unorm
+            ]
+        );
+        assert_eq!(caps.present_modes, [crate::HalPresentMode::Fifo]);
+        assert_eq!(caps.alpha_modes, [crate::HalCompositeAlphaMode::Opaque]);
+        assert!(caps.usages.render_attachment);
+        assert!(
+            !caps.usages.copy_src
+                && !caps.usages.copy_dst
+                && !caps.usages.texture_binding
+                && !caps.usages.storage_binding
+                && !caps.usages.transient
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -505,6 +545,7 @@ mod tests {
                 320,
                 240,
                 HalPresentMode::Fifo,
+                crate::HalCompositeAlphaMode::Opaque,
             );
 
             assert!(validate_config(config).is_ok());
@@ -527,6 +568,7 @@ mod tests {
             320,
             240,
             HalPresentMode::Fifo,
+            crate::HalCompositeAlphaMode::Opaque,
         );
         assert!(matches!(
             validate_config(format),
@@ -542,6 +584,7 @@ mod tests {
             0,
             240,
             HalPresentMode::Fifo,
+            crate::HalCompositeAlphaMode::Opaque,
         );
         assert!(matches!(
             validate_config(zero_size),
