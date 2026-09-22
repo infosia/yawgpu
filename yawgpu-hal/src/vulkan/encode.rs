@@ -336,7 +336,7 @@ pub(super) fn transition_swapchain_image_to_present(
             inner,
             vk::ImageLayout::PRESENT_SRC_KHR,
             IMAGE_LAYOUT_PRESENT,
-        );
+        )?;
         unsafe {
             queue
                 .inner
@@ -898,6 +898,58 @@ fn block_aligned_extent(extent: u32, block: u32) -> Result<u32, HalError> {
         .ok_or_else(|| texture_error("compressed clear physical extent overflows"))
 }
 
+/// Returns the mip/layer rectangle touched by a texture clear.
+fn clear_subresource_range(
+    dimension: HalTextureDimension,
+    clear: &HalTextureClear,
+) -> SubresourceRange {
+    copy_subresource_range(
+        dimension,
+        clear.mip_level,
+        clear.base_array_layer,
+        clear.array_layer_count,
+    )
+}
+
+/// Returns the mip/layer rectangle touched by a copy; 3D slices share layer zero.
+fn copy_subresource_range(
+    dimension: HalTextureDimension,
+    mip_level: u32,
+    z: u32,
+    depth_or_array_layers: u32,
+) -> SubresourceRange {
+    let (base_array_layer, array_layer_count) = match dimension {
+        HalTextureDimension::D3 => (0, 1),
+        HalTextureDimension::D1 | HalTextureDimension::D2 => (z, depth_or_array_layers),
+    };
+    SubresourceRange {
+        base_mip_level: mip_level,
+        mip_level_count: 1,
+        base_array_layer,
+        array_layer_count,
+    }
+}
+
+/// Bounds two validated image subresource rectangles.
+fn union_subresource_range(a: SubresourceRange, b: SubresourceRange) -> SubresourceRange {
+    let base_mip_level = a.base_mip_level.min(b.base_mip_level);
+    let base_array_layer = a.base_array_layer.min(b.base_array_layer);
+    SubresourceRange {
+        base_mip_level,
+        mip_level_count: a
+            .base_mip_level
+            .saturating_add(a.mip_level_count)
+            .max(b.base_mip_level.saturating_add(b.mip_level_count))
+            - base_mip_level,
+        base_array_layer,
+        array_layer_count: a
+            .base_array_layer
+            .saturating_add(a.array_layer_count)
+            .max(b.base_array_layer.saturating_add(b.array_layer_count))
+            - base_array_layer,
+    }
+}
+
 /// Returns the subresource range one `HalTextureClear` covers.
 ///
 /// A 3D texture has a single array layer, so the whole mip — every depth
@@ -907,18 +959,13 @@ fn texture_clear_subresource_range(
     clear: &HalTextureClear,
     aspect: vk::ImageAspectFlags,
 ) -> vk::ImageSubresourceRange {
+    let range = clear_subresource_range(texture.dimension, clear);
     vk::ImageSubresourceRange::default()
         .aspect_mask(aspect)
-        .base_mip_level(clear.mip_level)
-        .level_count(1)
-        .base_array_layer(match texture.dimension {
-            HalTextureDimension::D3 => 0,
-            HalTextureDimension::D1 | HalTextureDimension::D2 => clear.base_array_layer,
-        })
-        .layer_count(match texture.dimension {
-            HalTextureDimension::D3 => 1,
-            HalTextureDimension::D1 | HalTextureDimension::D2 => clear.array_layer_count,
-        })
+        .base_mip_level(range.base_mip_level)
+        .level_count(range.mip_level_count)
+        .base_array_layer(range.base_array_layer)
+        .layer_count(range.array_layer_count)
 }
 
 /// Orders the clear's transfer write against the transfer write or read that
@@ -960,10 +1007,8 @@ fn texture_clear_write_after_write_barrier(
 /// block-compressed image is filled from a zeroed transient buffer, which the
 /// submission retirement ring keeps alive through `temporary_resources`.
 ///
-/// The image layout tracker is whole-image, so the transition to
-/// `TRANSFER_DST_OPTIMAL` always covers every aspect of the image even when the
-/// clear itself touches one plane — the same rule the discarded depth/stencil
-/// render-pass epilogue follows.
+/// Layout transitions cover the clear's mip and layers and every image aspect,
+/// even when the clear itself touches only one depth/stencil plane.
 pub(super) fn encode_texture_clear(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
@@ -979,13 +1024,14 @@ pub(super) fn encode_texture_clear(
         ClearKind::Color => {
             let range =
                 texture_clear_subresource_range(texture, clear, vk::ImageAspectFlags::COLOR);
-            transition_image(
+            transition_image_range(
                 device,
                 command_buffer,
                 texture_inner,
+                clear_subresource_range(texture.dimension, clear),
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 IMAGE_LAYOUT_TRANSFER_DST,
-            );
+            )?;
             let value = unsafe { vulkan_color_clear_value(clear.format, [0.0; 4]).color };
             unsafe {
                 device.cmd_clear_color_image(
@@ -1008,13 +1054,14 @@ pub(super) fn encode_texture_clear(
                 return Ok(());
             }
             let range = texture_clear_subresource_range(texture, clear, aspects);
-            transition_image(
+            transition_image_range(
                 device,
                 command_buffer,
                 texture_inner,
+                clear_subresource_range(texture.dimension, clear),
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 IMAGE_LAYOUT_TRANSFER_DST,
-            );
+            )?;
             unsafe {
                 device.cmd_clear_depth_stencil_image(
                     command_buffer,
@@ -1029,8 +1076,7 @@ pub(super) fn encode_texture_clear(
             }
             // The clear itself is aspect-scoped, but a layout barrier on a
             // combined depth-stencil image must name both aspects
-            // (VUID-VkImageMemoryBarrier-image-03320) — the tracker is
-            // whole-image anyway.
+            // (VUID-VkImageMemoryBarrier-image-03320).
             texture_clear_write_after_write_barrier(
                 device,
                 command_buffer,
@@ -1161,13 +1207,14 @@ fn encode_compressed_texture_clear(
             vk::ImageAspectFlags::COLOR,
         )?);
     }
-    transition_image(
+    transition_image_range(
         device,
         command_buffer,
         texture_inner,
+        clear_subresource_range(texture.dimension, clear),
         vk::ImageLayout::TRANSFER_DST_OPTIMAL,
         IMAGE_LAYOUT_TRANSFER_DST,
-    );
+    )?;
     unsafe {
         device.cmd_fill_buffer(command_buffer, zeros_handle, 0, size, 0);
         let barrier = vk::BufferMemoryBarrier::default()
@@ -1403,15 +1450,21 @@ pub(super) fn encode_buffer_to_texture(
     let texture_inner = texture.inner()?;
     let aspect = buffer_texture_copy_aspect_flags(copy.format, copy.aspect);
     let region = buffer_image_copy(copy, texture, texture_bytes_per_pixel(copy)?, aspect)?;
-    // The layout tracker covers the whole image, including both depth/stencil
+    // The layout barrier covers the copied mip/layers and both depth/stencil
     // aspects. Only the copy region above may narrow the aspect selection.
-    transition_image(
+    transition_image_range(
         device,
         command_buffer,
         texture_inner,
+        copy_subresource_range(
+            texture.dimension,
+            copy.mip_level,
+            copy.origin.z,
+            copy.extent.depth_or_array_layers,
+        ),
         vk::ImageLayout::TRANSFER_DST_OPTIMAL,
         IMAGE_LAYOUT_TRANSFER_DST,
-    );
+    )?;
     unsafe {
         device.cmd_copy_buffer_to_image(
             command_buffer,
@@ -1443,15 +1496,21 @@ pub(super) fn encode_texture_to_buffer(
     let texture_inner = texture.inner()?;
     let aspect = buffer_texture_copy_aspect_flags(copy.format, copy.aspect);
     let region = buffer_image_copy(copy, texture, texture_bytes_per_pixel(copy)?, aspect)?;
-    // The layout tracker covers the whole image, including both depth/stencil
+    // The layout barrier covers the copied mip/layers and both depth/stencil
     // aspects. Only the copy region above may narrow the aspect selection.
-    transition_image(
+    transition_image_range(
         device,
         command_buffer,
         texture_inner,
+        copy_subresource_range(
+            texture.dimension,
+            copy.mip_level,
+            copy.origin.z,
+            copy.extent.depth_or_array_layers,
+        ),
         vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
         IMAGE_LAYOUT_TRANSFER_SRC,
-    );
+    )?;
     unsafe {
         device.cmd_copy_image_to_buffer(
             command_buffer,
@@ -1485,6 +1544,18 @@ pub(super) fn encode_texture_to_texture(
     let source_inner = source.inner()?;
     let destination_inner = destination.inner()?;
     let aspect = copy_format_aspect_flags(source.format);
+    let source_range = copy_subresource_range(
+        source.dimension,
+        copy.source_mip_level,
+        copy.source_origin.z,
+        copy.extent.depth_or_array_layers,
+    );
+    let destination_range = copy_subresource_range(
+        destination.dimension,
+        copy.destination_mip_level,
+        copy.destination_origin.z,
+        copy.extent.depth_or_array_layers,
+    );
     let source_extent = compressed_copy_extent(
         source,
         copy.source_mip_level,
@@ -1517,14 +1588,14 @@ pub(super) fn encode_texture_to_texture(
         // fence completion, including surface submissions. On recording errors,
         // the caller drops it after destroying the unsubmitted command pool.
         temporary_resources.push(RetainedResource::Buffer { _inner: buffer });
-        transition_image_aspect(
+        transition_image_range(
             device,
             command_buffer,
             source_inner,
-            aspect,
+            source_range,
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
             IMAGE_LAYOUT_TRANSFER_SRC,
-        );
+        )?;
         unsafe {
             device.cmd_copy_image_to_buffer(
                 command_buffer,
@@ -1551,16 +1622,15 @@ pub(super) fn encode_texture_to_texture(
                 &[],
             );
         }
-        // Transition after the read: this also handles a shared VkImage without
-        // splitting subresources or diverging from the whole-image tracker.
-        transition_image_aspect(
+        // Transition the destination after the read, including shared images.
+        transition_image_range(
             device,
             command_buffer,
             destination_inner,
-            aspect,
+            destination_range,
             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
             IMAGE_LAYOUT_TRANSFER_DST,
-        );
+        )?;
         unsafe {
             device.cmd_copy_buffer_to_image(
                 command_buffer,
@@ -1604,65 +1674,32 @@ pub(super) fn encode_texture_to_texture(
     let same_image = source_inner.image == destination_inner.image;
     let (source_layout, destination_layout) =
         texture_copy_layouts(same_image, region.src_subresource, region.dst_subresource);
-    let mut source_barrier_subresource = region.src_subresource;
-    source_barrier_subresource.aspect_mask = source_inner.aspect_flags;
-    let mut destination_barrier_subresource = region.dst_subresource;
-    destination_barrier_subresource.aspect_mask = destination_inner.aspect_flags;
-    if same_image {
-        // The tracker describes the whole image. Temporarily split disjoint
-        // subresources, then restore GENERAL before another command sees it.
-        transition_image_aspect(
+    if same_image && source_layout == vk::ImageLayout::GENERAL {
+        transition_image_range(
             device,
             command_buffer,
             source_inner,
-            source_inner.aspect_flags,
+            union_subresource_range(source_range, destination_range),
             vk::ImageLayout::GENERAL,
             IMAGE_LAYOUT_GENERAL,
-        );
-        transition_copy_subresource(
-            device,
-            command_buffer,
-            source_inner.image,
-            if source_layout == vk::ImageLayout::GENERAL {
-                image_subresource_layers(
-                    source_inner.aspect_flags,
-                    copy.source_mip_level,
-                    0,
-                    source_inner.array_layers,
-                )
-            } else {
-                source_barrier_subresource
-            },
-            vk::ImageLayout::GENERAL,
-            source_layout,
-        );
-        if source_layout != vk::ImageLayout::GENERAL {
-            transition_copy_subresource(
-                device,
-                command_buffer,
-                destination_inner.image,
-                destination_barrier_subresource,
-                vk::ImageLayout::GENERAL,
-                destination_layout,
-            );
-        }
+        )?;
     } else {
-        transition_image_aspect(
+        transition_image_range(
             device,
             command_buffer,
             source_inner,
-            aspect,
+            source_range,
             source_layout,
             IMAGE_LAYOUT_TRANSFER_SRC,
-        );
-        transition_image_aspect(
+        )?;
+        transition_image_range(
             device,
             command_buffer,
             destination_inner,
-            aspect,
+            destination_range,
             destination_layout,
             IMAGE_LAYOUT_TRANSFER_DST,
-        );
+        )?;
     }
     unsafe {
         device.cmd_copy_image(
@@ -1674,22 +1711,6 @@ pub(super) fn encode_texture_to_texture(
             &[region],
         );
     }
-    if same_image && source_layout != vk::ImageLayout::GENERAL {
-        for (subresource, layout) in [
-            (source_barrier_subresource, source_layout),
-            (destination_barrier_subresource, destination_layout),
-        ] {
-            transition_copy_subresource(
-                device,
-                command_buffer,
-                source_inner.image,
-                subresource,
-                layout,
-                vk::ImageLayout::GENERAL,
-            );
-        }
-    }
-
     Ok(())
 }
 
@@ -1710,45 +1731,6 @@ fn texture_copy_layouts(
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
         )
-    }
-}
-
-fn transition_copy_subresource(
-    device: &ash::Device,
-    command_buffer: vk::CommandBuffer,
-    image: vk::Image,
-    subresource: vk::ImageSubresourceLayers,
-    old_layout: vk::ImageLayout,
-    new_layout: vk::ImageLayout,
-) {
-    // Emit even GENERAL -> GENERAL: consecutive same-image copies need a
-    // transfer write -> read/write dependency despite no layout change.
-    let barrier = vk::ImageMemoryBarrier::default()
-        .old_layout(old_layout)
-        .new_layout(new_layout)
-        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .image(image)
-        .subresource_range(
-            vk::ImageSubresourceRange::default()
-                .aspect_mask(subresource.aspect_mask)
-                .base_mip_level(subresource.mip_level)
-                .level_count(1)
-                .base_array_layer(subresource.base_array_layer)
-                .layer_count(subresource.layer_count),
-        )
-        .src_access_mask(access_mask_for_layout(old_layout))
-        .dst_access_mask(access_mask_for_layout(new_layout));
-    unsafe {
-        device.cmd_pipeline_barrier(
-            command_buffer,
-            stage_mask_for_layout(old_layout),
-            stage_mask_for_layout(new_layout),
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[barrier],
-        );
     }
 }
 
@@ -1963,18 +1945,15 @@ fn transition_storage_textures(
         if attachment_images.contains(&inner.image) {
             continue;
         }
-        // Use the image's own full aspect mask, not the bound view's aspect:
-        // a whole-image barrier on a combined depth-stencil image must cover
-        // both aspects (VUID-VkImageMemoryBarrier-image-03320), and the
-        // per-texture layout tracking is whole-image anyway.
-        transition_image_aspect(
+        // Whole-image transitions and attachment exclusion remain until the
+        // S2 view-range form (Block 105 R4). Barriers retain full image aspects.
+        transition_image(
             device,
             command_buffer,
             inner,
-            inner.aspect_flags,
             vk::ImageLayout::GENERAL,
             IMAGE_LAYOUT_GENERAL,
-        );
+        )?;
     }
     Ok(())
 }
@@ -2001,21 +1980,15 @@ fn transition_sampled_textures(
         if attachment_images.contains(&inner.image) {
             continue;
         }
-        // Use the image's own full aspect mask, not the bound view's aspect:
-        // `bound.format` is the aspect-specific descriptor format (e.g. a
-        // Depth32Float view of a combined Depth32FloatStencil8 image), so it
-        // cannot see the image's other aspect, and a whole-image barrier on a
-        // combined depth-stencil image must cover both aspects
-        // (VUID-VkImageMemoryBarrier-image-03320). The per-texture layout
-        // tracking is whole-image anyway.
-        transition_image_aspect(
+        // Whole-image transitions and attachment exclusion remain until the
+        // S2 view-range form (Block 105 R4). Barriers retain full image aspects.
+        transition_image(
             device,
             command_buffer,
             inner,
-            inner.aspect_flags,
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             IMAGE_LAYOUT_SHADER_READ_ONLY,
-        );
+        )?;
     }
     Ok(())
 }
@@ -2069,7 +2042,7 @@ pub(super) fn encode_subpass_render_pass(
             texture.inner()?,
             layout,
             layout_id,
-        );
+        )?;
     }
     let framebuffer_info = vk::FramebufferCreateInfo::default()
         .render_pass(render_pass)
@@ -2125,10 +2098,11 @@ pub(super) fn encode_subpass_render_pass(
         device.device.cmd_end_render_pass(command_buffer);
     }
     for (_, texture) in persistent_textures {
-        texture.inner()?.layout.store(
+        let inner = texture.inner()?;
+        inner.layouts.set(
+            inner.layouts.whole(),
             subpass_color_tracked_layout(texture.transient),
-            AtomicOrdering::Relaxed,
-        );
+        )?;
     }
     Ok(RenderPassTemps {
         descriptor_pools,
@@ -2875,7 +2849,7 @@ fn encode_render_pass_impl(
             texture.inner()?,
             layout,
             layout_id,
-        );
+        )?;
     }
     for texture in resolve_textures.iter().flatten() {
         transition_image(
@@ -2884,19 +2858,18 @@ fn encode_render_pass_impl(
             texture.inner()?,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             IMAGE_LAYOUT_COLOR_ATTACHMENT,
-        );
+        )?;
     }
-    if let (Some(texture), Some(attachment)) =
+    if let (Some(texture), Some(_attachment)) =
         (depth_stencil_texture, &pass.depth_stencil_attachment)
     {
-        transition_image_aspect(
+        transition_image(
             vk_device,
             command_buffer,
             texture.inner()?,
-            depth_stencil_aspect_flags(attachment.format),
             vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
             IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT,
-        );
+        )?;
     }
     // Move sampled bind-group textures to the layout their descriptors declare
     // before the render pass instance begins (barriers are illegal inside it).
@@ -2986,16 +2959,16 @@ fn encode_render_pass_impl(
         vk_device.cmd_end_render_pass(command_buffer);
     }
     for texture in color_textures.iter().flatten() {
-        texture
-            .inner()?
-            .layout
-            .store(IMAGE_LAYOUT_TRANSFER_SRC, AtomicOrdering::Relaxed);
+        let inner = texture.inner()?;
+        inner
+            .layouts
+            .set(inner.layouts.whole(), IMAGE_LAYOUT_TRANSFER_SRC)?;
     }
     for texture in resolve_textures.iter().flatten() {
-        texture
-            .inner()?
-            .layout
-            .store(IMAGE_LAYOUT_TRANSFER_SRC, AtomicOrdering::Relaxed);
+        let inner = texture.inner()?;
+        inner
+            .layouts
+            .set(inner.layouts.whole(), IMAGE_LAYOUT_TRANSFER_SRC)?;
     }
     for (texture, target) in color_textures
         .iter()
@@ -3011,7 +2984,7 @@ fn encode_render_pass_impl(
             inner,
             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
             IMAGE_LAYOUT_TRANSFER_DST,
-        );
+        )?;
         let clear_value = unsafe { vulkan_color_clear_value(target.view_format, [0.0; 4]).color };
         unsafe {
             vk_device.cmd_clear_color_image(
@@ -3028,7 +3001,7 @@ fn encode_render_pass_impl(
             inner,
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
             IMAGE_LAYOUT_TRANSFER_SRC,
-        );
+        )?;
     }
     if let (Some(texture), Some(attachment)) =
         (depth_stencil_texture, &pass.depth_stencil_attachment)
@@ -3039,16 +3012,14 @@ fn encode_render_pass_impl(
             attachment.format,
         );
         if !discarded_aspects.is_empty() {
-            let depth_stencil_aspects = depth_stencil_aspect_flags(attachment.format);
             let inner = texture.inner()?;
-            transition_image_aspect(
+            transition_image(
                 vk_device,
                 command_buffer,
                 inner,
-                depth_stencil_aspects,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 IMAGE_LAYOUT_TRANSFER_DST,
-            );
+            )?;
             let mut range = depth_stencil_attachment_subresource_range(attachment);
             range.aspect_mask = discarded_aspects;
             unsafe {
@@ -3063,14 +3034,13 @@ fn encode_render_pass_impl(
                     &[range],
                 );
             }
-            transition_image_aspect(
+            transition_image(
                 vk_device,
                 command_buffer,
                 inner,
-                depth_stencil_aspects,
                 vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                 IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT,
-            );
+            )?;
         }
     }
     Ok(RenderPassTemps {
@@ -4569,6 +4539,100 @@ pub(super) fn to_image_extent(extent: HalExtent3d) -> vk::Extent3D {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn copy_ranges_select_array_layers_and_collapse_3d_slices() {
+        for dimension in [HalTextureDimension::D1, HalTextureDimension::D2] {
+            assert_eq!(
+                copy_subresource_range(dimension, 1, 2, 3),
+                SubresourceRange {
+                    base_mip_level: 1,
+                    mip_level_count: 1,
+                    base_array_layer: 2,
+                    array_layer_count: 3
+                }
+            );
+        }
+        assert_eq!(
+            copy_subresource_range(HalTextureDimension::D3, 2, 5, 4),
+            SubresourceRange {
+                base_mip_level: 2,
+                mip_level_count: 1,
+                base_array_layer: 0,
+                array_layer_count: 1
+            }
+        );
+    }
+
+    #[test]
+    fn clear_ranges_select_mip_layers_and_collapse_3d_slices() {
+        let texture = VulkanTexture {
+            inner: None,
+            swapchain: None,
+            surface_pending: None,
+            dimension: HalTextureDimension::D2,
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 8,
+            sample_count: 1,
+            bytes_per_pixel: 4,
+            format: HalTextureFormat::Rgba8Unorm,
+            transient: false,
+        };
+        let clear = HalTextureClear {
+            texture: HalTexture::Vulkan(texture),
+            format: HalTextureFormat::Rgba8Unorm,
+            aspect: HalTextureAspect::All,
+            mip_level: 2,
+            base_array_layer: 3,
+            array_layer_count: 4,
+        };
+        for dimension in [HalTextureDimension::D1, HalTextureDimension::D2] {
+            assert_eq!(
+                clear_subresource_range(dimension, &clear),
+                SubresourceRange {
+                    base_mip_level: 2,
+                    mip_level_count: 1,
+                    base_array_layer: 3,
+                    array_layer_count: 4
+                }
+            );
+        }
+        assert_eq!(
+            clear_subresource_range(HalTextureDimension::D3, &clear),
+            SubresourceRange {
+                base_mip_level: 2,
+                mip_level_count: 1,
+                base_array_layer: 0,
+                array_layer_count: 1
+            }
+        );
+    }
+
+    #[test]
+    fn union_ranges_bounds_both_mips_and_layers() {
+        let a = SubresourceRange {
+            base_mip_level: 0,
+            mip_level_count: 1,
+            base_array_layer: 0,
+            array_layer_count: 2,
+        };
+        let b = SubresourceRange {
+            base_mip_level: 1,
+            mip_level_count: 1,
+            base_array_layer: 1,
+            array_layer_count: 2,
+        };
+        let expected = SubresourceRange {
+            base_mip_level: 0,
+            mip_level_count: 2,
+            base_array_layer: 0,
+            array_layer_count: 3,
+        };
+        assert_eq!(union_subresource_range(a, b), expected);
+        assert_eq!(union_subresource_range(b, a), expected);
+        assert_eq!(union_subresource_range(a, a), a);
+    }
+
+    #[test]
     fn combined_depth_stencil_copy_aspects_preserve_whole_image_barrier_aspects() {
         for format in [
             HalTextureFormat::Depth24PlusStencil8,
@@ -4586,6 +4650,18 @@ mod tests {
                 let copy_aspects = buffer_texture_copy_aspect_flags(format, aspect);
                 assert_eq!(copy_aspects, expected);
                 assert_ne!(copy_aspects, barrier_aspects);
+                let runs = [LayoutRun {
+                    range: copy_subresource_range(HalTextureDimension::D2, 1, 2, 3),
+                    old_state: IMAGE_LAYOUT_TRANSFER_DST,
+                }];
+                let (barriers, _) = layout_barriers(
+                    vk::Image::null(),
+                    barrier_aspects,
+                    &runs,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                );
+                assert_eq!(barriers.len(), 1);
+                assert_eq!(barriers[0].subresource_range.aspect_mask, barrier_aspects);
             }
         }
     }
@@ -6465,8 +6541,8 @@ mod tests {
         ));
 
         // Both aspect readbacks ride in the same submission as the render pass
-        // that wrote them: the Vulkan image layout tracker is whole-image, so
-        // two per-aspect transitions in a row only move the first aspect.
+        // that wrote them. The first readback transitions both image aspects;
+        // the second reuses that subresource layout without narrowing it.
         device
             .queue()
             .submit_copies(&[canary_pass, depth_copy.clone(), stencil_copy.clone()])

@@ -16,7 +16,7 @@ native NVIDIA Vulkan driver, `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation`.
 
 | Slice | Commit | Gate | Notes |
 |---|---|---|---|
-| S1 | — | — | — |
+| S1 | (this commit) | workspace 1093/0; clippy vulkan,tiled + fmt clean; Vulkan e2e `--ignored` 109/0, HAL `--ignored` 54/0, 0 validation lines | `layout.rs` tracker (11 unit tests), `transition_image_range` + pure `layout_barriers`, copy/clear/present sites carry exact ranges, same-image copies drop the `GENERAL` split/restore (`transition_copy_subresource` removed), `barrier_aspect_mask` / `transition_image_aspect` removed; render/subpass sites still whole-image via `transition_image` + `set(whole, ..)` (S2/S3). Review nits for the Phase Review: `mod.rs` still duplicates the `IMAGE_LAYOUT_*` constants (only `UNDEFINED` aliased); `_attachment` binding in the depth-stencil pre-pass transition (goes away in S2). |
 | S2 | — | — | — |
 | S3 | — | — | — |
 | S4 | — | — | — |

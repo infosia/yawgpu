@@ -88,10 +88,10 @@ pub(super) struct VulkanTextureInner {
     /// STENCIL for depth-stencil formats, COLOR otherwise). Whole-image layout
     /// barriers must cover every aspect of a combined depth-stencil image
     /// (VUID-VkImageMemoryBarrier-image-03320 without
-    /// separateDepthStencilLayouts), which also keeps the single tracked
-    /// `layout` state self-consistent.
+    /// separateDepthStencilLayouts). Each subresource tracks both aspects together.
     pub(super) aspect_flags: vk::ImageAspectFlags,
-    pub(super) layout: AtomicU8,
+    /// Per-mip and per-layer layout state shared by all image aspects.
+    pub(super) layouts: SubresourceLayouts,
 }
 
 impl Drop for VulkanTextureInner {
@@ -385,7 +385,7 @@ pub(super) fn create_texture(
             mip_level_count: descriptor.mip_level_count,
             array_layers,
             aspect_flags,
-            layout: AtomicU8::new(IMAGE_LAYOUT_UNDEFINED),
+            layouts: SubresourceLayouts::new(descriptor.mip_level_count, array_layers),
         },
         bytes_per_pixel,
     ))
@@ -503,75 +503,78 @@ pub(super) fn transition_image(
     texture: &VulkanTextureInner,
     new_layout: vk::ImageLayout,
     new_state: u8,
-) {
-    transition_image_aspect(
+) -> Result<(), HalError> {
+    transition_image_range(
         device,
         command_buffer,
         texture,
-        texture.aspect_flags,
+        texture.layouts.whole(),
         new_layout,
         new_state,
-    );
+    )
 }
 
-/// Returns transition image for the requested aspect range.
-pub(super) fn transition_image_aspect(
+/// Transitions exactly the requested mip/layer rectangle with full image aspects.
+pub(super) fn transition_image_range(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
     texture: &VulkanTextureInner,
-    aspect: vk::ImageAspectFlags,
+    range: SubresourceRange,
     new_layout: vk::ImageLayout,
     new_state: u8,
-) {
-    let old_state = texture.layout.swap(new_state, AtomicOrdering::Relaxed);
-    let old_layout = image_layout(old_state);
-    if old_layout == new_layout {
-        return;
+) -> Result<(), HalError> {
+    let runs = texture.layouts.transition(range, new_state)?;
+    if runs.is_empty() {
+        return Ok(());
     }
-    let aspect = barrier_aspect_mask(aspect, texture.aspect_flags);
-    let barrier = vk::ImageMemoryBarrier::default()
-        .old_layout(old_layout)
-        .new_layout(new_layout)
-        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .image(texture.image)
-        .subresource_range(image_subresource_range(
-            aspect,
-            texture.mip_level_count,
-            texture.array_layers,
-        ))
-        .src_access_mask(access_mask_for_layout(old_layout))
-        .dst_access_mask(access_mask_for_layout(new_layout));
+    let (barriers, src_stages) =
+        layout_barriers(texture.image, texture.aspect_flags, &runs, new_layout);
     unsafe {
         device.cmd_pipeline_barrier(
             command_buffer,
-            stage_mask_for_layout(old_layout),
+            src_stages,
             stage_mask_for_layout(new_layout),
             vk::DependencyFlags::empty(),
             &[],
             &[],
-            &[barrier],
+            &barriers,
         );
     }
+    Ok(())
 }
 
-/// Returns the aspect mask a layout barrier must name for an image.
-///
-/// The layout tracker is whole-image, and Vulkan requires a barrier on a
-/// combined depth-stencil image to name **both** aspects unless
-/// `separateDepthStencilLayouts` is enabled
-/// (`VUID-VkImageMemoryBarrier-image-03320`), so an aspect-narrowed request
-/// (a `DepthOnly` / `StencilOnly` copy or clear) is widened to the image's
-/// full aspect set. Single-aspect images keep the requested mask.
-pub(super) fn barrier_aspect_mask(
-    requested: vk::ImageAspectFlags,
-    image_aspects: vk::ImageAspectFlags,
-) -> vk::ImageAspectFlags {
-    if image_aspects.contains(vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL) {
-        image_aspects
-    } else {
-        requested
-    }
+/// Builds one full-aspect image barrier per layout run and combines source stages.
+pub(super) fn layout_barriers(
+    texture_image: vk::Image,
+    aspect_flags: vk::ImageAspectFlags,
+    runs: &[LayoutRun],
+    new_layout: vk::ImageLayout,
+) -> (Vec<vk::ImageMemoryBarrier<'static>>, vk::PipelineStageFlags) {
+    let mut src_stages = vk::PipelineStageFlags::empty();
+    let barriers = runs
+        .iter()
+        .map(|run| {
+            let old_layout = image_layout(run.old_state);
+            src_stages |= stage_mask_for_layout(old_layout);
+            vk::ImageMemoryBarrier::default()
+                .old_layout(old_layout)
+                .new_layout(new_layout)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(texture_image)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(aspect_flags)
+                        .base_mip_level(run.range.base_mip_level)
+                        .level_count(run.range.mip_level_count)
+                        .base_array_layer(run.range.base_array_layer)
+                        .layer_count(run.range.array_layer_count),
+                )
+                .src_access_mask(access_mask_for_layout(old_layout))
+                .dst_access_mask(access_mask_for_layout(new_layout))
+        })
+        .collect();
+    (barriers, src_stages)
 }
 
 pub(super) fn buffer_write_read_barrier_dst_access_mask() -> vk::AccessFlags {
@@ -734,6 +737,93 @@ pub(super) fn color_subresource_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Exercises both recording entry points and range rejection on a real device.
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    fn transition_image_range_and_whole_wrapper_track_recorded_subresources() {
+        let device = super::super::test_helpers::vulkan_device();
+        let mut descriptor = super::super::test_helpers::texture_descriptor();
+        descriptor.mip_level_count = 2;
+        descriptor.depth_or_array_layers = 3;
+        let texture = device.create_texture(&descriptor).unwrap();
+        let inner = texture.inner().unwrap();
+        let vk_device = &device.inner.device;
+        let pool_info = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(device.inner.queue_family_index);
+        let pool = unsafe { vk_device.create_command_pool(&pool_info, None) }.unwrap();
+        let allocate = vk::CommandBufferAllocateInfo::default()
+            .command_pool(pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        let command_buffer = unsafe { vk_device.allocate_command_buffers(&allocate) }.unwrap()[0];
+        unsafe {
+            vk_device.begin_command_buffer(command_buffer, &vk::CommandBufferBeginInfo::default())
+        }
+        .unwrap();
+        let range = SubresourceRange {
+            base_mip_level: 1,
+            mip_level_count: 1,
+            base_array_layer: 1,
+            array_layer_count: 1,
+        };
+        assert!(transition_image_range(
+            vk_device,
+            command_buffer,
+            inner,
+            SubresourceRange {
+                mip_level_count: 0,
+                ..range
+            },
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            IMAGE_LAYOUT_TRANSFER_DST
+        )
+        .is_err());
+        transition_image_range(
+            vk_device,
+            command_buffer,
+            inner,
+            range,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            IMAGE_LAYOUT_TRANSFER_DST,
+        )
+        .unwrap();
+        assert_eq!(
+            inner.layouts.state(1, 1).unwrap(),
+            IMAGE_LAYOUT_TRANSFER_DST
+        );
+        assert_eq!(inner.layouts.state(0, 0).unwrap(), IMAGE_LAYOUT_UNDEFINED);
+        transition_image(
+            vk_device,
+            command_buffer,
+            inner,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            IMAGE_LAYOUT_TRANSFER_SRC,
+        )
+        .unwrap();
+        // Repeating a read-only layout exercises the no-barrier return path.
+        transition_image_range(
+            vk_device,
+            command_buffer,
+            inner,
+            range,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            IMAGE_LAYOUT_TRANSFER_SRC,
+        )
+        .unwrap();
+        for mip in 0..2 {
+            for layer in 0..3 {
+                assert_eq!(
+                    inner.layouts.state(mip, layer).unwrap(),
+                    IMAGE_LAYOUT_TRANSFER_SRC
+                );
+            }
+        }
+        unsafe {
+            vk_device.end_command_buffer(command_buffer).unwrap();
+            vk_device.destroy_command_pool(pool, None);
+        }
+    }
 
     #[test]
     fn effective_anisotropy_clamps_above_device_max_to_device_max() {
@@ -944,18 +1034,72 @@ mod tests {
     }
 
     #[test]
-    fn barrier_aspect_mask_widens_only_combined_depth_stencil_images() {
-        let ds = vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL;
-        assert_eq!(barrier_aspect_mask(vk::ImageAspectFlags::STENCIL, ds), ds);
-        assert_eq!(barrier_aspect_mask(vk::ImageAspectFlags::DEPTH, ds), ds);
+    fn layout_barriers_preserve_ranges_full_aspects_and_source_stages() {
+        use ash::vk::Handle;
+        let image = vk::Image::from_raw(17);
+        let aspects = vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL;
+        let runs = [
+            LayoutRun {
+                range: SubresourceRange {
+                    base_mip_level: 1,
+                    mip_level_count: 2,
+                    base_array_layer: 2,
+                    array_layer_count: 3,
+                },
+                old_state: IMAGE_LAYOUT_TRANSFER_DST,
+            },
+            LayoutRun {
+                range: SubresourceRange {
+                    base_mip_level: 3,
+                    mip_level_count: 1,
+                    base_array_layer: 0,
+                    array_layer_count: 1,
+                },
+                old_state: IMAGE_LAYOUT_SHADER_READ_ONLY,
+            },
+        ];
+        let (barriers, stages) = layout_barriers(image, aspects, &runs, vk::ImageLayout::GENERAL);
+        assert_eq!(barriers.len(), runs.len());
+        for (barrier, run) in barriers.iter().zip(runs) {
+            assert_eq!(barrier.image, image);
+            assert_eq!(barrier.subresource_range.aspect_mask, aspects);
+            assert_eq!(
+                barrier.subresource_range.base_mip_level,
+                run.range.base_mip_level
+            );
+            assert_eq!(
+                barrier.subresource_range.level_count,
+                run.range.mip_level_count
+            );
+            assert_eq!(
+                barrier.subresource_range.base_array_layer,
+                run.range.base_array_layer
+            );
+            assert_eq!(
+                barrier.subresource_range.layer_count,
+                run.range.array_layer_count
+            );
+            assert_eq!(barrier.old_layout, image_layout(run.old_state));
+            assert_eq!(barrier.new_layout, vk::ImageLayout::GENERAL);
+            assert_eq!(
+                barrier.src_access_mask,
+                access_mask_for_layout(barrier.old_layout)
+            );
+            assert_eq!(
+                barrier.dst_access_mask,
+                access_mask_for_layout(vk::ImageLayout::GENERAL)
+            );
+            assert_eq!(barrier.src_queue_family_index, vk::QUEUE_FAMILY_IGNORED);
+            assert_eq!(barrier.dst_queue_family_index, vk::QUEUE_FAMILY_IGNORED);
+        }
         assert_eq!(
-            barrier_aspect_mask(vk::ImageAspectFlags::DEPTH, vk::ImageAspectFlags::DEPTH),
-            vk::ImageAspectFlags::DEPTH
+            stages,
+            vk::PipelineStageFlags::TRANSFER
+                | stage_mask_for_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
         );
-        assert_eq!(
-            barrier_aspect_mask(vk::ImageAspectFlags::COLOR, vk::ImageAspectFlags::COLOR),
-            vk::ImageAspectFlags::COLOR
-        );
+        let (empty, stages) = layout_barriers(image, aspects, &[], vk::ImageLayout::GENERAL);
+        assert!(empty.is_empty());
+        assert!(stages.is_empty());
     }
 
     #[test]

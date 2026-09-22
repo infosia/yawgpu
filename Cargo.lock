@@ -704,9 +704,11 @@ version = "0.1.0"
 dependencies = [
  "ash",
  "bindgen",
+ "objc2",
  "objc2-core-foundation",
  "objc2-metal",
  "objc2-quartz-core",
+ "windows-sys",
  "yawgpu-core",
  "yawgpu-hal",
  "yawgpu-test",

@@ -5,7 +5,6 @@ use std::ffi::{c_char, c_void, CStr, CString};
 use std::fmt;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use ash::vk;
@@ -31,7 +30,7 @@ const ASSUMED_MAX_BUFFER_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 /// Minimum Vulkan API version yawgpu requests at vkCreateInstance.
 /// Documented in specs/blocks/60-real-backends.md § Minimum Vulkan version.
 const YAWGPU_VULKAN_API_VERSION: u32 = vk::API_VERSION_1_1;
-const IMAGE_LAYOUT_UNDEFINED: u8 = 0;
+const IMAGE_LAYOUT_UNDEFINED: u8 = texture::IMAGE_LAYOUT_UNDEFINED;
 const IMAGE_LAYOUT_TRANSFER_DST: u8 = 1;
 const IMAGE_LAYOUT_TRANSFER_SRC: u8 = 2;
 const IMAGE_LAYOUT_COLOR_ATTACHMENT: u8 = 3;
@@ -1331,6 +1330,7 @@ mod device;
 mod encode;
 mod error;
 mod format;
+mod layout;
 mod pipeline;
 mod query_set;
 mod queue;
@@ -1340,6 +1340,7 @@ use self::device::*;
 use self::encode::*;
 use self::error::*;
 use self::format::*;
+use self::layout::*;
 use self::pipeline::*;
 use self::query_set::*;
 use self::queue::*;
