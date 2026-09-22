@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn compute_pass_encoder_lifecycle_and_debug_markers() {
         let encoder = noop_device().create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
 
         assert_eq!(pass.push_debug_group(), None);
@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn compute_pass_double_end_does_not_poison_parent_encoder() {
         let encoder = noop_device().create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
 
         assert_eq!(pass.end(), None);
@@ -259,7 +259,7 @@ mod tests {
         let indirect = noop_indirect_buffer(&device);
         let indirect_for_dispatch = Arc::clone(&indirect);
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
 
         assert_eq!(pass.set_pipeline(pipeline), None);
@@ -309,7 +309,7 @@ mod tests {
         let pipeline = noop_compute_pipeline(&device);
         let bind_group = empty_bind_group(&device);
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
 
         assert_eq!(pass.set_pipeline(pipeline), None);
@@ -354,7 +354,7 @@ mod tests {
         let pipeline_a = noop_compute_pipeline(&device);
         let pipeline_b = noop_compute_pipeline(&device);
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
 
         assert_eq!(pass.set_pipeline(pipeline_a), None);
@@ -388,7 +388,7 @@ mod tests {
 
         let unaligned_offset = || {
             let encoder = device.create_command_encoder();
-            let (pass, _) = encoder.begin_compute_pass();
+            let (pass, _) = encoder.begin_compute_pass(None);
             assert_eq!(pass.set_immediates(1, &[1, 2, 3, 4], device.limits()), None);
             assert_eq!(pass.end(), None);
             encoder.finish().1
@@ -400,7 +400,7 @@ mod tests {
 
         let unaligned_size = || {
             let encoder = device.create_command_encoder();
-            let (pass, _) = encoder.begin_compute_pass();
+            let (pass, _) = encoder.begin_compute_pass(None);
             assert_eq!(pass.set_immediates(0, &[1, 2, 3], device.limits()), None);
             assert_eq!(pass.end(), None);
             encoder.finish().1
@@ -412,7 +412,7 @@ mod tests {
 
         let offset_out_of_limit = || {
             let encoder = device.create_command_encoder();
-            let (pass, _) = encoder.begin_compute_pass();
+            let (pass, _) = encoder.begin_compute_pass(None);
             assert_eq!(pass.set_immediates(68, &[], device.limits()), None);
             assert_eq!(pass.end(), None);
             encoder.finish().1
@@ -424,7 +424,7 @@ mod tests {
 
         let range_out_of_limit = || {
             let encoder = device.create_command_encoder();
-            let (pass, _) = encoder.begin_compute_pass();
+            let (pass, _) = encoder.begin_compute_pass(None);
             assert_eq!(pass.set_immediates(60, &[0; 8], device.limits()), None);
             assert_eq!(pass.end(), None);
             encoder.finish().1
@@ -452,7 +452,7 @@ fn cs() {
         );
 
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
         assert_eq!(pass.set_pipeline(pipeline), None);
         assert_eq!(pass.set_immediates(0, &[1, 2, 3, 4], device.limits()), None);
@@ -497,7 +497,7 @@ fn cs() {
 
         let dispatch_with_writes = |pipeline: Arc<ComputePipeline>, writes: Vec<(u32, Vec<u8>)>| {
             let encoder = device.create_command_encoder();
-            let (pass, begin_error) = encoder.begin_compute_pass();
+            let (pass, begin_error) = encoder.begin_compute_pass(None);
             assert_eq!(begin_error, None);
             assert_eq!(pass.set_pipeline(pipeline), None);
             for (offset, data) in writes {
@@ -540,7 +540,7 @@ fn cs() {}
         );
 
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
         assert_eq!(pass.set_pipeline(pipeline), None);
         assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
@@ -574,7 +574,7 @@ fn cs() {
         );
 
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
         assert_eq!(pass.set_pipeline(pipeline), None);
         assert_eq!(pass.set_immediates(0, &[1; 4], device.limits()), None);
@@ -599,7 +599,7 @@ fn cs() {
 
         // Valid offset, zero size: succeeds and leaves the scratch untouched.
         let encoder = device.create_command_encoder();
-        let (pass, _) = encoder.begin_compute_pass();
+        let (pass, _) = encoder.begin_compute_pass(None);
         assert_eq!(pass.set_pipeline(pipeline), None);
         assert_eq!(pass.set_immediates(0, &[], device.limits()), None);
         assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
@@ -614,7 +614,7 @@ fn cs() {
         // Invalid (unaligned) offset with zero size: still validated and
         // rejected, matching Dawn's unconditional `ValidateSetImmediates`.
         let encoder = device.create_command_encoder();
-        let (pass, _) = encoder.begin_compute_pass();
+        let (pass, _) = encoder.begin_compute_pass(None);
         assert_eq!(pass.set_immediates(1, &[], device.limits()), None);
         assert_eq!(pass.end(), None);
         let (command_buffer, error) = encoder.finish();
@@ -671,7 +671,7 @@ fn cs() {
         assert!(!pipeline_b.is_error());
 
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
 
         assert_eq!(pass.set_pipeline(pipeline_a), None);
@@ -745,7 +745,7 @@ fn cs() {
         let pipeline = storage_compute_pipeline(&device, pipeline_layout);
 
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
 
         assert_eq!(pass.set_pipeline(pipeline), None);
@@ -778,7 +778,7 @@ fn cs() {
             mapped_at_creation: false,
         }));
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
 
         assert_eq!(
@@ -857,7 +857,7 @@ fn cs() {
             }],
         ));
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
 
         assert_eq!(pass.set_pipeline(pipeline), None);
@@ -922,7 +922,7 @@ fn cs() {
         let pipeline_b = uniform_compute_pipeline(&device, pipeline_layout);
 
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
 
         assert_eq!(pass.set_pipeline(pipeline_a), None);
@@ -1019,7 +1019,7 @@ fn cs() {
         );
 
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
 
         assert_eq!(pass.set_pipeline(pipeline_a), None);
@@ -1129,7 +1129,7 @@ fn cs() {
         let pipeline = aliasing_storage_textures_compute_pipeline(&device, pipeline_layout);
 
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
 
         assert_eq!(pass.set_pipeline(pipeline), None);
@@ -1245,7 +1245,7 @@ fn cs() {
         assert!(pipeline.is_error());
 
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
 
         assert_eq!(pass.set_pipeline(pipeline), None);
@@ -1283,7 +1283,7 @@ fn cs() {
         );
 
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
         assert_eq!(
             pass.set_bind_group(0, Some(group), Vec::new(), device.limits()),
@@ -1338,7 +1338,7 @@ fn cs() {
         assert!(!bind_group.is_error());
 
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
 
         assert_eq!(
@@ -1360,7 +1360,7 @@ fn cs() {
         );
 
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
 
         assert_eq!(

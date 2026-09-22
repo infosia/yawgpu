@@ -126,6 +126,13 @@ impl GlesQueue {
                         HalCopy::Buffer(copy) => submit_buffer_copy(gl, copy)?,
                         HalCopy::BufferClear(clear) => submit_buffer_clear(gl, clear)?,
                         HalCopy::ClearTexture(clear) => submit_texture_clear(gl, clear)?,
+                        HalCopy::WriteTimestamp(_) => {
+                            return Err(HalError::QueueSubmissionFailed {
+                                backend: "gles",
+                                message: "timestamp writes are not implemented yet on gles"
+                                    .to_owned(),
+                            })
+                        }
                         HalCopy::ResolveQuerySet(resolve) => {
                             submit_resolve_query_set(gl, resolve)?;
                         }

@@ -60,6 +60,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderBeginComputePass(
     descriptor: *const native::WGPUComputePassDescriptor,
 ) -> native::WGPUComputePassEncoder {
     let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let mut mapped_writes = None;
     if let Some(timestamp_writes) = descriptor
         .as_ref()
         .and_then(|descriptor| descriptor.timestampWrites.as_ref())
@@ -80,22 +81,11 @@ pub unsafe extern "C" fn wgpuCommandEncoderBeginComputePass(
                     encoder.core.record_validation_error(message),
                 );
             } else {
-                if let Some(index) = timestamp_writes.beginning_index {
-                    let error = encoder
-                        .core
-                        .write_timestamp(Arc::new(timestamp_writes.query_set.clone()), index);
-                    dispatch_optional_error(&encoder.device, error);
-                }
-                if let Some(index) = timestamp_writes.end_index {
-                    let error = encoder
-                        .core
-                        .write_timestamp(Arc::new(timestamp_writes.query_set), index);
-                    dispatch_optional_error(&encoder.device, error);
-                }
+                mapped_writes = Some(timestamp_writes);
             }
         }
     }
-    let (pass, error) = encoder.core.begin_compute_pass();
+    let (pass, error) = encoder.core.begin_compute_pass(mapped_writes);
     dispatch_optional_error(&encoder.device, error);
     arc_to_handle(Arc::new(WGPUComputePassEncoderImpl {
         core: Arc::new(pass),
@@ -618,6 +608,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn device_impl() -> Arc<WGPUDeviceImpl> {
+        device_impl_with_features(&[])
+    }
+
+    fn device_impl_with_features(features: &[core::Feature]) -> Arc<WGPUDeviceImpl> {
         let instance = Arc::new(WGPUInstanceImpl {
             core: Arc::new(core::Instance::new_noop()),
             timed_wait_any_enabled: false,
@@ -630,7 +624,7 @@ mod tests {
             .next()
             .expect("Noop adapter");
         let device = adapter
-            .create_device(None, &[], "device", "queue")
+            .create_device(None, features, "device", "queue")
             .expect("Noop device");
         Arc::new(WGPUDeviceImpl {
             core: Arc::new(device),
@@ -649,6 +643,114 @@ mod tests {
             compute_pipeline_cache: ObjectCache::new(),
             render_pipeline_cache: ObjectCache::new(),
         })
+    }
+
+    #[test]
+    fn wgpuCommandEncoderBeginComputePass_with_timestamp_writes_records_begin_before_and_end_after()
+    {
+        let device = device_impl_with_features(&[core::Feature::TimestampQuery]);
+        let handle = arc_to_handle(device.clone());
+        unsafe {
+            let descriptor = native::WGPUQuerySetDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: std::mem::zeroed(),
+                type_: native::WGPUQueryType_Timestamp,
+                count: 2,
+            };
+            let set = wgpuDeviceCreateQuerySet(handle, &descriptor);
+            let encoder = wgpuDeviceCreateCommandEncoder(handle, std::ptr::null());
+            let writes = native::WGPUPassTimestampWrites {
+                nextInChain: std::ptr::null_mut(),
+                querySet: set,
+                beginningOfPassWriteIndex: 0,
+                endOfPassWriteIndex: 1,
+            };
+            let descriptor = native::WGPUComputePassDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: std::mem::zeroed(),
+                timestampWrites: &writes,
+            };
+            let pass = wgpuCommandEncoderBeginComputePass(encoder, &descriptor);
+            let shader = Arc::new(device.core.create_shader_module(
+                core::ShaderModuleSource::Wgsl(
+                    "@compute @workgroup_size(1) fn main() {}".to_owned(),
+                ),
+            ));
+            let pipeline = Arc::new(device.core.create_compute_pipeline(
+                core::ComputePipelineDescriptor {
+                    layout: core::ComputePipelineLayout::Auto,
+                    shader_module: shader,
+                    entry_point: None,
+                    constants: Vec::new(),
+                    error: None,
+                },
+            ));
+            let core_pass = &borrow_handle(pass, "WGPUComputePassEncoder").core;
+            assert_eq!(core_pass.set_pipeline(pipeline), None);
+            assert_eq!(
+                core_pass.dispatch_workgroups(1, 1, 1, device.core.limits()),
+                None
+            );
+            wgpuComputePassEncoderEnd(pass);
+            let command = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert!(!borrow_handle(command, "WGPUCommandBuffer").core.is_error());
+            let queue = wgpuDeviceGetQueue(handle);
+            wgpuQueueSubmit(queue, 1, &command);
+            let queue_core = device.core.queue();
+            let yawgpu_hal::HalQueue::Noop(hal) = queue_core.hal() else {
+                panic!("expected Noop")
+            };
+            assert!(
+                matches!(hal.submitted_copies().as_slice(), [yawgpu_hal::HalCopy::WriteTimestamp(b), yawgpu_hal::HalCopy::ComputePass(_), yawgpu_hal::HalCopy::WriteTimestamp(e)] if b.query_index == 0 && e.query_index == 1)
+            );
+            wgpuComputePassEncoderRelease(pass);
+            wgpuCommandBufferRelease(command);
+            wgpuCommandEncoderRelease(encoder);
+            wgpuQuerySetRelease(set);
+            wgpuQueueRelease(queue);
+            wgpuDeviceRelease(handle);
+        }
+    }
+
+    #[test]
+    fn wgpuCommandEncoderBeginComputePass_timestamp_writes_reject_device_mismatch() {
+        let device = device_impl_with_features(&[core::Feature::TimestampQuery]);
+        let other = device_impl_with_features(&[core::Feature::TimestampQuery]);
+        let handle = arc_to_handle(device.clone());
+        let other_handle = arc_to_handle(other);
+        unsafe {
+            let descriptor = native::WGPUQuerySetDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: std::mem::zeroed(),
+                type_: native::WGPUQueryType_Timestamp,
+                count: 2,
+            };
+            let set = wgpuDeviceCreateQuerySet(other_handle, &descriptor);
+            let encoder = wgpuDeviceCreateCommandEncoder(handle, std::ptr::null());
+            let writes = native::WGPUPassTimestampWrites {
+                nextInChain: std::ptr::null_mut(),
+                querySet: set,
+                beginningOfPassWriteIndex: 0,
+                endOfPassWriteIndex: 1,
+            };
+            let descriptor = native::WGPUComputePassDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: std::mem::zeroed(),
+                timestampWrites: &writes,
+            };
+            let pass = wgpuCommandEncoderBeginComputePass(encoder, &descriptor);
+            wgpuComputePassEncoderEnd(pass);
+            let (_, error) = borrow_handle(encoder, "WGPUCommandEncoder").core.finish();
+            assert_eq!(
+                error.as_deref(),
+                Some("compute pass timestamp query set must belong to the command encoder device")
+            );
+            wgpuComputePassEncoderRelease(pass);
+            wgpuCommandEncoderRelease(encoder);
+            wgpuQuerySetRelease(set);
+            wgpuDeviceRelease(other_handle);
+            wgpuDeviceRelease(handle);
+        }
     }
 
     unsafe fn copy_dst_buffer(device: native::WGPUDevice, size: u64) -> native::WGPUBuffer {

@@ -119,6 +119,7 @@ impl RenderBundleEncoder {
                         pass_state: PassEncoderState::new(
                             limits,
                             PassEncoderInit {
+                                end_timestamp: None,
                                 attachment_signature: Some(attachment_signature),
                                 render_extent: None,
                                 attachment_textures: Vec::new(),

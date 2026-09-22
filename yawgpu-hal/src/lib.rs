@@ -48,6 +48,7 @@ pub use command::{
     HalRenderColorTarget, HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPassCommand,
     HalRenderPassCommandStream, HalResolveQuerySet, HalScissorRect, HalStorageTextureAccess,
     HalTextureAspect, HalTextureClear, HalTextureCopy, HalTextureViewDimension, HalViewport,
+    HalWriteTimestamp,
 };
 #[cfg(feature = "tiled")]
 pub use command::{
@@ -478,6 +479,12 @@ impl HalAdapter {
         hal_dispatch!(self, adapter => adapter.supports_timestamp_query())
     }
 
+    /// Returns nanoseconds per timestamp tick.
+    #[must_use]
+    pub fn timestamp_period(&self) -> f32 {
+        hal_dispatch!(self, adapter => adapter.timestamp_period())
+    }
+
     /// Returns true when Depth32FloatStencil8 textures are supported.
     #[must_use]
     pub fn supports_depth32float_stencil8(&self) -> bool {
@@ -645,6 +652,8 @@ pub enum HalBackend {
 pub enum HalQueryKind {
     /// Occlusion query set.
     Occlusion,
+    /// Timestamp query set containing raw backend ticks.
+    Timestamp,
 }
 
 /// Enumerates HAL device values.
@@ -734,6 +743,7 @@ impl HalDevice {
     }
 
     /// Creates a query set matching the given kind and count.
+    #[must_use = "query set creation can fail"]
     pub fn create_query_set(
         &self,
         kind: HalQueryKind,
@@ -750,6 +760,13 @@ impl HalDevice {
                 .map(HalQuerySet::Vulkan),
             #[cfg(feature = "metal")]
             Self::Metal(device) => device.create_query_set(kind, count).map(HalQuerySet::Metal),
+            #[cfg(feature = "gles")]
+            Self::Gles(_) if kind == HalQueryKind::Timestamp => {
+                Err(HalError::BufferOperationFailed {
+                    backend: "gles",
+                    message: "timestamp query sets are not implemented yet on gles",
+                })
+            }
             #[cfg(feature = "gles")]
             Self::Gles(_) => Ok(HalQuerySet::Gles {
                 count,
@@ -1294,6 +1311,33 @@ pub enum HalRenderPipeline {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn timestamp_period_on_noop_is_one() {
+        let adapter = HalInstance::new_noop().enumerate_adapters().remove(0);
+        assert_eq!(adapter.timestamp_period(), 1.0);
+    }
+
+    #[test]
+    fn timestamp_query_set_and_write_timestamp_on_noop() -> Result<(), HalError> {
+        let device = noop_device()?;
+        let set = device.create_query_set(HalQueryKind::Timestamp, 4)?;
+        assert_eq!(set.count(), 4);
+        let queue = device.queue();
+        queue.submit_copies(&[HalCopy::WriteTimestamp(HalWriteTimestamp {
+            query_set: set,
+            query_index: 3,
+        })])?;
+        #[allow(irrefutable_let_patterns)]
+        let HalQueue::Noop(queue) = queue
+        else {
+            panic!("expected Noop")
+        };
+        assert!(
+            matches!(queue.submitted_copies().as_slice(), [HalCopy::WriteTimestamp(write)] if write.query_index == 3)
+        );
+        Ok(())
+    }
+
     use super::*;
 
     #[test]

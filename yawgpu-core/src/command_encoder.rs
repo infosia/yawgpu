@@ -161,6 +161,13 @@ pub(crate) enum TextureCopyCommand {
     },
 }
 
+/// A timestamp written at this point in the command stream.
+#[derive(Debug, Clone)]
+pub(crate) struct WriteTimestampCommand {
+    pub(crate) query_set: Arc<QuerySet>,
+    pub(crate) query_index: u32,
+}
+
 /// Enumerates command execution values.
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
@@ -175,6 +182,8 @@ pub(crate) enum CommandExecution {
     TextureCopy(TextureCopyCommand),
     /// Query-set resolve variant.
     ResolveQuerySet(ResolveQuerySetCommand),
+    /// Timestamp write.
+    WriteTimestamp(WriteTimestampCommand),
     /// Compute pass variant.
     ComputePass(ComputePassCommand),
     /// Render pass variant.
@@ -400,6 +409,7 @@ impl CommandEncoder {
         descriptor: &RenderPassDescriptor,
     ) -> (RenderPassEncoder, Option<String>) {
         let (token, immediate_error) = self.begin_pass(PassKind::Render);
+        let mut end_timestamp = None;
         let attachment_signature =
             render_pass_attachment_signature(descriptor, &self.inner.features, self.inner.limits)
                 .ok();
@@ -411,6 +421,8 @@ impl CommandEncoder {
             } else {
                 self.record_referenced_textures(render_pass_attachment_textures(descriptor));
                 self.record_referenced_query_sets(render_pass_query_sets(descriptor));
+                end_timestamp =
+                    self.record_pass_timestamp_begin(descriptor.timestamp_writes.as_ref());
             }
         }
         (
@@ -420,6 +432,7 @@ impl CommandEncoder {
                         self.clone(),
                         token,
                         PassEncoderInit {
+                            end_timestamp,
                             attachment_signature,
                             render_extent: render_pass_extent(descriptor),
                             attachment_textures: render_pass_attachment_textures(descriptor),
@@ -512,14 +525,33 @@ impl CommandEncoder {
 
     /// Begins a compute pass on this encoder and returns its compute-pass encoder.
     #[must_use]
-    pub fn begin_compute_pass(&self) -> (ComputePassEncoder, Option<String>) {
+    pub fn begin_compute_pass(
+        &self,
+        timestamp_writes: Option<RenderPassTimestampWrites>,
+    ) -> (ComputePassEncoder, Option<String>) {
         let (token, immediate_error) = self.begin_pass(PassKind::Compute);
+        let end_timestamp = if immediate_error.is_none() {
+            match timestamp_writes
+                .as_ref()
+                .map(validate_compute_pass_timestamp_writes)
+                .transpose()
+            {
+                Ok(_) => self.record_pass_timestamp_begin(timestamp_writes.as_ref()),
+                Err(message) => {
+                    self.record_first_error(message);
+                    None
+                }
+            }
+        } else {
+            None
+        };
         (
             ComputePassEncoder {
                 inner: Arc::new(PassEncoderInner::new(
                     self.clone(),
                     token,
                     PassEncoderInit {
+                        end_timestamp,
                         attachment_signature: None,
                         render_extent: None,
                         attachment_textures: Vec::new(),
@@ -532,6 +564,34 @@ impl CommandEncoder {
             },
             immediate_error,
         )
+    }
+
+    fn record_pass_timestamp_begin(
+        &self,
+        writes: Option<&RenderPassTimestampWrites>,
+    ) -> Option<WriteTimestampCommand> {
+        let writes = writes?;
+        self.record_referenced_query_set(writes.query_set.clone());
+        let query_set = Arc::new(writes.query_set.clone());
+        if let Some(query_index) = writes.beginning_index {
+            self.record_pass_timestamp(WriteTimestampCommand {
+                query_set: query_set.clone(),
+                query_index,
+            });
+        }
+        writes.end_index.map(|query_index| WriteTimestampCommand {
+            query_set,
+            query_index,
+        })
+    }
+
+    /// Appends a timestamp at an already validated pass boundary.
+    pub(crate) fn record_pass_timestamp(&self, command: WriteTimestampCommand) {
+        self.inner
+            .state
+            .lock()
+            .command_ops
+            .push(CommandExecution::WriteTimestamp(command));
     }
 
     /// Begins a pass, locking the encoder until the pass ends.
@@ -653,15 +713,24 @@ impl CommandEncoder {
     }
 
     /// Records a timestamp write into the query set at `query_index`.
+    #[must_use]
     pub fn write_timestamp(&self, query_set: Arc<QuerySet>, query_index: u32) -> Option<String> {
         self.record_referenced_query_set((*query_set).clone());
-        self.record_buffer_command(Vec::new(), None, || {
-            validate_timestamp_query_set(&query_set, "write timestamp")?;
-            validate_query_index(&query_set, query_index, "write timestamp query index")
-        })
+        self.record_buffer_command(
+            Vec::new(),
+            Some(CommandExecution::WriteTimestamp(WriteTimestampCommand {
+                query_set: query_set.clone(),
+                query_index,
+            })),
+            || {
+                validate_timestamp_query_set(&query_set, "write timestamp")?;
+                validate_query_index(&query_set, query_index, "write timestamp query index")
+            },
+        )
     }
 
     /// Records resolution of a query-set range into a destination buffer.
+    #[must_use]
     pub fn resolve_query_set(
         &self,
         query_set: Arc<QuerySet>,
@@ -688,6 +757,21 @@ impl CommandEncoder {
         ) {
             self.record_first_error(message);
         } else {
+            let conversion = if query_set.kind() == QueryType::Timestamp && query_count != 0 {
+                match self.timestamp_conversion_command(
+                    destination.clone(),
+                    destination_offset,
+                    query_count,
+                ) {
+                    Ok(command) => Some(command),
+                    Err(message) => {
+                        self.record_first_error(message);
+                        return None;
+                    }
+                }
+            } else {
+                None
+            };
             self.record_referenced_query_set((*query_set).clone());
             let mut state = self.inner.state.lock();
             state.has_recorded_command = true;
@@ -701,8 +785,68 @@ impl CommandEncoder {
                     destination,
                     destination_offset,
                 }));
+            if let Some(command) = conversion {
+                state
+                    .command_ops
+                    .push(CommandExecution::ComputePass(command));
+            }
         }
         None
+    }
+
+    fn timestamp_conversion_command(
+        &self,
+        destination: Arc<Buffer>,
+        offset: u64,
+        count: u32,
+    ) -> Result<ComputePassCommand, String> {
+        let device = self
+            .inner
+            .device
+            .as_ref()
+            .ok_or_else(|| "timestamp conversion requires a device".to_owned())?;
+        let pipeline = device.timestamp_conversion_pipeline()?;
+        let layout = pipeline
+            .inner
+            .bind_group_layouts
+            .first()
+            .ok_or_else(|| "timestamp conversion layout is missing".to_owned())?
+            .clone();
+        let group = device.create_internal_bind_group(
+            layout,
+            vec![crate::BindGroupEntry {
+                binding: 0,
+                resource: crate::BindGroupResource::Buffer {
+                    buffer: destination,
+                    device: Arc::new(device.clone()),
+                    offset,
+                    size: u64::from(count) * 8,
+                },
+            }],
+        )?;
+        let (multiplier, shift) =
+            crate::device::timestamp_conversion_params(device.inner.timestamp_period);
+        let mut immediate_data = vec![0; MAX_IMMEDIATE_DATA_BYTES];
+        for (bytes, value) in immediate_data
+            .chunks_exact_mut(4)
+            .zip([count, multiplier, shift])
+        {
+            bytes.copy_from_slice(&value.to_le_bytes());
+        }
+        Ok(ComputePassCommand {
+            pipeline,
+            bind_groups: BTreeMap::from([(
+                0,
+                BoundBindGroup {
+                    group: Arc::new(group),
+                    dynamic_offsets: Vec::new(),
+                },
+            )]),
+            dispatch: ComputeDispatch::Direct {
+                workgroups: (count.div_ceil(8), 1, 1),
+            },
+            immediate_data,
+        })
     }
 
     /// Records a buffer-to-texture copy after validating layout, sizes, and usages.
@@ -2242,6 +2386,193 @@ impl CommandBuffer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn timestamp_conversion_pipeline_failure_invalidates_encoder_without_recording_resolve() {
+        let (device, set) = timestamp_device_and_set();
+        device
+            .inner
+            .timestamp_pipeline
+            .set(Err("injected timestamp pipeline failure".to_owned()))
+            .unwrap();
+        let destination = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::QUERY_RESOLVE,
+            size: 32,
+            mapped_at_creation: false,
+        }));
+        let encoder = device.create_command_encoder();
+        assert_eq!(encoder.resolve_query_set(set, 0, 4, destination, 0), None);
+        let (buffer, error) = encoder.finish();
+        assert_eq!(
+            error.as_deref(),
+            Some("injected timestamp pipeline failure")
+        );
+        assert!(buffer.command_ops().is_empty());
+        assert_eq!(device.compute_pipeline_creation_count(), 0);
+    }
+
+    fn timestamp_device_and_set() -> (crate::Device, Arc<QuerySet>) {
+        let device = noop_adapter()
+            .create_device(None, &[crate::Feature::TimestampQuery], "", "")
+            .unwrap();
+        let (set, error) = device.create_query_set(QuerySetDescriptor {
+            label: String::new(),
+            kind: QueryType::Timestamp,
+            count: 16,
+        });
+        assert_eq!(error, None);
+        (device, Arc::new(set))
+    }
+
+    #[test]
+    fn write_timestamp_records_a_write_timestamp_command() {
+        let (device, set) = timestamp_device_and_set();
+        let encoder = device.create_command_encoder();
+        assert_eq!(encoder.write_timestamp(set.clone(), 3), None);
+        let (buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(
+            matches!(buffer.command_ops(), [CommandExecution::WriteTimestamp(write)] if write.query_index == 3 && write.query_set.same(&set))
+        );
+    }
+
+    #[test]
+    fn begin_compute_pass_records_beginning_timestamp_before_and_end_after_the_pass() {
+        let (device, set) = timestamp_device_and_set();
+        let encoder = device.create_command_encoder();
+        let (pass, error) = encoder.begin_compute_pass(Some(RenderPassTimestampWrites {
+            query_set: (*set).clone(),
+            beginning_index: Some(1),
+            end_index: Some(2),
+        }));
+        assert_eq!(error, None);
+        assert_eq!(pass.set_pipeline(noop_compute_pipeline(&device)), None);
+        assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
+        assert_eq!(pass.end(), None);
+        let (buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(
+            matches!(buffer.command_ops(), [CommandExecution::WriteTimestamp(b), CommandExecution::ComputePass(_), CommandExecution::WriteTimestamp(e)] if b.query_index == 1 && e.query_index == 2)
+        );
+    }
+
+    #[test]
+    fn begin_render_pass_records_beginning_timestamp_before_and_end_after_the_pass() {
+        let (device, set) = timestamp_device_and_set();
+        let encoder = device.create_command_encoder();
+        let mut descriptor = noop_render_pass_descriptor(noop_render_attachment(&device), None);
+        descriptor.timestamp_writes = Some(RenderPassTimestampWrites {
+            query_set: (*set).clone(),
+            beginning_index: Some(1),
+            end_index: Some(2),
+        });
+        let (pass, error) = encoder.begin_render_pass(&descriptor);
+        assert_eq!(error, None);
+        assert_eq!(pass.end(), None);
+        let (buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(
+            matches!(buffer.command_ops(), [CommandExecution::WriteTimestamp(b), CommandExecution::RenderPass(_), CommandExecution::WriteTimestamp(e)] if b.query_index == 1 && e.query_index == 2)
+        );
+    }
+
+    #[test]
+    fn pass_timestamp_writes_with_only_end_index_record_a_single_write() {
+        let (device, set) = timestamp_device_and_set();
+        for render in [false, true] {
+            let encoder = device.create_command_encoder();
+            let writes = Some(RenderPassTimestampWrites {
+                query_set: (*set).clone(),
+                beginning_index: None,
+                end_index: Some(3),
+            });
+            if render {
+                let mut descriptor =
+                    noop_render_pass_descriptor(noop_render_attachment(&device), None);
+                descriptor.timestamp_writes = writes;
+                let (pass, error) = encoder.begin_render_pass(&descriptor);
+                assert_eq!(error, None);
+                assert_eq!(pass.end(), None);
+            } else {
+                let (pass, error) = encoder.begin_compute_pass(writes);
+                assert_eq!(error, None);
+                assert_eq!(pass.end(), None);
+            }
+            let (buffer, error) = encoder.finish();
+            assert_eq!(error, None);
+            assert_eq!(
+                buffer
+                    .command_ops()
+                    .iter()
+                    .filter(|op| matches!(op, CommandExecution::WriteTimestamp(_)))
+                    .count(),
+                1
+            );
+            assert!(
+                matches!(buffer.command_ops().last(), Some(CommandExecution::WriteTimestamp(w)) if w.query_index == 3)
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_query_set_on_timestamp_set_records_resolve_then_conversion_pass() {
+        let (device, set) = timestamp_device_and_set();
+        let destination = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::QUERY_RESOLVE,
+            size: 512,
+            mapped_at_creation: false,
+        }));
+        let encoder = device.create_command_encoder();
+        assert_eq!(
+            encoder.resolve_query_set(set, 0, 9, destination.clone(), 256),
+            None
+        );
+        let (buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        let [CommandExecution::ResolveQuerySet(_), CommandExecution::ComputePass(pass)] =
+            buffer.command_ops()
+        else {
+            panic!("expected resolve then conversion")
+        };
+        assert!(matches!(
+            pass.dispatch,
+            ComputeDispatch::Direct {
+                workgroups: (2, 1, 1)
+            }
+        ));
+        let (m, s) = crate::device::timestamp_conversion_params(device.inner.timestamp_period);
+        assert_eq!(
+            &pass.immediate_data[..12],
+            [9u32, m, s]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(pass.immediate_data.len(), MAX_IMMEDIATE_DATA_BYTES);
+        let entry = &pass.bind_groups[&0].group.entries()[0];
+        assert!(
+            matches!(&entry.resource, crate::BindGroupResource::Buffer { buffer, offset: 256, size: 72, .. } if buffer.same(&destination))
+        );
+    }
+
+    #[test]
+    fn resolve_query_set_with_zero_count_records_no_conversion_pass() {
+        let (device, set) = timestamp_device_and_set();
+        let destination = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::QUERY_RESOLVE,
+            size: 32,
+            mapped_at_creation: false,
+        }));
+        let encoder = device.create_command_encoder();
+        assert_eq!(encoder.resolve_query_set(set, 0, 0, destination, 0), None);
+        let (buffer, error) = encoder.finish();
+        assert_eq!(
+            error.as_deref(),
+            Some("resolve query count must be greater than zero")
+        );
+        assert!(buffer.command_ops().is_empty());
+        assert!(device.inner.timestamp_pipeline.get().is_none());
+    }
+
     use super::*;
     use crate::test_helpers::*;
 

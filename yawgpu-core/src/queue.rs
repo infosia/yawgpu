@@ -783,7 +783,21 @@ impl Queue {
             error: None,
         };
         for (op_index, op) in all_ops.iter().enumerate() {
-            append_hal_command_execution(&mut copies, op, &all_ops[..=op_index], &mut staging);
+            let prefix = if matches!(op, CommandExecution::ResolveQuerySet(resolve) if resolve.query_set.kind() == crate::QueryType::Timestamp)
+            {
+                let mut start = 0;
+                for buffer in command_buffers {
+                    let end = start + buffer.command_ops().len();
+                    if op_index < end {
+                        break;
+                    }
+                    start = end;
+                }
+                &all_ops[start..=op_index]
+            } else {
+                &all_ops[..=op_index]
+            };
+            append_hal_command_execution(&mut copies, op, prefix, &mut staging);
             if staging.error.is_some() {
                 break;
             }
@@ -933,6 +947,7 @@ fn command_buffer_referenced_textures(command_buffer: &CommandBuffer) -> Vec<Tex
             CommandExecution::BufferCopy(_)
             | CommandExecution::BufferClear(_)
             | CommandExecution::BufferWrite(_)
+            | CommandExecution::WriteTimestamp(_)
             | CommandExecution::ResolveQuerySet(_)
             | CommandExecution::ComputePass(_) => {}
         }
@@ -1123,6 +1138,14 @@ fn append_hal_command_execution(
                 size: clear.size,
             }));
         }
+        CommandExecution::WriteTimestamp(write) => {
+            if let Some(query_set) = write.query_set.hal() {
+                copies.push(HalCopy::WriteTimestamp(yawgpu_hal::HalWriteTimestamp {
+                    query_set,
+                    query_index: write.query_index,
+                }));
+            }
+        }
         CommandExecution::ResolveQuerySet(resolve) => {
             let Some(query_set) = resolve.query_set.hal() else {
                 return;
@@ -1134,7 +1157,26 @@ fn append_hal_command_execution(
                 query_set,
                 first_query: resolve.first_query,
                 query_count: resolve.query_count,
-                written_queries: resolve_written_occlusion_queries(resolve, command_ops),
+                written_queries: if resolve.query_set.kind() == crate::QueryType::Timestamp {
+                    command_ops
+                        .iter()
+                        .filter_map(|op| match op {
+                            CommandExecution::WriteTimestamp(write)
+                                if write.query_set.same(&resolve.query_set)
+                                    && (resolve.first_query
+                                        ..resolve.first_query + resolve.query_count)
+                                        .contains(&write.query_index) =>
+                            {
+                                Some(write.query_index)
+                            }
+                            _ => None,
+                        })
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect()
+                } else {
+                    resolve_written_occlusion_queries(resolve, command_ops)
+                },
                 destination,
                 destination_offset: resolve.destination_offset,
             }));
@@ -2352,6 +2394,105 @@ pub(crate) fn dynamic_offset_for_binding(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn timestamp_resolve_ignores_writes_in_other_command_buffers_and_query_sets() {
+        let device = noop_adapter()
+            .create_device(None, &[crate::Feature::TimestampQuery], "", "")
+            .unwrap();
+        let make_set = || {
+            Arc::new(
+                device
+                    .create_query_set(crate::QuerySetDescriptor {
+                        label: String::new(),
+                        kind: crate::QueryType::Timestamp,
+                        count: 4,
+                    })
+                    .0,
+            )
+        };
+        let set = make_set();
+        let other = make_set();
+        let destination = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::QUERY_RESOLVE,
+            size: 32,
+            mapped_at_creation: false,
+        }));
+        let encoder = device.create_command_encoder();
+        assert_eq!(encoder.write_timestamp(set.clone(), 1), None);
+        let (first, error) = encoder.finish();
+        assert_eq!(error, None);
+        let encoder = device.create_command_encoder();
+        assert_eq!(encoder.write_timestamp(other, 3), None);
+        assert_eq!(encoder.resolve_query_set(set, 0, 4, destination, 0), None);
+        let (second, error) = encoder.finish();
+        assert_eq!(error, None);
+        let queue = device.queue();
+        assert_eq!(queue.submit(&[Arc::new(first), Arc::new(second)]), None);
+        let HalQueue::Noop(queue) = queue.hal() else {
+            panic!("expected Noop")
+        };
+        assert!(queue.submitted_copies().iter().any(|op| matches!(op, HalCopy::ResolveQuerySet(resolve) if resolve.written_queries.is_empty())));
+    }
+
+    fn timestamp_submission(indices: &[u32]) -> Vec<HalCopy> {
+        let device = noop_adapter()
+            .create_device(None, &[crate::Feature::TimestampQuery], "", "")
+            .unwrap();
+        let (set, error) = device.create_query_set(crate::QuerySetDescriptor {
+            label: String::new(),
+            kind: crate::QueryType::Timestamp,
+            count: 4,
+        });
+        assert_eq!(error, None);
+        let set = Arc::new(set);
+        let destination = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::QUERY_RESOLVE,
+            size: 32,
+            mapped_at_creation: false,
+        }));
+        let encoder = device.create_command_encoder();
+        for &index in indices {
+            assert_eq!(encoder.write_timestamp(set.clone(), index), None);
+        }
+        assert_eq!(
+            encoder.resolve_query_set(set.clone(), 0, 4, destination, 0),
+            None
+        );
+        // A later write must not affect the preceding resolve.
+        assert_eq!(encoder.write_timestamp(set, 2), None);
+        let (commands, error) = encoder.finish();
+        assert_eq!(error, None);
+        let queue = device.queue();
+        assert_eq!(queue.submit(&[Arc::new(commands)]), None);
+        let HalQueue::Noop(queue) = queue.hal() else {
+            panic!("expected Noop")
+        };
+        queue.submitted_copies()
+    }
+
+    #[test]
+    fn submit_lowers_write_timestamp_to_hal_copy() {
+        let copies = timestamp_submission(&[1]);
+        assert!(matches!(copies.first(), Some(HalCopy::WriteTimestamp(w)) if w.query_index == 1));
+    }
+
+    #[test]
+    fn submit_lowers_timestamp_resolve_with_written_queries_from_earlier_writes_in_the_same_command_buffer(
+    ) {
+        let copies = timestamp_submission(&[1, 3]);
+        assert!(
+            matches!(copies.as_slice(), [HalCopy::WriteTimestamp(_), HalCopy::WriteTimestamp(_), HalCopy::ResolveQuerySet(r), HalCopy::ComputePass(_), HalCopy::WriteTimestamp(_)] if r.written_queries == [1, 3])
+        );
+    }
+
+    #[test]
+    fn timestamp_resolve_of_a_never_written_range_has_empty_written_queries() {
+        let copies = timestamp_submission(&[]);
+        assert!(
+            matches!(copies.as_slice(), [HalCopy::ResolveQuerySet(r), HalCopy::ComputePass(_), HalCopy::WriteTimestamp(_)] if r.written_queries.is_empty())
+        );
+    }
+
     use super::*;
     use crate::shader::{SHADER_STAGE_COMPUTE, SHADER_STAGE_FRAGMENT, SHADER_STAGE_VERTEX};
     use crate::test_helpers::*;
@@ -3069,7 +3210,7 @@ fn fs() -> @location(0) vec4<f32> {
         let pipeline_layout = explicit_pipeline_layout(&device, layout);
         let pipeline = sampled_compute_pipeline(&device, pipeline_layout);
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
         assert_eq!(pass.set_pipeline(pipeline), None);
         assert_eq!(
@@ -3123,7 +3264,7 @@ fn fs() -> @location(0) vec4<f32> {
             StorageTextureAccess::ReadOnly,
         );
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
         assert_eq!(pass.set_pipeline(pipeline), None);
         assert_eq!(
@@ -3214,7 +3355,7 @@ fn fs() -> @location(0) vec4<f32> {
             mapped_at_creation: false,
         }));
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
         assert_eq!(pass.set_pipeline(pipeline), None);
         assert_eq!(
@@ -5376,7 +5517,7 @@ fn fs() -> @location(0) vec4<f32> {
                 }],
             ));
             let encoder = device.create_command_encoder();
-            let (pass, error) = encoder.begin_compute_pass();
+            let (pass, error) = encoder.begin_compute_pass(None);
             assert_eq!(error, None);
             assert_eq!(
                 pass.set_bind_group(0, Some(Arc::clone(&group)), Vec::new(), device.limits(),),
@@ -5476,7 +5617,7 @@ fn fs() -> @location(0) vec4<f32> {
 
         // set_bind_group on the compute pass must not produce an error.
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None, "begin_compute_pass must succeed");
         assert_eq!(
             pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
@@ -5580,7 +5721,7 @@ fn fs() -> @location(0) vec4<f32> {
 
         // set_bind_group on the compute pass must not produce an error.
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
         assert_eq!(
             pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),

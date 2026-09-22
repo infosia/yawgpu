@@ -392,6 +392,12 @@ impl MetalAdapter {
         self.float32_filterable
     }
 
+    /// Returns nanoseconds per timestamp tick (S1 placeholder).
+    #[must_use]
+    pub(crate) fn timestamp_period(&self) -> f32 {
+        1.0
+    }
+
     /// Returns true when timestamp queries are supported: the device exposes
     /// the `timestamp` counter set with the `timestamp` counter and can sample
     /// counters at a stage or command boundary (Block 99 R1, Dawn

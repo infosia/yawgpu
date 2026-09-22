@@ -134,7 +134,14 @@ impl Adapter {
         let features = self.resolve_features(required_features)?;
         let hal = self.inner.hal.create_device()?;
         *consumed = true;
-        Ok(Device::from_hal(hal, limits, features, label, queue_label))
+        Ok(Device::from_hal_with_timestamp_period(
+            hal,
+            limits,
+            features,
+            label,
+            queue_label,
+            self.inner.hal.timestamp_period(),
+        ))
     }
 
     /// Resolves the requested feature list against what this adapter supports.

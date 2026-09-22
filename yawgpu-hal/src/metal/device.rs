@@ -92,12 +92,17 @@ impl MetalDevice {
     }
 
     /// Creates a query set matching the given kind and count.
+    #[must_use = "query set creation can fail"]
     pub fn create_query_set(
         &self,
         kind: HalQueryKind,
         count: u32,
     ) -> Result<MetalQuerySet, HalError> {
         match kind {
+            HalQueryKind::Timestamp => Err(HalError::BufferOperationFailed {
+                backend: "metal",
+                message: "timestamp query sets are not implemented yet on metal",
+            }),
             HalQueryKind::Occlusion => {
                 self.allocations.fetch_add(1, Ordering::Relaxed);
                 MetalQuerySet::new(&self.device, count)
@@ -182,6 +187,25 @@ impl MetalDevice {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "manual real metal backend test"]
+    fn metal_device_create_query_set_rejects_timestamp_until_implemented() {
+        let device = metal_device();
+        let error = device
+            .create_query_set(HalQueryKind::Timestamp, 4)
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("timestamp query sets are not implemented yet on metal"));
+        assert_eq!(
+            device
+                .create_query_set(HalQueryKind::Occlusion, 4)
+                .unwrap()
+                .count(),
+            4
+        );
+    }
+
     use super::super::test_helpers::*;
     use super::*;
 

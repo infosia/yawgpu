@@ -78,6 +78,12 @@ pub(super) fn record_and_submit_copies(
                 HalCopy::ClearTexture(clear) => {
                     encode_texture_clear(&queue.device.device, command_buffer, clear)?;
                 }
+                HalCopy::WriteTimestamp(_) => {
+                    return Err(HalError::QueueSubmissionFailed {
+                        backend: "vulkan",
+                        message: "timestamp writes are not implemented yet on vulkan".to_owned(),
+                    })
+                }
                 HalCopy::ResolveQuerySet(resolve) => {
                     encode_resolve_query_set(&queue.device.device, command_buffer, resolve)?;
                 }
@@ -448,6 +454,7 @@ fn retain_copy_resources(copy: &HalCopy, retained: &mut RetainedResources) {
         }
         HalCopy::BufferClear(clear) => retain_hal_buffer(&clear.buffer, retained),
         HalCopy::ClearTexture(clear) => retain_hal_texture(&clear.texture, retained),
+        HalCopy::WriteTimestamp(write) => retain_hal_query_set(&write.query_set, retained),
         HalCopy::ResolveQuerySet(resolve) => {
             retain_hal_query_set(&resolve.query_set, retained);
             retain_hal_buffer(&resolve.destination, retained);
@@ -697,6 +704,7 @@ fn surface_pending_from_copy(copy: &HalCopy) -> Option<Arc<Mutex<SurfacePendingS
         HalCopy::Buffer(_)
         | HalCopy::BufferClear(_)
         | HalCopy::ClearTexture(_)
+        | HalCopy::WriteTimestamp(_)
         | HalCopy::ResolveQuerySet(_)
         | HalCopy::ComputePass(_) => None,
         #[cfg(feature = "tiled")]

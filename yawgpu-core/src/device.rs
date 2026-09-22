@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
 use yawgpu_hal::{HalDevice, HalError, HalQueryKind};
@@ -31,6 +31,8 @@ pub struct Device {
 /// Holds shared state for the device handle.
 #[derive(Debug)]
 pub(crate) struct DeviceInner {
+    pub(crate) timestamp_period: f32,
+    pub(crate) timestamp_pipeline: OnceLock<Result<Arc<ComputePipeline>, String>>,
     pub(crate) hal: HalDevice,
     pub(crate) queue: Queue,
     pub(crate) error_sink: Mutex<ErrorSink>,
@@ -64,9 +66,24 @@ impl Device {
         label: impl Into<String>,
         queue_label: impl Into<String>,
     ) -> Self {
+        Self::from_hal_with_timestamp_period(hal, limits, features, label, queue_label, 1.0)
+    }
+
+    /// Constructs a device with the timestamp period captured from its adapter.
+    #[must_use]
+    pub(crate) fn from_hal_with_timestamp_period(
+        hal: HalDevice,
+        limits: Limits,
+        features: FeatureSet,
+        label: impl Into<String>,
+        queue_label: impl Into<String>,
+        timestamp_period: f32,
+    ) -> Self {
         let queue = Queue::from_hal(hal.queue(), queue_label);
         Self {
             inner: Arc::new(DeviceInner {
+                timestamp_period,
+                timestamp_pipeline: OnceLock::new(),
                 hal,
                 queue,
                 error_sink: Mutex::new(ErrorSink::default()),
@@ -160,11 +177,14 @@ impl Device {
             );
         }
         let hal = match descriptor.kind {
-            QueryType::Occlusion => match self
-                .inner
-                .hal
-                .create_query_set(HalQueryKind::Occlusion, descriptor.count)
-            {
+            QueryType::Occlusion | QueryType::Timestamp => match self.inner.hal.create_query_set(
+                if descriptor.kind == QueryType::Timestamp {
+                    HalQueryKind::Timestamp
+                } else {
+                    HalQueryKind::Occlusion
+                },
+                descriptor.count,
+            ) {
                 Ok(hal) => Some(hal),
                 Err(error) => {
                     return (
@@ -173,7 +193,7 @@ impl Device {
                     );
                 }
             },
-            QueryType::Timestamp | QueryType::Unknown(_) => None,
+            QueryType::Unknown(_) => None,
         };
         (QuerySet::new(descriptor, false, hal), None)
     }
@@ -739,8 +759,159 @@ pub enum DeviceLostReason {
 /// Alias for feature set.
 pub type FeatureSet = BTreeSet<Feature>;
 
+/// Derives Dawn's fixed-point timestamp multiplier and shift.
+#[must_use]
+pub(crate) fn timestamp_conversion_params(period: f32) -> (u32, u32) {
+    let upper = period.log2().ceil() as u32;
+    let right_shift = 16 - upper.min(16);
+    ((period * (1u32 << right_shift) as f32) as u32, right_shift)
+}
+
+/// Dawn timestamp conversion using immediates and no fingerprint quantization.
+pub(crate) const TIMESTAMP_CONVERSION_WGSL: &str = r#"requires immediate_address_space;
+
+struct Timestamp {
+    low  : u32,
+    high : u32,
+}
+
+struct TimestampArr {
+    t : array<Timestamp>
+}
+
+struct TimestampParams {
+    count  : u32,
+    multiplier : u32,
+    right_shift  : u32,
+}
+
+@group(0) @binding(0) var<storage, read_write> timestamps : TimestampArr;
+var<immediate> params : TimestampParams;
+
+@compute @workgroup_size(8, 1, 1)
+fn main(@builtin(global_invocation_id) GlobalInvocationID : vec3u) {
+    if (GlobalInvocationID.x >= params.count) { return; }
+
+    var index = GlobalInvocationID.x;
+    var timestamp = timestamps.t[index];
+
+    var chunks : array<u32, 5>;
+    chunks[0] = timestamp.low & 0xFFFFu;
+    chunks[1] = timestamp.low >> 16u;
+    chunks[2] = timestamp.high & 0xFFFFu;
+    chunks[3] = timestamp.high >> 16u;
+    chunks[4] = 0u;
+
+    // Multiply all the chunks with the integer period.
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        chunks[i] = chunks[i] * params.multiplier;
+    }
+
+    // Propagate the carry
+    var carry = 0u;
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        var chunk_with_carry = chunks[i] + carry;
+        carry = chunk_with_carry >> 16u;
+        chunks[i] = chunk_with_carry & 0xFFFFu;
+    }
+    chunks[4] = carry;
+
+    // Apply the right shift.
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        var low = chunks[i] >> params.right_shift;
+        var high = (chunks[i + 1u] << (16u - params.right_shift)) & 0xFFFFu;
+        chunks[i] = low | high;
+    }
+
+    var low = chunks[0] | (chunks[1] << 16u);
+    timestamps.t[index].low = low;
+    timestamps.t[index].high = chunks[2] | (chunks[3] << 16u);
+}"#;
+
+impl Device {
+    /// Returns the device's lazily initialized timestamp conversion pipeline.
+    pub(crate) fn timestamp_conversion_pipeline(&self) -> Result<Arc<ComputePipeline>, String> {
+        self.inner
+            .timestamp_pipeline
+            .get_or_init(|| {
+                let shader = Arc::new(self.create_shader_module(ShaderModuleSource::Wgsl(
+                    TIMESTAMP_CONVERSION_WGSL.to_owned(),
+                )));
+                if shader.is_error() {
+                    return Err("timestamp conversion shader creation failed".to_owned());
+                }
+                let bgl = Arc::new(self.create_bind_group_layout(BindGroupLayoutDescriptor {
+                    entries: vec![BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: SHADER_STAGE_COMPUTE,
+                        binding_array_size: 0,
+                        kind: Some(BindingLayoutKind::Buffer {
+                            ty: BufferBindingType::Storage,
+                            has_dynamic_offset: false,
+                            min_binding_size: 8,
+                        }),
+                    }],
+                    error: None,
+                }));
+                let layout = Arc::new(self.create_pipeline_layout(PipelineLayoutDescriptor {
+                    bind_group_layouts: vec![bgl],
+                    immediate_size: 12,
+                    error: None,
+                }));
+                let pipeline = self.create_compute_pipeline_without_error_dispatch(
+                    ComputePipelineDescriptor {
+                        layout: ComputePipelineLayout::Explicit(layout),
+                        shader_module: shader,
+                        entry_point: Some("main".to_owned()),
+                        constants: Vec::new(),
+                        error: None,
+                    },
+                );
+                if pipeline.is_error() {
+                    return Err("timestamp conversion pipeline creation failed".to_owned());
+                }
+                Ok(Arc::new(pipeline))
+            })
+            .clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn timestamp_conversion_params_unit_period() {
+        assert_eq!(timestamp_conversion_params(1.0), (65536, 16));
+    }
+    #[test]
+    fn timestamp_conversion_params_fractional_periods() {
+        for (period, expected) in [(41.666_668, (42666, 10)), (83.333, (42666, 9))] {
+            let (multiplier, shift) = timestamp_conversion_params(period);
+            assert_eq!((multiplier, shift), expected);
+            assert!(
+                ((multiplier as f64 / (1u32 << shift) as f64) / period as f64 - 1.0).abs() < 1e-3
+            );
+        }
+    }
+    #[test]
+    fn create_query_set_timestamp_creates_a_hal_query_set_on_noop() {
+        let device = noop_adapter()
+            .create_device(None, &[Feature::TimestampQuery], "", "")
+            .unwrap();
+        let (set, error) = device.create_query_set(QuerySetDescriptor {
+            label: String::new(),
+            kind: QueryType::Timestamp,
+            count: 4,
+        });
+        assert_eq!(error, None);
+        assert!(set.hal().is_some());
+        assert_eq!(device.inner.timestamp_period, 1.0);
+        assert!(device.inner.timestamp_pipeline.get().is_none());
+        let first = device.timestamp_conversion_pipeline().unwrap();
+        let second = device.timestamp_conversion_pipeline().unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(device.compute_pipeline_creation_count(), 1);
+    }
+
     use super::*;
     use crate::test_helpers::*;
     use crate::*;

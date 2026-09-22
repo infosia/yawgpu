@@ -511,6 +511,12 @@ impl VulkanAdapter {
         )
     }
 
+    /// Returns nanoseconds per timestamp tick (S1 placeholder).
+    #[must_use]
+    pub(crate) fn timestamp_period(&self) -> f32 {
+        1.0
+    }
+
     /// Returns true when timestamp queries are supported by this physical
     /// device: `limits.timestampComputeAndGraphics == VK_TRUE` (Block 99 R3,
     /// Dawn `InitializeSupportedFeaturesImpl`).

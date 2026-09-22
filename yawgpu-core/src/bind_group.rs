@@ -138,6 +138,16 @@ pub(crate) fn validate_bind_group_descriptor(
     entries: &[BindGroupEntry],
     limits: Limits,
 ) -> Option<String> {
+    validate_bind_group_descriptor_with_usage(device, layout, entries, limits, false)
+}
+
+fn validate_bind_group_descriptor_with_usage(
+    device: &Device,
+    layout: &BindGroupLayout,
+    entries: &[BindGroupEntry],
+    limits: Limits,
+    internal: bool,
+) -> Option<String> {
     if layout.is_error() {
         return Some("cannot create bind group from an error bind group layout".to_owned());
     }
@@ -167,7 +177,9 @@ pub(crate) fn validate_bind_group_descriptor(
         let Some(kind) = layout_entry.kind else {
             return Some("cannot create bind group from an invalid bind group layout".to_owned());
         };
-        if let Some(message) = validate_bind_group_entry(device, entry, kind, limits) {
+        if let Some(message) =
+            validate_bind_group_entry_with_usage(device, entry, kind, limits, internal)
+        {
             return Some(message);
         }
     }
@@ -196,11 +208,22 @@ fn bind_group_layout_entry_is_input_attachment(entry: &BindGroupLayoutEntry) -> 
 }
 
 /// Validates bind group entry and returns a descriptive error on failure.
+#[cfg(test)]
 pub(crate) fn validate_bind_group_entry(
     device: &Device,
     entry: &BindGroupEntry,
     kind: BindingLayoutKind,
     limits: Limits,
+) -> Option<String> {
+    validate_bind_group_entry_with_usage(device, entry, kind, limits, false)
+}
+
+fn validate_bind_group_entry_with_usage(
+    device: &Device,
+    entry: &BindGroupEntry,
+    kind: BindingLayoutKind,
+    limits: Limits,
+    internal: bool,
 ) -> Option<String> {
     match (&entry.resource, kind) {
         (
@@ -215,7 +238,7 @@ pub(crate) fn validate_bind_group_entry(
                 min_binding_size,
                 ..
             },
-        ) => validate_bind_group_buffer(
+        ) => validate_bind_group_buffer_with_usage(
             device,
             resource_device,
             BindGroupBufferValidation {
@@ -226,6 +249,7 @@ pub(crate) fn validate_bind_group_entry(
                 min_binding_size,
                 limits,
             },
+            internal,
         ),
         (
             BindGroupResource::Sampler {
@@ -329,11 +353,11 @@ pub(crate) fn validate_bind_group_external_texture(
     None
 }
 
-/// Validates bind group buffer and returns a descriptive error on failure.
-pub(crate) fn validate_bind_group_buffer(
+fn validate_bind_group_buffer_with_usage(
     device: &Device,
     resource_device: &Device,
     validation: BindGroupBufferValidation<'_>,
+    internal: bool,
 ) -> Option<String> {
     if !device.same(resource_device) {
         return Some("bind group buffer must belong to the same device".to_owned());
@@ -369,7 +393,9 @@ pub(crate) fn validate_bind_group_buffer(
         ),
     };
 
-    if !buffer.usage().contains(required_usage) {
+    if !(buffer.usage().contains(required_usage)
+        || internal && required_usage == BufferUsage::STORAGE)
+    {
         return Some("bind group buffer usage does not satisfy the layout".to_owned());
     }
     if alignment != 0 && !offset.is_multiple_of(alignment) {
@@ -571,8 +597,80 @@ pub(crate) fn validate_bind_group_storage_texture(
     None
 }
 
+impl Device {
+    /// Creates an internal bind group, skipping only storage buffer usage validation.
+    #[must_use = "internal bind group validation can fail"]
+    pub(crate) fn create_internal_bind_group(
+        &self,
+        layout: Arc<BindGroupLayout>,
+        entries: Vec<BindGroupEntry>,
+    ) -> Result<BindGroup, String> {
+        if self.is_lost() {
+            return Err("device is lost".to_owned());
+        }
+        if let Some(message) =
+            validate_bind_group_descriptor_with_usage(self, &layout, &entries, self.limits(), true)
+        {
+            return Err(message);
+        }
+        Ok(BindGroup::new(layout, entries, false, None))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn internal_bind_group_skips_only_storage_usage_validation() {
+        let device = Arc::new(noop_device());
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: crate::shader::SHADER_STAGE_COMPUTE,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::Buffer {
+                    ty: BufferBindingType::Storage,
+                    has_dynamic_offset: false,
+                    min_binding_size: 8,
+                }),
+            }],
+            error: None,
+        }));
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::QUERY_RESOLVE,
+            size: 512,
+            mapped_at_creation: false,
+        }));
+        let entry = |offset, size, device: Arc<Device>| BindGroupEntry {
+            binding: 0,
+            resource: BindGroupResource::Buffer {
+                buffer: buffer.clone(),
+                device,
+                offset,
+                size,
+            },
+        };
+        assert!(device
+            .create_bind_group(layout.clone(), vec![entry(256, 32, device.clone())])
+            .is_error());
+        assert!(device
+            .create_internal_bind_group(layout.clone(), vec![entry(256, 32, device.clone())])
+            .is_ok());
+        for (offset, size) in [(1, 8), (256, 0), (256, 257), (256, 4)] {
+            assert!(device
+                .create_internal_bind_group(
+                    layout.clone(),
+                    vec![entry(offset, size, device.clone())]
+                )
+                .is_err());
+        }
+        assert!(device
+            .create_internal_bind_group(layout.clone(), Vec::new())
+            .is_err());
+        assert!(device
+            .create_internal_bind_group(layout, vec![entry(0, 8, Arc::new(noop_device()))])
+            .is_err());
+    }
+
     use super::*;
     #[cfg(feature = "tiled")]
     use crate::shader::SHADER_STAGE_FRAGMENT;

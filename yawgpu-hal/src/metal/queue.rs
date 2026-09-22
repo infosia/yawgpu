@@ -256,6 +256,12 @@ impl MetalQueue {
                         blit.endEncoding();
                         result?;
                     }
+                    HalCopy::WriteTimestamp(_) => {
+                        return Err(HalError::QueueSubmissionFailed {
+                            backend: "metal",
+                            message: "timestamp writes are not implemented yet on metal".to_owned(),
+                        })
+                    }
                     HalCopy::ResolveQuerySet(resolve) => {
                         let blit = command_buffer.blitCommandEncoder().ok_or_else(|| {
                             queue_submission_error(

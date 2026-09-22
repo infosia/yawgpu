@@ -27,6 +27,7 @@ pub(crate) struct PassEncoderInner {
 /// Tracks the lifecycle state for pass encoder.
 #[derive(Debug)]
 pub(crate) struct PassEncoderState {
+    pub(crate) end_timestamp: Option<WriteTimestampCommand>,
     pub(crate) ended: bool,
     pub(crate) debug_group_depth: u32,
     pub(crate) render_pipeline: Option<Arc<RenderPipeline>>,
@@ -93,6 +94,7 @@ const _: () = assert!(MAX_IMMEDIATE_DATA_BYTES / 4 <= ImmediateWrittenMask::BITS
 /// Groups pass encoder creation metadata.
 #[derive(Debug)]
 pub(crate) struct PassEncoderInit {
+    pub(crate) end_timestamp: Option<WriteTimestampCommand>,
     pub(crate) attachment_signature: Option<AttachmentSignature>,
     pub(crate) render_extent: Option<Extent3d>,
     pub(crate) attachment_textures: Vec<Texture>,
@@ -106,6 +108,7 @@ impl PassEncoderState {
     /// Creates a new instance.
     pub(crate) fn new(limits: Limits, init: PassEncoderInit) -> Self {
         Self {
+            end_timestamp: init.end_timestamp,
             ended: false,
             debug_group_depth: 0,
             render_pipeline: None,
@@ -188,6 +191,7 @@ impl PassEncoderState {
     /// has a corresponding owning handle in the scope history -- which dropping
     /// `scope_buffer_uses` / `scope_texture_uses` on their own would falsify.
     fn clear_ended_resources(&mut self) {
+        self.end_timestamp = None;
         self.render_pipeline = None;
         self.compute_pipeline = None;
         self.bind_groups.clear();
@@ -447,6 +451,9 @@ impl PassEncoderInner {
         } else {
             None
         };
+        // The end-of-pass timestamp write (Block 102) is taken out before the
+        // state is cleared so it is recorded after the pass's own command.
+        let end_timestamp = state.end_timestamp.take();
         // The pass has ended: it will never validate or record another command,
         // so it must stop pinning what it bound while encoding (Block 50, D1).
         // Reached only after `ended = true`; the early returns above leave the
@@ -456,6 +463,9 @@ impl PassEncoderInner {
 
         if let Some(command) = render_pass_command {
             self.parent.record_render_pass(command);
+        }
+        if let Some(command) = end_timestamp {
+            self.parent.record_pass_timestamp(command);
         }
         self.parent.end_pass(self.token);
         if unbalanced_debug_groups {
@@ -2174,6 +2184,7 @@ mod tests {
         PassEncoderState::new(
             device.limits(),
             PassEncoderInit {
+                end_timestamp: None,
                 attachment_signature: None,
                 render_extent: None,
                 attachment_textures: Vec::new(),
@@ -3238,6 +3249,7 @@ mod tests {
         let mut state = PassEncoderState::new(
             limits,
             PassEncoderInit {
+                end_timestamp: None,
                 attachment_signature: None,
                 render_extent: None,
                 attachment_textures: Vec::new(),
@@ -3436,7 +3448,7 @@ mod tests {
         let device = noop_device();
         let pipeline = noop_compute_pipeline(&device);
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
 
         let caller_refs = Arc::strong_count(&pipeline);
@@ -3541,7 +3553,7 @@ mod tests {
         let device = noop_device();
         let pipeline = noop_compute_pipeline(&device);
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
 
         let caller_refs = Arc::strong_count(&pipeline);
@@ -3623,7 +3635,7 @@ mod tests {
         let device = noop_device();
         let pipeline = noop_compute_pipeline(&device);
         let encoder = device.create_command_encoder();
-        let (pass, begin_error) = encoder.begin_compute_pass();
+        let (pass, begin_error) = encoder.begin_compute_pass(None);
         assert_eq!(begin_error, None);
 
         let caller_refs = Arc::strong_count(&pipeline);

@@ -157,6 +157,12 @@ impl GlesAdapter {
         }
     }
 
+    /// Returns nanoseconds per timestamp tick (S1 placeholder).
+    #[must_use]
+    pub(crate) fn timestamp_period(&self) -> f32 {
+        1.0
+    }
+
     /// Returns true when timestamp queries are supported.
     #[must_use]
     pub(crate) fn supports_timestamp_query(&self) -> bool {

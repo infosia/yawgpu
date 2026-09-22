@@ -146,9 +146,19 @@ pub struct HalResolveQuerySet {
     pub destination_offset: u64,
 }
 
+/// Writes a raw timestamp into a query slot.
+#[derive(Debug, Clone)]
+pub struct HalWriteTimestamp {
+    /// Destination query set.
+    pub query_set: HalQuerySet,
+    /// Destination query index.
+    pub query_index: u32,
+}
+
 /// Enumerates HAL copy values.
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
+#[non_exhaustive]
 pub enum HalCopy {
     /// Buffer variant.
     Buffer(HalBufferCopy),
@@ -164,6 +174,8 @@ pub enum HalCopy {
     TextureToTexture(HalTextureCopy),
     /// Query-set resolve variant.
     ResolveQuerySet(HalResolveQuerySet),
+    /// Timestamp write.
+    WriteTimestamp(HalWriteTimestamp),
     /// Compute pass variant.
     ComputePass(HalComputePass),
     /// Render pass command-stream variant.
