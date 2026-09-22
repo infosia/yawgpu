@@ -52,14 +52,18 @@ pub(super) fn encode_buffer_clear(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ClearStrategy {
     RenderPass {
-        depth: bool,
-        stencil: bool,
+        depth: Option<MTLLoadAction>,
+        stencil: Option<MTLLoadAction>,
         color: bool,
     },
     BlockBlit {
         block: (u32, u32, u32),
     },
     TexelBlit,
+    AspectBlit {
+        depth: Option<(MTLBlitOption, u32)>,
+        stencil: Option<(MTLBlitOption, u32)>,
+    },
 }
 
 /// Selects attachments independently so clearing one packed aspect preserves the other.
@@ -67,20 +71,52 @@ fn clear_strategy(
     format: HalTextureFormat,
     sample_count: u32,
     aspect: HalTextureAspect,
-) -> ClearStrategy {
+    has_render_target: bool,
+) -> Result<ClearStrategy, HalError> {
     let has_depth = format_has_depth_aspect(format);
     let has_stencil = format_has_stencil_aspect(format);
-    if has_depth || has_stencil || sample_count > 1 {
+    if sample_count > 1 && !has_render_target {
+        return Err(texture_error(
+            "multisampled texture clear requires RenderTarget usage",
+        ));
+    }
+    if (has_depth || has_stencil) && !has_render_target {
+        return Ok(ClearStrategy::AspectBlit {
+            depth: (has_depth && aspect != HalTextureAspect::StencilOnly).then_some((
+                packed_depth_stencil_blit_option(format, HalTextureAspect::DepthOnly),
+                if format == HalTextureFormat::Depth16Unorm {
+                    2
+                } else {
+                    4
+                },
+            )),
+            stencil: (has_stencil && aspect != HalTextureAspect::DepthOnly).then_some((
+                packed_depth_stencil_blit_option(format, HalTextureAspect::StencilOnly),
+                1,
+            )),
+        });
+    }
+    Ok(if has_depth || has_stencil || sample_count > 1 {
+        // Both attachments share the texture and Store action. Preserve the
+        // unrequested plane with Load on drivers requiring both attachments.
         ClearStrategy::RenderPass {
-            depth: has_depth && aspect != HalTextureAspect::StencilOnly,
-            stencil: has_stencil && aspect != HalTextureAspect::DepthOnly,
+            depth: has_depth.then_some(if aspect == HalTextureAspect::StencilOnly {
+                MTLLoadAction::Load
+            } else {
+                MTLLoadAction::Clear
+            }),
+            stencil: has_stencil.then_some(if aspect == HalTextureAspect::DepthOnly {
+                MTLLoadAction::Load
+            } else {
+                MTLLoadAction::Clear
+            }),
             color: !has_depth && !has_stencil,
         }
     } else if let Some(block) = format.compressed_block_info() {
         ClearStrategy::BlockBlit { block }
     } else {
         ClearStrategy::TexelBlit
-    }
+    })
 }
 
 /// Computes tightly packed block rows, including partial edge blocks.
@@ -108,7 +144,15 @@ pub(super) fn encode_texture_clear(
     let HalTexture::Metal(texture) = &clear.texture else {
         return Err(texture_error("texture is not Metal-backed"));
     };
-    let strategy = clear_strategy(clear.format, texture.sample_count, clear.aspect);
+    let strategy = clear_strategy(
+        clear.format,
+        texture.sample_count,
+        clear.aspect,
+        texture
+            .inner()?
+            .usage()
+            .contains(MTLTextureUsage::RenderTarget),
+    )?;
     if let ClearStrategy::RenderPass {
         depth,
         stencil,
@@ -123,21 +167,21 @@ pub(super) fn encode_texture_clear(
             let descriptor = MTLRenderPassDescriptor::new();
             let level = to_ns(u64::from(clear.mip_level))?;
             let slice = to_ns(u64::from(layer))?;
-            if depth {
+            if let Some(load) = depth {
                 let attachment = descriptor.depthAttachment();
                 attachment.setTexture(Some(texture.inner()?));
                 attachment.setLevel(level);
                 attachment.setSlice(slice);
-                attachment.setLoadAction(MTLLoadAction::Clear);
+                attachment.setLoadAction(load);
                 attachment.setStoreAction(MTLStoreAction::Store);
                 attachment.setClearDepth(0.0);
             }
-            if stencil {
+            if let Some(load) = stencil {
                 let attachment = descriptor.stencilAttachment();
                 attachment.setTexture(Some(texture.inner()?));
                 attachment.setLevel(level);
                 attachment.setSlice(slice);
-                attachment.setLoadAction(MTLLoadAction::Clear);
+                attachment.setLoadAction(load);
                 attachment.setStoreAction(MTLStoreAction::Store);
                 attachment.setClearStencil(0);
             }
@@ -174,7 +218,7 @@ pub(super) fn encode_texture_clear(
     }
 }
 
-/// Clears a single-sample color subresource from zeroed staging memory.
+/// Clears a single-sample subresource from command-buffer-retained staging memory.
 fn encode_texture_clear_blit(
     blit: &ProtocolObject<dyn MTLBlitCommandEncoder>,
     clear: &HalTextureClear,
@@ -183,81 +227,92 @@ fn encode_texture_clear_blit(
     let HalTexture::Metal(texture) = &clear.texture else {
         return Err(texture_error("texture is not Metal-backed"));
     };
+    let planes = match strategy {
+        ClearStrategy::AspectBlit { depth, stencil } => [depth, stencil],
+        _ => [
+            Some((MTLBlitOption::empty(), texture.bytes_per_pixel)),
+            None,
+        ],
+    };
     if clear.array_layer_count == 0 {
         return Ok(());
     }
     let (width, height, depth) = mip_texture_extent(texture, clear.mip_level)?;
-    let (bytes_per_row, bytes_per_image) = match strategy {
-        ClearStrategy::BlockBlit { block } => compressed_clear_layout(width, height, block)?,
-        _ => {
-            let row = u64::from(width) * u64::from(texture.bytes_per_pixel);
-            let image = row
-                .checked_mul(u64::from(height))
-                .ok_or_else(|| texture_error("texture clear image bytes overflow"))?;
-            (row, image)
-        }
-    };
-    let image_count = match texture.dimension {
-        HalTextureDimension::D3 => depth,
-        HalTextureDimension::D1 | HalTextureDimension::D2 => clear.array_layer_count,
-    };
-    let byte_count = bytes_per_image
-        .checked_mul(u64::from(image_count))
-        .ok_or_else(|| texture_error("texture clear byte count overflows"))?;
-    if byte_count == 0 {
-        return Ok(());
-    }
-    let byte_count_ns = to_ns(byte_count)?;
-    let zero_buffer = texture
-        .device
-        .newBufferWithLength_options(byte_count_ns, MTLResourceOptions::StorageModeShared)
-        .ok_or(HalError::OutOfMemory {
-            backend: BACKEND,
-            resource: "texture clear staging buffer",
-        })?;
-    unsafe {
-        std::ptr::write_bytes(
-            zero_buffer.contents().cast::<u8>().as_ptr(),
-            0,
-            byte_count_ns,
-        );
-        let level = to_ns(u64::from(clear.mip_level))?;
-        let size = to_mtl_size(HalExtent3d {
-            width,
-            height,
-            depth_or_array_layers: match texture.dimension {
-                HalTextureDimension::D3 => depth,
-                HalTextureDimension::D1 | HalTextureDimension::D2 => 1,
-            },
-        })?;
-        match texture.dimension {
-            HalTextureDimension::D3 => {
-                blit.copyFromBuffer_sourceOffset_sourceBytesPerRow_sourceBytesPerImage_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
-                    &zero_buffer,
-                    0,
-                    to_ns(bytes_per_row)?,
-                    to_ns(bytes_per_image)?,
-                    size,
-                    texture.inner()?,
-                    0,
-                    level,
-                    to_mtl_origin(0, 0, 0)?,
-                );
+    for (option, bytes_per_texel) in planes.into_iter().flatten() {
+        let (bytes_per_row, bytes_per_image) = match strategy {
+            ClearStrategy::BlockBlit { block } => compressed_clear_layout(width, height, block)?,
+            _ => {
+                let row = u64::from(width) * u64::from(bytes_per_texel);
+                let image = row
+                    .checked_mul(u64::from(height))
+                    .ok_or_else(|| texture_error("texture clear image bytes overflow"))?;
+                (row, image)
             }
-            HalTextureDimension::D1 | HalTextureDimension::D2 => {
-                for layer in 0..clear.array_layer_count {
-                    let source_offset = layer_buffer_offset(0, to_ns(bytes_per_image)?, layer)?;
-                    blit.copyFromBuffer_sourceOffset_sourceBytesPerRow_sourceBytesPerImage_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
+        };
+        let image_count = match texture.dimension {
+            HalTextureDimension::D3 => depth,
+            HalTextureDimension::D1 | HalTextureDimension::D2 => clear.array_layer_count,
+        };
+        let byte_count = bytes_per_image
+            .checked_mul(u64::from(image_count))
+            .ok_or_else(|| texture_error("texture clear byte count overflows"))?;
+        if byte_count == 0 {
+            continue;
+        }
+        let byte_count_ns = to_ns(byte_count)?;
+        let zero_buffer = texture
+            .device
+            .newBufferWithLength_options(byte_count_ns, MTLResourceOptions::StorageModeShared)
+            .ok_or(HalError::OutOfMemory {
+                backend: BACKEND,
+                resource: "texture clear staging buffer",
+            })?;
+        unsafe {
+            std::ptr::write_bytes(
+                zero_buffer.contents().cast::<u8>().as_ptr(),
+                0,
+                byte_count_ns,
+            );
+            let level = to_ns(u64::from(clear.mip_level))?;
+            let size = to_mtl_size(HalExtent3d {
+                width,
+                height,
+                depth_or_array_layers: match texture.dimension {
+                    HalTextureDimension::D3 => depth,
+                    HalTextureDimension::D1 | HalTextureDimension::D2 => 1,
+                },
+            })?;
+            match texture.dimension {
+                HalTextureDimension::D3 => {
+                    blit.copyFromBuffer_sourceOffset_sourceBytesPerRow_sourceBytesPerImage_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin_options(
                         &zero_buffer,
-                        source_offset,
+                        0,
                         to_ns(bytes_per_row)?,
                         to_ns(bytes_per_image)?,
                         size,
                         texture.inner()?,
-                        to_ns(u64::from(clear.base_array_layer + layer))?,
+                        0,
                         level,
                         to_mtl_origin(0, 0, 0)?,
+                        option,
                     );
+                }
+                HalTextureDimension::D1 | HalTextureDimension::D2 => {
+                    for layer in 0..clear.array_layer_count {
+                        let source_offset = layer_buffer_offset(0, to_ns(bytes_per_image)?, layer)?;
+                        blit.copyFromBuffer_sourceOffset_sourceBytesPerRow_sourceBytesPerImage_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin_options(
+                            &zero_buffer,
+                            source_offset,
+                            to_ns(bytes_per_row)?,
+                            to_ns(bytes_per_image)?,
+                            size,
+                            texture.inner()?,
+                            to_ns(u64::from(clear.base_array_layer + layer))?,
+                            level,
+                            to_mtl_origin(0, 0, 0)?,
+                            option,
+                        );
+                    }
                 }
             }
         }
@@ -2034,55 +2089,78 @@ mod tests {
             HalTextureFormat::Depth24PlusStencil8,
             HalTextureFormat::Depth32FloatStencil8,
         ] {
-            for (aspect, depth, stencil) in [
-                (All, true, true),
-                (DepthOnly, true, false),
-                (StencilOnly, false, true),
-            ] {
+            for aspect in [All, DepthOnly, StencilOnly] {
                 for samples in [1, 4] {
                     assert_eq!(
-                        clear_strategy(format, samples, aspect),
+                        clear_strategy(format, samples, aspect, true).unwrap(),
                         ClearStrategy::RenderPass {
-                            depth,
-                            stencil,
-                            color: false
+                            depth: Some(if aspect == StencilOnly {
+                                MTLLoadAction::Load
+                            } else {
+                                MTLLoadAction::Clear
+                            }),
+                            stencil: Some(if aspect == DepthOnly {
+                                MTLLoadAction::Load
+                            } else {
+                                MTLLoadAction::Clear
+                            }),
+                            color: false,
                         }
                     );
                 }
+                assert_eq!(
+                    clear_strategy(format, 1, aspect, false).unwrap(),
+                    ClearStrategy::AspectBlit {
+                        depth: (aspect != StencilOnly)
+                            .then_some((MTLBlitOption::DepthFromDepthStencil, 4)),
+                        stencil: (aspect != DepthOnly)
+                            .then_some((MTLBlitOption::StencilFromDepthStencil, 1)),
+                    }
+                );
             }
         }
+        for (format, depth, bytes) in [
+            (HalTextureFormat::Depth32Float, true, 4),
+            (HalTextureFormat::Depth24Plus, true, 4),
+            (HalTextureFormat::Depth16Unorm, true, 2),
+            (HalTextureFormat::Stencil8, false, 1),
+        ] {
+            assert_eq!(
+                clear_strategy(format, 1, All, true).unwrap(),
+                ClearStrategy::RenderPass {
+                    depth: depth.then_some(MTLLoadAction::Clear),
+                    stencil: (!depth).then_some(MTLLoadAction::Clear),
+                    color: false,
+                }
+            );
+            assert_eq!(
+                clear_strategy(format, 1, All, false).unwrap(),
+                ClearStrategy::AspectBlit {
+                    depth: depth.then_some((MTLBlitOption::empty(), bytes)),
+                    stencil: (!depth).then_some((MTLBlitOption::empty(), bytes)),
+                }
+            );
+            assert!(clear_strategy(format, 4, All, false).is_err());
+        }
         assert_eq!(
-            clear_strategy(HalTextureFormat::Depth32Float, 1, All),
+            clear_strategy(HalTextureFormat::Rgba8Unorm, 4, All, true).unwrap(),
             ClearStrategy::RenderPass {
-                depth: true,
-                stencil: false,
-                color: false
-            }
-        );
-        assert_eq!(
-            clear_strategy(HalTextureFormat::Stencil8, 1, StencilOnly),
-            ClearStrategy::RenderPass {
-                depth: false,
-                stencil: true,
-                color: false
-            }
-        );
-        assert_eq!(
-            clear_strategy(HalTextureFormat::Rgba8Unorm, 4, All),
-            ClearStrategy::RenderPass {
-                depth: false,
-                stencil: false,
+                depth: None,
+                stencil: None,
                 color: true
             }
         );
-        assert_eq!(
-            clear_strategy(HalTextureFormat::Rgba8Unorm, 1, All),
-            ClearStrategy::TexelBlit
-        );
-        assert_eq!(
-            clear_strategy(HalTextureFormat::Bc1RgbaUnorm, 1, All),
-            ClearStrategy::BlockBlit { block: (8, 4, 4) }
-        );
+        assert!(clear_strategy(HalTextureFormat::Rgba8Unorm, 4, All, false).is_err());
+        for renderable in [false, true] {
+            assert_eq!(
+                clear_strategy(HalTextureFormat::Rgba8Unorm, 1, All, renderable).unwrap(),
+                ClearStrategy::TexelBlit
+            );
+            assert_eq!(
+                clear_strategy(HalTextureFormat::Bc1RgbaUnorm, 1, All, renderable).unwrap(),
+                ClearStrategy::BlockBlit { block: (8, 4, 4) }
+            );
+        }
     }
 
     #[test]

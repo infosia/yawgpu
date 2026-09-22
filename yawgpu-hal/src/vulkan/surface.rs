@@ -1,5 +1,6 @@
 use super::*;
 use crate::{HalCompositeAlphaMode, HalPresentMode, HalSurfaceCapabilities, HalTextureDimension};
+use std::sync::atomic::AtomicBool;
 
 pub(super) const RETIRE_RING_SIZE: usize = 3;
 
@@ -625,7 +626,9 @@ impl VulkanSurface {
             // Device idle retires submissions using all three semaphore arrays
             // and the fences, plus the transition commands whose pool is freed next.
             // Teardown must still proceed if the device has been lost.
-            let _ = swapchain.device.device.device_wait_idle();
+            wait_for_teardown_once(&swapchain.teardown_waited, || {
+                let _ = swapchain.device.device.device_wait_idle();
+            });
             for semaphore in self.image_acquired_semaphores.drain(..) {
                 swapchain.device.device.destroy_semaphore(semaphore, None);
             }
@@ -676,6 +679,7 @@ pub(super) struct VulkanSwapchainInner {
     pub(super) loader: ash::khr::swapchain::Device,
     pub(super) swapchain: vk::SwapchainKHR,
     pub(super) images: Vec<VulkanTexture>,
+    teardown_waited: AtomicBool,
 }
 
 impl fmt::Debug for VulkanSwapchainInner {
@@ -688,12 +692,22 @@ impl fmt::Debug for VulkanSwapchainInner {
     }
 }
 
+/// Surface teardown and the final swapchain drop share one device-idle wait.
+fn wait_for_teardown_once(waited: &AtomicBool, wait: impl FnOnce()) {
+    if !waited.load(Ordering::Acquire) {
+        wait();
+        waited.store(true, Ordering::Release);
+    }
+}
+
 impl Drop for VulkanSwapchainInner {
     fn drop(&mut self) {
         // Guard the image views and swapchain even when outstanding texture
         // handles defer this drop beyond the surface's synchronization teardown.
         unsafe {
-            let _ = self.device.device.device_wait_idle();
+            wait_for_teardown_once(&self.teardown_waited, || {
+                let _ = self.device.device.device_wait_idle();
+            });
         }
         self.images.clear();
         unsafe {
@@ -731,13 +745,9 @@ pub(super) fn create_swapchain(
     }
     .unwrap_or_else(|_| vec![vk::PresentModeKHR::FIFO]);
     let present_mode = select_present_mode(config.present_mode, &present_modes);
-    let usage = hal_usage_to_vk_image_usage(config.usage);
+    let usage = swapchain_image_usage(config.usage, capabilities.supported_usage_flags)?;
     let alpha = hal_alpha_to_vk(config.alpha_mode);
-    if usage.is_empty()
-        || !capabilities.supported_usage_flags.contains(usage)
-        || !capabilities.supported_composite_alpha.contains(alpha)
-        || config.usage.transient
-    {
+    if !capabilities.supported_composite_alpha.contains(alpha) {
         return Err(surface_query_error());
     }
     let formats = unsafe {
@@ -786,7 +796,7 @@ pub(super) fn create_swapchain(
                 format,
                 config,
                 extent,
-                bytes_per_pixel,
+                (bytes_per_pixel, usage),
                 Arc::clone(&pending_state),
             )
         })
@@ -800,6 +810,7 @@ pub(super) fn create_swapchain(
         loader,
         swapchain,
         images: textures,
+        teardown_waited: AtomicBool::new(false),
     }))
 }
 
@@ -854,9 +865,10 @@ pub(super) fn create_swapchain_texture(
     vk_format: vk::Format,
     config: HalSurfaceConfiguration,
     extent: vk::Extent2D,
-    bytes_per_pixel: u32,
+    pixel_info: (u32, vk::ImageUsageFlags),
     pending_state: Arc<Mutex<SurfacePendingState>>,
 ) -> Result<VulkanTexture, HalError> {
+    let (bytes_per_pixel, usage) = pixel_info;
     let view = if super::texture::texture_usage_needs_view(config.usage) {
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
@@ -876,7 +888,7 @@ pub(super) fn create_swapchain_texture(
         inner: Some(Arc::new(VulkanTextureInner {
             device,
             image,
-            usage: hal_usage_to_vk_image_usage(config.usage),
+            usage,
             view,
             bgra8_storage_view: vk::ImageView::null(),
             memory: None,
@@ -972,6 +984,17 @@ fn vk_surface_usages(flags: vk::ImageUsageFlags) -> HalTextureUsage {
     }
 }
 
+fn swapchain_image_usage(
+    requested: HalTextureUsage,
+    supported: vk::ImageUsageFlags,
+) -> Result<vk::ImageUsageFlags, HalError> {
+    let usage = hal_usage_to_vk_image_usage(requested);
+    if usage.is_empty() || requested.transient || !supported.contains(usage) {
+        return Err(surface_query_error());
+    }
+    Ok(usage | (supported & vk::ImageUsageFlags::TRANSFER_DST))
+}
+
 fn hal_usage_to_vk_image_usage(usage: HalTextureUsage) -> vk::ImageUsageFlags {
     let mut flags = vk::ImageUsageFlags::empty();
     for (enabled, flag) in [
@@ -993,6 +1016,50 @@ fn hal_usage_to_vk_image_usage(usage: HalTextureUsage) -> vk::ImageUsageFlags {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn teardown_waits_only_once_including_direct_drop() {
+        let waited = AtomicBool::new(false);
+        let mut count = 0;
+        wait_for_teardown_once(&waited, || count += 1);
+        wait_for_teardown_once(&waited, || count += 1);
+        assert_eq!(count, 1);
+        assert!(waited.load(Ordering::Acquire));
+        let direct_drop = AtomicBool::new(false);
+        wait_for_teardown_once(&direct_drop, || count += 1);
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn swapchain_image_usage_validates_requested_bits_before_adding_clear_usage() {
+        let requested = HalTextureUsage {
+            render_attachment: true,
+            copy_src: true,
+            ..vk_surface_usages(vk::ImageUsageFlags::empty())
+        };
+        let flags = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC;
+        assert_eq!(swapchain_image_usage(requested, flags).unwrap(), flags);
+        assert_eq!(
+            swapchain_image_usage(requested, flags | vk::ImageUsageFlags::TRANSFER_DST).unwrap(),
+            flags | vk::ImageUsageFlags::TRANSFER_DST
+        );
+        assert!(swapchain_image_usage(
+            requested,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST
+        )
+        .is_err());
+        assert!(
+            swapchain_image_usage(vk_surface_usages(vk::ImageUsageFlags::empty()), flags).is_err()
+        );
+        assert!(swapchain_image_usage(
+            HalTextureUsage {
+                transient: true,
+                ..requested
+            },
+            flags
+        )
+        .is_err());
+    }
+
     #[test]
     fn swapchain_extent_uses_current_extent() {
         let caps = vk::SurfaceCapabilitiesKHR::default().current_extent(vk::Extent2D {
@@ -1076,7 +1143,7 @@ mod tests {
                 width: 4,
                 height: 4,
             },
-            4,
+            (4, hal_usage_to_vk_image_usage(config.usage)),
             Arc::new(Mutex::new(SurfacePendingState::new())),
         )
         .unwrap();

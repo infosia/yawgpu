@@ -825,7 +825,16 @@ enum ClearKind {
 }
 
 /// Returns the clear path for `format` restricted to the requested `aspect`.
-fn clear_kind(format: HalTextureFormat, aspect: HalTextureAspect) -> ClearKind {
+fn clear_kind(
+    format: HalTextureFormat,
+    aspect: HalTextureAspect,
+    usage: vk::ImageUsageFlags,
+) -> Result<ClearKind, HalError> {
+    if !usage.contains(vk::ImageUsageFlags::TRANSFER_DST) {
+        return Err(texture_error(
+            "texture clear requires TRANSFER_DST image usage",
+        ));
+    }
     let has_depth = format_has_depth_aspect(format);
     let has_stencil = format_has_stencil_aspect(format);
     if has_depth || has_stencil {
@@ -841,16 +850,16 @@ fn clear_kind(format: HalTextureFormat, aspect: HalTextureAspect) -> ClearKind {
         {
             aspects |= vk::ImageAspectFlags::STENCIL;
         }
-        return ClearKind::DepthStencil(aspects);
+        return Ok(ClearKind::DepthStencil(aspects));
     }
-    match format.compressed_block_info() {
+    Ok(match format.compressed_block_info() {
         Some((block_bytes, block_width, block_height)) => ClearKind::Compressed {
             block_bytes,
             block_width,
             block_height,
         },
         None => ClearKind::Color,
-    }
+    })
 }
 
 /// Returns `(bytes_per_row, bytes_per_image)` of the zeroed staging bytes one
@@ -966,7 +975,7 @@ pub(super) fn encode_texture_clear(
     };
     validate_mip_level(texture, clear.mip_level)?;
     let texture_inner = texture.inner()?;
-    match clear_kind(clear.format, clear.aspect) {
+    match clear_kind(clear.format, clear.aspect, texture_inner.usage)? {
         ClearKind::Color => {
             let range =
                 texture_clear_subresource_range(texture, clear, vk::ImageAspectFlags::COLOR);
@@ -4207,7 +4216,9 @@ fn create_attachment_image_view(
     subresource_range: vk::ImageSubresourceRange,
     usage: vk::ImageUsageFlags,
 ) -> Result<vk::ImageView, HalError> {
-    let usage = intersect_image_view_usage(usage, texture.usage);
+    // Restrict views to image usage, including swapchain images without
+    // INPUT_ATTACHMENT (VUID-VkImageViewCreateInfo-pNext-02662).
+    let usage = usage & texture.usage;
     let mut view_usage_info = vk::ImageViewUsageCreateInfo::default().usage(usage);
     let mut view_info = vk::ImageViewCreateInfo::default()
         .image(texture.image)
@@ -4219,15 +4230,6 @@ fn create_attachment_image_view(
     }
     unsafe { device.create_image_view(&view_info, None) }
         .map_err(|_| shader_error("attachment image view creation failed"))
-}
-
-/// Restricts view usage to bits present on the image, including swapchain images
-/// that lack INPUT_ATTACHMENT (VUID-VkImageViewCreateInfo-pNext-02662).
-fn intersect_image_view_usage(
-    requested: vk::ImageUsageFlags,
-    image_usage: vk::ImageUsageFlags,
-) -> vk::ImageUsageFlags {
-    requested & image_usage
 }
 
 fn color_attachment_image_view_usage() -> vk::ImageUsageFlags {
@@ -4566,25 +4568,6 @@ pub(super) fn to_image_extent(extent: HalExtent3d) -> vk::Extent3D {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn intersect_image_view_usage_limits_views_to_actual_image_usage() {
-        let attachment = vk::ImageUsageFlags::COLOR_ATTACHMENT;
-        let requested = attachment | vk::ImageUsageFlags::INPUT_ATTACHMENT;
-        assert_eq!(
-            intersect_image_view_usage(requested, attachment),
-            attachment
-        );
-        assert_eq!(
-            intersect_image_view_usage(requested, attachment | vk::ImageUsageFlags::TRANSFER_SRC),
-            attachment
-        );
-        assert_eq!(intersect_image_view_usage(requested, requested), requested);
-        assert_eq!(
-            intersect_image_view_usage(requested, vk::ImageUsageFlags::SAMPLED),
-            vk::ImageUsageFlags::empty()
-        );
-    }
-
     #[test]
     fn combined_depth_stencil_copy_aspects_preserve_whole_image_barrier_aspects() {
         for format in [
@@ -6075,35 +6058,78 @@ mod tests {
     /// block layout, narrowed by the requested aspect — not from the requested
     /// aspect alone.
     #[test]
+    fn clear_kind_rejects_missing_transfer_destination_usage() {
+        for format in [
+            HalTextureFormat::Rgba8Unorm,
+            HalTextureFormat::Depth32Float,
+            HalTextureFormat::Bc1RgbaUnorm,
+        ] {
+            let error = clear_kind(
+                format,
+                HalTextureAspect::All,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+            )
+            .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("texture clear requires TRANSFER_DST image usage"));
+        }
+    }
+
+    #[test]
     fn clear_kind_selects_depth_stencil_compressed_and_color_paths() {
         assert_eq!(
-            clear_kind(HalTextureFormat::Rgba8Unorm, HalTextureAspect::All),
+            clear_kind(
+                HalTextureFormat::Rgba8Unorm,
+                HalTextureAspect::All,
+                vk::ImageUsageFlags::TRANSFER_DST
+            )
+            .unwrap(),
             ClearKind::Color
         );
         assert_eq!(
-            clear_kind(HalTextureFormat::Depth32Float, HalTextureAspect::All),
+            clear_kind(
+                HalTextureFormat::Depth32Float,
+                HalTextureAspect::All,
+                vk::ImageUsageFlags::TRANSFER_DST
+            )
+            .unwrap(),
             ClearKind::DepthStencil(vk::ImageAspectFlags::DEPTH)
         );
         assert_eq!(
-            clear_kind(HalTextureFormat::Stencil8, HalTextureAspect::All),
+            clear_kind(
+                HalTextureFormat::Stencil8,
+                HalTextureAspect::All,
+                vk::ImageUsageFlags::TRANSFER_DST
+            )
+            .unwrap(),
             ClearKind::DepthStencil(vk::ImageAspectFlags::STENCIL)
         );
         assert_eq!(
-            clear_kind(HalTextureFormat::Depth24PlusStencil8, HalTextureAspect::All),
+            clear_kind(
+                HalTextureFormat::Depth24PlusStencil8,
+                HalTextureAspect::All,
+                vk::ImageUsageFlags::TRANSFER_DST
+            )
+            .unwrap(),
             ClearKind::DepthStencil(vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL)
         );
         assert_eq!(
             clear_kind(
                 HalTextureFormat::Depth32FloatStencil8,
-                HalTextureAspect::DepthOnly
-            ),
+                HalTextureAspect::DepthOnly,
+                vk::ImageUsageFlags::TRANSFER_DST
+            )
+            .unwrap(),
             ClearKind::DepthStencil(vk::ImageAspectFlags::DEPTH)
         );
         assert_eq!(
             clear_kind(
                 HalTextureFormat::Depth32FloatStencil8,
-                HalTextureAspect::StencilOnly
-            ),
+                HalTextureAspect::StencilOnly,
+                vk::ImageUsageFlags::TRANSFER_DST
+            )
+            .unwrap(),
             ClearKind::DepthStencil(vk::ImageAspectFlags::STENCIL)
         );
         // A stencil request on a depth-only format selects no plane, so the
@@ -6112,12 +6138,19 @@ mod tests {
         assert_eq!(
             clear_kind(
                 HalTextureFormat::Depth32Float,
-                HalTextureAspect::StencilOnly
-            ),
+                HalTextureAspect::StencilOnly,
+                vk::ImageUsageFlags::TRANSFER_DST
+            )
+            .unwrap(),
             ClearKind::DepthStencil(vk::ImageAspectFlags::empty())
         );
         assert_eq!(
-            clear_kind(HalTextureFormat::Bc1RgbaUnorm, HalTextureAspect::All),
+            clear_kind(
+                HalTextureFormat::Bc1RgbaUnorm,
+                HalTextureAspect::All,
+                vk::ImageUsageFlags::TRANSFER_DST
+            )
+            .unwrap(),
             ClearKind::Compressed {
                 block_bytes: 8,
                 block_width: 4,
@@ -6125,7 +6158,12 @@ mod tests {
             }
         );
         assert_eq!(
-            clear_kind(HalTextureFormat::Astc6x5Unorm, HalTextureAspect::All),
+            clear_kind(
+                HalTextureFormat::Astc6x5Unorm,
+                HalTextureAspect::All,
+                vk::ImageUsageFlags::TRANSFER_DST
+            )
+            .unwrap(),
             ClearKind::Compressed {
                 block_bytes: 16,
                 block_width: 6,

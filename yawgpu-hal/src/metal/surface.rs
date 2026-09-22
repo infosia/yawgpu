@@ -33,6 +33,10 @@ impl MetalSurface {
     /// Returns the formats and modes supported by CAMetalLayer.
     #[must_use]
     pub fn capabilities(&self) -> HalSurfaceCapabilities {
+        Self::capability_list()
+    }
+
+    fn capability_list() -> HalSurfaceCapabilities {
         HalSurfaceCapabilities {
             usages: HalTextureUsage {
                 render_attachment: true,
@@ -93,6 +97,7 @@ impl MetalSurface {
             width: f64::from(config.width),
             height: f64::from(config.height),
         });
+        #[cfg(target_os = "macos")]
         self.layer
             .setDisplaySyncEnabled(config.present_mode != HalPresentMode::Immediate);
         self.layer
@@ -170,6 +175,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn metal_surface_capability_list_matches_dawn() {
+        let layer = metal_layer();
+        let raw = (&*layer as *const CAMetalLayer).cast_mut().cast::<c_void>();
+        let surface = unsafe { MetalSurface::from_layer(raw) }.unwrap();
+        let caps = MetalSurface::capability_list();
+        let dispatched = surface.capabilities();
+        assert_eq!(
+            [
+                dispatched.usages.render_attachment,
+                dispatched.usages.texture_binding,
+                dispatched.usages.copy_src,
+                dispatched.usages.copy_dst,
+                dispatched.usages.storage_binding,
+                dispatched.usages.transient
+            ],
+            [true, true, true, true, false, false],
+        );
+        assert_eq!(dispatched.formats, caps.formats);
+        assert_eq!(dispatched.present_modes, caps.present_modes);
+        assert_eq!(dispatched.alpha_modes, caps.alpha_modes);
+        let expected = vec![
+            HalTextureFormat::Bgra8Unorm,
+            HalTextureFormat::Bgra8UnormSrgb,
+            HalTextureFormat::Rgba16Float,
+            #[cfg(target_os = "macos")]
+            HalTextureFormat::Rgb10a2Unorm,
+        ];
+        assert_eq!(caps.formats, expected);
+        assert_eq!(
+            caps.present_modes,
+            [
+                HalPresentMode::Fifo,
+                HalPresentMode::Immediate,
+                HalPresentMode::Mailbox
+            ]
+        );
+        assert_eq!(
+            caps.alpha_modes,
+            [
+                HalCompositeAlphaMode::Opaque,
+                HalCompositeAlphaMode::Premultiplied
+            ]
+        );
+        assert!(
+            caps.usages.render_attachment
+                && caps.usages.texture_binding
+                && caps.usages.copy_src
+                && caps.usages.copy_dst
+        );
+        assert!(!caps.usages.storage_binding && !caps.usages.transient);
+    }
+
+    #[test]
     #[ignore = "manual real Metal backend test"]
     fn metal_surface_capabilities_and_resolved_modes() {
         let device = metal_device();
@@ -213,6 +271,7 @@ mod tests {
             config.present_mode = HalPresentMode::Immediate;
             config.alpha_mode = HalCompositeAlphaMode::Premultiplied;
             surface.configure(&device, config).unwrap();
+            #[cfg(target_os = "macos")]
             assert!(!layer.displaySyncEnabled());
             assert!(!layer.isOpaque());
             assert!(!layer.framebufferOnly());
@@ -220,6 +279,7 @@ mod tests {
             config.present_mode = HalPresentMode::Mailbox;
             config.alpha_mode = HalCompositeAlphaMode::Opaque;
             surface.configure(&device, config).unwrap();
+            #[cfg(target_os = "macos")]
             assert!(layer.displaySyncEnabled());
             assert!(layer.isOpaque());
         }

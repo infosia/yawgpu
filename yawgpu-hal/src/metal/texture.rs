@@ -148,16 +148,9 @@ pub(super) fn create_texture(
     Ok((texture, bytes_per_pixel))
 }
 
-/// Includes the internal attachment usage required by lazy depth/stencil and MSAA clears.
+/// Preserves declared usage; lazy clears use blits for non-renderable textures.
 fn texture_usage_for_clear(descriptor: &HalTextureDescriptor) -> MTLTextureUsage {
-    let mut usage = map_texture_usage(descriptor.usage);
-    if crate::format::format_has_depth_aspect(descriptor.format)
-        || crate::format::format_has_stencil_aspect(descriptor.format)
-        || descriptor.sample_count > 1
-    {
-        usage |= MTLTextureUsage::RenderTarget;
-    }
-    usage
+    map_texture_usage(descriptor.usage)
 }
 
 /// Metal's documented maximum for `setMaxAnisotropy` (API range [1, 16]).
@@ -200,7 +193,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn texture_usage_for_clear_adds_internal_render_target_only_when_needed() {
+    fn texture_usage_for_clear_preserves_declared_render_target_usage() {
         let mut descriptor = super::super::test_helpers::texture_descriptor();
         descriptor.usage.render_attachment = false;
         for format in [
@@ -210,7 +203,7 @@ mod tests {
             HalTextureFormat::Depth32FloatStencil8,
         ] {
             descriptor.format = format;
-            assert!(texture_usage_for_clear(&descriptor).contains(MTLTextureUsage::RenderTarget));
+            assert!(!texture_usage_for_clear(&descriptor).contains(MTLTextureUsage::RenderTarget));
         }
         for format in [HalTextureFormat::Rgba8Unorm, HalTextureFormat::Bc1RgbaUnorm] {
             descriptor.format = format;
@@ -221,20 +214,22 @@ mod tests {
         }
         descriptor.format = HalTextureFormat::Rgba8Unorm;
         descriptor.sample_count = 4;
+        assert!(!texture_usage_for_clear(&descriptor).contains(MTLTextureUsage::RenderTarget));
+        descriptor.usage.render_attachment = true;
         assert!(texture_usage_for_clear(&descriptor).contains(MTLTextureUsage::RenderTarget));
     }
 
     #[test]
     #[cfg(feature = "metal")]
     #[ignore = "manual real Metal backend test"]
-    fn metal_create_texture_allows_internal_depth_clear_attachment() {
+    fn metal_create_texture_preserves_non_renderable_depth_usage() {
         let device = super::super::test_helpers::metal_device();
         let mut descriptor = super::super::test_helpers::texture_descriptor();
         descriptor.format = HalTextureFormat::Depth32Float;
         descriptor.usage.render_attachment = false;
         let (texture, bytes) = create_texture(&device.device, &descriptor).unwrap();
         assert_eq!(bytes, 4);
-        assert!(texture.usage().contains(MTLTextureUsage::RenderTarget));
+        assert!(!texture.usage().contains(MTLTextureUsage::RenderTarget));
         descriptor.sample_count = 3;
         assert!(create_texture(&device.device, &descriptor).is_err());
     }
