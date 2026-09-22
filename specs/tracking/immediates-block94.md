@@ -86,8 +86,7 @@ un-stubbing the port's immediates trees.
 
 ## Outstanding
 
-- Native-Vulkan (Windows RTX) confirmation on the next user-run sweep
-  (MoltenVK is non-authoritative Vulkan coverage).
+- ~~Native-Vulkan (Windows RTX) confirmation on the next user-run sweep~~ **Closed 2026-09-22 (Block 106)**: the F-145 fix was re-run 181/181 on this host on 2026-07-03 (`webgpu-native-cts` `docs/FINDINGS.md` F-145), the 2026-09-21 whole-suite native-Vulkan sweep on this host is `api/validation` 4 fail (all documented xfail, none in the immediates trees) / `api/operation` 0 fail, and Block 106 re-ran `encoding,programmable,pipeline_immediate` 181/0 + `encoding,cmds,setImmediates` 378/0 on yawgpu `4d5bc52`.
 - GLES (Tier 2) stays `maxImmediateSize = 0`; `tint_immediates[0]` remains
   reserved for internal `first_instance` (Block 67). Revisit only if the
   GLES uniform-array delivery path is ever wanted.

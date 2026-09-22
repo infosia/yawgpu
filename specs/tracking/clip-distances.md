@@ -9,6 +9,7 @@ Spec: [Block 68](../blocks/68-clip-distances.md). Goal: Dawn parity for
 |---|---|---|
 | 1 | Feature plumbing + Tint gate + inter-stage limit (Noop + HAL cap) | **DONE** (2026-07-01) |
 | 2 | Real-GPU e2e + CTS | **DONE** (2026-07-01) |
+| 4 | Native-Vulkan execution (Block 106) | **DONE** (2026-09-22) — `e2e_vulkan_clip_distances.rs` 2/2 on Windows / NVIDIA RTX 5060 Ti under `VK_LAYER_KHRONOS_validation` (0 lines); CTS execution + validation trees 8/0, 368/0, 4/0 (see Block 106) |
 
 **Slice 2 — real Metal e2e + CTS-verified.** `e2e_metal_clip_distances.rs`:
 negative clip distance culls (clear) vs positive keeps (red), 2/2 on M2. CTS

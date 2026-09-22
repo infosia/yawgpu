@@ -4,7 +4,7 @@ Status: **COMPLETE** — real-GPU + CTS verified on Metal (M2 e2e + CTS
 clip_distances 240/0 + 4/0), Phase Review clean (no CRITICAL/MAJOR; shim 6-arg
 signature + 16-field entry-point struct verified char-by-char, location-ceiling
 off-by-one checked). MoltenVK advertises but can't compile the shader (its
-SPIR-V→MSL limitation) — Vulkan execution deferred to native HW. Owner:
+SPIR-V→MSL limitation); **Vulkan execution verified on native hardware 2026-09-22 (Block 106: `e2e_vulkan_clip_distances.rs` cull-by-sign on NVIDIA + CTS `vertex_builtins:outputs,clip_distances` 8/0, see `specs/tracking/clip-distances.md`)**. Owner:
 Dawn-parity feature backfill.
 
 The WebGPU `clip-distances` optional feature

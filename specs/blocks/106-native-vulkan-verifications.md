@@ -1,6 +1,6 @@
 # Block 106 — Native-Vulkan verifications deferred from Blocks 68 / 71 / 94 (backlog D11, Vulkan items)
 
-Status: **IN PROGRESS (2026-09-22)** — backlog **D11** "Hardware-blocked
+Status: **COMPLETE (2026-09-22)** — R1 `e2e_vulkan_clip_distances.rs` 2/2, R2 `e2e_vulkan_texture_component_swizzle.rs` 4/4 (native NVIDIA, validation layer 0 lines); R3 native Vulkan CTS (this host, yawgpu `4d5bc52` release `--features vulkan`, CTS `2f0fb9f`, raw, 2026-09-22): `shader,execution,shader_io,vertex_builtins:outputs,clip_distances` 8/0, `capability_checks,features,clip_distances` 368/0, `shader,validation,extension,clip_distances` 4/0, `api,operation,texture_view,texture_component_swizzle` 32,832 pass / 19,494 skip (all skips = compressed formats this GPU does not expose; every depth/stencil-format subcase passes: depth16unorm 1,197, depth24plus 1,197, depth32float 1,197, depth24plus-stencil8 1,539, depth32float-stencil8 1,539, stencil8 342) / 0 fail, `capability_checks,features,texture_component_swizzle` 855/0, `encoding,programmable,pipeline_immediate` 181/0, `encoding,cmds,setImmediates` 378/0; summary pass=34,626 skip=19,495 fail=0 crash=0; R4 records updated. Backlog **D11** "Hardware-blocked
 Vulkan verifications", Vulkan-related items only: clip-distances
 *execution* (Block 68), the texture-component-swizzle depth path
 (Block 71 "R001") and the native-Windows immediates CTS sweep (Block 94).
@@ -62,15 +62,18 @@ readback buffer:
    `(B, G, R, One)`; `textureLoad` on `texture_2d<f32>` →
    `(0x30, 0x20, 0x10, 0xFF)` after `pack4x8unorm` (tolerance ±1 on each
    channel for the unorm round trip).
-2. `vulkan_swizzle_composes_over_the_depth_base` — `depth32float`
-   texture written by `writeTexture` (aspect `DepthOnly`, value `0.25`);
-   view swizzle `(G, R, A, B)`; bound as `texture_2d<f32>` (a depth
-   texture may be bound to a non-depth `texture_2d<f32>` for
-   `textureLoad`); expected `(0.0, 0.25, 1.0, 0.0)` — the WebGPU base
-   `(d, 0, 0, 1)` read through the user swizzle (Block 71 R001).
-   Exact float comparison.
+2. `vulkan_swizzle_composes_over_the_depth_base` — `depth16unorm`
+   texture written by `writeTexture` (aspect `DepthOnly`, `u16 0x4000`,
+   so `d = 16384 / 65535`; `depth16unorm` is the only 32-bit-or-narrower
+   depth format the WebGPU depth-stencil capability table allows as a
+   copy destination — `depth32float` is copy-source only, and yawgpu
+   correctly rejects a `writeTexture` into it); view swizzle
+   `(G, R, A, B)`; bound as `texture_2d<f32>` through an explicit
+   `UnfilterableFloat` bind group layout; expected `(0.0, d, 1.0, 0.0)`
+   — the WebGPU base `(d, 0, 0, 1)` read through the user swizzle
+   (Block 71 R001). Per-channel tolerance `1e-3`.
 3. `vulkan_swizzle_identity_on_depth_reads_d001` — same texture,
-   identity swizzle (no chain) → `(0.25, 0.0, 0.0, 1.0)`.
+   identity swizzle (no chain) → `(d, 0.0, 0.0, 1.0)`.
 4. `vulkan_non_identity_swizzle_without_feature_is_a_device_error` —
    a device without the feature: `wgpuTextureCreateView` with a
    non-identity swizzle raises a validation error on the uncaptured-error
