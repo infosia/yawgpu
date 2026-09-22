@@ -411,10 +411,21 @@ impl VulkanAdapter {
         })
     }
 
-    /// Returns true when texture view component swizzling is supported by this physical device.
+    /// Returns true when texture view component swizzling is supported by this physical device. Dawn enables this unconditionally on Vulkan, so the literal mirrors its rule.
     #[must_use]
     pub fn supports_texture_component_swizzle(&self) -> bool {
         true
+    }
+
+    /// Returns the optimal-tiling format feature flags the physical device
+    /// reports for `format` (`vkGetPhysicalDeviceFormatProperties`).
+    fn optimal_tiling_features(&self, format: vk::Format) -> vk::FormatFeatureFlags {
+        unsafe {
+            self.instance
+                .instance
+                .get_physical_device_format_properties(self.physical_device, format)
+        }
+        .optimal_tiling_features
     }
 
     fn supports_texture_formats_tiers(&self) -> bool {
@@ -468,34 +479,60 @@ impl VulkanAdapter {
         self.supports_texture_formats_tiers()
     }
 
-    /// Returns true when `Rg11b10Ufloat` is renderable by this physical device.
+    /// Returns true when `Rg11b10Ufloat` is renderable by this physical device:
+    /// `B10G11R11_UFLOAT_PACK32` optimal-tiling features contain
+    /// `COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND` (Block 99 R4, Dawn
+    /// `PhysicalDeviceVk.cpp` `InitializeSupportedFeaturesImpl`).
     #[must_use]
     pub(super) fn supports_rg11b10ufloat_renderable(&self) -> bool {
-        true
+        rg11b10ufloat_renderable_from_flags(
+            self.optimal_tiling_features(vk::Format::B10G11R11_UFLOAT_PACK32),
+        )
     }
 
-    /// Returns true when BGRA8 unorm storage textures are supported by this physical device.
+    /// Returns true when BGRA8 unorm storage textures are supported by this
+    /// physical device: `B8G8R8A8_UNORM` optimal-tiling features contain
+    /// `STORAGE_IMAGE` (Block 99 R4, Dawn `InitializeSupportedFeaturesImpl`).
     #[must_use]
     pub(super) fn supports_bgra8unorm_storage(&self) -> bool {
-        true
+        bgra8unorm_storage_from_flags(self.optimal_tiling_features(vk::Format::B8G8R8A8_UNORM))
     }
 
-    /// Returns true when 32-bit float textures are filterable by this physical device.
+    /// Returns true when 32-bit float textures are filterable by this physical
+    /// device: `R32_SFLOAT`, `R32G32_SFLOAT` and `R32G32B32A32_SFLOAT`
+    /// optimal-tiling features all contain `SAMPLED_IMAGE_FILTER_LINEAR`
+    /// (Block 99 R4, Dawn `InitializeSupportedFeaturesImpl`).
     #[must_use]
     pub(super) fn supports_float32_filterable(&self) -> bool {
-        true
+        float32_filterable_from_flags(
+            self.optimal_tiling_features(vk::Format::R32_SFLOAT),
+            self.optimal_tiling_features(vk::Format::R32G32_SFLOAT),
+            self.optimal_tiling_features(vk::Format::R32G32B32A32_SFLOAT),
+        )
     }
 
-    /// Returns true when timestamp queries are supported by this physical device.
+    /// Returns true when timestamp queries are supported by this physical
+    /// device: `limits.timestampComputeAndGraphics == VK_TRUE` (Block 99 R3,
+    /// Dawn `InitializeSupportedFeaturesImpl`).
     #[must_use]
     pub(super) fn supports_timestamp_query(&self) -> bool {
-        true
+        let properties = unsafe {
+            self.instance
+                .instance
+                .get_physical_device_properties(self.physical_device)
+        };
+        timestamp_query_from_limits(properties.limits.timestamp_compute_and_graphics)
     }
 
-    /// Returns true when Depth32FloatStencil8 textures are supported by this physical device.
+    /// Returns true when Depth32FloatStencil8 textures are supported by this
+    /// physical device: `D32_SFLOAT_S8_UINT` optimal-tiling features contain
+    /// `DEPTH_STENCIL_ATTACHMENT` (Block 99 R4, Dawn
+    /// `IsDepthStencilFormatSupported`).
     #[must_use]
     pub(super) fn supports_depth32float_stencil8(&self) -> bool {
-        true
+        depth32float_stencil8_from_flags(
+            self.optimal_tiling_features(vk::Format::D32_SFLOAT_S8_UINT),
+        )
     }
 
     /// Returns true when WGSL `shader-f16` is supported by this physical device.
@@ -1039,6 +1076,44 @@ fn enabled_texture_compression_features(
 
 fn shader_float16_supported(extension_present: bool, shader_float16: vk::Bool32) -> bool {
     extension_present && shader_float16 == vk::TRUE
+}
+
+/// Block 99 R3: `timestamp-query` iff `limits.timestampComputeAndGraphics == VK_TRUE`.
+fn timestamp_query_from_limits(timestamp_compute_and_graphics: vk::Bool32) -> bool {
+    timestamp_compute_and_graphics == vk::TRUE
+}
+
+/// Block 99 R4: `depth32float-stencil8` iff `D32_SFLOAT_S8_UINT` optimal-tiling
+/// features contain `DEPTH_STENCIL_ATTACHMENT`.
+fn depth32float_stencil8_from_flags(flags: vk::FormatFeatureFlags) -> bool {
+    flags.contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
+}
+
+/// Block 99 R4: `rg11b10ufloat-renderable` iff `B10G11R11_UFLOAT_PACK32`
+/// optimal-tiling features contain `COLOR_ATTACHMENT | COLOR_ATTACHMENT_BLEND`.
+fn rg11b10ufloat_renderable_from_flags(flags: vk::FormatFeatureFlags) -> bool {
+    flags.contains(
+        vk::FormatFeatureFlags::COLOR_ATTACHMENT | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND,
+    )
+}
+
+/// Block 99 R4: `bgra8unorm-storage` iff `B8G8R8A8_UNORM` optimal-tiling
+/// features contain `STORAGE_IMAGE`.
+fn bgra8unorm_storage_from_flags(flags: vk::FormatFeatureFlags) -> bool {
+    flags.contains(vk::FormatFeatureFlags::STORAGE_IMAGE)
+}
+
+/// Block 99 R4: `float32-filterable` iff every 32-bit float format
+/// (`R32_SFLOAT`, `R32G32_SFLOAT`, `R32G32B32A32_SFLOAT`) has
+/// `SAMPLED_IMAGE_FILTER_LINEAR` in its optimal-tiling features.
+fn float32_filterable_from_flags(
+    r32: vk::FormatFeatureFlags,
+    rg32: vk::FormatFeatureFlags,
+    rgba32: vk::FormatFeatureFlags,
+) -> bool {
+    [r32, rg32, rgba32]
+        .into_iter()
+        .all(|flags| flags.contains(vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR))
 }
 
 fn subgroups_supported(
@@ -1906,6 +1981,145 @@ mod tests {
                 expected
             );
         }
+    }
+
+    /// Block 99 R3: `timestamp-query` follows `timestampComputeAndGraphics`.
+    #[test]
+    fn vulkan_timestamp_query_from_limits_follows_timestamp_compute_and_graphics() {
+        assert!(timestamp_query_from_limits(vk::TRUE));
+        assert!(!timestamp_query_from_limits(vk::FALSE));
+    }
+
+    /// Block 99 R4: `depth32float-stencil8` needs `DEPTH_STENCIL_ATTACHMENT`.
+    #[test]
+    fn vulkan_depth32float_stencil8_from_flags_requires_depth_stencil_attachment() {
+        assert!(depth32float_stencil8_from_flags(
+            vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT
+                | vk::FormatFeatureFlags::SAMPLED_IMAGE
+        ));
+        assert!(!depth32float_stencil8_from_flags(
+            vk::FormatFeatureFlags::SAMPLED_IMAGE | vk::FormatFeatureFlags::TRANSFER_DST
+        ));
+        assert!(!depth32float_stencil8_from_flags(
+            vk::FormatFeatureFlags::empty()
+        ));
+    }
+
+    /// Block 99 R4: `rg11b10ufloat-renderable` needs both `COLOR_ATTACHMENT`
+    /// and `COLOR_ATTACHMENT_BLEND`; either alone is not enough.
+    #[test]
+    fn vulkan_rg11b10ufloat_renderable_from_flags_requires_attachment_and_blend() {
+        assert!(rg11b10ufloat_renderable_from_flags(
+            vk::FormatFeatureFlags::COLOR_ATTACHMENT
+                | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND
+                | vk::FormatFeatureFlags::SAMPLED_IMAGE
+        ));
+        assert!(!rg11b10ufloat_renderable_from_flags(
+            vk::FormatFeatureFlags::COLOR_ATTACHMENT
+        ));
+        assert!(!rg11b10ufloat_renderable_from_flags(
+            vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND
+        ));
+        assert!(!rg11b10ufloat_renderable_from_flags(
+            vk::FormatFeatureFlags::empty()
+        ));
+    }
+
+    /// Block 99 R4: `bgra8unorm-storage` needs `STORAGE_IMAGE`.
+    #[test]
+    fn vulkan_bgra8unorm_storage_from_flags_requires_storage_image() {
+        assert!(bgra8unorm_storage_from_flags(
+            vk::FormatFeatureFlags::STORAGE_IMAGE | vk::FormatFeatureFlags::COLOR_ATTACHMENT
+        ));
+        assert!(!bgra8unorm_storage_from_flags(
+            vk::FormatFeatureFlags::COLOR_ATTACHMENT
+                | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND
+                | vk::FormatFeatureFlags::SAMPLED_IMAGE
+        ));
+        assert!(!bgra8unorm_storage_from_flags(
+            vk::FormatFeatureFlags::empty()
+        ));
+    }
+
+    /// Block 99 R4: `float32-filterable` needs `SAMPLED_IMAGE_FILTER_LINEAR`
+    /// on all three 32-bit float formats; one missing format rejects.
+    #[test]
+    fn vulkan_float32_filterable_from_flags_requires_linear_filter_on_all_formats() {
+        let linear = vk::FormatFeatureFlags::SAMPLED_IMAGE
+            | vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR;
+        let nearest_only = vk::FormatFeatureFlags::SAMPLED_IMAGE;
+
+        assert!(float32_filterable_from_flags(linear, linear, linear));
+        assert!(!float32_filterable_from_flags(nearest_only, linear, linear));
+        assert!(!float32_filterable_from_flags(linear, nearest_only, linear));
+        assert!(!float32_filterable_from_flags(linear, linear, nearest_only));
+        assert!(!float32_filterable_from_flags(
+            vk::FormatFeatureFlags::empty(),
+            vk::FormatFeatureFlags::empty(),
+            vk::FormatFeatureFlags::empty()
+        ));
+    }
+
+    /// Block 99: each gated `supports_*` entry equals a fresh
+    /// `vkGetPhysicalDeviceFormatProperties` /
+    /// `vkGetPhysicalDeviceProperties` evaluation on the adapter's physical
+    /// device, applying the same Dawn rule.
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    fn vulkan_adapter_feature_queries_match_fresh_physical_device_queries() {
+        let adapter = VulkanInstance::new()
+            .expect("create Vulkan instance")
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("at least one Vulkan adapter");
+        let optimal = |format: vk::Format| {
+            unsafe {
+                adapter
+                    .instance
+                    .instance
+                    .get_physical_device_format_properties(adapter.physical_device, format)
+            }
+            .optimal_tiling_features
+        };
+        let properties = unsafe {
+            adapter
+                .instance
+                .instance
+                .get_physical_device_properties(adapter.physical_device)
+        };
+
+        assert_eq!(
+            adapter.supports_timestamp_query(),
+            properties.limits.timestamp_compute_and_graphics == vk::TRUE
+        );
+        assert_eq!(
+            adapter.supports_depth32float_stencil8(),
+            optimal(vk::Format::D32_SFLOAT_S8_UINT)
+                .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
+        );
+        assert_eq!(
+            adapter.supports_rg11b10ufloat_renderable(),
+            optimal(vk::Format::B10G11R11_UFLOAT_PACK32).contains(
+                vk::FormatFeatureFlags::COLOR_ATTACHMENT
+                    | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND
+            )
+        );
+        assert_eq!(
+            adapter.supports_bgra8unorm_storage(),
+            optimal(vk::Format::B8G8R8A8_UNORM).contains(vk::FormatFeatureFlags::STORAGE_IMAGE)
+        );
+        assert_eq!(
+            adapter.supports_float32_filterable(),
+            [
+                vk::Format::R32_SFLOAT,
+                vk::Format::R32G32_SFLOAT,
+                vk::Format::R32G32B32A32_SFLOAT,
+            ]
+            .into_iter()
+            .all(|format| optimal(format)
+                .contains(vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR))
+        );
     }
 
     #[test]

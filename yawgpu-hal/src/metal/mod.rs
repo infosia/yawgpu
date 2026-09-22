@@ -11,8 +11,9 @@ use objc2_foundation::{NSArray, NSRange, NSString};
 use objc2_metal::{
     MTLBlendFactor, MTLBlendOperation, MTLBlitCommandEncoder, MTLBlitOption,
     MTLBuffer as MTLBufferTrait, MTLClearColor, MTLColorWriteMask, MTLCommandBuffer,
-    MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue, MTLCompareFunction,
-    MTLCompileOptions, MTLComputeCommandEncoder, MTLComputePipelineState, MTLCopyAllDevices,
+    MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue, MTLCommonCounterSetTimestamp,
+    MTLCommonCounterTimestamp, MTLCompareFunction, MTLCompileOptions, MTLComputeCommandEncoder,
+    MTLComputePipelineState, MTLCopyAllDevices, MTLCounter, MTLCounterSamplingPoint, MTLCounterSet,
     MTLCreateSystemDefaultDevice, MTLCullMode, MTLDepthClipMode, MTLDepthStencilDescriptor,
     MTLDepthStencilState, MTLDevice, MTLDrawable, MTLFunction, MTLGPUFamily, MTLIndexType,
     MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType,
@@ -175,6 +176,10 @@ pub struct MetalAdapter {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     name: String,
     read_write_texture_tier: MTLReadWriteTextureTier,
+    /// Block 99 R1: Dawn's `IsGPUCounterSupported(timestamp)` answer, cached at construction.
+    timestamp_query_supported: bool,
+    /// Block 99 R2: `supports32BitFloatFiltering`, cached at construction.
+    float32_filterable: bool,
 }
 
 impl std::fmt::Debug for MetalAdapter {
@@ -191,10 +196,15 @@ impl MetalAdapter {
     pub fn new(device: Retained<ProtocolObject<dyn MTLDevice>>) -> Self {
         let name = device.name().to_string();
         let read_write_texture_tier = device.readWriteTextureSupport();
+        let timestamp_query_supported = metal_device_has_timestamp_counter_set(&device)
+            && metal_device_supports_counter_sampling(&device);
+        let float32_filterable = device.supports32BitFloatFiltering();
         Self {
             device,
             name,
             read_write_texture_tier,
+            timestamp_query_supported,
+            float32_filterable,
         }
     }
 
@@ -350,7 +360,7 @@ impl MetalAdapter {
             || self.device.supportsFamily(MTLGPUFamily::Apple2)
     }
 
-    /// Returns true when WebGPU texture format tier 1 is supported.
+    /// Returns true when WebGPU texture format tier 1 is supported. Dawn enables this unconditionally on Metal, so the literal mirrors its rule.
     #[must_use]
     pub(super) fn supports_texture_formats_tier1(&self) -> bool {
         true
@@ -362,37 +372,42 @@ impl MetalAdapter {
         self.read_write_texture_tier == MTLReadWriteTextureTier::Tier2
     }
 
-    /// Returns true when `Rg11b10Ufloat` is renderable.
+    /// Returns true when `Rg11b10Ufloat` is renderable. Dawn enables this unconditionally on Metal, so the literal mirrors its rule.
     #[must_use]
     pub(super) fn supports_rg11b10ufloat_renderable(&self) -> bool {
         true
     }
 
-    /// Returns true when BGRA8 unorm storage textures are supported.
+    /// Returns true when BGRA8 unorm storage textures are supported. Dawn enables this unconditionally on Metal, so the literal mirrors its rule.
     #[must_use]
     pub(super) fn supports_bgra8unorm_storage(&self) -> bool {
         true
     }
 
-    /// Returns true when 32-bit float textures are filterable.
+    /// Returns true when 32-bit float textures are filterable: the cached
+    /// `supports32BitFloatFiltering` device answer (Block 99 R2, Dawn
+    /// `PhysicalDeviceMTL.mm` `InitializeSupportedFeaturesImpl`).
     #[must_use]
     pub(super) fn supports_float32_filterable(&self) -> bool {
-        true
+        self.float32_filterable
     }
 
-    /// Returns true when timestamp queries are supported.
+    /// Returns true when timestamp queries are supported: the device exposes
+    /// the `timestamp` counter set with the `timestamp` counter and can sample
+    /// counters at a stage or command boundary (Block 99 R1, Dawn
+    /// `IsGPUCounterSupported`). Cached at construction.
     #[must_use]
     pub(super) fn supports_timestamp_query(&self) -> bool {
-        true
+        self.timestamp_query_supported
     }
 
-    /// Returns true when Depth32FloatStencil8 textures are supported.
+    /// Returns true when Depth32FloatStencil8 textures are supported. Dawn enables this unconditionally on Metal, so the literal mirrors its rule.
     #[must_use]
     pub(super) fn supports_depth32float_stencil8(&self) -> bool {
         true
     }
 
-    /// Returns true when WGSL `shader-f16` is supported.
+    /// Returns true when WGSL `shader-f16` is supported. Dawn enables this unconditionally on Metal, so the literal mirrors its rule.
     #[must_use]
     pub(super) fn supports_shader_float16(&self) -> bool {
         true
@@ -405,25 +420,25 @@ impl MetalAdapter {
             || self.device.supportsFamily(MTLGPUFamily::Metal3)
     }
 
-    /// Returns true when depth clip control is supported.
+    /// Returns true when depth clip control is supported. Dawn enables this unconditionally on Metal, so the literal mirrors its rule.
     #[must_use]
     pub(super) fn supports_depth_clip_control(&self) -> bool {
         true
     }
 
-    /// Returns true when float32 color target blending is supported.
+    /// Returns true when float32 color target blending is supported. Dawn enables this unconditionally on Metal, so the literal mirrors its rule.
     #[must_use]
     pub(super) fn supports_float32_blendable(&self) -> bool {
         true
     }
 
-    /// Returns true when dual-source blending is supported.
+    /// Returns true when dual-source blending is supported. Dawn enables this unconditionally on Metal, so the literal mirrors its rule.
     #[must_use]
     pub(super) fn supports_dual_source_blending(&self) -> bool {
         true
     }
 
-    /// Returns true when WGSL clip distances are supported.
+    /// Returns true when WGSL clip distances are supported. Dawn enables this unconditionally on Metal, so the literal mirrors its rule.
     #[must_use]
     pub(super) fn supports_clip_distances(&self) -> bool {
         true
@@ -435,7 +450,7 @@ impl MetalAdapter {
         self.device.supportsFamily(MTLGPUFamily::Apple7)
     }
 
-    /// Returns true when indirect draws support non-zero first instance values.
+    /// Returns true when indirect draws support non-zero first instance values. Dawn enables this unconditionally on Metal, so the literal mirrors its rule.
     #[must_use]
     pub(super) fn supports_indirect_first_instance(&self) -> bool {
         true
@@ -463,6 +478,69 @@ impl MetalAdapter {
             },
         })
     }
+}
+
+/// Returns true when `device.counterSets()` contains a set named
+/// `MTLCommonCounterSetTimestamp` whose counters include
+/// `MTLCommonCounterTimestamp` (Block 99 R1(a); Dawn `IsGPUCounterSupported`,
+/// `PhysicalDeviceMTL.mm`). Names are compared case-insensitively like Dawn's
+/// `caseInsensitiveCompare:`; the first set matching by name decides.
+#[must_use]
+pub(super) fn metal_device_has_timestamp_counter_set(
+    device: &ProtocolObject<dyn MTLDevice>,
+) -> bool {
+    // SAFETY: `MTLCommonCounterSetTimestamp` / `MTLCommonCounterTimestamp` are
+    // immutable `NSString` constants exported by Metal.framework; reading an
+    // `extern` static only requires `unsafe`, it has no other precondition.
+    let (set_name, counter_name) = unsafe {
+        (
+            MTLCommonCounterSetTimestamp.to_string().to_lowercase(),
+            MTLCommonCounterTimestamp.to_string().to_lowercase(),
+        )
+    };
+    let Some(counter_sets) = device.counterSets() else {
+        return false;
+    };
+    let Some(counter_set) = counter_sets
+        .iter()
+        .find(|set| set.name().to_string().to_lowercase() == set_name)
+    else {
+        return false;
+    };
+    counter_set
+        .counters()
+        .iter()
+        .any(|counter| counter.name().to_string().to_lowercase() == counter_name)
+}
+
+/// Dawn's counter-sampling disjunction as a pure function of the four
+/// `supportsCounterSampling:` answers (Block 99 R1(b)): sampling at the stage
+/// boundary, **or** at every command boundary (draw, dispatch and blit).
+#[must_use]
+pub(super) fn counter_sampling_supported(
+    stage: bool,
+    draw: bool,
+    dispatch: bool,
+    blit: bool,
+) -> bool {
+    stage || (draw && dispatch && blit)
+}
+
+/// Returns true when the device can sample GPU counters at a stage boundary or
+/// at every command boundary (Block 99 R1(b); Dawn
+/// `SupportCounterSamplingAtStageBoundary || SupportCounterSamplingAtCommandBoundary`,
+/// `UtilsMetal.mm`). Block 102 reuses this to pick stage- vs command-boundary
+/// timestamp sampling.
+#[must_use]
+pub(super) fn metal_device_supports_counter_sampling(
+    device: &ProtocolObject<dyn MTLDevice>,
+) -> bool {
+    counter_sampling_supported(
+        device.supportsCounterSampling(MTLCounterSamplingPoint::AtStageBoundary),
+        device.supportsCounterSampling(MTLCounterSamplingPoint::AtDrawBoundary),
+        device.supportsCounterSampling(MTLCounterSamplingPoint::AtDispatchBoundary),
+        device.supportsCounterSampling(MTLCounterSamplingPoint::AtBlitBoundary),
+    )
 }
 
 mod buffer;
@@ -610,6 +688,84 @@ mod tests {
             adapter.supports_texture_formats_tier2(),
             fresh_tier == MTLReadWriteTextureTier::Tier2
         );
+    }
+
+    /// Block 99 R1(b): stage-boundary sampling alone is sufficient.
+    #[test]
+    fn counter_sampling_supported_stage_only_is_supported() {
+        assert!(counter_sampling_supported(true, false, false, false));
+    }
+
+    /// Block 99 R1(b): draw, dispatch and blit together form a command boundary.
+    #[test]
+    fn counter_sampling_supported_draw_dispatch_blit_is_supported() {
+        assert!(counter_sampling_supported(false, true, true, true));
+    }
+
+    /// Block 99 R1(b): a partial command boundary (no blit) is not enough.
+    #[test]
+    fn counter_sampling_supported_draw_dispatch_without_blit_is_unsupported() {
+        assert!(!counter_sampling_supported(false, true, true, false));
+    }
+
+    /// Block 99 R1(b): no sampling point at all means no counter sampling.
+    #[test]
+    fn counter_sampling_supported_none_is_unsupported() {
+        assert!(!counter_sampling_supported(false, false, false, false));
+    }
+
+    /// Block 99 R1: the cached `timestamp-query` answer equals a fresh
+    /// recomputation from the device through the two `pub(super)` halves.
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_adapter_timestamp_query_matches_fresh_device_query() {
+        let adapter = MetalInstance::new()
+            .expect("create Metal instance")
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("at least one Metal adapter");
+        let fresh = metal_device_has_timestamp_counter_set(&adapter.device)
+            && metal_device_supports_counter_sampling(&adapter.device);
+
+        assert_eq!(adapter.timestamp_query_supported, fresh);
+        assert_eq!(adapter.supports_timestamp_query(), fresh);
+        assert_eq!(
+            metal_device_supports_counter_sampling(&adapter.device),
+            counter_sampling_supported(
+                adapter
+                    .device
+                    .supportsCounterSampling(MTLCounterSamplingPoint::AtStageBoundary),
+                adapter
+                    .device
+                    .supportsCounterSampling(MTLCounterSamplingPoint::AtDrawBoundary),
+                adapter
+                    .device
+                    .supportsCounterSampling(MTLCounterSamplingPoint::AtDispatchBoundary),
+                adapter
+                    .device
+                    .supportsCounterSampling(MTLCounterSamplingPoint::AtBlitBoundary),
+            )
+        );
+    }
+
+    /// Block 99 R2: the cached `float32-filterable` answer equals
+    /// `supports32BitFloatFiltering` on the device.
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_adapter_float32_filterable_matches_supports_32bit_float_filtering() {
+        let adapter = MetalInstance::new()
+            .expect("create Metal instance")
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("at least one Metal adapter");
+        let fresh = adapter.device.supports32BitFloatFiltering();
+
+        assert_eq!(adapter.float32_filterable, fresh);
+        assert_eq!(adapter.supports_float32_filterable(), fresh);
     }
 
     #[test]
