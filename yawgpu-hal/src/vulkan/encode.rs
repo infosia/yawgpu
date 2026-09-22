@@ -1951,7 +1951,13 @@ fn bound_view_subresource_range(bound: &HalBoundTexture) -> SubresourceRange {
     }
 }
 
-/// Whether a sampled view overlaps a storage view of the same image anywhere in the pass.
+/// Whether a sampled binding's image has any storage binding in the pass.
+///
+/// A non-Vulkan texture or failed `inner()` returns false only because callers
+/// reject those conditions before consuming it as an authoritative layout answer:
+/// `transition_sampled_textures` checks the queried texture first,
+/// `transition_storage_textures` rejects invalid storage candidates before use,
+/// and `descriptor_info` checks through `create_sampled_texture_image_view` first.
 pub(super) fn sampled_binding_shares_storage(
     bound: &HalBoundTexture,
     pass_textures: &[HalBoundTexture],
@@ -1965,28 +1971,14 @@ pub(super) fn sampled_binding_shares_storage(
     let Ok(inner) = texture.inner() else {
         return false;
     };
-    let range = bound_view_subresource_range(bound);
-    pass_textures.iter().any(|storage| {
-        if storage.storage_access.is_none() {
-            return false;
-        }
+    let storage_images = pass_textures.iter().filter_map(|storage| {
+        storage.storage_access?;
         let HalTexture::Vulkan(texture) = &storage.texture else {
-            return false;
+            return None;
         };
-        let Ok(storage_inner) = texture.inner() else {
-            return false;
-        };
-        let other = bound_view_subresource_range(storage);
-        inner.image == storage_inner.image
-            && u64::from(range.base_mip_level)
-                < u64::from(other.base_mip_level) + u64::from(other.mip_level_count)
-            && u64::from(other.base_mip_level)
-                < u64::from(range.base_mip_level) + u64::from(range.mip_level_count)
-            && u64::from(range.base_array_layer)
-                < u64::from(other.base_array_layer) + u64::from(other.array_layer_count)
-            && u64::from(other.base_array_layer)
-                < u64::from(range.base_array_layer) + u64::from(range.array_layer_count)
-    })
+        texture.inner().ok().map(|inner| inner.image)
+    });
+    image_has_storage_binding(inner.image, storage_images)
 }
 
 /// Subtracts exclusions, merging adjacent layers and then identical mip run lists.
@@ -2043,7 +2035,7 @@ fn transition_storage_textures(
     Ok(())
 }
 
-/// Transitions sampled views outside attachments, using GENERAL for storage overlap.
+/// Transitions sampled views outside attachments, using GENERAL for storage-bound images.
 /// A read-only depth-stencil attachment sampled in the same pass stays skipped
 /// (Block 105 "Known limitations"); other mips/layers of its image still transition.
 fn transition_sampled_textures(
@@ -5159,158 +5151,22 @@ mod tests {
         );
     }
 
-    /// Builds Vulkan handles with inert dispatch tables; no loader or GPU is used.
-    fn sharing_texture(image: u64) -> HalBoundTexture {
-        use ash::vk::Handle;
-        unsafe extern "system" fn get_proc(
-            _: vk::Instance,
-            _: *const std::ffi::c_char,
-        ) -> vk::PFN_vkVoidFunction {
-            None
-        }
-        unsafe extern "system" fn destroy_instance(
-            _: vk::Instance,
-            _: *const vk::AllocationCallbacks<'_>,
-        ) {
-        }
-        unsafe extern "system" fn destroy_device(
-            _: vk::Device,
-            _: *const vk::AllocationCallbacks<'_>,
-        ) {
-        }
-        unsafe extern "system" fn destroy_view(
-            _: vk::Device,
-            _: vk::ImageView,
-            _: *const vk::AllocationCallbacks<'_>,
-        ) {
-        }
-        static ENTRY: OnceLock<ash::Entry> = OnceLock::new();
-        let entry = ENTRY.get_or_init(|| unsafe {
-            ash::Entry::from_static_fn(ash::StaticFn {
-                get_instance_proc_addr: get_proc,
-            })
-        });
-        let instance = unsafe {
-            ash::Instance::load_with(
-                |name| {
-                    if name.to_bytes() == b"vkDestroyInstance" {
-                        destroy_instance as *const () as *const std::ffi::c_void
-                    } else {
-                        std::ptr::null()
-                    }
-                },
-                vk::Instance::null(),
-            )
-        };
-        let device = unsafe {
-            ash::Device::load_with(
-                |name| match name.to_bytes() {
-                    b"vkDestroyDevice" => destroy_device as *const () as *const std::ffi::c_void,
-                    b"vkDestroyImageView" => destroy_view as *const () as *const std::ffi::c_void,
-                    _ => std::ptr::null(),
-                },
-                vk::Device::null(),
-            )
-        };
-        let device = Arc::new(VulkanDeviceInner {
-            _instance: Arc::new(VulkanInstanceInner {
-                _entry: entry,
-                instance,
-            }),
-            device,
-            physical_device: vk::PhysicalDevice::null(),
-            memory_properties: vk::PhysicalDeviceMemoryProperties::default(),
-            queue_family_index: 0,
-            occlusion_query_precise: false,
-            depth_clip_control: false,
-            sampler_anisotropy: false,
-            shader_demote_to_helper_invocation: false,
-            shader_float16: false,
-            vulkan_memory_model: false,
-            image_format_list: false,
-            storage_buffer16_bit_access: false,
-            uniform_and_storage_buffer16_bit_access: false,
-            storage_input_output16: false,
-            storage_push_constant16: false,
-            max_sampler_anisotropy: 1.0,
-            #[cfg(feature = "tiled")]
-            subpass_render_pass_cache: Mutex::new(BTreeMap::new()),
-            allocations: AtomicU64::new(0),
-        });
-        let mut texture =
-            dummy_vulkan_texture(HalTextureDimension::D2, HalTextureFormat::Rgba8Unorm);
-        texture.inner = Some(Arc::new(VulkanTextureInner {
-            device,
-            image: vk::Image::from_raw(image),
-            usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE,
-            view: vk::ImageView::null(),
-            bgra8_storage_view: vk::ImageView::null(),
-            memory: None,
-            owns_image: false,
-            mip_level_count: 4,
-            array_layers: 4,
-            aspect_flags: vk::ImageAspectFlags::COLOR,
-            layouts: SubresourceLayouts::new(4, 4),
-        }));
-        let mut bound = bound_texture(HalTexture::Vulkan(texture));
-        bound.mip_level_count = 2;
-        bound.array_layer_count = 2;
-        bound
-    }
-
-    fn sharing_pair() -> (HalBoundTexture, HalBoundTexture) {
-        let sampled = sharing_texture(17);
+    #[test]
+    fn sampled_binding_shares_storage_rejects_noop_texture() {
+        let sampled = bound_texture(dummy_texture(HalTextureFormat::Rgba8Unorm));
         let mut storage = sampled.clone();
-        storage.group = 3;
-        storage.binding = 4;
         storage.storage_access = Some(crate::HalStorageTextureAccess::ReadOnly);
-        storage.base_mip_level = 1;
-        storage.mip_level_count = 1;
-        storage.base_array_layer = 1;
-        storage.array_layer_count = 1;
-        (sampled, storage)
-    }
-
-    #[test]
-    fn sampled_binding_shares_storage_overlapping_mips_and_layers() {
-        let (sampled, storage) = sharing_pair();
-        assert!(sampled_binding_shares_storage(&sampled, &[storage]));
-    }
-
-    #[test]
-    fn sampled_binding_shares_storage_disjoint_mips() {
-        let (sampled, mut storage) = sharing_pair();
-        storage.base_mip_level = 2;
-        assert!(!sampled_binding_shares_storage(&sampled, &[storage]));
-    }
-
-    #[test]
-    fn sampled_binding_shares_storage_disjoint_layers() {
-        let (sampled, mut storage) = sharing_pair();
-        storage.base_array_layer = 2;
-        assert!(!sampled_binding_shares_storage(&sampled, &[storage]));
-    }
-
-    #[test]
-    fn sampled_binding_shares_storage_different_image() {
-        let (sampled, mut storage) = sharing_pair();
-        storage.texture = sharing_texture(18).texture;
         assert!(!sampled_binding_shares_storage(&sampled, &[storage]));
     }
 
     #[test]
     fn sampled_binding_shares_storage_rejects_storage_query() {
-        let (_, storage) = sharing_pair();
+        let mut storage = bound_texture(dummy_texture(HalTextureFormat::Rgba8Unorm));
+        storage.storage_access = Some(crate::HalStorageTextureAccess::ReadOnly);
         assert!(!sampled_binding_shares_storage(
             &storage,
             std::slice::from_ref(&storage)
         ));
-    }
-
-    #[test]
-    fn sampled_binding_shares_storage_empty_pass() {
-        let (sampled, _) = sharing_pair();
-        assert!(!sampled_binding_shares_storage(&sampled, &[]));
     }
 
     fn dummy_texture(format: HalTextureFormat) -> HalTexture {

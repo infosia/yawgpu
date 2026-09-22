@@ -830,9 +830,11 @@ fn vulkan_tiled_subpass_samples_texture_written_by_copy() {
 /// Discard invalidates the whole mip, so the next read lazily zeroes every depth slice.
 /// Before the HAL fix, depthSlice = 1 emitted VUID-vkCmdClearColorImage-baseArrayLayer-01472
 /// and VUID-vkCmdClearColorImage-pRanges-01693 from the Vulkan HAL.
+/// This test asserts pixels and no device error; the validation-layer check is
+/// performed by running the binary under `VK_LAYER_KHRONOS_validation`.
 #[test]
 #[ignore = "manual real-backend test"]
-fn vulkan_3d_attachment_discard_lazily_zeroes_the_whole_mip_without_validation_errors() {
+fn vulkan_3d_attachment_discard_lazily_zeroes_the_whole_mip() {
     if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
         return;
     }
@@ -856,7 +858,6 @@ fn vulkan_3d_attachment_discard_lazily_zeroes_the_whole_mip_without_validation_e
         let colors = [[17, 34, 51, 255], [68, 85, 102, 255], [119, 136, 153, 255]];
         let mut mismatches = Vec::new();
         for depth_slice in [1, 0] {
-            eprintln!("A8 depthSlice={depth_slice}");
             let mut descriptor: native::WGPUTextureDescriptor = std::mem::zeroed();
             descriptor.usage = native::WGPUTextureUsage_RenderAttachment
                 | native::WGPUTextureUsage_CopySrc
@@ -999,6 +1000,33 @@ unsafe fn create_shared_group(
     group
 }
 
+/// Binds two sampled views and one storage view plus a compute output buffer.
+unsafe fn create_three_view_shared_group(
+    device: native::WGPUDevice,
+    layout: native::WGPUBindGroupLayout,
+    views: [native::WGPUTextureView; 3],
+    output: native::WGPUBuffer,
+) -> native::WGPUBindGroup {
+    let mut entries: [native::WGPUBindGroupEntry; 4] = std::mem::zeroed();
+    for (binding, view) in views.into_iter().enumerate() {
+        entries[binding].binding = binding as u32;
+        entries[binding].textureView = view;
+    }
+    entries[3].binding = 3;
+    entries[3].buffer = output;
+    entries[3].size = 4;
+    let descriptor = native::WGPUBindGroupDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout,
+        entryCount: entries.len(),
+        entries: entries.as_ptr(),
+    };
+    let group = yawgpu::wgpuDeviceCreateBindGroup(device, &descriptor);
+    assert!(!group.is_null());
+    group
+}
+
 /// A sampled descriptor and a storage descriptor of the same image share GENERAL.
 #[test]
 #[ignore = "manual real-backend test"]
@@ -1062,6 +1090,85 @@ fn vulkan_compute_binds_one_texture_sampled_and_read_only_storage_in_one_pass() 
         yawgpu::wgpuAdapterRelease(adapter);
         yawgpu::wgpuInstanceRelease(instance);
         assert_eq!(actual, 14u32.to_ne_bytes());
+        assert!(errors.lock().expect("error lock").is_empty(), "{errors:?}");
+    }
+}
+
+/// Both sampled views must agree on GENERAL even when only one overlaps storage.
+#[test]
+#[ignore = "manual real-backend test"]
+fn vulkan_compute_two_sampled_views_of_one_image_agree_when_storage_reads_another_mip() {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
+        return;
+    }
+    unsafe {
+        let instance = create_vulkan_instance();
+        let adapter = request_adapter(instance);
+        let errors = Mutex::new(Vec::new());
+        let device = request_device(instance, adapter, &errors);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+        let texture = create_shared_texture(device, 2);
+        write_pixels(queue, texture, 0, 0, 4, &11u32.to_ne_bytes().repeat(16));
+        write_pixels(queue, texture, 1, 0, 2, &37u32.to_ne_bytes().repeat(4));
+        let sampled_range = create_shared_view(texture, 0, 2);
+        let sampled_mip = create_shared_view(texture, 0, 1);
+        let storage = create_shared_view(texture, 1, 1);
+        let output = create_buffer(
+            device,
+            4,
+            native::WGPUBufferUsage_Storage | native::WGPUBufferUsage_CopySrc,
+        );
+        let readback = create_buffer(
+            device,
+            4,
+            native::WGPUBufferUsage_MapRead | native::WGPUBufferUsage_CopyDst,
+        );
+        let module = create_wgsl_module(
+            device,
+            r#"
+@group(0) @binding(0) var a: texture_2d<u32>;
+@group(0) @binding(1) var b: texture_2d<u32>;
+@group(0) @binding(2) var s: texture_storage_2d<r32uint, read>;
+@group(0) @binding(3) var<storage, read_write> result: array<u32>;
+@compute @workgroup_size(1) fn main() {
+    result[0] = textureLoad(a, vec2i(0), 0).r + textureLoad(a, vec2i(0), 1).r
+        + textureLoad(b, vec2i(0), 0).r + textureLoad(s, vec2i(0)).r;
+}
+"#,
+        );
+        let pipeline = create_compute_pipeline(device, module);
+        let layout = yawgpu::wgpuComputePipelineGetBindGroupLayout(pipeline, 0);
+        let group = create_three_view_shared_group(
+            device,
+            layout,
+            [sampled_range, sampled_mip, storage],
+            output,
+        );
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        let pass = yawgpu::wgpuCommandEncoderBeginComputePass(encoder, std::ptr::null());
+        yawgpu::wgpuComputePassEncoderSetPipeline(pass, pipeline);
+        yawgpu::wgpuComputePassEncoderSetBindGroup(pass, 0, group, 0, std::ptr::null());
+        yawgpu::wgpuComputePassEncoderDispatchWorkgroups(pass, 1, 1, 1);
+        yawgpu::wgpuComputePassEncoderEnd(pass);
+        yawgpu::wgpuCommandEncoderCopyBufferToBuffer(encoder, output, 0, readback, 0, 4);
+        submit_encoder(queue, encoder);
+        let actual = read_buffer(instance, readback, 0, 4);
+        yawgpu::wgpuComputePassEncoderRelease(pass);
+        yawgpu::wgpuBindGroupRelease(group);
+        yawgpu::wgpuBindGroupLayoutRelease(layout);
+        yawgpu::wgpuComputePipelineRelease(pipeline);
+        yawgpu::wgpuShaderModuleRelease(module);
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuBufferRelease(output);
+        yawgpu::wgpuTextureViewRelease(storage);
+        yawgpu::wgpuTextureViewRelease(sampled_mip);
+        yawgpu::wgpuTextureViewRelease(sampled_range);
+        yawgpu::wgpuTextureRelease(texture);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+        assert_eq!(actual, 96u32.to_ne_bytes());
         assert!(errors.lock().expect("error lock").is_empty(), "{errors:?}");
     }
 }

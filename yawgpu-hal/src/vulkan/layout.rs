@@ -13,6 +13,14 @@ pub(super) struct SubresourceRange {
     pub(super) array_layer_count: u32,
 }
 
+/// Whether any storage binding references this image, regardless of view ranges.
+pub(super) fn image_has_storage_binding(
+    image: vk::Image,
+    storage_images: impl IntoIterator<Item = vk::Image>,
+) -> bool {
+    storage_images.into_iter().any(|storage| storage == image)
+}
+
 /// A coalesced rectangle sharing the same old layout state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct LayoutRun {
@@ -211,6 +219,42 @@ pub(super) fn needs_barrier(old_state: u8, new_state: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ash::vk::Handle;
+
+    #[test]
+    fn image_has_storage_binding_finds_same_image_among_storage_images() {
+        let image = vk::Image::from_raw(17);
+        assert!(image_has_storage_binding(
+            image,
+            [vk::Image::from_raw(18), image, vk::Image::from_raw(19)]
+        ));
+    }
+
+    #[test]
+    fn image_has_storage_binding_f1_disjoint_views_of_same_image_agree() {
+        let image = vk::Image::from_raw(17);
+        // F1: A spans mips 0..2, B samples mip 0, and storage reads mip 1.
+        // Both sampled views use the same image-wide decision; their ranges
+        // deliberately do not participate, including B's disjoint mip range.
+        let sampled_views = [(image, range(0, 2, 0, 1)), (image, range(0, 1, 0, 1))];
+        let storage_view = (image, range(1, 1, 0, 1));
+        for (sampled_image, _) in sampled_views {
+            assert!(image_has_storage_binding(sampled_image, [storage_view.0]));
+        }
+    }
+
+    #[test]
+    fn image_has_storage_binding_rejects_different_image() {
+        assert!(!image_has_storage_binding(
+            vk::Image::from_raw(17),
+            [vk::Image::from_raw(18)]
+        ));
+    }
+
+    #[test]
+    fn image_has_storage_binding_rejects_empty_storage_set() {
+        assert!(!image_has_storage_binding(vk::Image::from_raw(17), []));
+    }
 
     /// A uniform classification forms one rectangle, including nonzero origins.
     #[test]

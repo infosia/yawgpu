@@ -1,8 +1,17 @@
 # Block 107 — Vulkan: drop the eager `storeOp: Discard` clear (backlog A8) and give sampled + storage-bound subresources one layout (backlog A9)
 
-Status: **S1 + S2 landed (2026-09-23), Phase Review in progress** — one
-coding-agent handoff (HAL + tests), reviewed and committed together (the
-two slices touch the same functions). Gates on the Windows native NVIDIA
+Status: **COMPLETE (2026-09-23)** — S1 + S2 `3f809b1` (one coding-agent
+handoff, HAL + tests, committed together because the two slices touch the
+same functions); Phase Review: 1 MAJOR (F1, pairwise → image-wide sharing
+rule) + 5 MINOR, fixed in the S3 commit that follows `3f809b1` (F5
+deferred with rationale, F2 documented) — table below. S3 gates: HAL
+`--lib` 261/0 (`vulkan`) and 269/0 (`vulkan,tiled`), `e2e_vulkan_layouts`
+7/7 under the layer with 0 VUID lines (e2e 7 was red before the fix:
+`VUID-VkDescriptorImageInfo-imageLayout-00344` + `vkCmdDispatch-None-08114`
+with `GENERAL` declared while mip 0 sat in `SHADER_READ_ONLY_OPTIMAL`),
+`e2e_vulkan_lazy_init` 7/7, `e2e_vulkan_tiled` 4/4, `e2e_vulkan_compute`
+3/3 under the layer, `cargo test --workspace` green, fmt + clippy default /
+`vulkan` / `vulkan,tiled` clean. S1 + S2 gates on the Windows native NVIDIA
 host: `cargo test --workspace` green; fmt + clippy default / `vulkan` /
 `vulkan,tiled` clean; HAL `--ignored` 54/0 and every `e2e_vulkan_*` binary
 green under `VK_LAYER_KHRONOS_validation` with **0 validation lines**
@@ -118,6 +127,14 @@ R4 (core un-marks the aspect) + R6 (`ClearTexture`), exactly as on Metal.
 - Block 105 R4's sentence "the `storeOp: Discard` epilogue clears use
   `transition_image_range` on the same attachment range" is superseded by
   this rule (spec 105 is annotated, not rewritten).
+- **Present is the one consumer core does not clear for** (Phase Review
+  F2): `wgpuSurfacePresent` hands the swapchain image to the HAL without
+  an `InitOverlay` check, so a surface texture rendered with
+  `storeOp: Discard` and presented without any further use now reaches
+  the compositor with `STORE_OP_DONT_CARE` contents on Vulkan (it was
+  zeroed by the removed epilogue). This matches Metal today and is not
+  observable by any WebGPU read; Dawn does not clear on present either.
+  Recorded as the only behaviour change of R1 outside the fixed VUIDs.
 
 ### R2 — A sampled binding whose subresources are also storage-bound in the same pass uses `GENERAL` (A9)
 
@@ -128,9 +145,20 @@ same slice the Block 105 R5 transitions consume):
 
 > a sampled binding `b` (`storage_access.is_none()`) **shares** with
 > storage iff some storage binding `s` (`storage_access.is_some()`) in the
-> same pass references the same `VkImage` and
-> `bound_view_subresource_range(b)` intersects
-> `bound_view_subresource_range(s)` (mip **and** layer ranges overlap).
+> same pass references the same `VkImage`. The rule is **image-wide**:
+> subresource ranges are deliberately *not* compared.
+
+*(Amended after the Phase Review, F1. The first draft compared
+subresource ranges pairwise; that is not transitive across sampled views
+of one image — sampled V1 = mips 0..2, sampled V2 = mip 0, storage S =
+mip 1: V1 shares, V2 does not, and mip 0 ends in whichever layout the
+last-visited binding chose while the other binding's descriptor declares
+the opposite (VUID-00344 again). Dawn's `VulkanImageLayout` decides per
+texture from the pass's combined usage — any storage usage → `GENERAL`
+for every sampled descriptor of that texture — so yawgpu now does the
+same. Cost: a sampled view of mip 0 while storage reads mip 1 is
+`GENERAL` instead of `SHADER_READ_ONLY_OPTIMAL`, which is what Dawn
+does too.)*
 
 Then:
 
@@ -138,12 +166,20 @@ Then:
   sharing sampled binding (minus the pass's attachment exclusions, as
   today) to `GENERAL` / `IMAGE_LAYOUT_GENERAL` instead of
   `SHADER_READ_ONLY_OPTIMAL`. Non-sharing sampled bindings are unchanged.
-  Rationale: a descriptor declares one layout for its entire view, so a
-  partially overlapping view (sampled mips 0..2, storage mip 1) must be
-  uniformly `GENERAL`; `transition_storage_textures` then finds the
-  overlapping part already in `GENERAL` (no barrier emitted for an
-  identical layout — confirm `transition_image_range` short-circuits, or
-  accept the redundant barrier if it does not; do not add a special case).
+  Because the rule is image-wide, every sampled binding of a
+  storage-bound image reaches the same layout regardless of visiting
+  order; `transition_storage_textures` then finds the storage range
+  already in `GENERAL` (a redundant same-layout barrier is acceptable; do
+  not add a special case).
+- The predicate's pure core takes only `VkImage` handles
+  (`image_shares_storage(image, storage_images)`-shape helper next to
+  `SubresourceRange` in `layout.rs`, or equivalent) so it can be
+  unit-tested without constructing a fake device; the
+  `HalBoundTexture` adapter (`sampled_binding_shares_storage`) filters
+  on `storage_access` and unwraps the Vulkan texture. The adapter
+  returns `false` for a non-Vulkan texture or a failed `inner()` only
+  because every caller fails on that same condition first — its doc
+  comment says so (Phase Review F4).
 - `descriptor_info` for `HalDescriptorBindingKind::Texture` declares
   `GENERAL` for a sharing sampled binding and `SHADER_READ_ONLY_OPTIMAL`
   otherwise. **The decision must come from one function** shared by the
@@ -173,10 +209,16 @@ core). No public API changes.
 
 ### Unit (`#[cfg(test)]`, Noop / GPU-free)
 
-- `encode.rs`: the sharing predicate — same image + overlapping mips and
-  layers → true; same image, disjoint mips → false; same image, disjoint
-  layers → false; different image → false; a storage binding never
-  "shares" (only sampled bindings are queried); empty pass set → false.
+- the pure image-level helper (plain `vk::Image` handles, no device):
+  same image among the storage images → true; same image listed with
+  disjoint subresource ranges → still true (image-wide rule, the F1
+  scenario: two sampled views of one image must agree); different image →
+  false; empty storage set → false.
+- `encode.rs` adapter: a storage binding queried → false (only sampled
+  bindings share). If an adapter test needs a Vulkan-backed
+  `HalBoundTexture`, do **not** build a fake `VulkanDeviceInner` with
+  inert dispatch tables (Phase Review F3: sound today but fragile); the
+  pure helper carries the coverage.
 - `encode.rs`: if `discarded_depth_stencil_aspects` is deleted, delete its
   test; if kept, its test stays.
 - Existing Block 105 range tests unchanged.
@@ -210,6 +252,15 @@ for a 3D dimension or add a sibling helper):
   error, no validation output. Before R2 this case emits
   `VUID-VkDescriptorImageInfo-imageLayout-00344` (and the matching
   `VUID-vkCmdDispatch-None-08114`-class line).
+- **e2e 7 (A9, F1 scenario)** `vulkan_compute_two_sampled_views_of_one_image_agree_when_storage_reads_another_mip`:
+  `r32uint` 2D texture 4×4, 2 mips (usage `TextureBinding |
+  StorageBinding | CopyDst`); compute shader binding `texture_2d<u32>`
+  view A = mips 0..2, `texture_2d<u32>` view B = mip 0 only,
+  `texture_storage_2d<r32uint, read>` view S = mip 1 only; writes
+  `A(mip 0) + A(mip 1) + B(mip 0) + S` into a storage buffer. Expect the
+  sum, no device error, no validation output. Under the pairwise rule B
+  declared `SHADER_READ_ONLY_OPTIMAL` while A left mip 0 in `GENERAL`
+  (or vice versa) → VUID-00344.
 - **e2e 6 (A9, render + partial overlap)**
   `vulkan_render_samples_mip_range_while_storage_reads_one_mip`: `r32uint`
   2D texture 4×4, 2 mips, usage `TextureBinding | StorageBinding |
@@ -240,10 +291,33 @@ report records the VUID lines observed before the fix).
   plus the Block 105 re-confirmation trees `command_buffer,*` and
   `rendering,*` — fail 0 / crash 0.
 
+## Phase Review (2026-09-23, fresh-context reviewer over `aaef70c..3f809b1`)
+
+| ID | Sev | Finding | Disposition |
+|---|---|---|---|
+| F1 | MAJOR | The R2 predicate compared subresource ranges pairwise, which is not transitive across sampled views of one image (sampled mips 0..2 + sampled mip 0 + storage mip 1: mip 0's layout depends on visiting order, one descriptor declares the other layout — VUID-00344 again); unit tests never had a second sampled view | **Fixed (spec + code)** — R2 amended to Dawn's image-wide rule (any storage binding of the image in the pass → `GENERAL` for every sampled binding of that image); pure `vk::Image`-level helper in `layout.rs` + adapter; unit tests on the helper; new e2e 7 reproduces the scenario red-before-fix |
+| F2 | MINOR | `wgpuSurfacePresent` is the one consumer with no `InitOverlay` check: a Discarded, then presented, surface texture was zeroed by the removed epilogue and now presents `DONT_CARE` contents on Vulkan (Metal already behaves so; not observable by WebGPU reads) | **Documented (spec R1)** — matches Metal and Dawn; no code change |
+| F3 | MINOR | Predicate unit tests built a fake `VulkanDeviceInner` with inert `ash` dispatch tables — sound (ash substitutes panicking stubs, all reachable drops are supplied) but fragile and technically outside `load_with`'s documented contract | **Fixed** — fixture removed; the pure helper carries the coverage |
+| F4 | MINOR | The adapter silently returns `false` for a non-Vulkan texture / failed `inner()`; safe only because every caller fails first | **Fixed (docs)** — stated in the adapter's doc comment |
+| F5 | MINOR | `#[allow(clippy::too_many_arguments)]` on `update_render_descriptor_sets`; `bind_textures` (per-draw) and `pass_textures` (pass-wide) sit side by side with the same type | **Deferred with rationale** — same pre-existing style as `encode_vulkan_render_commands`; a `RenderBindings<'_>` struct is a refactor across the render-stream call chain, out of this block's scope; tracked with refactor-dedup deferrals (backlog E4) |
+| F6 | MINOR | e2e 4 printed the backlog id (`eprintln!("A8 …")`); its name claimed "without validation errors" although the layer check is performed by the human running under `VK_LAYER_KHRONOS_validation` | **Fixed** — `eprintln!` removed, renamed, doc comment states how the layer check is run |
+
+Reviewer confirmed (no finding): every core read path clears before the
+consumer (copies, compute / render / bundle / tiled bindings, `Load →
+Clear` rewrite, 3D whole-mip clear, Discard un-mark) — present is the sole
+gap (F2); depth-stencil tracker consistent after the pass without the
+epilogue (`initial == final == DEPTH_STENCIL_ATTACHMENT_OPTIMAL`); the
+pass-wide slice is identical on the transition and descriptor sides for
+compute, render incl. bundles, and tiled; interval arithmetic correct; a
+`WriteOnly` / `ReadWrite` storage sharer is unreachable (core usage scope);
+attachment exclusions never interact with the `GENERAL` choice; no dead
+code left; docs / no-panic conventions met; e2e 5 / 6 not vacuous.
+
 ## Slices
 
 - **S1 (A8)** R1 + e2e 4.
 - **S2 (A9)** R2 + unit tests + e2e 5, 6.
+- **S3 (Phase Review fixes)** F1 / F3 / F4 / F6 + e2e 7.
 
 One coding-agent handoff covers both (small, same functions); landed as
 one commit on review because the R1 removal and the R2 plumbing edit the
