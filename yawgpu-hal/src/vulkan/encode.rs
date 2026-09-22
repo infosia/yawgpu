@@ -78,11 +78,8 @@ pub(super) fn record_and_submit_copies(
                 HalCopy::ClearTexture(clear) => {
                     encode_texture_clear(&queue.device.device, command_buffer, clear)?;
                 }
-                HalCopy::WriteTimestamp(_) => {
-                    return Err(HalError::QueueSubmissionFailed {
-                        backend: "vulkan",
-                        message: "timestamp writes are not implemented yet on vulkan".to_owned(),
-                    })
+                HalCopy::WriteTimestamp(write) => {
+                    encode_write_timestamp(&queue.device.device, command_buffer, write)?;
                 }
                 HalCopy::ResolveQuerySet(resolve) => {
                     encode_resolve_query_set(&queue.device.device, command_buffer, resolve)?;
@@ -857,6 +854,40 @@ pub(super) fn encode_texture_clear(
     Ok(())
 }
 
+/// Records a raw timestamp write into the command stream (Block 102 R3).
+///
+/// Mirrors Dawn's `RecordWriteTimestampCmd` (`CommandBufferVk.cpp`) at top
+/// level: a query must be reset before it is written again, and
+/// `vkCmdResetQueryPool` cannot be recorded inside a render pass instance —
+/// which holds here because `HalCopy` commands are always recorded at the top
+/// level of the command buffer. The stamp itself is taken at `ALL_COMMANDS`,
+/// the stage Dawn uses for a standalone `writeTimestamp`.
+pub(super) fn encode_write_timestamp(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    write: &HalWriteTimestamp,
+) -> Result<(), HalError> {
+    let HalQuerySet::Vulkan(query_set) = &write.query_set else {
+        return Err(buffer_error("query set is not Vulkan-backed"));
+    };
+    if query_set.kind() != HalQueryKind::Timestamp {
+        return Err(buffer_error(
+            "timestamp write requires a timestamp query set",
+        ));
+    }
+    query_set.validate_query(write.query_index)?;
+    unsafe {
+        device.cmd_reset_query_pool(command_buffer, query_set.pool(), write.query_index, 1);
+        device.cmd_write_timestamp(
+            command_buffer,
+            vk::PipelineStageFlags::ALL_COMMANDS,
+            query_set.pool(),
+            write.query_index,
+        );
+    }
+    Ok(())
+}
+
 /// Records query-set resolve encode into the command stream.
 pub(super) fn encode_resolve_query_set(
     device: &ash::Device,
@@ -921,6 +952,13 @@ pub(super) fn encode_resolve_query_set(
                 vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
             );
         }
+        query_resolve_copy_to_shader_barrier(
+            device,
+            command_buffer,
+            destination_buffer,
+            resolve.destination_offset,
+            byte_count,
+        );
     }
     Ok(())
 }
@@ -945,6 +983,43 @@ fn query_resolve_fill_to_copy_barrier(
             command_buffer,
             vk::PipelineStageFlags::TRANSFER,
             vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[barrier],
+            &[],
+        );
+    }
+}
+
+/// Makes the resolved query results visible to the compute pass that converts
+/// them (Block 102 R3).
+///
+/// `vkCmdCopyQueryPoolResults` is a transfer write, and for a timestamp set
+/// core follows the resolve with the timestamp-to-nanoseconds conversion
+/// dispatch reading the very same range as a storage buffer. The range barrier
+/// pairs the copies with those shader accesses; the compute pass's own global
+/// barrier covers the same hazard more coarsely, so this one keeps the
+/// dependency scoped to the resolved bytes.
+fn query_resolve_copy_to_shader_barrier(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    buffer: vk::Buffer,
+    offset: u64,
+    size: u64,
+) {
+    let barrier = vk::BufferMemoryBarrier::default()
+        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+        .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
+        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .buffer(buffer)
+        .offset(offset)
+        .size(size);
+    unsafe {
+        device.cmd_pipeline_barrier(
+            command_buffer,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
             vk::DependencyFlags::empty(),
             &[],
             &[barrier],
@@ -1356,7 +1431,11 @@ pub(super) fn encode_compute_pass(
     };
     transition_sampled_textures(device, command_buffer, &pass.bind_textures, &[])?;
     transition_storage_textures(device, command_buffer, &pass.bind_textures, &[])?;
-    transfer_to_compute_barrier(device, command_buffer);
+    record_memory_barrier(
+        device,
+        command_buffer,
+        compute_pass_pre_dispatch_barrier_scopes(),
+    );
     unsafe {
         device.cmd_bind_pipeline(
             command_buffer,
@@ -1415,11 +1494,94 @@ pub(super) fn encode_compute_pass(
             }
         }
     }
-    compute_to_transfer_barrier(device, command_buffer);
+    record_memory_barrier(
+        device,
+        command_buffer,
+        compute_pass_post_dispatch_barrier_scopes(),
+    );
     Ok(ComputePassTemps {
         descriptor_pool,
         image_views,
     })
+}
+
+/// Stage and access scopes of a global (`VkMemoryBarrier`) dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MemoryBarrierScopes {
+    src_stages: vk::PipelineStageFlags,
+    src_access: vk::AccessFlags,
+    dst_stages: vk::PipelineStageFlags,
+    dst_access: vk::AccessFlags,
+}
+
+/// Records a global memory barrier with the given scopes.
+fn record_memory_barrier(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    scopes: MemoryBarrierScopes,
+) {
+    let barrier = vk::MemoryBarrier::default()
+        .src_access_mask(scopes.src_access)
+        .dst_access_mask(scopes.dst_access);
+    unsafe {
+        device.cmd_pipeline_barrier(
+            command_buffer,
+            scopes.src_stages,
+            scopes.dst_stages,
+            vk::DependencyFlags::empty(),
+            &[barrier],
+            &[],
+            &[],
+        );
+    }
+}
+
+/// Scopes of the barrier recorded before a compute pass's dispatch
+/// (Block 102 R3).
+///
+/// Vulkan orders nothing between a transfer write and a later shader access,
+/// so a dispatch that consumes buffer data produced earlier in the same
+/// command buffer needs an explicit dependency — the timestamp resolve
+/// (`vkCmdFillBuffer` + `vkCmdCopyQueryPoolResults`) followed by the
+/// nanosecond conversion dispatch over the same range is exactly that shape.
+/// The source scope covers every write from the transfer and compute stages
+/// (`MEMORY_WRITE` subsumes `TRANSFER_WRITE`), so a preceding copy, fill,
+/// query resolve or dispatch is included. The destination scope keeps the
+/// wider buffer-read mask on top of R3's `SHADER_READ | SHADER_WRITE` so that
+/// index, indirect and copy-source reads recorded after this pass still
+/// observe those earlier transfer writes (F-106).
+fn compute_pass_pre_dispatch_barrier_scopes() -> MemoryBarrierScopes {
+    MemoryBarrierScopes {
+        src_stages: vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::COMPUTE_SHADER,
+        src_access: vk::AccessFlags::MEMORY_WRITE,
+        dst_stages: vk::PipelineStageFlags::COMPUTE_SHADER
+            | buffer_write_read_barrier_dst_stage_mask(),
+        dst_access: vk::AccessFlags::SHADER_READ
+            | vk::AccessFlags::SHADER_WRITE
+            | buffer_write_read_barrier_dst_access_mask(),
+    }
+}
+
+/// Scopes of the barrier recorded after a compute pass's dispatch
+/// (Block 102 R3).
+///
+/// The dispatch's storage-buffer writes are made available to everything that
+/// can consume them next: a following transfer (the conversion pass is
+/// normally followed by a copy out of the resolve destination), another
+/// dispatch, a draw reading index/indirect/vertex data (F-106), and the host
+/// once the submission's fence is signalled.
+fn compute_pass_post_dispatch_barrier_scopes() -> MemoryBarrierScopes {
+    MemoryBarrierScopes {
+        src_stages: vk::PipelineStageFlags::COMPUTE_SHADER,
+        src_access: vk::AccessFlags::SHADER_WRITE,
+        dst_stages: vk::PipelineStageFlags::TRANSFER
+            | vk::PipelineStageFlags::COMPUTE_SHADER
+            | vk::PipelineStageFlags::HOST
+            | buffer_write_read_barrier_dst_stage_mask(),
+        dst_access: vk::AccessFlags::MEMORY_READ
+            | vk::AccessFlags::MEMORY_WRITE
+            | buffer_write_read_barrier_dst_access_mask(),
+    }
 }
 
 /// Transitions bind-group textures bound for storage access to `GENERAL`, the
@@ -4661,6 +4823,231 @@ mod tests {
         assert_eq!(retained_texture_count(&retained, &external_plane0_inner), 1);
         assert_eq!(retained_texture_count(&retained, &external_plane1_inner), 1);
         assert_eq!(retained_sampler_count(&retained, &sampler_inner), 1);
+    }
+
+    /// Block 102 R3: the barriers recorded around a compute-pass dispatch
+    /// order transfer writes (query resolve, copies, fills) against the
+    /// dispatch's storage accesses, and the dispatch's writes against later
+    /// transfers, dispatches, draws and the host. Pure flag math, no GPU.
+    #[test]
+    fn compute_pass_barrier_scopes_order_transfer_and_compute_buffer_hazards() {
+        let pre = compute_pass_pre_dispatch_barrier_scopes();
+        assert!(pre
+            .src_stages
+            .contains(vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::COMPUTE_SHADER));
+        assert!(pre.src_access.contains(vk::AccessFlags::MEMORY_WRITE));
+        assert!(pre
+            .dst_stages
+            .contains(vk::PipelineStageFlags::COMPUTE_SHADER));
+        assert!(pre
+            .dst_access
+            .contains(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE));
+        // The wider buffer-read destination scope (F-106) is kept on top of R3.
+        assert!(pre
+            .dst_stages
+            .contains(buffer_write_read_barrier_dst_stage_mask()));
+        assert!(pre
+            .dst_access
+            .contains(buffer_write_read_barrier_dst_access_mask()));
+
+        let post = compute_pass_post_dispatch_barrier_scopes();
+        assert_eq!(post.src_stages, vk::PipelineStageFlags::COMPUTE_SHADER);
+        assert_eq!(post.src_access, vk::AccessFlags::SHADER_WRITE);
+        assert!(post.dst_stages.contains(
+            vk::PipelineStageFlags::TRANSFER
+                | vk::PipelineStageFlags::COMPUTE_SHADER
+                | vk::PipelineStageFlags::HOST
+        ));
+        assert!(post
+            .dst_access
+            .contains(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE));
+        assert!(post
+            .dst_stages
+            .contains(buffer_write_read_barrier_dst_stage_mask()));
+    }
+
+    /// Block 102 R3: two timestamps written around GPU work resolve to raw
+    /// ticks that are both non-zero and strictly increasing.
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_write_timestamp_then_resolve_yields_increasing_ticks() {
+        let device = vulkan_device();
+        let query_set = device
+            .create_query_set(HalQueryKind::Timestamp, 2)
+            .expect("create timestamp query set");
+        let destination = device
+            .create_buffer(16, query_resolve_usage())
+            .expect("create resolve destination");
+        let readback = device
+            .create_buffer(16, readback_usage())
+            .expect("create readback buffer");
+        let busy = device
+            .create_buffer(1024 * 1024, HalBufferUsage::default())
+            .expect("create busy-work buffer");
+
+        device
+            .queue()
+            .submit_copies(&[
+                HalCopy::WriteTimestamp(HalWriteTimestamp {
+                    query_set: HalQuerySet::Vulkan(query_set.clone()),
+                    query_index: 0,
+                }),
+                // Keep the GPU busy so the two stamps cannot collapse onto the
+                // same tick.
+                HalCopy::BufferClear(HalBufferClear {
+                    buffer: HalBuffer::Vulkan(busy),
+                    offset: 0,
+                    size: 1024 * 1024,
+                }),
+                HalCopy::WriteTimestamp(HalWriteTimestamp {
+                    query_set: HalQuerySet::Vulkan(query_set.clone()),
+                    query_index: 1,
+                }),
+                HalCopy::ResolveQuerySet(HalResolveQuerySet {
+                    query_set: HalQuerySet::Vulkan(query_set),
+                    first_query: 0,
+                    query_count: 2,
+                    written_queries: vec![0, 1],
+                    destination: HalBuffer::Vulkan(destination.clone()),
+                    destination_offset: 0,
+                }),
+                HalCopy::Buffer(HalBufferCopy {
+                    source: HalBuffer::Vulkan(destination),
+                    source_offset: 0,
+                    destination: HalBuffer::Vulkan(readback.clone()),
+                    destination_offset: 0,
+                    size: 16,
+                }),
+            ])
+            .expect("submit timestamp writes and resolve");
+        device.queue().wait_idle().expect("wait idle");
+
+        let ticks = read_query_results(&readback, 2);
+        assert!(
+            ticks[0] > 0,
+            "first timestamp should be non-zero: {ticks:?}"
+        );
+        assert!(
+            ticks[1] > ticks[0],
+            "second timestamp should be later: {ticks:?}"
+        );
+    }
+
+    /// Block 102 R3: slots never written in the submission resolve to zero
+    /// while the written ones carry their ticks.
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_resolve_timestamp_query_set_zero_fills_unwritten_slots() {
+        let device = vulkan_device();
+        let query_set = device
+            .create_query_set(HalQueryKind::Timestamp, 2)
+            .expect("create timestamp query set");
+        let destination = device
+            .create_buffer(16, query_resolve_usage())
+            .expect("create resolve destination");
+        let readback = device
+            .create_buffer(16, readback_usage())
+            .expect("create readback buffer");
+
+        device
+            .queue()
+            .submit_copies(&[
+                HalCopy::WriteTimestamp(HalWriteTimestamp {
+                    query_set: HalQuerySet::Vulkan(query_set.clone()),
+                    query_index: 1,
+                }),
+                HalCopy::ResolveQuerySet(HalResolveQuerySet {
+                    query_set: HalQuerySet::Vulkan(query_set),
+                    first_query: 0,
+                    query_count: 2,
+                    written_queries: vec![1],
+                    destination: HalBuffer::Vulkan(destination.clone()),
+                    destination_offset: 0,
+                }),
+                HalCopy::Buffer(HalBufferCopy {
+                    source: HalBuffer::Vulkan(destination),
+                    source_offset: 0,
+                    destination: HalBuffer::Vulkan(readback.clone()),
+                    destination_offset: 0,
+                    size: 16,
+                }),
+            ])
+            .expect("submit timestamp write and resolve");
+        device.queue().wait_idle().expect("wait idle");
+
+        let ticks = read_query_results(&readback, 2);
+        assert_eq!(ticks[0], 0, "unwritten slot should resolve to zero");
+        assert!(ticks[1] > 0, "written slot should carry ticks: {ticks:?}");
+    }
+
+    /// Block 102 R3: a timestamp write keeps its query set — and therefore the
+    /// query pool — alive until the submission retires.
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn collect_retained_resources_retains_write_timestamp_query_set() {
+        let device = vulkan_device();
+        let query_set = device
+            .create_query_set(HalQueryKind::Timestamp, 2)
+            .expect("create timestamp query set");
+        let query_set_inner = Arc::clone(&query_set.inner);
+
+        let retained = collect_retained_resources(&[HalCopy::WriteTimestamp(HalWriteTimestamp {
+            query_set: HalQuerySet::Vulkan(query_set),
+            query_index: 0,
+        })]);
+
+        assert_eq!(
+            retained
+                .iter()
+                .filter(|resource| matches!(
+                    resource,
+                    RetainedResource::QuerySet { _inner: inner }
+                        if Arc::ptr_eq(inner, &query_set_inner)
+                ))
+                .count(),
+            1
+        );
+    }
+
+    /// Returns the usage of a timestamp-resolve destination: written by the
+    /// resolve copy, read by the conversion pass, copied out for readback.
+    #[cfg(feature = "vulkan")]
+    fn query_resolve_usage() -> HalBufferUsage {
+        HalBufferUsage {
+            copy_src: true,
+            copy_dst: true,
+            query_resolve: true,
+            ..HalBufferUsage::default()
+        }
+    }
+
+    /// Returns the usage of a host-readable readback buffer.
+    #[cfg(feature = "vulkan")]
+    fn readback_usage() -> HalBufferUsage {
+        HalBufferUsage {
+            copy_dst: true,
+            map_read: true,
+            ..HalBufferUsage::default()
+        }
+    }
+
+    /// Reads `count` resolved 64-bit query results back from a buffer.
+    #[cfg(feature = "vulkan")]
+    fn read_query_results(buffer: &VulkanBuffer, count: u64) -> Vec<u64> {
+        let bytes = buffer
+            .read(0, count * 8)
+            .expect("read resolved query results");
+        bytes
+            .chunks_exact(8)
+            .map(|chunk| {
+                let mut value = [0; 8];
+                value.copy_from_slice(chunk);
+                u64::from_le_bytes(value)
+            })
+            .collect()
     }
 
     #[test]

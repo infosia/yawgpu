@@ -587,24 +587,6 @@ pub(super) fn transfer_to_compute_barrier(device: &ash::Device, command_buffer: 
     }
 }
 
-/// Records a barrier from shader writes to later buffer reads or writes.
-pub(super) fn compute_to_transfer_barrier(device: &ash::Device, command_buffer: vk::CommandBuffer) {
-    let barrier = vk::MemoryBarrier::default()
-        .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-        .dst_access_mask(buffer_write_read_barrier_dst_access_mask());
-    unsafe {
-        device.cmd_pipeline_barrier(
-            command_buffer,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
-            buffer_write_read_barrier_dst_stage_mask(),
-            vk::DependencyFlags::empty(),
-            &[barrier],
-            &[],
-            &[],
-        );
-    }
-}
-
 /// Returns image layout.
 pub(super) fn image_layout(state: u8) -> vk::ImageLayout {
     match state {

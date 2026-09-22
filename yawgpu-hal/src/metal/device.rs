@@ -5,6 +5,8 @@ pub struct MetalDevice {
     pub(super) device: Retained<ProtocolObject<dyn MTLDevice>>,
     pub(super) allocations: AtomicU64,
     pub(super) queue: MetalQueue,
+    /// Cached sampling capabilities and the lazily allocated mock blit buffer.
+    pub(super) timestamp_resources: Arc<MetalTimestampResources>,
 }
 
 impl std::fmt::Debug for MetalDevice {
@@ -98,16 +100,19 @@ impl MetalDevice {
         kind: HalQueryKind,
         count: u32,
     ) -> Result<MetalQuerySet, HalError> {
-        match kind {
-            HalQueryKind::Timestamp => Err(HalError::BufferOperationFailed {
-                backend: "metal",
-                message: "timestamp query sets are not implemented yet on metal",
-            }),
-            HalQueryKind::Occlusion => {
-                self.allocations.fetch_add(1, Ordering::Relaxed);
-                MetalQuerySet::new(&self.device, count)
-            }
+        self.allocations.fetch_add(1, Ordering::Relaxed);
+        let query_set = MetalQuerySet::new(&self.device, kind, count)?;
+        if kind == HalQueryKind::Timestamp
+            && timestamp_sampling_mode(
+                self.timestamp_resources.counter_sampling_at_stage_boundary,
+                self.timestamp_resources
+                    .counter_sampling_at_command_boundary,
+            )
+            .is_none()
+        {
+            return Err(buffer_error("Metal device has no timestamp sampling mode"));
         }
+        Ok(query_set)
     }
 
     /// Creates a sampler matching the given descriptor.
@@ -187,27 +192,29 @@ impl MetalDevice {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    #[ignore = "manual real metal backend test"]
-    fn metal_device_create_query_set_rejects_timestamp_until_implemented() {
-        let device = metal_device();
-        let error = device
-            .create_query_set(HalQueryKind::Timestamp, 4)
-            .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("timestamp query sets are not implemented yet on metal"));
-        assert_eq!(
-            device
-                .create_query_set(HalQueryKind::Occlusion, 4)
-                .unwrap()
-                .count(),
-            4
-        );
-    }
-
     use super::super::test_helpers::*;
     use super::*;
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_device_create_query_set_supports_timestamp_and_occlusion() {
+        let device = metal_device();
+        for kind in [HalQueryKind::Timestamp, HalQueryKind::Occlusion] {
+            for count in [0, 4] {
+                let set = device
+                    .create_query_set(kind, count)
+                    .expect("create query set");
+                assert_eq!(set.count(), count);
+                assert_eq!(
+                    set.sample_buffer().is_some(),
+                    kind == HalQueryKind::Timestamp
+                );
+                assert_eq!(set.buffer().is_ok(), kind == HalQueryKind::Occlusion);
+            }
+        }
+        assert_eq!(device.allocation_count(), 4);
+    }
 
     #[test]
     #[ignore = "manual real Metal backend test"]

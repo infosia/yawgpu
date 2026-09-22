@@ -21,7 +21,7 @@ use crate::{
     HalRenderPassCommandStream, HalRenderPipelineDescriptor, HalResolveQuerySet, HalSampler,
     HalSamplerDescriptor, HalShaderSource, HalStencilOperation, HalSurfaceConfiguration,
     HalTexture, HalTextureCopy, HalTextureDescriptor, HalTextureFormat, HalTextureUsage,
-    HalVertexFormat, HalVertexStepMode, SubmissionIndex,
+    HalVertexFormat, HalVertexStepMode, HalWriteTimestamp, SubmissionIndex,
 };
 #[cfg(feature = "tiled")]
 use crate::{HalDraw, HalSubpassPassLayout};
@@ -511,10 +511,16 @@ impl VulkanAdapter {
         )
     }
 
-    /// Returns nanoseconds per timestamp tick (S1 placeholder).
+    /// Returns nanoseconds per timestamp tick: `limits.timestampPeriod`
+    /// (Block 102 R3, Dawn `DeviceVk.cpp` `GetTimestampPeriodInNS`).
     #[must_use]
     pub(crate) fn timestamp_period(&self) -> f32 {
-        1.0
+        let properties = unsafe {
+            self.instance
+                .instance
+                .get_physical_device_properties(self.physical_device)
+        };
+        timestamp_period_from_limits(properties.limits.timestamp_period)
     }
 
     /// Returns true when timestamp queries are supported by this physical
@@ -1087,6 +1093,18 @@ fn shader_float16_supported(extension_present: bool, shader_float16: vk::Bool32)
 /// Block 99 R3: `timestamp-query` iff `limits.timestampComputeAndGraphics == VK_TRUE`.
 fn timestamp_query_from_limits(timestamp_compute_and_graphics: vk::Bool32) -> bool {
     timestamp_compute_and_graphics == vk::TRUE
+}
+
+/// Block 102 R3: the reported timestamp period is nanoseconds per tick, so it
+/// must be finite and strictly positive. A driver reporting `0` or a
+/// non-finite value would make the nanosecond conversion pass produce zeroes
+/// or NaNs, so such values fall back to one nanosecond per tick.
+fn timestamp_period_from_limits(period: f32) -> f32 {
+    if period.is_finite() && period > 0.0 {
+        period
+    } else {
+        1.0
+    }
 }
 
 /// Block 99 R4: `depth32float-stencil8` iff `D32_SFLOAT_S8_UINT` optimal-tiling
@@ -1994,6 +2012,54 @@ mod tests {
     fn vulkan_timestamp_query_from_limits_follows_timestamp_compute_and_graphics() {
         assert!(timestamp_query_from_limits(vk::TRUE));
         assert!(!timestamp_query_from_limits(vk::FALSE));
+    }
+
+    /// Block 102 R3: a finite, positive `timestampPeriod` is passed through;
+    /// zero, negative and non-finite reports fall back to 1.0 ns per tick.
+    #[test]
+    fn timestamp_period_from_limits_passes_through_positive_finite_periods() {
+        assert_eq!(timestamp_period_from_limits(1.0), 1.0);
+        assert_eq!(timestamp_period_from_limits(41.666_668), 41.666_668);
+        assert_eq!(
+            timestamp_period_from_limits(f32::MIN_POSITIVE),
+            f32::MIN_POSITIVE
+        );
+    }
+
+    /// Block 102 R3: the fallback keeps the conversion pass usable when a
+    /// driver reports a period that cannot scale ticks to nanoseconds.
+    #[test]
+    fn timestamp_period_from_limits_falls_back_on_non_positive_or_non_finite() {
+        for period in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.0] {
+            assert_eq!(timestamp_period_from_limits(period), 1.0);
+        }
+    }
+
+    /// Block 102 R3: the adapter reports the physical device's own
+    /// `limits.timestampPeriod` (Dawn `GetTimestampPeriodInNS`).
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    fn vulkan_adapter_timestamp_period_matches_physical_device_limits() {
+        let adapter = VulkanInstance::new()
+            .expect("create Vulkan instance")
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("at least one Vulkan adapter");
+        let properties = unsafe {
+            adapter
+                .instance
+                .instance
+                .get_physical_device_properties(adapter.physical_device)
+        };
+
+        let period = adapter.timestamp_period();
+
+        assert_eq!(
+            period,
+            timestamp_period_from_limits(properties.limits.timestamp_period)
+        );
+        assert!(period.is_finite() && period > 0.0);
     }
 
     /// Block 99 R4: `depth32float-stencil8` needs `DEPTH_STENCIL_ATTACHMENT`.

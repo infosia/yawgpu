@@ -162,9 +162,15 @@ pub(super) fn map_buffer_usage(usage: HalBufferUsage) -> vk::BufferUsageFlags {
     if usage.indirect {
         flags |= vk::BufferUsageFlags::INDIRECT_BUFFER;
     }
-    // query_resolve is a transfer-dst write; the bit is already on the
-    // baseline above. map_read / map_write are host-memory properties and
-    // have no Vulkan buffer-usage equivalent.
+    // Block 102 R3: a query-resolve destination is written by the resolve copy
+    // (transfer-dst, already on the baseline above) and then bound as a
+    // storage buffer by the timestamp-to-nanoseconds conversion pass, which
+    // mirrors Dawn's internal storage usage for QueryResolve buffers.
+    if usage.query_resolve {
+        flags |= vk::BufferUsageFlags::STORAGE_BUFFER;
+    }
+    // map_read / map_write are host-memory properties and have no Vulkan
+    // buffer-usage equivalent.
     flags
 }
 
@@ -276,6 +282,28 @@ mod tests {
 
         assert!(flags.contains(vk::BufferUsageFlags::TRANSFER_SRC));
         assert!(flags.contains(vk::BufferUsageFlags::TRANSFER_DST));
+        assert!(!flags.contains(vk::BufferUsageFlags::STORAGE_BUFFER));
+    }
+
+    /// Block 102 R3: the timestamp conversion pass binds a resolve
+    /// destination as a storage buffer, so `query_resolve` implies
+    /// `STORAGE_BUFFER` on top of the transfer bits.
+    #[test]
+    fn query_resolve_buffers_get_storage_usage() {
+        let flags = map_buffer_usage(HalBufferUsage {
+            copy_dst: true,
+            query_resolve: true,
+            ..HalBufferUsage::default()
+        });
+
+        assert!(flags.contains(vk::BufferUsageFlags::STORAGE_BUFFER));
+        assert!(flags.contains(vk::BufferUsageFlags::TRANSFER_DST));
+        assert!(flags.contains(vk::BufferUsageFlags::TRANSFER_SRC));
+        assert!(map_buffer_usage(HalBufferUsage {
+            storage: true,
+            ..HalBufferUsage::default()
+        })
+        .contains(vk::BufferUsageFlags::STORAGE_BUFFER));
     }
 
     #[test]

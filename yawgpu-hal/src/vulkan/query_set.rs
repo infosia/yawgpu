@@ -4,6 +4,7 @@ use super::*;
 #[derive(Clone)]
 pub struct VulkanQuerySet {
     pub(super) inner: Arc<VulkanQuerySetInner>,
+    kind: HalQueryKind,
     count: u32,
 }
 
@@ -11,23 +12,35 @@ impl fmt::Debug for VulkanQuerySet {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("VulkanQuerySet")
+            .field("kind", &self.kind)
             .field("count", &self.count)
             .finish()
     }
 }
 
 impl VulkanQuerySet {
-    /// Creates a new Vulkan query set backed by a query pool.
-    pub(super) fn new(device: Arc<VulkanDeviceInner>, count: u32) -> Result<Self, HalError> {
+    /// Creates a new Vulkan query set backed by a query pool of `kind`.
+    pub(super) fn new(
+        device: Arc<VulkanDeviceInner>,
+        kind: HalQueryKind,
+        count: u32,
+    ) -> Result<Self, HalError> {
         let create_info = vk::QueryPoolCreateInfo::default()
-            .query_type(vk::QueryType::OCCLUSION)
+            .query_type(vulkan_query_type(kind))
             .query_count(count.max(1));
         let pool = unsafe { device.device.create_query_pool(&create_info, None) }
             .map_err(|_| buffer_error("query-pool creation failed"))?;
         Ok(Self {
             inner: Arc::new(VulkanQuerySetInner { device, pool }),
+            kind,
             count,
         })
+    }
+
+    /// Returns the kind of query this set holds.
+    #[must_use]
+    pub fn kind(&self) -> HalQueryKind {
+        self.kind
     }
 
     /// Returns the number of queries in this set.
@@ -62,6 +75,15 @@ impl VulkanQuerySet {
     }
 }
 
+/// Maps a HAL query kind to its Vulkan query type, as Dawn's
+/// `VulkanQueryType` (`QuerySetVk.cpp`) does.
+fn vulkan_query_type(kind: HalQueryKind) -> vk::QueryType {
+    match kind {
+        HalQueryKind::Occlusion => vk::QueryType::OCCLUSION,
+        HalQueryKind::Timestamp => vk::QueryType::TIMESTAMP,
+    }
+}
+
 /// Holds shared state for the Vulkan query-set handle.
 pub(super) struct VulkanQuerySetInner {
     pub(super) device: Arc<VulkanDeviceInner>,
@@ -90,7 +112,21 @@ impl Drop for VulkanQuerySetInner {
 #[cfg(test)]
 mod tests {
     use super::super::test_helpers::*;
-    use crate::HalQueryKind;
+    use super::*;
+
+    /// Block 102 R3: a timestamp set is a `VK_QUERY_TYPE_TIMESTAMP` pool while
+    /// occlusion stays `VK_QUERY_TYPE_OCCLUSION`. Pure mapping, no GPU needed.
+    #[test]
+    fn vulkan_query_type_maps_timestamp_and_occlusion_kinds() {
+        assert_eq!(
+            vulkan_query_type(HalQueryKind::Timestamp),
+            vk::QueryType::TIMESTAMP
+        );
+        assert_eq!(
+            vulkan_query_type(HalQueryKind::Occlusion),
+            vk::QueryType::OCCLUSION
+        );
+    }
 
     #[test]
     #[ignore = "manual real Vulkan backend test"]
@@ -99,6 +135,7 @@ mod tests {
         let query_set = vulkan_device()
             .create_query_set(HalQueryKind::Occlusion, 4)
             .expect("occlusion query set should allocate");
+        assert_eq!(query_set.kind(), HalQueryKind::Occlusion);
         assert_eq!(query_set.count(), 4);
         assert_ne!(query_set.pool(), ash::vk::QueryPool::null());
     }
@@ -112,5 +149,28 @@ mod tests {
             .expect("zero-count occlusion query set should allocate");
         assert_eq!(query_set.count(), 0);
         assert_ne!(query_set.pool(), ash::vk::QueryPool::null());
+    }
+
+    /// Block 102 R3: a timestamp query set allocates a timestamp pool of
+    /// `max(count, 1)` queries and reports its kind back.
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_query_set_timestamp_creates_a_timestamp_pool() {
+        let device = vulkan_device();
+        let query_set = device
+            .create_query_set(HalQueryKind::Timestamp, 4)
+            .expect("timestamp query set should allocate");
+        assert_eq!(query_set.kind(), HalQueryKind::Timestamp);
+        assert_eq!(query_set.count(), 4);
+        assert_ne!(query_set.pool(), ash::vk::QueryPool::null());
+
+        let empty = device
+            .create_query_set(HalQueryKind::Timestamp, 0)
+            .expect("zero-count timestamp query set should allocate");
+        assert_eq!(empty.kind(), HalQueryKind::Timestamp);
+        assert_eq!(empty.count(), 0);
+        assert_ne!(empty.pool(), ash::vk::QueryPool::null());
+        assert!(empty.validate_query(0).is_err());
     }
 }

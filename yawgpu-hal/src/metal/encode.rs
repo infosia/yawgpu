@@ -150,6 +150,7 @@ fn mip_texture_extent(texture: &MetalTexture, mip_level: u32) -> Result<(u32, u3
 }
 
 /// Records query-set resolve encode into the command stream.
+#[must_use = "query resolve encoding can fail"]
 pub(super) fn encode_resolve_query_set(
     blit: &ProtocolObject<dyn MTLBlitCommandEncoder>,
     resolve: &HalResolveQuerySet,
@@ -162,14 +163,17 @@ pub(super) fn encode_resolve_query_set(
             "query resolve destination is not Metal-backed",
         ));
     };
-    let source_offset = u64::from(resolve.first_query)
-        .checked_mul(8)
-        .ok_or_else(|| buffer_error("query resolve source offset overflows"))?;
     let size = u64::from(resolve.query_count)
         .checked_mul(8)
         .ok_or_else(|| buffer_error("query resolve byte count overflows"))?;
     destination.validate_range(resolve.destination_offset, size)?;
-    query_set.buffer.validate_range(source_offset, size)?;
+    if resolve
+        .first_query
+        .checked_add(resolve.query_count)
+        .is_none_or(|end| end > query_set.count())
+    {
+        return Err(buffer_error("query resolve range exceeds query count"));
+    }
     for &query_index in &resolve.written_queries {
         if query_index < resolve.first_query {
             return Err(buffer_error("written query precedes resolve range"));
@@ -178,10 +182,6 @@ pub(super) fn encode_resolve_query_set(
         if relative_index >= resolve.query_count {
             return Err(buffer_error("written query exceeds resolve range"));
         }
-        let source_offset = u64::from(query_index)
-            .checked_mul(8)
-            .ok_or_else(|| buffer_error("query resolve source offset overflows"))?;
-        query_set.buffer.validate_range(source_offset, 8)?;
     }
     if size == 0 {
         return Ok(());
@@ -203,13 +203,22 @@ pub(super) fn encode_resolve_query_set(
                 .destination_offset
                 .checked_add(u64::from(query_index - resolve.first_query) * 8)
                 .ok_or_else(|| buffer_error("query resolve destination offset overflows"))?;
-            blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                query_set.buffer()?,
-                to_ns(source_offset)?,
-                destination_buffer,
-                to_ns(destination_offset)?,
-                8,
-            );
+            if let Some(sample_buffer) = query_set.sample_buffer() {
+                blit.resolveCounters_inRange_destinationBuffer_destinationOffset(
+                    sample_buffer,
+                    NSRange::new(to_ns(u64::from(query_index))?, 1),
+                    destination_buffer,
+                    to_ns(destination_offset)?,
+                );
+            } else {
+                blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                    query_set.buffer()?,
+                    to_ns(source_offset)?,
+                    destination_buffer,
+                    to_ns(destination_offset)?,
+                    8,
+                );
+            }
         }
     }
     Ok(())

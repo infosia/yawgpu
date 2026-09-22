@@ -178,6 +178,7 @@ pub struct MetalAdapter {
     read_write_texture_tier: MTLReadWriteTextureTier,
     /// Block 99 R1: Dawn's `IsGPUCounterSupported(timestamp)` answer, cached at construction.
     timestamp_query_supported: bool,
+    timestamp_period: f32,
     /// Block 99 R2: `supports32BitFloatFiltering`, cached at construction.
     float32_filterable: bool,
 }
@@ -198,12 +199,18 @@ impl MetalAdapter {
         let read_write_texture_tier = device.readWriteTextureSupport();
         let timestamp_query_supported = metal_device_has_timestamp_counter_set(&device)
             && metal_device_supports_counter_sampling(&device);
+        let timestamp_period = if timestamp_query_supported {
+            calibrate_timestamp_period(&device)
+        } else {
+            1.0
+        };
         let float32_filterable = device.supports32BitFloatFiltering();
         Self {
             device,
             name,
             read_write_texture_tier,
             timestamp_query_supported,
+            timestamp_period,
             float32_filterable,
         }
     }
@@ -392,10 +399,10 @@ impl MetalAdapter {
         self.float32_filterable
     }
 
-    /// Returns nanoseconds per timestamp tick (S1 placeholder).
+    /// Returns the cached calibration in nanoseconds per timestamp tick.
     #[must_use]
     pub(crate) fn timestamp_period(&self) -> f32 {
-        1.0
+        self.timestamp_period
     }
 
     /// Returns true when timestamp queries are supported: the device exposes
@@ -469,15 +476,36 @@ impl MetalAdapter {
     }
 
     /// Creates a device (and its default queue) on this adapter.
+    #[must_use = "device creation can fail"]
     pub fn create_device(&self) -> Result<MetalDevice, HalError> {
         let queue = self
             .device
             .newCommandQueue()
             .ok_or(HalError::DeviceCreationFailed { backend: BACKEND })?;
+        let timestamp_resources = Arc::new(MetalTimestampResources {
+            counter_sampling_at_stage_boundary: self
+                .device
+                .supportsCounterSampling(MTLCounterSamplingPoint::AtStageBoundary),
+            counter_sampling_at_command_boundary: self
+                .device
+                .supportsCounterSampling(MTLCounterSamplingPoint::AtDrawBoundary)
+                && self
+                    .device
+                    .supportsCounterSampling(MTLCounterSamplingPoint::AtDispatchBoundary)
+                && self
+                    .device
+                    .supportsCounterSampling(MTLCounterSamplingPoint::AtBlitBoundary),
+            mock_blit: std::sync::OnceLock::new(),
+            serialize_timestamps: self.device.supportsFamily(MTLGPUFamily::Apple8),
+            serialize_event: std::sync::OnceLock::new(),
+            serialize_value: AtomicU64::new(0),
+        });
         Ok(MetalDevice {
+            timestamp_resources: timestamp_resources.clone(),
             device: self.device.clone(),
             allocations: AtomicU64::new(0),
             queue: MetalQueue {
+                timestamp_resources,
                 inner: queue,
                 submission_lock: Arc::new(Mutex::new(())),
                 submissions: Arc::new(Mutex::new(queue::MetalSubmissionTracker::new())),
@@ -495,28 +523,81 @@ impl MetalAdapter {
 pub(super) fn metal_device_has_timestamp_counter_set(
     device: &ProtocolObject<dyn MTLDevice>,
 ) -> bool {
-    // SAFETY: `MTLCommonCounterSetTimestamp` / `MTLCommonCounterTimestamp` are
-    // immutable `NSString` constants exported by Metal.framework; reading an
-    // `extern` static only requires `unsafe`, it has no other precondition.
-    let (set_name, counter_name) = unsafe {
-        (
-            MTLCommonCounterSetTimestamp.to_string().to_lowercase(),
-            MTLCommonCounterTimestamp.to_string().to_lowercase(),
-        )
-    };
-    let Some(counter_sets) = device.counterSets() else {
-        return false;
-    };
-    let Some(counter_set) = counter_sets
-        .iter()
-        .find(|set| set.name().to_string().to_lowercase() == set_name)
-    else {
+    // SAFETY: Metal exports this immutable NSString constant.
+    let counter_name = unsafe { MTLCommonCounterTimestamp.to_string().to_lowercase() };
+    let Some(counter_set) = metal_timestamp_counter_set(device) else {
         return false;
     };
     counter_set
         .counters()
         .iter()
         .any(|counter| counter.name().to_string().to_lowercase() == counter_name)
+}
+
+#[must_use]
+fn metal_timestamp_counter_set(
+    device: &ProtocolObject<dyn MTLDevice>,
+) -> Option<Retained<ProtocolObject<dyn MTLCounterSet>>> {
+    // SAFETY: Metal exports this immutable NSString constant.
+    let name = unsafe { MTLCommonCounterSetTimestamp.to_string().to_lowercase() };
+    device
+        .counterSets()?
+        .iter()
+        .find(|set| set.name().to_string().to_lowercase() == name)
+}
+
+// Shared by the device and queue clones, including queues outliving their device.
+struct MetalTimestampResources {
+    counter_sampling_at_stage_boundary: bool,
+    counter_sampling_at_command_boundary: bool,
+    mock_blit: std::sync::OnceLock<MetalBuffer>,
+    /// Dawn `MetalSerializeTimestampGenerationAndResolution` (crbug.com/372698905):
+    /// on Apple8+ GPUs the counter resolve can race with timestamp samples
+    /// taken by earlier compute / render passes, so before every timestamp
+    /// resolve the queue signals and then waits on this shared event
+    /// (`encodeSignalEvent:value:` + `encodeWaitForEvent:value:`), which
+    /// forces the samples to land first. Measured 2026-09-22 on an M2: without
+    /// it a stamp written after a compute or render pass resolves to 0.
+    serialize_timestamps: bool,
+    serialize_event: std::sync::OnceLock<Retained<ProtocolObject<dyn objc2_metal::MTLSharedEvent>>>,
+    serialize_value: AtomicU64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TimestampSamplingMode {
+    StageBoundary,
+    CommandBoundary,
+}
+
+#[must_use]
+fn timestamp_sampling_mode(stage: bool, command: bool) -> Option<TimestampSamplingMode> {
+    if stage {
+        Some(TimestampSamplingMode::StageBoundary)
+    } else if command {
+        Some(TimestampSamplingMode::CommandBoundary)
+    } else {
+        None
+    }
+}
+
+#[must_use]
+fn timestamp_period_from_samples(cpu0: u64, gpu0: u64, cpu1: u64, gpu1: u64) -> f32 {
+    if gpu1 <= gpu0 || cpu1 <= cpu0 {
+        return 1.0;
+    }
+    ((cpu1 - cpu0) as f64 / (gpu1 - gpu0) as f64) as f32
+}
+
+#[must_use]
+fn calibrate_timestamp_period(device: &ProtocolObject<dyn MTLDevice>) -> f32 {
+    let (mut cpu0, mut gpu0, mut cpu1, mut gpu1) = (0, 0, 0, 0);
+    // SAFETY: All four out-pointers refer to initialized, live MTLTimestamp values.
+    unsafe {
+        device.sampleTimestamps_gpuTimestamp(NonNull::from(&mut cpu0), NonNull::from(&mut gpu0));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        device.sampleTimestamps_gpuTimestamp(NonNull::from(&mut cpu1), NonNull::from(&mut gpu1));
+    }
+    timestamp_period_from_samples(cpu0, gpu0, cpu1, gpu1)
 }
 
 /// Dawn's counter-sampling disjunction as a pure function of the four
@@ -576,6 +657,58 @@ pub use texture::{MetalSampler, MetalTexture};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timestamp_sampling_mode_prefers_stage_boundary() {
+        assert_eq!(
+            timestamp_sampling_mode(true, true),
+            Some(TimestampSamplingMode::StageBoundary)
+        );
+        assert_eq!(
+            timestamp_sampling_mode(true, false),
+            Some(TimestampSamplingMode::StageBoundary)
+        );
+        assert_eq!(
+            timestamp_sampling_mode(false, true),
+            Some(TimestampSamplingMode::CommandBoundary)
+        );
+        assert_eq!(timestamp_sampling_mode(false, false), None);
+    }
+
+    #[test]
+    fn timestamp_period_from_samples_normal() {
+        assert_eq!(timestamp_period_from_samples(100, 20, 300, 30), 20.0);
+    }
+
+    #[test]
+    fn timestamp_period_from_samples_gpu_reset() {
+        assert_eq!(timestamp_period_from_samples(100, 20, 300, 10), 1.0);
+    }
+
+    #[test]
+    fn timestamp_period_from_samples_cpu_reset() {
+        assert_eq!(timestamp_period_from_samples(100, 20, 50, 30), 1.0);
+        assert_eq!(timestamp_period_from_samples(100, 20, 100, 30), 1.0);
+    }
+
+    #[test]
+    fn timestamp_period_from_samples_equal_gpu() {
+        assert_eq!(timestamp_period_from_samples(100, 20, 300, 20), 1.0);
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_adapter_timestamp_period_is_finite_and_positive() {
+        let device = test_helpers::metal_device();
+        let adapter = MetalAdapter::new(device.device.clone());
+        let period = adapter.timestamp_period();
+        assert!(period.is_finite() && period > 0.0);
+        assert_eq!(adapter.timestamp_period(), period);
+        if !adapter.supports_timestamp_query() {
+            assert_eq!(period, 1.0);
+        }
+    }
 
     #[test]
     #[ignore = "manual real Metal backend test"]
@@ -806,5 +939,32 @@ mod tests {
             .expect("at least one Metal adapter");
         let device = adapter.create_device().expect("create Metal device");
         assert_eq!(device.allocation_count(), 0);
+        assert_eq!(
+            device
+                .timestamp_resources
+                .counter_sampling_at_stage_boundary,
+            adapter
+                .device
+                .supportsCounterSampling(MTLCounterSamplingPoint::AtStageBoundary)
+        );
+        assert_eq!(
+            device
+                .timestamp_resources
+                .counter_sampling_at_command_boundary,
+            adapter
+                .device
+                .supportsCounterSampling(MTLCounterSamplingPoint::AtDrawBoundary)
+                && adapter
+                    .device
+                    .supportsCounterSampling(MTLCounterSamplingPoint::AtDispatchBoundary)
+                && adapter
+                    .device
+                    .supportsCounterSampling(MTLCounterSamplingPoint::AtBlitBoundary)
+        );
+        assert!(Arc::ptr_eq(
+            &device.timestamp_resources,
+            &device.queue().timestamp_resources
+        ));
+        assert!(device.timestamp_resources.mock_blit.get().is_none());
     }
 }

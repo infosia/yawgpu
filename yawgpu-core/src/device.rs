@@ -770,36 +770,35 @@ pub(crate) fn timestamp_conversion_params(period: f32) -> (u32, u32) {
 /// Dawn timestamp conversion using immediates and no fingerprint quantization.
 pub(crate) const TIMESTAMP_CONVERSION_WGSL: &str = r#"requires immediate_address_space;
 
-struct Timestamp {
-    low  : u32,
-    high : u32,
-}
-
-struct TimestampArr {
-    t : array<Timestamp>
-}
-
+// The timestamps are addressed as a flat u32 array (low word at 2*i, high
+// word at 2*i + 1) instead of Dawn's `array<Timestamp>` of structs: loading a
+// whole struct out of a storage buffer is a `device`-to-local struct copy in
+// MSL, which SPIRV-Cross (MoltenVK) cannot express for Tint's robustness-
+// clamped SPIR-V ("no matching constructor for initialization of
+// 'Timestamp'"), while scalar loads translate everywhere.
 struct TimestampParams {
     count  : u32,
     multiplier : u32,
     right_shift  : u32,
 }
 
-@group(0) @binding(0) var<storage, read_write> timestamps : TimestampArr;
+@group(0) @binding(0) var<storage, read_write> timestamps : array<u32>;
 var<immediate> params : TimestampParams;
 
 @compute @workgroup_size(8, 1, 1)
 fn main(@builtin(global_invocation_id) GlobalInvocationID : vec3u) {
     if (GlobalInvocationID.x >= params.count) { return; }
 
-    var index = GlobalInvocationID.x;
-    var timestamp = timestamps.t[index];
+    let low_index = GlobalInvocationID.x * 2u;
+    let high_index = low_index + 1u;
+    let low_word = timestamps[low_index];
+    let high_word = timestamps[high_index];
 
     var chunks : array<u32, 5>;
-    chunks[0] = timestamp.low & 0xFFFFu;
-    chunks[1] = timestamp.low >> 16u;
-    chunks[2] = timestamp.high & 0xFFFFu;
-    chunks[3] = timestamp.high >> 16u;
+    chunks[0] = low_word & 0xFFFFu;
+    chunks[1] = low_word >> 16u;
+    chunks[2] = high_word & 0xFFFFu;
+    chunks[3] = high_word >> 16u;
     chunks[4] = 0u;
 
     // Multiply all the chunks with the integer period.
@@ -823,9 +822,8 @@ fn main(@builtin(global_invocation_id) GlobalInvocationID : vec3u) {
         chunks[i] = low | high;
     }
 
-    var low = chunks[0] | (chunks[1] << 16u);
-    timestamps.t[index].low = low;
-    timestamps.t[index].high = chunks[2] | (chunks[3] << 16u);
+    timestamps[low_index] = chunks[0] | (chunks[1] << 16u);
+    timestamps[high_index] = chunks[2] | (chunks[3] << 16u);
 }"#;
 
 impl Device {
