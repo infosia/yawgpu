@@ -1,6 +1,6 @@
 # Block 103 — Surface capabilities come from the HAL
 
-Status: **IMPLEMENTED (2026-09-22)** — Metal: inline + C-ABI e2e 5/5 (Dawn's list, sRGB + Immediate + Premultiplied + CopySrc readback, Rgba16Float, rejection of unlisted modes); MoltenVK: e2e 4/4 (driver-reported set deduplicated per format — a driver lists one entry per colour space; MoltenVK reports Fifo/Immediate, Opaque/Unpremultiplied/Inherit, usages incl. StorageBinding). **Known follow-ups found by the Khronos validation layer on the MoltenVK surface e2e (both pre-existing, tracked in the backlog progress log):** (1) `VUID-VkImageViewCreateInfo-pNext-02662` — the view of a swapchain image is created with `map_texture_usage`'s `INPUT_ATTACHMENT` bit, which the swapchain image (and MoltenVK's `supportedUsageFlags`) does not carry; the view usage must be intersected with the image usage. (2) `VUID-vkDestroySemaphore-semaphore-05149` — a present semaphore is destroyed while still pending at surface teardown. (3) A bare `CAMetalLayer` reports `currentExtent (0,0)`; `create_swapchain` passes it through (VUID 01689) — reject a zero extent with `SwapchainCreationFailed` instead. Backlog item **B5** in
+Status: **COMPLETE (2026-09-22)** — `a2907ca`; Metal: inline + C-ABI e2e (Dawn's list, sRGB + Immediate + Premultiplied + CopySrc readback, Rgba16Float, rejection of unlisted modes, read-before-render zero); MoltenVK: e2e (driver-reported set deduplicated per format — a driver lists one entry per colour space; MoltenVK reports Fifo/Immediate, Opaque/Unpremultiplied/Inherit, usages incl. StorageBinding; read-before-render zero). The three Khronos-validation follow-ups (VUID 02662 view usage ⊄ image usage, VUID 05149 present semaphore destroyed while pending, VUID 01689 zero `currentExtent`) were fixed in `974a818`; the Phase Review with Block 104 (`251a4cc`, `c83bbbf`) fixed the iOS-unavailable `setDisplaySyncEnabled` (C1), the swapchain `TRANSFER_DST` for lazy zero-init (M2), the `Internal` error kind for capability-query failures (m2), the `Undefined`-format guard (m3) and the double device-idle wait (m4). Backlog item **B5** in
 `specs/tracking/backlog.md`. Extends Block 70 "Surface" (descriptor
 validation, sentinel resolution) and Block 85 (Win32 surface).
 
@@ -54,7 +54,9 @@ a `HalError`):
   preserved from the driver; unknown formats / modes dropped; `Fifo`
   is always present per the Vulkan spec. `StorageBinding` is mapped when
   offered but yawgpu's swapchain images are created with the requested
-  usage only.
+  usage only — plus `TRANSFER_DST` whenever the surface offers it, so the
+  Block 104 lazy zero-init of an acquired image can `vkCmdClearColorImage`
+  it (the usage is internal; it is not reported as `CopyDst`).
 - **GLES** (Tier 2): `[Rgba8Unorm, Bgra8Unorm]`, `[Fifo]`, `[Opaque]`,
   `render_attachment` (unchanged behaviour; catalogued in Block 67).
 
@@ -89,7 +91,13 @@ constants:
   sibling (WebGPU `GPUCanvasConfiguration` rule; Dawn `ValidateSurfaceConfiguration`),
   else `"surface configuration view format is not compatible"`.
 
-Every existing message string is kept verbatim.
+Every existing message string is kept verbatim. A `format` of `Undefined`
+is always rejected with the format message (a HAL format with no
+`webgpu.h` mapping must never make `Undefined` a member). A failure of the
+HAL capability query itself at configure time (no HAL surface for the
+adapter's backend, driver error) is dispatched as an **`Internal`** error,
+not `Validation`; `wgpuSurfaceGetCapabilities` returns `WGPUStatus_Error`
+for the same cases.
 
 ### R4 — The HAL receives the resolved modes
 
@@ -98,8 +106,11 @@ Every existing message string is kept verbatim.
 
 - **Metal** `configure`: `layer.setPixelFormat` for every advertised
   format (the `map_texture_format` table already has them);
-  `layer.setDisplaySyncEnabled(present_mode != Immediate)` (Dawn
-  `SwapChainMTL.mm`; `Mailbox` behaves as `Fifo` on Metal, as in Dawn);
+  `layer.setDisplaySyncEnabled(present_mode != Immediate)` **on macOS
+  only** (`#[cfg(target_os = "macos")]`; the property is
+  `API_UNAVAILABLE(ios, tvos, watchos, visionos)` and Dawn guards it with
+  `DAWN_PLATFORM_IS(MACOS)` in `SwapChainMTL.mm` — on iOS `Immediate`
+  behaves as `Fifo`; `Mailbox` behaves as `Fifo` on Metal, as in Dawn);
   `layer.setOpaque(alpha_mode != Premultiplied)`;
   `layer.setFramebufferOnly(false)` stays (needed for `copy_src` /
   `texture_binding`). The acquired `MetalTexture` reports the configured
@@ -109,7 +120,10 @@ Every existing message string is kept verbatim.
   `SRGB_NONLINEAR` when the driver reports otherwise); `image_usage`
   = the requested usage mapped to `VkImageUsageFlags` (a requested bit
   the surface does not support is a validation error at the FFI, so the
-  HAL may `HalError` if it still sees one); `composite_alpha` from
+  HAL may `HalError` if it still sees one) **plus `TRANSFER_DST` when
+  `supportedUsageFlags` offers it** (lazy zero-init, Block 104 R6); the
+  swapchain texture records its final usage so view creation and clears
+  can intersect against it; `composite_alpha` from
   `alpha_mode`; `present_mode` = the requested mode exactly
   (`select_present_mode`'s FIFO fallback stays only for a driver that
   lies between the capability query and swapchain creation).

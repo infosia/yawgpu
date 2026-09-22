@@ -1,6 +1,6 @@
 # Block 104 — Lazy zero-initialization Stage 2
 
-Status: **S1–S3 IMPLEMENTED (2026-09-22)** — S1 core `60744d8`, S2 Metal `99d786b`, S3 Vulkan `9aa1da3` (+ Vulkan barrier/validation follow-ups `974a818`). Real-GPU: Metal inline clear tests 5/5, `e2e_metal_lazy_init` 6/6 (Metal API validation layer clean); MoltenVK inline 4/4, `e2e_vulkan_lazy_init` 6/6 (Khronos validation layer clean). S5 CTS (8 `api,operation` trees: resource_init, render_pass, rendering, command_buffer, texture_view, sampling, storage_texture, compute): Metal **224,036 pass / 0 fail / 0 crash**; MoltenVK 224,027 pass / 9 fail — the 9 are byte-identical to a baseline built at `a2907ca` (pre-Block-104): `rendering,3d_texture_slices` ×7 and `depth_clip_clamp` ×2, the documented MoltenVK artifacts (F-139/F-140, perf ledger Run 5). GLES (S4) not started — Tier 2, catalogued. Phase Review pending. Backlog item **A3** in
+Status: **COMPLETE (2026-09-22)** — S1 core `60744d8`, S2 Metal `99d786b`, S3 Vulkan `9aa1da3` (+ Vulkan barrier/validation follow-ups `974a818`); Phase Review (with Block 103) fixed in `251a4cc` (HAL), `c83bbbf` (core/FFI), `f69c996` (e2e) — triage table in `specs/tracking/backlog.md`. Real-GPU after the review fixes: Metal HAL inline 56/56 (clear tests under the Metal API validation layer), `e2e_metal_lazy_init` 7/7 + `e2e_metal_surface` 6/6 (validation layer clean); MoltenVK HAL inline 53/53, `e2e_vulkan_lazy_init` 7/7 + `e2e_vulkan_surface` 5/5 (Khronos validation layer, 0 messages). CTS Metal: the 8 `api,operation` trees (resource_init, render_pass, rendering, command_buffer, texture_view, sampling, storage_texture, compute) **224,036 pass / 0 fail / 0 crash** (identical to the pre-review count), `api,validation,render_pass` 16,626/0, `api,validation,encoding` 34,231/0; MoltenVK: same trees, the only failures are the 9 documented MoltenVK artifacts (`rendering,3d_texture_slices` ×7, `depth_clip_clamp` ×2; F-139/F-140) present at the `a2907ca` baseline. GLES (S4) not started — Tier 2, catalogued in Block 67. Backlog item **A3** in
 `specs/tracking/backlog.md`. Completes F-138 Stage 1
 (`specs/tracking/tint-migration-plan.md` → "F-138 — texture lazy
 zero-initialization"; commits `8ebdfa6`, `0449b89`).
@@ -114,6 +114,25 @@ In the `RenderPass` lowering (`hal_render_color_target`,
   `stencil_store_op` independently). Colour `Discard` likewise.
 - Render bundles executed inside the pass do not change attachment
   marks (they cannot end the pass).
+- **Aspects come from the attachment view, and the view must cover the
+  texture (Phase Review C2).** `validate_depth_stencil_attachment`
+  rejects a depth-stencil attachment whose view aspects are not exactly
+  the texture format's aspects (Dawn `CommandEncoder.cpp`: "The depth
+  stencil attachment must encompass all aspects of its texture's
+  format"), so a `stencil8`/`StencilOnly` view of a
+  `depth24plus-stencil8` texture is not a valid attachment. As defence
+  in depth, the marks are derived from the **attachment view's format**
+  (`InitAspects` of `attachment.format`), never from
+  `texture.init_aspects(All)`, so a mark can never name an aspect the
+  HAL stream was not told to clear.
+- **Marks are recorded only when the pass lowers (m5).** The plan and its
+  marks are applied to the overlay only after `hal_render_pass_execution`
+  produced a HAL pass; a pass dropped from the stream leaves the overlay
+  untouched.
+- **Tiled subpasses (`tiled` feature, m6)** follow the same store-op rule:
+  a subpass attachment whose layout stores with `Discard` ends the pass
+  **uninitialized**; `Load` on an uninitialized attachment still triggers
+  the pre-pass clear.
 
 ### R5 — Core: marks are committed after a successful submit
 
@@ -138,15 +157,38 @@ format (colour, depth, stencil, combined, compressed) and **any** sample
 count. Value is always zero (`0.0` depth, `0` stencil, zero bytes for
 compressed, `0` colour).
 
-- **Metal** (`encode_texture_clear`): dispatch on the texture:
-  - depth/stencil aspect or `sample_count > 1` → an **empty render
-    pass** per (mip, layer): `MTLRenderPassDescriptor` with the
-    subresource as the depth / stencil / colour attachment, `loadAction
-    = Clear`, `storeAction = Store`, `clearDepth 0` / `clearStencil 0` /
+- **Metal** (`encode_texture_clear`): dispatch on the texture's format,
+  sample count **and its `MTLTextureUsage`** (texture creation does
+  **not** widen usage for the sake of the clear — `RenderTarget` comes
+  only from `RenderAttachment`, as Dawn's `MetalTextureUsage`; Phase
+  Review M3):
+  - depth/stencil aspect or `sample_count > 1` **on a texture that has
+    `MTLTextureUsageRenderTarget`** → an **empty render pass** per
+    (mip, layer): `MTLRenderPassDescriptor` with the subresource as the
+    depth / stencil / colour attachment, `loadAction = Clear`,
+    `storeAction = Store`, `clearDepth 0` / `clearStencil 0` /
     `clearColor (0,0,0,0)`; `renderCommandEncoderWithDescriptor` +
     `endEncoding` (Dawn `TextureMTL.mm` `ClearTexture`, renderable
     branch). A combined depth-stencil texture with `aspect == All`
-    clears both attachments in one pass.
+    clears both attachments in one pass. **When only one aspect of a
+    combined depth-stencil pixel format is cleared, the other aspect is
+    attached too with `loadAction = Load`, `storeAction = Store`** —
+    Dawn's `MetalUseBothDepthAndStencilAttachmentsForCombinedDepthStencilFormats`
+    workaround (Intel / pre-GCN4 AMD Macs silently skip a single-aspect
+    clear), applied unconditionally because it is correct everywhere
+    (Phase Review M1).
+  - depth/stencil aspect on a texture **without** `RenderTarget`
+    (e.g. `TextureBinding | CopySrc`) → a zero-buffer
+    `copyFromBuffer:...toTexture:` blit per (mip, layer) with
+    `MTLBlitOption` chosen from the pixel format and aspect: on the
+    combined `Depth32Float_Stencil8` (both `depth24plus-stencil8` and
+    `depth32float-stencil8` map to it) `DepthFromDepthStencil` (4
+    bytes/texel) or `StencilFromDepthStencil` (1 byte/texel); on
+    single-aspect formats `None` (Dawn `TextureMTL.mm`
+    `ComputeMTLBlitOption`, non-renderable branch).
+  - multisampled without `RenderTarget` → `HalError` (unreachable:
+    WebGPU validation requires `RenderAttachment` on every multisampled
+    texture).
   - compressed format → the existing zero-buffer blit with **block
     math**: `bytes_per_row = blocks_wide · block_bytes`,
     `bytes_per_image = bytes_per_row · blocks_high`, using
@@ -162,7 +204,13 @@ compressed, `0` colour).
     texels, as `encode_buffer_to_texture` already computes), one region
     per layer.
   - colour, any sample count → `vkCmdClearColorImage` as today (valid
-    for multisampled images).
+    for multisampled images). This needs `TRANSFER_DST` on the image:
+    ordinary textures always carry it (`vulkan/format.rs`), and a
+    **swapchain image** — a lazy-init-eligible core `Texture` — gets it
+    added in `create_swapchain` whenever the surface's
+    `supportedUsageFlags` offers it (Block 103 R4). An image without
+    `TRANSFER_DST` makes the clear a `HalError` instead of an invalid
+    command (`VUID-vkCmdClearColorImage-image-00002`; Phase Review M2).
 - **GLES** (Tier 2): depth / stencil via the temporary-FBO path with
   `glClearBufferfv(GL_DEPTH, ..)` / `glClearBufferiv(GL_STENCIL, ..)`;
   multisample colour via an FBO with the multisample texture attached;
