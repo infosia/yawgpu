@@ -1292,8 +1292,25 @@ fn append_hal_command_execution(
         }
         CommandExecution::RenderPass(pass) => {
             append_render_stream_bound_texture_init_clears(copies, &pass.commands, overlay);
-            let plan = append_render_pass_attachment_init_clears(copies, pass, overlay);
+            // A pass whose lowering fails encodes nothing, so neither its
+            // pre-pass zero clears nor the marks that claim the attachments
+            // initialized may reach the submission: both are staged locally
+            // and adopted only once `hal_render_pass_execution` succeeded.
+            let mut attachment_clears = Vec::new();
+            let mut marks = Vec::new();
+            let plan =
+                plan_render_pass_attachment_init(&mut attachment_clears, &mut marks, pass, overlay);
             if let Some(copy) = hal_render_pass_execution(pass, &plan) {
+                copies.append(&mut attachment_clears);
+                for mark in marks {
+                    overlay.set_initialized(
+                        &mark.texture,
+                        mark.mip_level,
+                        mark.array_layer,
+                        mark.aspect,
+                        mark.initialized,
+                    );
+                }
                 copies.push(copy);
             }
         }
@@ -1310,6 +1327,28 @@ fn append_hal_command_execution(
             }
             if let Some(copy) = hal_subpass_render_pass_execution(pass) {
                 copies.push(copy);
+            }
+            // The pass ends: every aspect the layout discards goes back to
+            // uninitialized, exactly as in the non-tiled render pass path
+            // (Block 104 R4).
+            for attachment in &pass.color_attachments {
+                if matches!(attachment.store_op, StoreOp::Discard) {
+                    unmark_discarded_subpass_attachment(
+                        &attachment.resource,
+                        InitAspects::only(InitAspect::Color),
+                        overlay,
+                    );
+                }
+            }
+            if let Some(attachment) = &pass.depth_stencil_attachment {
+                let mut discarded = InitAspects::default();
+                if matches!(attachment.depth_store_op, StoreOp::Discard) {
+                    discarded.insert(InitAspect::Depth);
+                }
+                if matches!(attachment.stencil_store_op, StoreOp::Discard) {
+                    discarded.insert(InitAspect::Stencil);
+                }
+                unmark_discarded_subpass_attachment(&attachment.resource, discarded, overlay);
             }
         }
     }
@@ -1876,12 +1915,47 @@ impl RenderPassInitPlan {
     }
 }
 
-/// Plans the attachment lazy-init of one render pass and emits the clears that
-/// cannot be expressed as a load op.
-fn append_render_pass_attachment_init_clears(
+/// One lazy-init mark a render pass records, held back until the pass has
+/// lowered (a pass the HAL never sees must not claim it initialized anything).
+struct PendingInitMark {
+    texture: Texture,
+    mip_level: u32,
+    array_layer: u32,
+    aspect: InitAspect,
+    initialized: bool,
+}
+
+impl PendingInitMark {
+    fn push(
+        marks: &mut Vec<Self>,
+        texture: &Texture,
+        mip_level: u32,
+        array_layer: u32,
+        aspect: InitAspect,
+        initialized: bool,
+    ) {
+        marks.push(Self {
+            texture: texture.clone(),
+            mip_level,
+            array_layer,
+            aspect,
+            initialized,
+        });
+    }
+}
+
+/// Plans the attachment lazy-init of one render pass, emitting the clears that
+/// cannot be expressed as a load op into `copies` and the resulting marks into
+/// `marks`. Both are staged: the caller applies them once the pass lowered.
+///
+/// The overlay is read-only here, which is also the invariant the staging
+/// relies on -- one pass's attachments are distinct subresource aspects, so no
+/// mark of this pass can change another attachment's `is_initialized` answer.
+fn plan_render_pass_attachment_init(
     copies: &mut Vec<HalCopy>,
+    marks: &mut Vec<PendingInitMark>,
     pass: &RenderPassCommand,
-    overlay: &mut InitOverlay,
+    overlay: &InitOverlay,
 ) -> RenderPassInitPlan {
     let mut plan = RenderPassInitPlan {
         color_force_clear: vec![false; pass.color_attachments.len()],
@@ -1915,7 +1989,8 @@ fn append_render_pass_attachment_init_clears(
             // `Discard` un-marks: the backend drops the rendered contents, so
             // believing the subresource initialized would hand the next reader
             // whatever the memory held.
-            overlay.set_initialized(
+            PendingInitMark::push(
+                marks,
                 texture,
                 attachment.mip_level,
                 layer,
@@ -1928,7 +2003,8 @@ fn append_render_pass_attachment_init_clears(
         if let Some(resolve_target) = &attachment.resolve_target {
             if resolve_target.is_lazy_init_eligible() {
                 let layer = tracked_init_layer(resolve_target, attachment.resolve_array_layer);
-                overlay.set_initialized(
+                PendingInitMark::push(
+                    marks,
                     resolve_target,
                     attachment.resolve_mip_level,
                     layer,
@@ -1942,9 +2018,16 @@ fn append_render_pass_attachment_init_clears(
         let texture = &attachment.texture;
         if texture.is_lazy_init_eligible() {
             let layer = tracked_init_layer(texture, attachment.array_layer);
-            // Validation guarantees the attachment view's format is the
-            // texture's, so the texture's aspects are the attachment's.
-            let aspects = texture.init_aspects(TextureAspect::All);
+            // The aspects come from the *attachment view's* format, never the
+            // texture's: validation makes the two equal today, so this only
+            // keeps a mark from ever claiming an aspect the HAL stream was not
+            // told to clear (the attachment carries that format verbatim).
+            let aspects =
+                texture
+                    .init_aspects(TextureAspect::All)
+                    .intersection(InitAspects::from_caps(
+                        texture.view_format_caps(attachment.format),
+                    ));
             if aspects.depth {
                 let loads = matches!(depth_attachment_load_op(attachment), LoadOp::Load);
                 if loads
@@ -1957,7 +2040,8 @@ fn append_render_pass_attachment_init_clears(
                 {
                     plan.depth_force_clear = true;
                 }
-                overlay.set_initialized(
+                PendingInitMark::push(
+                    marks,
                     texture,
                     attachment.mip_level,
                     layer,
@@ -1977,7 +2061,8 @@ fn append_render_pass_attachment_init_clears(
                 {
                     plan.stencil_force_clear = true;
                 }
-                overlay.set_initialized(
+                PendingInitMark::push(
+                    marks,
                     texture,
                     attachment.mip_level,
                     layer,
@@ -2068,6 +2153,36 @@ fn append_subpass_attachment_init_clears(
     append_render_attachment_init_clear_if_needed(copies, view, overlay);
     if let Some(resolve_target) = resolve_target {
         append_render_attachment_init_clear_if_needed(copies, resolve_target, overlay);
+    }
+}
+
+/// Un-marks the `aspects` of a subpass attachment that the pass discards.
+///
+/// The backend drops the rendered contents of a `Discard`ed attachment, so
+/// believing the subresource initialized would hand the next reader whatever
+/// the memory held (Block 104 R4). The resolve target is never affected: it is
+/// written by the resolve, not by the attachment's store op.
+#[cfg(feature = "tiled")]
+fn unmark_discarded_subpass_attachment(
+    resource: &SubpassAttachmentResource,
+    aspects: InitAspects,
+    overlay: &mut InitOverlay,
+) {
+    if aspects.is_empty() {
+        return;
+    }
+    let SubpassAttachmentResource::Persistent { view, .. } = resource;
+    let texture = view.texture();
+    if !texture.is_lazy_init_eligible() {
+        return;
+    }
+    let layer = tracked_init_layer(&texture, view.base_array_layer());
+    for aspect in texture
+        .init_aspects(view.aspect())
+        .intersection(aspects)
+        .iter()
+    {
+        overlay.set_initialized(&texture, view.base_mip_level(), layer, aspect, false);
     }
 }
 
@@ -6215,6 +6330,223 @@ fn fs() -> @location(0) vec4<f32> {
             if matches!(target.load_op, HalRenderLoadOp::Clear)
                 && target.clear_color == [0.0, 0.0, 0.0, 0.0]));
         assert!(texture.is_initialized(0, 0, InitAspect::Color));
+    }
+
+    /// Lowers one command execution and commits the lazy-init marks it
+    /// produced, returning every HAL copy it emitted (not just the first, as
+    /// `hal_command_execution` does).
+    #[cfg(feature = "tiled")]
+    fn lowered_copies_committing_init(op: &CommandExecution) -> Vec<HalCopy> {
+        let mut copies = Vec::new();
+        let mut batch = PendingWriteBatch::default();
+        let mut staging = BufferWriteStaging {
+            batch: &mut batch,
+            error: None,
+        };
+        let mut overlay = InitOverlay::default();
+        append_hal_command_execution(&mut copies, op, &[op], &mut staging, &mut overlay);
+        overlay.commit();
+        copies
+    }
+
+    /// Block 104 R4 on the tiled vendor path: an attachment aspect the subpass
+    /// discards ends the pass uninitialized, exactly as in a non-tiled render
+    /// pass, while a stored aspect stays initialized. A `Load` of an
+    /// uninitialized attachment still clears before the pass.
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn tiled_subpass_discarded_attachment_aspects_end_the_pass_uninitialized() {
+        let device = noop_device();
+        let size = Extent3d {
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+        };
+        let color = lazy_init_texture(
+            &device,
+            TextureUsage::RENDER_ATTACHMENT,
+            rgba8_unorm(),
+            size,
+            1,
+            1,
+        );
+        let depth_stencil = lazy_init_texture(
+            &device,
+            TextureUsage::RENDER_ATTACHMENT,
+            TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8),
+            size,
+            1,
+            1,
+        );
+        let layout = device.create_subpass_pass_layout(SubpassPassLayoutDescriptor {
+            color_attachments: vec![AttachmentLayout {
+                format: rgba8_unorm(),
+                sample_count: 1,
+            }],
+            depth_stencil_attachment: Some(AttachmentLayout {
+                format: TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8),
+                sample_count: 1,
+            }),
+            subpasses: vec![SubpassLayoutDesc {
+                color_attachment_indices: vec![0],
+                uses_depth_stencil: true,
+                input_attachments: Vec::new(),
+            }],
+            dependencies: Vec::new(),
+            error: None,
+        });
+        assert!(!layout.is_error());
+        let command = CommandExecution::SubpassRenderPass(SubpassRenderPassCommand {
+            layout: Arc::new(layout),
+            extent: size,
+            color_attachments: vec![SubpassColorAttachmentBinding {
+                resource: SubpassAttachmentResource::Persistent {
+                    view: whole_texture_view(&color),
+                    resolve_target: None,
+                },
+                load_op: LoadOp::Load,
+                store_op: StoreOp::Discard,
+                clear_value: Color {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+            }],
+            depth_stencil_attachment: Some(SubpassDepthStencilAttachmentBinding {
+                resource: SubpassAttachmentResource::Persistent {
+                    view: whole_texture_view(&depth_stencil),
+                    resolve_target: None,
+                },
+                depth_load_op: LoadOp::Load,
+                depth_store_op: StoreOp::Store,
+                depth_clear_value: 0.0,
+                stencil_load_op: LoadOp::Load,
+                stencil_store_op: StoreOp::Discard,
+                stencil_clear_value: 0,
+            }),
+            draws: Vec::new(),
+        });
+
+        let copies = lowered_copies_committing_init(&command);
+
+        assert_eq!(
+            copies
+                .iter()
+                .filter(|copy| matches!(copy, HalCopy::ClearTexture(_)))
+                .count(),
+            2
+        );
+        assert!(matches!(copies.last(), Some(HalCopy::SubpassRenderPass(_))));
+        assert!(!color.is_initialized(0, 0, InitAspect::Color));
+        assert!(depth_stencil.is_initialized(0, 0, InitAspect::Depth));
+        assert!(!depth_stencil.is_initialized(0, 0, InitAspect::Stencil));
+    }
+
+    /// Blocks 103/104 C2, defence in depth: the depth-stencil attachment's
+    /// marks come from the *attachment's own format*, which is the format the
+    /// HAL stream carries. A stencil-only attachment therefore cannot mark the
+    /// texture's depth aspect initialized, even though the texture tracks it
+    /// (`validate_depth_stencil_attachment` rejects such a pass up front, so
+    /// this asserts the lowering could not go wrong if it ever did not).
+    #[test]
+    fn depth_stencil_attachment_marks_only_the_aspects_of_its_own_format() {
+        let device = noop_device();
+        let texture = lazy_init_texture(
+            &device,
+            TextureUsage::RENDER_ATTACHMENT,
+            TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8),
+            Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            1,
+            1,
+        );
+        let pass = RenderPassCommand {
+            color_attachments: Vec::new(),
+            depth_stencil_attachment: Some(RenderPassDepthStencilExecution {
+                texture: (*texture).clone(),
+                format: TextureFormat::from_raw(TextureFormat::STENCIL8),
+                mip_level: 0,
+                array_layer: 0,
+                depth_load_op: LoadOp::Undefined,
+                depth_store_op: StoreOp::Undefined,
+                depth_clear_value: 0.0,
+                depth_read_only: true,
+                stencil_load_op: LoadOp::Clear,
+                stencil_store_op: StoreOp::Store,
+                stencil_clear_value: 0,
+                stencil_read_only: false,
+            }),
+            attachment_textures: vec![(*texture).clone()],
+            occlusion_query_set: None,
+            written_occlusion_queries: BTreeSet::new(),
+            commands: Vec::new(),
+        };
+
+        let mut copies = Vec::new();
+        let mut marks = Vec::new();
+        let plan = plan_render_pass_attachment_init(
+            &mut copies,
+            &mut marks,
+            &pass,
+            &InitOverlay::default(),
+        );
+
+        assert!(copies.is_empty());
+        // The depth aspect is neither force-cleared nor marked: the stream
+        // carries `stencil8`, so the backend never touches depth.
+        assert!(!plan.depth_force_clear);
+        assert!(!plan.stencil_force_clear);
+        assert_eq!(
+            marks
+                .iter()
+                .map(|mark| (mark.aspect, mark.initialized))
+                .collect::<Vec<_>>(),
+            vec![(InitAspect::Stencil, true)]
+        );
+    }
+
+    /// Block 104 m5: a render pass whose lowering fails is never encoded, so
+    /// neither its clears nor its attachment marks may reach the submission --
+    /// otherwise the attachment is believed zeroed by a pass the backend never
+    /// saw, and the next reader gets uninitialized memory.
+    #[test]
+    fn render_pass_that_fails_to_lower_leaves_its_attachments_uninitialized() {
+        let device = noop_device();
+        let queue = device.queue();
+        // A texture with no HAL object: it is not an error texture, so it
+        // validates as an attachment, but `hal_render_pass_execution` cannot
+        // lower the color target and drops the whole pass.
+        let texture = Arc::new(Texture::new(
+            TextureDescriptor {
+                usage: TextureUsage::RENDER_ATTACHMENT,
+                dimension: TextureDimension::D2,
+                size: Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                format: rgba8_unorm(),
+                mip_level_count: 1,
+                sample_count: 1,
+                view_formats: Vec::new(),
+            },
+            None,
+            false,
+            device.features(),
+        ));
+        assert!(texture.is_lazy_init_eligible());
+
+        submit_empty_render_pass(
+            &device,
+            &color_attachment(whole_texture_view(&texture), LoadOp::Clear, StoreOp::Store),
+        );
+
+        assert!(submitted_copies(&queue).is_empty());
+        assert!(!texture.is_initialized(0, 0, InitAspect::Color));
     }
 
     /// Block 104 R4: the resolve target is fully overwritten by the resolve,

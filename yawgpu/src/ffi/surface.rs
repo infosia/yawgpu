@@ -86,7 +86,7 @@ pub unsafe extern "C" fn wgpuSurfaceConfigure(
     let caps = match query_surface_capabilities(surface, device.adapter.hal()) {
         Ok(caps) => caps,
         Err(error) => {
-            device.dispatch_error(core::ErrorKind::Validation, error.to_string());
+            dispatch_capability_query_failure(device, &error);
             return;
         }
     };
@@ -96,14 +96,10 @@ pub unsafe extern "C" fn wgpuSurfaceConfigure(
     }
     let present_mode = resolved_present_mode(config.presentMode);
     let alpha_mode = resolved_alpha_mode(config.alphaMode, &caps);
+    // `surface_configuration_error` has already rejected a null `viewFormats`
+    // with a non-zero `viewFormatCount`, so the pointer is readable here.
     let view_formats = if config.viewFormatCount == 0 {
         Vec::new()
-    } else if config.viewFormats.is_null() {
-        device.dispatch_error(
-            core::ErrorKind::Validation,
-            "surface configuration viewFormats pointer is null",
-        );
-        return;
     } else {
         std::slice::from_raw_parts(config.viewFormats, config.viewFormatCount)
             .iter()
@@ -329,10 +325,20 @@ fn query_surface_capabilities(
     let hal = surface
         .hal
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+        .expect("surface HAL lock is not poisoned");
     hal.as_ref()
         .unwrap_or(&HalSurface::Noop)
         .capabilities(adapter)
+}
+
+/// Reports a failed surface capability query.
+///
+/// The HAL, not the caller, failed here -- a surface whose backend does not
+/// match the adapter's has no capability set to validate the configuration
+/// against -- so this is an internal error, not a validation error. Validation
+/// against a capability set that *was* obtained stays `Validation`.
+fn dispatch_capability_query_failure(device: &WGPUDeviceImpl, error: &yawgpu_hal::HalError) {
+    device.dispatch_error(core::ErrorKind::Internal, error.to_string());
 }
 
 fn fill_surface_capabilities(
@@ -369,7 +375,7 @@ fn fill_surface_capabilities(
 #[cfg(test)]
 mod tests {
     use super::super::tests::{
-        noop_chain, noop_surface_caps, release_handles, valid_surface_config,
+        create_noop_surface, noop_chain, noop_surface_caps, release_handles, valid_surface_config,
     };
     use super::*;
     use yawgpu_hal::{HalCompositeAlphaMode as A, HalSurfaceCapabilities};
@@ -545,6 +551,118 @@ mod tests {
                 surface_configuration_error(handle, &config, &caps),
                 Some("surface configuration viewFormats pointer is null")
             );
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    /// Blocks 103 m1: `surface_configuration_error` owns the null
+    /// `viewFormats` rejection, so `wgpuSurfaceConfigure` still reports it
+    /// exactly once after the duplicate branch that followed it was removed.
+    #[test]
+    fn surface_configure_reports_a_null_view_formats_pointer_from_the_capability_check() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let handle = borrow_handle(device, "WGPUDevice");
+            let surface = create_noop_surface(instance);
+            let mut config = valid_surface_config(device);
+            config.viewFormatCount = 1;
+            config.viewFormats = std::ptr::null();
+
+            handle.core.push_error_scope(core::ErrorFilter::Validation);
+            wgpuSurfaceConfigure(surface, &config);
+            let error = handle
+                .core
+                .pop_error_scope()
+                .expect("error scope should exist")
+                .expect("null viewFormats must be rejected");
+
+            assert_eq!(error.kind, core::ErrorKind::Validation);
+            assert_eq!(
+                error.message,
+                "surface configuration viewFormats pointer is null"
+            );
+            // The configuration was rejected, so nothing was stored.
+            assert!(surface
+                .as_ref()
+                .expect("surface handle")
+                .configured
+                .lock()
+                .expect("surface configuration lock is not poisoned")
+                .is_none());
+            wgpuSurfaceRelease(surface);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    /// Block 103 m2: a failed HAL capability query is the HAL's failure, not a
+    /// caller-side spec violation, so it is dispatched as an internal error.
+    #[test]
+    fn surface_capability_query_failure_is_dispatched_as_an_internal_error() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let handle = borrow_handle(device, "WGPUDevice");
+            // The error `HalSurface::capabilities` returns when the surface
+            // and the adapter come from different backends.
+            let failure = yawgpu_hal::HalError::SwapchainCreationFailed {
+                backend: "surface",
+                message: "surface and adapter backends do not match",
+            };
+
+            handle.core.push_error_scope(core::ErrorFilter::Internal);
+            dispatch_capability_query_failure(handle, &failure);
+            let error = handle
+                .core
+                .pop_error_scope()
+                .expect("error scope should exist")
+                .expect("HAL failure must be dispatched");
+
+            assert_eq!(error.kind, core::ErrorKind::Internal);
+            assert_eq!(error.message, failure.to_string());
+
+            // A validation scope must not capture it.
+            handle.core.push_error_scope(core::ErrorFilter::Validation);
+            dispatch_capability_query_failure(handle, &failure);
+            assert_eq!(
+                handle
+                    .core
+                    .pop_error_scope()
+                    .expect("error scope should exist"),
+                None
+            );
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    /// Block 103 m3: `native_surface_format` reports a HAL format the C ABI
+    /// has no enumerator for as `Undefined`. `Undefined` must never become a
+    /// legal configuration format through that mapping.
+    #[test]
+    fn surface_configuration_never_accepts_undefined_through_an_unmapped_hal_format() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let handle = borrow_handle(device, "WGPUDevice");
+            assert_eq!(
+                native_surface_format(HalTextureFormat::R8Unorm),
+                native::WGPUTextureFormat_Undefined
+            );
+            let mut caps = noop_surface_caps();
+            caps.formats = vec![HalTextureFormat::R8Unorm];
+            let mut config = valid_surface_config(device);
+            config.format = native::WGPUTextureFormat_Undefined;
+            assert_eq!(
+                surface_configuration_error(handle, &config, &caps),
+                Some("surface configuration format is not supported")
+            );
+
+            // The same holds once a mappable format sits beside it, and that
+            // mappable format is still accepted.
+            caps.formats.push(HalTextureFormat::Bgra8Unorm);
+            assert_eq!(
+                surface_configuration_error(handle, &config, &caps),
+                Some("surface configuration format is not supported")
+            );
+            config.format = native::WGPUTextureFormat_BGRA8Unorm;
+            assert_eq!(surface_configuration_error(handle, &config, &caps), None);
             release_handles(instance, adapter, device);
         }
     }

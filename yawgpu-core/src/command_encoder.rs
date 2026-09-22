@@ -1800,6 +1800,21 @@ pub(crate) fn validate_depth_stencil_attachment(
             "render pass depth-stencil attachment requires RenderAttachment usage".to_owned(),
         );
     }
+    // The attachment must encompass every aspect of its texture's format, so
+    // that the rest of this function -- and the lazy-init lowering in
+    // `queue.rs` -- may assume the view's format is the texture's. A view
+    // narrowed to one aspect of a combined depth-stencil texture would
+    // otherwise let the pass claim an aspect the backend is never told about
+    // (Dawn `ValidateRenderPassDepthStencilAttachment`).
+    let texture = attachment.view.texture();
+    if texture.init_aspects(attachment.view.aspect())
+        != InitAspects::from_caps(texture.format_caps())
+    {
+        return Err(
+            "render pass depth-stencil attachment must encompass all aspects of its texture's format"
+                .to_owned(),
+        );
+    }
     if !format_caps.aspects.depth && !format_caps.aspects.stencil {
         return Err(
             "render pass depth-stencil attachment format must have depth or stencil aspect"
@@ -3067,6 +3082,123 @@ mod tests {
         );
     }
 
+    /// Dawn `ValidateRenderPassDepthStencilAttachment`: a depth-stencil
+    /// attachment must encompass every aspect of its texture's format, so a
+    /// view narrowed to one aspect of a combined format is rejected. Without
+    /// this the lazy-init lowering marks the aspect the HAL stream never
+    /// carried, and a later depth copy reads uninitialized memory.
+    #[test]
+    fn render_pass_depth_stencil_attachment_must_encompass_all_texture_aspects() {
+        let device = noop_device();
+        let combined = aspect_render_attachment_texture(
+            &device,
+            TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8),
+        );
+        let stencil_only = aspect_view(
+            &combined,
+            TextureFormat::from_raw(TextureFormat::STENCIL8),
+            TextureAspect::StencilOnly,
+        );
+        let mut descriptor = RenderPassDescriptor {
+            max_color_attachments: device.limits().max_color_attachments,
+            color_attachments: Vec::new(),
+            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                view: stencil_only,
+                depth_load_op: LoadOp::Undefined,
+                depth_store_op: StoreOp::Undefined,
+                depth_clear_value: 0.0,
+                depth_read_only: true,
+                stencil_load_op: LoadOp::Clear,
+                stencil_store_op: StoreOp::Store,
+                stencil_clear_value: 0,
+                stencil_read_only: false,
+            }),
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            max_draw_count: 50_000_000,
+        };
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
+            Err(
+                "render pass depth-stencil attachment must encompass all aspects of its \
+                 texture's format"
+                    .to_owned()
+            )
+        );
+
+        // The mirror case: a `depth24plus` view of the same texture.
+        {
+            let attachment = descriptor
+                .depth_stencil_attachment
+                .as_mut()
+                .expect("depth-stencil attachment");
+            attachment.view = aspect_view(
+                &combined,
+                TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS),
+                TextureAspect::DepthOnly,
+            );
+            attachment.depth_read_only = false;
+            attachment.depth_load_op = LoadOp::Clear;
+            attachment.depth_store_op = StoreOp::Store;
+            attachment.stencil_read_only = true;
+            attachment.stencil_load_op = LoadOp::Undefined;
+            attachment.stencil_store_op = StoreOp::Undefined;
+        }
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
+            Err(
+                "render pass depth-stencil attachment must encompass all aspects of its \
+                 texture's format"
+                    .to_owned()
+            )
+        );
+
+        // A full-aspect view of the combined texture encompasses both aspects.
+        {
+            let attachment = descriptor
+                .depth_stencil_attachment
+                .as_mut()
+                .expect("depth-stencil attachment");
+            attachment.view = aspect_view(
+                &combined,
+                TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8),
+                TextureAspect::All,
+            );
+            attachment.stencil_read_only = false;
+            attachment.stencil_load_op = LoadOp::Clear;
+            attachment.stencil_store_op = StoreOp::Store;
+        }
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
+            Ok(())
+        );
+
+        // A `DepthOnly` view of a depth-only texture still encompasses the
+        // whole format, so it stays legal.
+        let depth_only_texture = aspect_render_attachment_texture(
+            &device,
+            TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS),
+        );
+        {
+            let attachment = descriptor
+                .depth_stencil_attachment
+                .as_mut()
+                .expect("depth-stencil attachment");
+            attachment.view = aspect_view(
+                &depth_only_texture,
+                TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS),
+                TextureAspect::DepthOnly,
+            );
+            attachment.stencil_read_only = true;
+            attachment.stencil_load_op = LoadOp::Undefined;
+            attachment.stencil_store_op = StoreOp::Undefined;
+        }
+        assert_eq!(
+            validate_render_pass_descriptor(&descriptor, &device.features(), device.limits()),
+            Ok(())
+        );
+    }
+
     #[test]
     fn render_pass_depth_stencil_attachment_rejects_component_swizzled_view() {
         let device = noop_adapter()
@@ -3298,6 +3430,42 @@ mod tests {
             base_array_layer: 0,
             array_layer_count: None,
             aspect: None,
+            usage: None,
+            swizzle: None,
+        });
+        assert_eq!(error, None);
+        Arc::new(view)
+    }
+
+    fn aspect_render_attachment_texture(device: &Device, format: TextureFormat) -> Texture {
+        device.create_texture(TextureDescriptor {
+            usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            format,
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        })
+    }
+
+    fn aspect_view(
+        texture: &Texture,
+        format: TextureFormat,
+        aspect: TextureAspect,
+    ) -> Arc<TextureView> {
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: Some(format),
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: Some(aspect),
             usage: None,
             swizzle: None,
         });

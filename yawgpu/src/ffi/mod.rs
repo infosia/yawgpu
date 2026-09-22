@@ -1427,11 +1427,16 @@ unsafe fn surface_configuration_error(
     if device.core.is_lost() {
         return Some("surface configuration device is lost");
     }
-    if !caps
-        .formats
-        .iter()
-        .any(|f| native_surface_format(*f) == config.format)
-    {
+    // `native_surface_format` maps a HAL format it does not know to
+    // `Undefined`, so `Undefined` is rejected outright and never matched by
+    // the membership scan: an unmapped HAL format must not make it legal.
+    if config.format == native::WGPUTextureFormat_Undefined {
+        return Some("surface configuration format is not supported");
+    }
+    if !caps.formats.iter().any(|f| {
+        let native = native_surface_format(*f);
+        native != native::WGPUTextureFormat_Undefined && native == config.format
+    }) {
         return Some("surface configuration format is not supported");
     }
     if config.usage == native::WGPUTextureUsage_None
@@ -4314,7 +4319,9 @@ mod tests {
         }
     }
 
-    unsafe fn create_noop_surface(instance: native::WGPUInstance) -> native::WGPUSurface {
+    pub(super) unsafe fn create_noop_surface(
+        instance: native::WGPUInstance,
+    ) -> native::WGPUSurface {
         let mut source = native::WGPUSurfaceSourceMetalLayer {
             chain: native::WGPUChainedStruct {
                 next: std::ptr::null_mut(),
