@@ -1,6 +1,6 @@
 # Block 103 — Surface capabilities come from the HAL
 
-Status: **COMPLETE (2026-09-22)** — `a2907ca`; Metal: inline + C-ABI e2e (Dawn's list, sRGB + Immediate + Premultiplied + CopySrc readback, Rgba16Float, rejection of unlisted modes, read-before-render zero); MoltenVK: e2e (driver-reported set deduplicated per format — a driver lists one entry per colour space; MoltenVK reports Fifo/Immediate, Opaque/Unpremultiplied/Inherit, usages incl. StorageBinding; read-before-render zero). The three Khronos-validation follow-ups (VUID 02662 view usage ⊄ image usage, VUID 05149 present semaphore destroyed while pending, VUID 01689 zero `currentExtent`) were fixed in `974a818`; the Phase Review with Block 104 (`251a4cc`, `c83bbbf`) fixed the iOS-unavailable `setDisplaySyncEnabled` (C1), the swapchain `TRANSFER_DST` for lazy zero-init (M2), the `Internal` error kind for capability-query failures (m2), the `Undefined`-format guard (m3) and the double device-idle wait (m4). Backlog item **B5** in
+Status: **COMPLETE (2026-09-22)** — `a2907ca`; Metal: inline + C-ABI e2e (Dawn's list, sRGB + Immediate + Premultiplied + CopySrc readback, Rgba16Float, rejection of unlisted modes, read-before-render zero); MoltenVK: e2e (driver-reported set deduplicated per format — a driver lists one entry per colour space; MoltenVK reports Fifo/Immediate, Opaque/Unpremultiplied/Inherit, usages incl. StorageBinding; read-before-render zero); Windows native Vulkan (NVIDIA, hidden Win32 window + HWND source, 2026-09-22): the same e2e 5/5 under the Khronos validation layer (0 messages) — the driver reports BGRA8Unorm/BGRA8UnormSrgb/RGBA8Unorm/RGBA8UnormSrgb/RGB10A2Unorm, all four present modes, Opaque + Premultiplied, usages CopySrc|CopyDst|TextureBinding|StorageBinding|RenderAttachment. The three Khronos-validation follow-ups (VUID 02662 view usage ⊄ image usage, VUID 05149 present semaphore destroyed while pending, VUID 01689 zero `currentExtent`) were fixed in `974a818`; the Phase Review with Block 104 (`251a4cc`, `c83bbbf`) fixed the iOS-unavailable `setDisplaySyncEnabled` (C1), the swapchain `TRANSFER_DST` for lazy zero-init (M2), the `Internal` error kind for capability-query failures (m2), the `Undefined`-format guard (m3) and the double device-idle wait (m4). Backlog item **B5** in
 `specs/tracking/backlog.md`. Extends Block 70 "Surface" (descriptor
 validation, sentinel resolution) and Block 85 (Win32 surface).
 
@@ -167,6 +167,17 @@ The core `Texture` wrapping the acquired image carries the configured
   `yawgpu/tests/e2e_vulkan_surface.rs` (MoltenVK via `CAMetalLayer` +
   `VK_EXT_metal_surface`): capabilities agree with a direct `ash`
   query; configure with a driver-reported non-Fifo mode succeeds.
+- **Real-GPU e2e, Windows native Vulkan (Claude)**: the same
+  `e2e_vulkan_surface.rs` cases run on Windows through a hidden
+  64x64-client `WS_POPUP` Win32 window + `WGPUSurfaceSourceWindowsHWND`
+  (`VK_KHR_win32_surface`, Block 85 R85-2/R85-3). The surface source is
+  the only platform-specific piece: one `cfg`-split helper creates the
+  window/layer and the `WGPUSurface`; the assertions are driver-neutral
+  (a native driver may report every present mode, so the
+  "mode outside capabilities" rejection is asserted per kind only when
+  the driver leaves one unreported; the format/usage rejections are
+  unconditional). The file is gated
+  `all(feature = "vulkan", any(target_os = "macos", windows))`.
 - **CTS**: not applicable (the harness never calls `wgpuSurface*`).
 
 ## Out of scope

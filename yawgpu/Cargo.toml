@@ -29,6 +29,8 @@ yawgpu-hal = { path = "../yawgpu-hal" }
 ash = "0.38.0"
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
+# Retained CAMetalLayer ownership in the cross-platform Vulkan surface helper.
+objc2 = { workspace = true }
 # `CGSize` for sizing a standalone CAMetalLayer in the surface e2e tests.
 objc2-core-foundation = { workspace = true }
 # Standalone CAMetalLayer construction for the real-Metal surface e2e test.
@@ -41,3 +43,7 @@ objc2-quartz-core = { workspace = true, features = [
 # Direct `MTLDevice.readWriteTextureSupport` oracle for the real-Metal
 # `texture-formats-tier2` advertisement e2e test.
 objc2-metal = { workspace = true }
+
+[target.'cfg(windows)'.dev-dependencies]
+# Hidden Win32 window for the real-Vulkan surface e2e test (HWND surface source).
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader"] }
