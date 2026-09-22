@@ -1956,53 +1956,19 @@ fn subtract_subresource_ranges(
     bound: SubresourceRange,
     exclusions: &[SubresourceRange],
 ) -> Vec<SubresourceRange> {
-    let mut result = Vec::new();
-    let mut previous: Vec<SubresourceRange> = Vec::new();
-    for mip in
-        (0..bound.mip_level_count).filter_map(|offset| bound.base_mip_level.checked_add(offset))
-    {
-        let mut runs: Vec<SubresourceRange> = Vec::new();
-        for layer in (0..bound.array_layer_count)
-            .filter_map(|offset| bound.base_array_layer.checked_add(offset))
-        {
-            if exclusions.iter().any(|range| {
-                mip.checked_sub(range.base_mip_level)
-                    .is_some_and(|offset| offset < range.mip_level_count)
-                    && layer
-                        .checked_sub(range.base_array_layer)
-                        .is_some_and(|offset| offset < range.array_layer_count)
-            }) {
-                continue;
-            }
-            if let Some(last) = runs.last_mut() {
-                if last.base_array_layer.checked_add(last.array_layer_count) == Some(layer) {
-                    last.array_layer_count += 1;
-                    continue;
-                }
-            }
-            runs.push(SubresourceRange {
-                base_mip_level: mip,
-                mip_level_count: 1,
-                base_array_layer: layer,
-                array_layer_count: 1,
-            });
-        }
-        let identical = previous.len() == runs.len()
-            && previous.iter().zip(&runs).all(|(a, b)| {
-                a.base_array_layer == b.base_array_layer
-                    && a.array_layer_count == b.array_layer_count
-            });
-        if identical {
-            for run in &mut previous {
-                run.mip_level_count += 1;
-            }
-        } else {
-            result.append(&mut previous);
-            previous = runs;
-        }
-    }
-    result.append(&mut previous);
-    result
+    coalesce_subresources(bound, |mip, layer| {
+        (!exclusions.iter().any(|range| {
+            mip.checked_sub(range.base_mip_level)
+                .is_some_and(|offset| offset < range.mip_level_count)
+                && layer
+                    .checked_sub(range.base_array_layer)
+                    .is_some_and(|offset| offset < range.array_layer_count)
+        }))
+        .then_some(())
+    })
+    .into_iter()
+    .map(|(range, ())| range)
+    .collect()
 }
 
 /// Transitions storage views to GENERAL outside this pass's attachment subresources.
@@ -2101,7 +2067,7 @@ pub(super) fn encode_subpass_render_pass(
         ));
     }
     let render_pass = cached_subpass_render_pass(device, pass)?;
-    let (views, persistent_textures) = subpass_attachment_views(pass)?;
+    let (views, persistent_textures, depth_stencil_texture) = subpass_attachment_views(pass)?;
     for (slot, texture) in persistent_textures.iter() {
         let is_input_source = pass.layout.subpasses.iter().any(|subpass| {
             subpass
@@ -2123,6 +2089,15 @@ pub(super) fn encode_subpass_render_pass(
             texture.inner()?,
             layout,
             layout_id,
+        )?;
+    }
+    if let Some(texture) = depth_stencil_texture {
+        transition_image(
+            &device.device,
+            command_buffer,
+            texture.inner()?,
+            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT,
         )?;
     }
     let mut attachments = Vec::new();
@@ -2240,8 +2215,13 @@ struct SubpassDrawTemps {
     image_views: Vec<vk::ImageView>,
 }
 
+/// Whole-image views, indexed color textures, and the separate depth-stencil texture.
 #[cfg(feature = "tiled")]
-type SubpassAttachmentViews = (Vec<vk::ImageView>, Vec<(u32, VulkanTexture)>);
+type SubpassAttachmentViews = (
+    Vec<vk::ImageView>,
+    Vec<(u32, VulkanTexture)>,
+    Option<VulkanTexture>,
+);
 
 #[cfg(feature = "tiled")]
 fn cached_subpass_render_pass(
@@ -2523,6 +2503,7 @@ fn encode_subpass_draw_call(
     }
 }
 
+/// Collects attachment views while keeping depth-stencil out of the color layout path.
 #[cfg(feature = "tiled")]
 fn subpass_attachment_views(
     pass: &HalSubpassRenderPassCommand,
@@ -2536,12 +2517,14 @@ fn subpass_attachment_views(
             u32::try_from(slot).map_err(|_| texture_error("subpass color slot is too large"))?;
         persistent_textures.push((slot, texture));
     }
-    if let Some(depth) = &pass.depth_stencil_attachment {
+    let depth_stencil_texture = if let Some(depth) = &pass.depth_stencil_attachment {
         let (view, texture) = subpass_attachment_view(&depth.resource)?;
         views.push(view);
-        persistent_textures.push((u32::MAX, texture));
-    }
-    Ok((views, persistent_textures))
+        Some(texture)
+    } else {
+        None
+    };
+    Ok((views, persistent_textures, depth_stencil_texture))
 }
 
 /// Returns whether the bound Vulkan texture is transient (memoryless), used to

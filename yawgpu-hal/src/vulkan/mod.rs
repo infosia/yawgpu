@@ -30,11 +30,6 @@ const ASSUMED_MAX_BUFFER_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 /// Minimum Vulkan API version yawgpu requests at vkCreateInstance.
 /// Documented in specs/blocks/60-real-backends.md § Minimum Vulkan version.
 const YAWGPU_VULKAN_API_VERSION: u32 = vk::API_VERSION_1_1;
-const IMAGE_LAYOUT_UNDEFINED: u8 = texture::IMAGE_LAYOUT_UNDEFINED;
-const IMAGE_LAYOUT_TRANSFER_DST: u8 = 1;
-const IMAGE_LAYOUT_TRANSFER_SRC: u8 = 2;
-const IMAGE_LAYOUT_COLOR_ATTACHMENT: u8 = 3;
-const IMAGE_LAYOUT_PRESENT: u8 = 4;
 
 static VULKAN_ENTRY: OnceLock<ash::Entry> = OnceLock::new();
 static VULKAN_ENTRY_INIT: Mutex<()> = Mutex::new(());

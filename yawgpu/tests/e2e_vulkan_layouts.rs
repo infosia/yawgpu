@@ -617,7 +617,7 @@ fn vulkan_copy_to_layer0_then_sample_layer1_then_copy_layer0_round_trips() {
     }
 }
 
-/// A tiled draw transitions a sampled texture last written by a queue copy.
+/// A tiled draw transitions copied sampled textures and preserves depth layout for readback.
 #[cfg(feature = "tiled")]
 #[test]
 #[ignore = "manual real-backend test"]
@@ -652,6 +652,16 @@ fn vulkan_tiled_subpass_samples_texture_written_by_copy() {
         let attachment = yawgpu::wgpuTextureCreateView(target, std::ptr::null());
         assert!(!attachment.is_null());
 
+        texture_descriptor.format = native::WGPUTextureFormat_Depth32Float;
+        let depth = yawgpu::wgpuDeviceCreateTexture(device, &texture_descriptor);
+        assert!(!depth.is_null());
+        let depth_view = yawgpu::wgpuTextureCreateView(depth, std::ptr::null());
+        assert!(!depth_view.is_null());
+        let depth_layout = yawgpu::YaWGPUAttachmentLayout {
+            format: native::WGPUTextureFormat_Depth32Float,
+            sampleCount: 1,
+        };
+
         let color_layout = yawgpu::YaWGPUAttachmentLayout {
             format: native::WGPUTextureFormat_RGBA8Unorm,
             sampleCount: 1,
@@ -660,7 +670,7 @@ fn vulkan_tiled_subpass_samples_texture_written_by_copy() {
         let subpass_layout = yawgpu::YaWGPUSubpassLayout {
             colorAttachmentIndices: &color_slot,
             colorAttachmentIndexCount: 1,
-            usesDepthStencil: 0,
+            usesDepthStencil: 1,
             inputAttachments: std::ptr::null(),
             inputAttachmentCount: 0,
         };
@@ -669,7 +679,7 @@ fn vulkan_tiled_subpass_samples_texture_written_by_copy() {
             label: empty_string_view(),
             colorAttachments: &color_layout,
             colorAttachmentCount: 1,
-            depthStencilAttachment: std::ptr::null(),
+            depthStencilAttachment: &depth_layout,
             subpasses: &subpass_layout,
             subpassCount: 1,
             dependencies: std::ptr::null(),
@@ -705,6 +715,11 @@ fn vulkan_tiled_subpass_samples_texture_written_by_copy() {
         base.primitive = primitive_state();
         base.multisample = multisample_state();
         base.fragment = &fragment;
+        let mut depth_state: native::WGPUDepthStencilState = std::mem::zeroed();
+        depth_state.format = native::WGPUTextureFormat_Depth32Float;
+        depth_state.depthWriteEnabled = native::WGPUOptionalBool_True;
+        depth_state.depthCompare = native::WGPUCompareFunction_Always;
+        base.depthStencil = &depth_state;
         let pipeline_descriptor = yawgpu::YaWGPUSubpassRenderPipelineDescriptor {
             nextInChain: std::ptr::null(),
             base,
@@ -721,6 +736,20 @@ fn vulkan_tiled_subpass_samples_texture_written_by_copy() {
             u64::from(BYTES_PER_ROW * 4),
             native::WGPUBufferUsage_MapRead | native::WGPUBufferUsage_CopyDst,
         );
+        let depth_readback = create_buffer(
+            device,
+            u64::from(BYTES_PER_ROW * 4),
+            native::WGPUBufferUsage_MapRead | native::WGPUBufferUsage_CopyDst,
+        );
+        let depth_attachment = yawgpu::YaWGPUSubpassDepthStencilAttachment {
+            view: depth_view,
+            depthLoadOp: native::WGPULoadOp_Clear,
+            depthStoreOp: native::WGPUStoreOp_Store,
+            depthClearValue: 1.0,
+            stencilLoadOp: native::WGPULoadOp_Undefined,
+            stencilStoreOp: native::WGPUStoreOp_Undefined,
+            stencilClearValue: 0,
+        };
         let color_attachment = yawgpu::YaWGPUSubpassColorAttachment {
             view: attachment,
             resolveTarget: std::ptr::null(),
@@ -740,7 +769,7 @@ fn vulkan_tiled_subpass_samples_texture_written_by_copy() {
             extent: extent(4, 1),
             colorAttachments: &color_attachment,
             colorAttachmentCount: 1,
-            depthStencilAttachment: std::ptr::null(),
+            depthStencilAttachment: &depth_attachment,
         };
         let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
         let pass = yawgpu::yawgpuCommandEncoderBeginSubpassRenderPass(encoder, &descriptor);
@@ -750,10 +779,35 @@ fn vulkan_tiled_subpass_samples_texture_written_by_copy() {
         yawgpu::yawgpuSubpassRenderPassEncoderDraw(pass, 3, 1, 0, 0);
         yawgpu::yawgpuSubpassRenderPassEncoderEnd(pass);
         copy_pixels(encoder, target, readback, 4);
+        let mut depth_copy = texture_copy(depth, 0, 0);
+        depth_copy.aspect = native::WGPUTextureAspect_DepthOnly;
+        let depth_destination = native::WGPUTexelCopyBufferInfo {
+            buffer: depth_readback,
+            layout: native::WGPUTexelCopyBufferLayout {
+                offset: 0,
+                bytesPerRow: BYTES_PER_ROW,
+                rowsPerImage: 4,
+            },
+        };
+        yawgpu::wgpuCommandEncoderCopyTextureToBuffer(
+            encoder,
+            &depth_copy,
+            &depth_destination,
+            &extent(4, 1),
+        );
         submit_encoder(queue, encoder);
         assert_eq!(read_pixels(instance, readback, 4), color.repeat(16));
+        for pixel in read_pixels(instance, depth_readback, 4).chunks_exact(4) {
+            assert_eq!(
+                f32::from_ne_bytes(pixel.try_into().expect("depth texel")),
+                0.0
+            );
+        }
         assert!(errors.lock().expect("error lock").is_empty(), "{errors:?}");
         yawgpu::yawgpuSubpassRenderPassEncoderRelease(pass);
+        yawgpu::wgpuBufferRelease(depth_readback);
+        yawgpu::wgpuTextureViewRelease(depth_view);
+        yawgpu::wgpuTextureRelease(depth);
         yawgpu::wgpuBufferRelease(readback);
         yawgpu::wgpuBindGroupRelease(group);
         yawgpu::wgpuBindGroupLayoutRelease(layout);

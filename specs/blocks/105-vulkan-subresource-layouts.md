@@ -1,6 +1,6 @@
 # Block 105 — Vulkan image layouts are tracked per subresource
 
-Status: **IN PROGRESS (2026-09-22)** — backlog item **A5**
+Status: **COMPLETE (2026-09-22)** — S1 `a00daf9`, S2 `10a59de`, S3 `6d391aa`, Phase Review fixes in the S4 commit (1 MAJOR fixed, 1 MAJOR deferred to backlog A8 as pre-existing / out of scope, 11 MINOR: 5 fixed, rest deferred or documented); final gate on the Windows native NVIDIA host: workspace 1093/0, Vulkan e2e 112/0 + passthrough 2/0, HAL 54/0, 0 validation-layer lines; CTS re-confirmation on MoltenVK pending the next Mac session. Backlog item **A5**
 (`specs/tracking/backlog.md`): "Vulkan image-layout tracking is
 per-texture, not per-subresource" (L), "the `tiled` subpass path lacks
 the sampled-texture layout transition" (M); the third A5 item
@@ -224,7 +224,8 @@ In `encode_render_pass_impl`:
 
 - Colour attachment: `transition_image_range` on
   (`target.mip_level`, layer = `array_layer` for 1D/2D or layer 0 for 3D
-  — the same choice `color_attachment_subresource_range` makes) to
+  — `attachment_subresource_range_of`; a 3D image has one array layer,
+  so the barrier names layer 0 whatever `depth_slice` the view targets) to
   `COLOR_ATTACHMENT` / `GENERAL` (framebuffer fetch). Resolve:
   (`resolve_mip_level`, `resolve_array_layer`) -> `COLOR_ATTACHMENT`.
   Depth-stencil: (`mip_level`, `array_layer`) ->
@@ -254,11 +255,20 @@ In `encode_render_pass_impl`:
 
 In `encode_subpass_render_pass`:
 
-- Attachments (`subpass_attachment_views` uses each texture's default
-  whole-image view, so the attachment range is `layouts.whole()`):
-  `transition_image_range` as today, then `layouts.set(whole,
+- Colour attachments (`subpass_attachment_views` uses each texture's
+  default whole-image view, so the attachment range is `layouts.whole()`):
+  `transition_image_range` as today (`GENERAL` when the slot feeds an
+  input attachment, else `COLOR_ATTACHMENT`), then `layouts.set(whole,
   subpass_color_tracked_layout(transient))` after the pass — unchanged
   semantics, new API.
+- **Depth-stencil attachment** (Phase Review MAJOR 1, pre-existing): it
+  must not take the colour path. Transition it to
+  `DEPTH_STENCIL_ATTACHMENT_OPTIMAL` / `IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT`
+  before the pass and record **no** post-pass state (the tiled
+  `VkRenderPass` declares `initialLayout = finalLayout =
+  DEPTH_STENCIL_ATTACHMENT_OPTIMAL`, so the tracked state already matches).
+  The sentinel slot `u32::MAX` that routed it through the colour loop is
+  gone; the attachment stays in the S3 exclusion list.
 - **New**: before `cmd_begin_render_pass`, collect every
   `draw.bind_textures` of every subpass and run the R4 sampled + storage
   transitions with the attachment images' whole ranges as the exclusion
@@ -354,6 +364,13 @@ attachment); `texture_copy_layouts`; the Metal and GLES backends; core.
   it needs a `DEPTH_STENCIL_READ_ONLY_OPTIMAL` state, matching
   `VkRenderPass` initial / final layouts and a per-binding descriptor
   layout — a follow-up backlog item, not part of A5.
+- A subresource bound both as a **sampled texture and a read-only
+  storage texture in one pass** (allowed by WebGPU) ends in `GENERAL`
+  ("storage follows sampled so `GENERAL` wins") while the sampled
+  descriptor declares `SHADER_READ_ONLY_OPTIMAL` — the same class as the
+  read-only depth-stencil case (pre-existing policy; a fix would declare
+  `GENERAL` on the sampled descriptor when the same subresource is also
+  storage-bound). Backlog A9.
 - Layout state is not usage / stage tracked (Dawn's `shaderStages`
   reuse optimisation is not replicated); barriers are derived from the
   layout pair alone, as today.

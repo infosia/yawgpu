@@ -85,54 +85,32 @@ impl SubresourceLayouts {
             .states
             .lock()
             .map_err(|_| texture_error("subresource layout lock poisoned"))?;
-        let mut result = Vec::new();
-        let mut previous: Vec<LayoutRun> = Vec::new();
-        for mip in range.base_mip_level..range.base_mip_level + range.mip_level_count {
-            let mut runs: Vec<LayoutRun> = Vec::new();
-            for layer in range.base_array_layer..range.base_array_layer + range.array_layer_count {
-                let state = states
-                    .get_mut(self.index(mip, layer)?)
-                    .ok_or_else(|| texture_error("subresource range exceeds texture"))?;
-                let old_state = *state;
-                *state = new_state;
-                if !needs_barrier(old_state, new_state) {
-                    continue;
+        let mut error = None;
+        let runs = coalesce_subresources(range, |mip, layer| {
+            let state = self.index(mip, layer).and_then(|index| {
+                states
+                    .get_mut(index)
+                    .ok_or_else(|| texture_error("subresource range exceeds texture"))
+            });
+            match state {
+                Ok(state) => {
+                    let old_state = *state;
+                    *state = new_state;
+                    needs_barrier(old_state, new_state).then_some(old_state)
                 }
-                if let Some(last) = runs.last_mut() {
-                    if last.old_state == old_state
-                        && last.range.base_array_layer + last.range.array_layer_count == layer
-                    {
-                        last.range.array_layer_count += 1;
-                        continue;
-                    }
+                Err(cause) => {
+                    error = Some(cause);
+                    None
                 }
-                runs.push(LayoutRun {
-                    range: SubresourceRange {
-                        base_mip_level: mip,
-                        mip_level_count: 1,
-                        base_array_layer: layer,
-                        array_layer_count: 1,
-                    },
-                    old_state,
-                });
             }
-            let identical = previous.len() == runs.len()
-                && previous.iter().zip(&runs).all(|(a, b)| {
-                    a.old_state == b.old_state
-                        && a.range.base_array_layer == b.range.base_array_layer
-                        && a.range.array_layer_count == b.range.array_layer_count
-                });
-            if identical {
-                for run in &mut previous {
-                    run.range.mip_level_count += 1;
-                }
-            } else {
-                result.append(&mut previous);
-                previous = runs;
-            }
+        });
+        if let Some(error) = error {
+            return Err(error);
         }
-        result.append(&mut previous);
-        Ok(result)
+        Ok(runs
+            .into_iter()
+            .map(|(range, old_state)| LayoutRun { range, old_state })
+            .collect())
     }
 
     /// Records an implicit render-pass layout transition without barrier runs.
@@ -152,8 +130,8 @@ impl SubresourceLayouts {
         Ok(())
     }
 
-    /// Returns one subresource's state for tests and debugging.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Returns one subresource's state for tests.
+    #[cfg(test)]
     pub(super) fn state(&self, mip_level: u32, array_layer: u32) -> Result<u8, HalError> {
         self.validate(SubresourceRange {
             base_mip_level: mip_level,
@@ -170,6 +148,61 @@ impl SubresourceLayouts {
     }
 }
 
+/// Coalesces classified subresources in ascending mip/layer order, excluding `None`.
+/// Adjacent layers merge first, then adjacent mips with identical layer-run lists.
+pub(super) fn coalesce_subresources<T: Copy + PartialEq>(
+    range: SubresourceRange,
+    mut classify: impl FnMut(u32, u32) -> Option<T>,
+) -> Vec<(SubresourceRange, T)> {
+    let mut result = Vec::new();
+    let mut previous: Vec<(SubresourceRange, T)> = Vec::new();
+    for mip in
+        (0..range.mip_level_count).filter_map(|offset| range.base_mip_level.checked_add(offset))
+    {
+        let mut runs: Vec<(SubresourceRange, T)> = Vec::new();
+        for layer in (0..range.array_layer_count)
+            .filter_map(|offset| range.base_array_layer.checked_add(offset))
+        {
+            let Some(value) = classify(mip, layer) else {
+                continue;
+            };
+            if let Some((last, last_value)) = runs.last_mut() {
+                if *last_value == value
+                    && last.base_array_layer.checked_add(last.array_layer_count) == Some(layer)
+                {
+                    last.array_layer_count += 1;
+                    continue;
+                }
+            }
+            runs.push((
+                SubresourceRange {
+                    base_mip_level: mip,
+                    mip_level_count: 1,
+                    base_array_layer: layer,
+                    array_layer_count: 1,
+                },
+                value,
+            ));
+        }
+        let identical = previous.len() == runs.len()
+            && previous.iter().zip(&runs).all(|((a, av), (b, bv))| {
+                av == bv
+                    && a.base_array_layer == b.base_array_layer
+                    && a.array_layer_count == b.array_layer_count
+            });
+        if identical {
+            for (run, _) in &mut previous {
+                run.mip_level_count += 1;
+            }
+        } else {
+            result.append(&mut previous);
+            previous = runs;
+        }
+    }
+    result.append(&mut previous);
+    result
+}
+
 /// Same-layout barriers are required only for transfer writes and GENERAL.
 pub(super) fn needs_barrier(old_state: u8, new_state: u8) -> bool {
     old_state != new_state || matches!(new_state, IMAGE_LAYOUT_TRANSFER_DST | IMAGE_LAYOUT_GENERAL)
@@ -178,6 +211,65 @@ pub(super) fn needs_barrier(old_state: u8, new_state: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A uniform classification forms one rectangle, including nonzero origins.
+    #[test]
+    fn coalescer_uniform_range_is_one_rectangle() {
+        let selected = range(2, 3, 4, 5);
+        assert_eq!(
+            coalesce_subresources(selected, |_, _| Some(7)),
+            vec![(selected, 7)]
+        );
+    }
+
+    /// Different states in one mip remain distinct adjacent layer runs.
+    #[test]
+    fn coalescer_splits_two_states_in_one_mip() {
+        assert_eq!(
+            coalesce_subresources(range(0, 1, 0, 4), |_, layer| Some(layer / 2)),
+            vec![(range(0, 1, 0, 2), 0), (range(0, 1, 2, 2), 1)]
+        );
+    }
+
+    /// Identical split layer lists merge across adjacent mips.
+    #[test]
+    fn coalescer_merges_identical_mip_run_lists() {
+        assert_eq!(
+            coalesce_subresources(range(0, 3, 0, 4), |_, layer| Some(layer / 2)),
+            vec![(range(0, 3, 0, 2), 0), (range(0, 3, 2, 2), 1)]
+        );
+    }
+
+    /// Excluded layers split equal-valued runs without joining across the hole.
+    #[test]
+    fn coalescer_none_hole_splits_layers() {
+        assert_eq!(
+            coalesce_subresources(range(0, 2, 0, 3), |_, layer| (layer != 1).then_some(())),
+            vec![(range(0, 2, 0, 1), ()), (range(0, 2, 2, 1), ())]
+        );
+    }
+
+    /// A skipped or differently classified mip prevents nonadjacent runs merging.
+    #[test]
+    fn coalescer_nonadjacent_identical_mips_stay_separate() {
+        for middle in [None, Some(1)] {
+            let mut expected = vec![(range(0, 1, 0, 3), 0)];
+            if let Some(value) = middle {
+                expected.push((range(1, 1, 0, 3), value));
+            }
+            expected.push((range(2, 1, 0, 3), 0));
+            assert_eq!(
+                coalesce_subresources(range(0, 3, 0, 3), |mip, _| {
+                    if mip == 1 {
+                        middle
+                    } else {
+                        Some(0)
+                    }
+                }),
+                expected
+            );
+        }
+    }
 
     fn range(mip: u32, mips: u32, layer: u32, layers: u32) -> SubresourceRange {
         SubresourceRange {
