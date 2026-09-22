@@ -121,7 +121,7 @@ No GLES mapping commits have landed since the previous snapshot.
 | D8 | Latent self-deadlock: `Drop` impls of GLES buffer / pipeline / sampler / texture inners acquire `with_current_context`; dropping the last `Arc` inside a context closure re-deadlocks. A guard is cheap. | S | `specs/tracking/cts-gles-sweep-0705.md:136-145` |
 | D9 | `unorm8x4-bgra` renders R/B swapped on hosts without `EXT/ARB_vertex_array_bgra` (execution-only divergence; shader swizzle emulation deferred). | M | `specs/blocks/67-gles-backend.md:786-790` |
 | D10 | **Manual verification owed**: ANGLE re-confirmation after the Tint migration, Windows WGL/NVIDIA sweep, catalogue re-sweep on the NVIDIA Linux host (README Haswell table stays until then). | Manual | `specs/tracking/tint-integration-refactor.md:219-221`; `specs/blocks/67-gles-backend.md:141, 269` |
-| D11 | **Hardware-blocked Vulkan verifications** — only the ETC2/ASTC probes E8/E9 remain (desktop NVIDIA does not expose those families; needs Android Vulkan or MoltenVK on Apple Silicon — **the M2 / MoltenVK host qualifies**, so this is runnable now rather than hardware-blocked). Vulkan items closed by Block 106. | S (Mac) | `specs/tracking/texture-compression-vulkan.md:94-96, 119` |
+| D11 | **DONE 2026-09-23** — ETC2/ASTC probes E8/E9 executed on Apple M2 via MoltenVK: `e2e_vulkan_texture_compression` 10/10 under the Khronos layer, 0 VUID lines, no self-skip (ledger `texture-compression-vulkan.md` "ETC2 / ASTC probes on MoltenVK"). Vulkan items were closed by Block 106. Original text: only the ETC2/ASTC probes E8/E9 remained (desktop NVIDIA does not expose those families; needs Android Vulkan or MoltenVK on Apple Silicon). | S (Mac) | `specs/tracking/texture-compression-vulkan.md:94-96, 119` |
 
 Permanent / catalogued Tier-2 rejections (not backlog, listed for
 completeness): vertex-stage storage images, `rg32*` storage formats,
@@ -156,8 +156,8 @@ None open. The previous snapshot's eight rows were closed in `aaef70c`
 
 ## Recommended order
 
-1. **D11** ETC2/ASTC probes E8/E9 on the M2 under MoltenVK — the only
-   "manual" row this machine can actually run; closes D11 outright.
+1. ~~**D11** ETC2/ASTC probes E8/E9 on the M2 under MoltenVK~~ — done
+   2026-09-23 (see the progress log).
 2. **B6 + D2 + D8** — all S, root cause known; one coding-agent handoff
    (a spec check, a limit reservation, a re-entrancy guard).
 3. **C4** feature-gated clippy in CI — infra only, stops lint rot from
@@ -276,3 +276,7 @@ Re-verification after the fixes: `cargo test --workspace` 1093/0, clippy default
 ### 2026-09-23 — snapshot re-taken at `2c6ea6f`
 
 - Tables rebuilt after Blocks 99–107 and the F cleanup; closed rows moved to "Closed since the previous snapshot". New rows: A10 (Block 102 m4), A11 (Block 107 F2, documented), E9 (Block 102 m12), E10 (GLES `HalError: Clone` TODO); Block 107 F5 folded into E4. Headline counts re-measured (3 `TODO`, 375 `#[ignore]`, Vulkan `supports_*` fully query-driven, Metal 10 doc-noted literals).
+
+### 2026-09-23 — D11 closed (ETC2 / ASTC probes on MoltenVK)
+
+- The previous snapshot called E8/E9 "hardware-blocked", but the M2 / MoltenVK host exposes `textureCompressionETC2` and `textureCompressionASTC_LDR`, and yawgpu advertises all three compression features on it. `e2e_vulkan_texture_compression` E1–E10 run 10/10 under `VK_LAYER_KHRONOS_validation` with 0 VUID lines; E8 (ETC2 RGB8 / EAC R11 / ASTC 4x4, 8x8, 12x12 multi-block round-trips) and E9 (3D ASTC per-slice round-trip) executed, not self-skipped. Docs: Block 73 status, Block 106 "Out of scope", the texture-compression ledger (new slice 4 + run section). Priority D now has no runnable-on-this-host row; the remaining "Manual" rows (D10) need Windows ANGLE / WGL or the NVIDIA Linux host.

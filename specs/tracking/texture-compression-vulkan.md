@@ -29,6 +29,7 @@ Gaps found by code reading:
 | 1 | R1 sliced-3d advertisement + R2 device feature enable | **DONE** |
 | 2 | R3/R3b 3D + mip-edge HAL path, R4 e2e probes, same-image 3D copy layout fix | **DONE** |
 | 3 | R5 docs + Phase Review + external CTS re-confirmation | docs + Phase Review **DONE**; external CTS re-confirmation pending |
+| 4 | E8 / E9 ETC2 / ASTC / ASTC-sliced-3d probes on hardware exposing the families | **DONE** (MoltenVK / Apple M2, 2026-09-23, below) |
 
 ### Phase Review (2026-09-20) — Clean Review of `1001859..f639ab2`
 
@@ -91,11 +92,36 @@ run with `--isolate --workers 6 --expectations expectations/yawgpu-vulkan.txt`.
   follow-up that would close this.
 
 **Open follow-ups (outside this block's gate):**
-- E8 / E9 (ETC2, ASTC, ASTC sliced-3d) need a run on hardware exposing those
-  families (Android Vulkan, or MoltenVK on Apple Silicon).
+- ~~E8 / E9 (ETC2, ASTC, ASTC sliced-3d) need a run on hardware exposing those
+  families (Android Vulkan, or MoltenVK on Apple Silicon).~~ **Done 2026-09-23**
+  on MoltenVK / Apple M2 (see "ETC2 / ASTC probes on MoltenVK" below).
 - Port `copyTextureToTexture:color_textures,compressed,*` in webgpu-native-cts
   so R3b gets oracle (Dawn) comparison on real hardware.
 - Deferred MINOR #6 (device-local scratch buffer) and #7 (barrier batching).
+
+### ETC2 / ASTC probes on MoltenVK (2026-09-23) — backlog D11 closed
+
+Host: Apple M2, MoltenVK 0.2.2019 (Vulkan SDK 1.3.296.0, API 1.2.296),
+`VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation`, yawgpu `557a043`,
+`CARGO_TARGET_DIR=target-vulkan cargo test -p yawgpu --features vulkan
+--test e2e_vulkan_texture_compression -- --ignored --test-threads=1
+--nocapture`.
+
+- `vulkaninfo`: `textureCompressionETC2 = true`, `textureCompressionASTC_LDR =
+  true`; the yawgpu adapter advertises `texture-compression-etc2`,
+  `texture-compression-astc` and `texture-compression-astc-sliced-3d` (no
+  `SKIP:` line from `with_device`, so E8 and E9 executed rather than
+  self-skipping — the "pass is not evidence" caveat of the Windows baseline does
+  not apply).
+- E8 (`etc2-rgb8unorm`, `eac-r11unorm`, `astc-4x4-unorm`, `astc-8x8-unorm`,
+  `astc-12x12-unorm` multi-block write → T2B round-trip) and E9 (3D ASTC 4x4,
+  8x8x3, per-slice T2B) pass byte-identical; the whole suite E1–E10 is 10/10 on
+  MoltenVK with **0 VUID / Validation Error lines** (loader debug confirms the
+  layer is loaded). BC on MoltenVK (E1–E7, E10) matches the native-Windows
+  result.
+- Still open from this block: the webgpu-native-cts port of the compressed
+  `copyTextureToTexture` operation cases (R3b oracle comparison) and the two
+  deferred MINORs (#6, #7). Android Vulkan remains unexercised; not a blocker.
 
 ### Slice 2 (2026-09-20)
 

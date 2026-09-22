@@ -2,9 +2,10 @@
 
 Status: **COMPLETE** — Phase Review clean (0 CRITICAL / 0 MAJOR; 6 of 8 MINOR
 fixed, 2 deferred with rationale). Verified VUID-clean on a native Windows
-Vulkan driver for BC (E1–E7, E10). Known deferrals: ETC2 / ASTC / ASTC
-sliced-3d probes (E8, E9) self-skip on desktop GPUs and are unverified on real
-hardware. External webgpu-native-cts re-confirmation on native Vulkan: 0 fail /
+Vulkan driver for BC (E1–E7, E10). ETC2 / ASTC / ASTC sliced-3d probes (E8, E9)
+self-skip on desktop GPUs; **verified 2026-09-23 on Apple M2 via MoltenVK
+(0.2.2019, Vulkan SDK 1.3.296): E1–E10 10/10 under `VK_LAYER_KHRONOS_validation`,
+0 VUID lines, E8/E9 executed (no self-skip)** — backlog D11 closed. External webgpu-native-cts re-confirmation on native Vulkan: 0 fail /
 0 crash, 71 sliced-3d cases newly executed and passing; the suite's compressed
 `copyTextureToTexture` *operation* cases are still unported there, so R3b is
 covered by the in-repo e2e only. Owner: Dawn-parity backfill.
@@ -121,9 +122,9 @@ exercised). Required probes:
 | E5 | BC1 sRGB format: the same block in a texture created as `bc1-rgba-unorm-srgb` (not a `viewFormats` reinterpretation) | red channel 255, alpha 255 (endpoints are 0/1 so sRGB decode is exact) |
 | E6 | 3D BC1 (sliced-3d): 4x4x3, distinct block per slice; write slices 0..3 in one writeTexture; T2B each slice | per-slice bytes identical |
 | E7 | 3D BC1 sampled through a `3d` view at slice centres | each slice's solid colour reads back |
-| E8 | ETC2 (`etc2-rgb8unorm`, `eac-r11unorm`) and ASTC (`astc-4x4-unorm`, `astc-8x8-unorm`, `astc-12x12-unorm`) multi-block round-trip | bytes identical (self-skip when the family is absent — expected on desktop NVIDIA/AMD) |
+| E8 | ETC2 (`etc2-rgb8unorm`, `eac-r11unorm`) and ASTC (`astc-4x4-unorm`, `astc-8x8-unorm`, `astc-12x12-unorm`) multi-block round-trip | bytes identical (self-skip when the family is absent — expected on desktop NVIDIA/AMD; executed on MoltenVK / Apple M2 2026-09-23) |
 | E10 | BC1 T2T with mismatched logical edges (R3b): source mip 0 of 16x16 → destination mip 2 of 60x60 (physical 16x16, logical 15x15), copy size 16x16; T2B the destination mip | destination blocks == source blocks; no device error |
-| E9 | 3D ASTC round-trip | self-skip unless `texture-compression-astc-sliced-3d` |
+| E9 | 3D ASTC round-trip | self-skip unless `texture-compression-astc-sliced-3d` (executed on MoltenVK / Apple M2 2026-09-23) |
 
 The run must be clean under `VK_LAYER_KHRONOS_validation` (no VUID output).
 The pre-existing probes in `e2e_vulkan_threading_audit.rs` stay as they are.

@@ -5,8 +5,8 @@ Vulkan verifications", Vulkan-related items only: clip-distances
 *execution* (Block 68), the texture-component-swizzle depth path
 (Block 71 "R001") and the native-Windows immediates CTS sweep (Block 94).
 The ETC2 / ASTC probes E8 / E9 (`specs/tracking/texture-compression-vulkan.md`)
-stay hardware-blocked: desktop NVIDIA does not expose those families in
-Vulkan. Host: Windows 11, NVIDIA RTX 5060 Ti, native Vulkan driver,
+stayed hardware-blocked here — desktop NVIDIA does not expose those families in
+Vulkan — and were closed on the Mac (MoltenVK / Apple M2) on 2026-09-23. Host: Windows 11, NVIDIA RTX 5060 Ti, native Vulkan driver,
 `VK_LAYER_KHRONOS_validation`; CTS: `../webgpu-native-cts` (`2f0fb9f`).
 
 ## Problem
@@ -122,7 +122,9 @@ revisions.
 
 ## Out of scope
 
-- ETC2 / ASTC / ASTC-sliced-3D probes (E8 / E9) — hardware-blocked here.
+- ETC2 / ASTC / ASTC-sliced-3D probes (E8 / E9) — hardware-blocked here;
+  run on MoltenVK / Apple M2 2026-09-23 (10/10, 0 validation lines), see the
+  texture-compression ledger.
 - E6 Vulkan limits (NVIDIA storage cap, `maxFragmentCombinedOutputResources`,
   `max_color_attachment_bytes_per_sample`) — separate item.
 - The Metal swizzle e2e file (Mac session).
