@@ -717,11 +717,12 @@ fn per_stage_slots(
     }
 }
 
+/// Collects storage-buffer sizes and pads them to Tint's `uint4` array layout.
 fn msl_buffer_sizes(
     size_bindings: &[HalMslBufferSizeBinding],
     buffers: &[HalBoundBuffer],
 ) -> Result<Vec<u32>, HalError> {
-    size_bindings
+    let mut sizes = size_bindings
         .iter()
         .map(|size_binding| {
             let Some(bound) = buffers.iter().find(|bound| {
@@ -732,7 +733,19 @@ fn msl_buffer_sizes(
             let size = bound_buffer_size(bound)?;
             msl_buffer_size_u32(size)
         })
-        .collect()
+        .collect::<Result<Vec<_>, HalError>>()?;
+    pad_msl_buffer_sizes(&mut sizes)?;
+    Ok(sizes)
+}
+
+/// Zero-pads size slots to whole `uint4` elements, leaving empty arrays empty.
+fn pad_msl_buffer_sizes(sizes: &mut Vec<u32>) -> Result<(), HalError> {
+    let padded_len = sizes
+        .len()
+        .checked_next_multiple_of(4)
+        .ok_or_else(|| buffer_error("MSL buffer sizes length overflows"))?;
+    sizes.resize(padded_len, 0);
+    Ok(())
 }
 
 fn msl_buffer_size_u32(size: u64) -> Result<u32, HalError> {
@@ -1367,6 +1380,7 @@ fn mtl_cull_mode(cull_mode: HalCullMode) -> MTLCullMode {
 ///
 /// Layout Tint emits:
 ///   [storage-array sizes …] [buffer_sizeN per vertex_buffer_metal_indices entry]
+/// followed by zero padding to whole `uint4` elements.
 ///
 /// `bind_buffers` supplies the bind-group buffers (storage-array entries).
 /// `vertex_buffers` supplies the vertex-attribute buffers; each entry in
@@ -1382,6 +1396,8 @@ fn compose_vertex_stage_sizes(
 ) -> Result<Vec<u32>, HalError> {
     // Storage-array sizes first.
     let mut sizes = msl_buffer_sizes(storage_bindings, bind_buffers)?;
+    // Keep vertex slots contiguous with storage slots; pad only the final array.
+    sizes.truncate(storage_bindings.len());
     // Vertex buffer sizes appended in vertex_buffer_mappings order.
     for &metal_index in vertex_buffer_metal_indices {
         let effective_size = vertex_buffers
@@ -1396,6 +1412,7 @@ fn compose_vertex_stage_sizes(
             .unwrap_or(0);
         sizes.push(u32::try_from(effective_size).unwrap_or(u32::MAX));
     }
+    pad_msl_buffer_sizes(&mut sizes)?;
     Ok(sizes)
 }
 
@@ -1913,6 +1930,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn msl_buffer_sizes_pads_to_uint4_elements() {
+        let bindings: Vec<_> = (0..5)
+            .map(|binding| HalMslBufferSizeBinding::new(0, binding))
+            .collect();
+        let buffers: Vec<_> = (0..5)
+            .map(|binding| make_vertex_bound_buffer(binding, 256, 16))
+            .collect();
+
+        for (slots, expected) in [
+            (0, vec![]),
+            (1, vec![240, 0, 0, 0]),
+            (4, vec![240; 4]),
+            (5, vec![240, 240, 240, 240, 240, 0, 0, 0]),
+        ] {
+            assert_eq!(
+                msl_buffer_sizes(&bindings[..slots], &buffers).expect("sizes must succeed"),
+                expected
+            );
+        }
+    }
+
     /// `compose_vertex_stage_sizes` places storage-array sizes first, then vertex
     /// buffer effective sizes (buffer.size - offset) in metal_index order.
     #[test]
@@ -1936,8 +1975,7 @@ mod tests {
         )
         .expect("compose must succeed");
 
-        // Expected: [240, 1024] (no storage entries).
-        assert_eq!(sizes, vec![240u32, 1024u32]);
+        assert_eq!(sizes, vec![240u32, 1024u32, 0, 0]);
     }
 
     /// Missing vertex-buffer binding (no matching metal_index) contributes 0.
@@ -1951,16 +1989,13 @@ mod tests {
         )
         .expect("compose must succeed");
 
-        assert_eq!(sizes, vec![0u32]);
+        assert_eq!(sizes, vec![0u32; 4]);
     }
 
     /// Vertex buffer sizes are appended AFTER any storage-array sizes.
     #[test]
     fn compose_vertex_stage_sizes_storage_entries_precede_vertex_entries() {
-        // One storage-array binding with a Noop buffer (size=0 via msl_buffer_sizes fallback path).
-        // The vertex buffer contributes 64.
-        // Noop buffers return 0 from msl_buffer_sizes because bound_buffer_size rejects them.
-        // Use a single vertex buffer slot only to verify ordering structure.
+        // An unbound storage-array binding contributes 0; the vertex buffer contributes 64.
         let vertex_buffer_metal_indices = vec![2u32];
         let vertex_buffers = vec![make_vertex_bound_buffer(2, 64, 0)];
         // Storage binding references group=0,binding=99 which has no matching entry in bind_buffers
@@ -1976,10 +2011,7 @@ mod tests {
         )
         .expect("compose must succeed");
 
-        // Two entries: [storage_size(0), vertex_size(64)].
-        assert_eq!(sizes.len(), 2);
-        assert_eq!(sizes[0], 0u32); // storage entry (unbound → 0)
-        assert_eq!(sizes[1], 64u32); // vertex entry
+        assert_eq!(sizes, vec![0, 64, 0, 0]);
     }
 
     /// Effective size saturates at u32::MAX for a very large buffer.
@@ -1993,7 +2025,7 @@ mod tests {
             compose_vertex_stage_sizes(&[], &[], &vertex_buffer_metal_indices, &vertex_buffers)
                 .expect("compose must succeed");
 
-        assert_eq!(sizes, vec![u32::MAX]);
+        assert_eq!(sizes, vec![u32::MAX, 0, 0, 0]);
     }
 
     #[test]
