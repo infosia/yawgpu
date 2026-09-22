@@ -82,6 +82,14 @@ fn vulkan_clip_distances_cull_by_sign() {
         eprintln!("Skipping Vulkan clip-distances: {reason}");
         return;
     }
+    // MoltenVK (the only Vulkan ICD on macOS) advertises shaderClipDistance but
+    // cannot lower a `ClipDistance`-decorated output to MSL: pipeline creation
+    // fails with "Shader library compile failed". Execution is verified on
+    // native Vulkan hardware (Block 106); see specs/tracking/clip-distances.md.
+    if cfg!(target_os = "macos") {
+        eprintln!("skipping: MoltenVK cannot lower ClipDistance (needs native Vulkan HW)");
+        return;
+    }
     unsafe {
         let instance = create_vulkan_instance();
         let adapter = request_adapter(instance);

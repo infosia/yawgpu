@@ -56,3 +56,5 @@ class as [[moltenvk-shader-execution-limits]] — MoltenVK is not a shader-codeg
   in sync). Vulkan enable mirrors `dual_src_blend` (`vulkan/mod.rs`).
 - Biggest remaining backfill (shader gate + reflection + limit); PrimitiveIndex
   (0x15) is the only one left after.
+
+**2026-09-22 (Mac):** `e2e_vulkan_clip_distances.rs::vulkan_clip_distances_cull_by_sign` skips on macOS (`cfg!(target_os = "macos")`, the framebuffer-fetch idiom) because MoltenVK fails pipeline creation with "Shader library compile failed" for a `ClipDistance` output — the limitation above; the adapter-advertisement case still runs there. Execution stays verified on native Vulkan (Block 106).

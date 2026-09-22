@@ -1,6 +1,6 @@
 # Block 105 — Vulkan image layouts are tracked per subresource
 
-Status: **COMPLETE (2026-09-22)** — S1 `a00daf9`, S2 `10a59de`, S3 `6d391aa`, Phase Review fixes in the S4 commit (1 MAJOR fixed, 1 MAJOR deferred to backlog A8 as pre-existing / out of scope, 11 MINOR: 5 fixed, rest deferred or documented); final gate on the Windows native NVIDIA host: workspace 1093/0, Vulkan e2e 112/0 + passthrough 2/0, HAL 54/0, 0 validation-layer lines; CTS re-confirmation on MoltenVK pending the next Mac session. Backlog item **A5**
+Status: **COMPLETE (2026-09-22)** — S1 `a00daf9`, S2 `10a59de`, S3 `6d391aa`, Phase Review fixes in the S4 commit (1 MAJOR fixed, 1 MAJOR deferred to backlog A8 as pre-existing / out of scope, 11 MINOR: 5 fixed, rest deferred or documented); final gate on the Windows native NVIDIA host: workspace 1093/0, Vulkan e2e 112/0 + passthrough 2/0, HAL 54/0, 0 validation-layer lines; MoltenVK re-confirmation done (Mac, 2026-09-22): the 10 CTS trees 274,884 pass / 9 fail = identical to the pre-Block-105 baseline (documented MoltenVK artifacts only), HAL 54/0, e2e 106/0, 0 layout-related validation lines — ledger "CTS" section. Backlog item **A5**
 (`specs/tracking/backlog.md`): "Vulkan image-layout tracking is
 per-texture, not per-subresource" (L), "the `tiled` subpass path lacks
 the sampled-texture layout transition" (M); the third A5 item

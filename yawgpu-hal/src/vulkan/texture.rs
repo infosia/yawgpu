@@ -160,14 +160,20 @@ fn bgra8_storage_view_format_list(
         .map(|rgba_format| [vk::Format::B8G8R8A8_UNORM, rgba_format])
 }
 
+/// Matches Dawn's TextureVk.cpp rule: only 3D COLOR_ATTACHMENT images need
+/// TYPE_2D_ARRAY_COMPATIBLE for depth-slice attachment views. Omitting it for
+/// other 3D images avoids VUID-VkImageCreateInfo-imageView2DOn3DImage-04459 on
+/// MoltenVK when imageView2DOn3DImage is false.
 fn texture_image_flags(
     dimension: HalTextureDimension,
+    usage: vk::ImageUsageFlags,
     bgra8_storage_view: bool,
 ) -> vk::ImageCreateFlags {
-    let mut flags = match dimension {
-        HalTextureDimension::D3 => vk::ImageCreateFlags::TYPE_2D_ARRAY_COMPATIBLE,
-        HalTextureDimension::D1 | HalTextureDimension::D2 => vk::ImageCreateFlags::empty(),
-    };
+    let mut flags = vk::ImageCreateFlags::empty();
+    if dimension == HalTextureDimension::D3 && usage.contains(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+    {
+        flags |= vk::ImageCreateFlags::TYPE_2D_ARRAY_COMPATIBLE;
+    }
     if bgra8_storage_view {
         flags |= vk::ImageCreateFlags::MUTABLE_FORMAT;
     }
@@ -214,9 +220,13 @@ pub(super) fn create_texture(
         HalTextureDimension::D1 | HalTextureDimension::D3 => 1,
     };
     let bgra8_storage_vk_format = bgra8_storage_view_format(descriptor.format, descriptor.usage);
-    let image_flags = texture_image_flags(descriptor.dimension, bgra8_storage_vk_format.is_some());
     let tiling = vk::ImageTiling::OPTIMAL;
     let usage = map_texture_usage(descriptor.usage, descriptor.format);
+    let image_flags = texture_image_flags(
+        descriptor.dimension,
+        usage,
+        bgra8_storage_vk_format.is_some(),
+    );
     // Multisampled images must only be created with a sample count the device
     // reports for this exact (format, type, tiling, usage, flags) combination;
     // calling vkCreateImage with an unsupported count violates
@@ -1207,8 +1217,10 @@ mod tests {
     fn bgra8_storage_texture_adds_mutable_format_and_format_list() {
         let storage = texture_usage(false, true, false);
 
-        assert!(texture_image_flags(HalTextureDimension::D2, true)
-            .contains(vk::ImageCreateFlags::MUTABLE_FORMAT));
+        assert!(
+            texture_image_flags(HalTextureDimension::D2, vk::ImageUsageFlags::STORAGE, true)
+                .contains(vk::ImageCreateFlags::MUTABLE_FORMAT)
+        );
         assert_eq!(
             bgra8_storage_view_format_list(HalTextureFormat::Bgra8Unorm, storage),
             Some([vk::Format::B8G8R8A8_UNORM, vk::Format::R8G8B8A8_UNORM])
@@ -1218,12 +1230,46 @@ mod tests {
     #[test]
     fn non_bgra_storage_texture_keeps_default_image_flags_and_no_storage_view() {
         let storage = texture_usage(false, true, false);
-        let flags = texture_image_flags(HalTextureDimension::D2, false);
+        let flags =
+            texture_image_flags(HalTextureDimension::D2, vk::ImageUsageFlags::STORAGE, false);
 
         assert!(!flags.contains(vk::ImageCreateFlags::MUTABLE_FORMAT));
         assert_eq!(
             bgra8_storage_view_format_list(HalTextureFormat::Rgba8Unorm, storage),
             None
         );
+    }
+
+    #[test]
+    fn texture_image_flags_allow_2d_array_views_only_for_3d_color_attachments() {
+        for dimension in [
+            HalTextureDimension::D1,
+            HalTextureDimension::D2,
+            HalTextureDimension::D3,
+        ] {
+            for usage in [
+                vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+                vk::ImageUsageFlags::SAMPLED,
+                vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST,
+                vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+                vk::ImageUsageFlags::STORAGE,
+                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            ] {
+                for bgra8_storage_view in [false, true] {
+                    let flags = texture_image_flags(dimension, usage, bgra8_storage_view);
+                    assert_eq!(
+                        flags.contains(vk::ImageCreateFlags::TYPE_2D_ARRAY_COMPATIBLE),
+                        dimension == HalTextureDimension::D3
+                            && usage.contains(vk::ImageUsageFlags::COLOR_ATTACHMENT),
+                        "{dimension:?}, {usage:?}, bgra8_storage_view={bgra8_storage_view}"
+                    );
+                    assert_eq!(
+                        flags.contains(vk::ImageCreateFlags::MUTABLE_FORMAT),
+                        bgra8_storage_view
+                    );
+                }
+            }
+        }
     }
 }
