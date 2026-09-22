@@ -23,9 +23,14 @@ no such entry point exists. bindgen maps `WGPUProc` to
   `*AddRef` / `*Release` / `*SetLabel` exports) resolves to the same
   address the linker exports for that symbol.
 - **R2** Every `yawgpu*` vendor entry point exported by the crate
-  (`yawgpu/ffi/yawgpu.h`) resolves too; entries behind a cargo feature
-  (`tiled`, `shader-passthrough`) resolve only when that feature is
-  compiled in, and are `NULL` otherwise.
+  (the `pub unsafe extern "C" fn yawgpu*` definitions under
+  `yawgpu/src/ffi/`; the vendor header is the `yawgpu.h` the C examples
+  consume, see `README.md` "The `yawgpu.h` companion header") resolves
+  too; entries behind the `tiled` cargo feature resolve only when that
+  feature is compiled in, and are `NULL` otherwise. (`shader-passthrough`
+  adds no entry point — it only widens `wgpuDeviceCreateShaderModule`'s
+  accepted chain.) A unit test asserts every vendor export resolves
+  (Phase Review m9).
 - **R3** An unknown name, an empty name, and a name that merely prefixes
   or extends a real one (`wgpuCreate`, `wgpuCreateInstanceX`) return
   `NULL`.

@@ -1,6 +1,6 @@
 # Block 102 — `timestamp-query` executes (Metal + Vulkan)
 
-Status: **S1–S3 IMPLEMENTED (2026-09-22)** — S1 `8fe363a` (core + Noop), S2 Metal + S3 Vulkan landed together (see git log); real-GPU e2e 4/4 on M2 Metal and 4/4 on MoltenVK; Khronos validation layer clean on the Vulkan e2e. S4 (CTS re-run + Phase Review) pending. Backlog item **A1** in
+Status: **COMPLETE (2026-09-22)** — S1 `8fe363a`, S2+S3 `bc64e25`, Phase Review fixes (C1/M1 + minors) in the commit that follows; real-GPU e2e 4/4 on M2 Metal (validation layer clean) and 4/4 on MoltenVK (Khronos validation layer clean); S4 CTS: Metal query_set / encoding,queries / command_buffer,queries / capability_checks,features / compute / memory_sync / copyBufferToBuffer / buffers trees **3723 pass, 0 fail, 0 crash**; MoltenVK same trees 3571 pass, 152 fail all `capability_checks,features,clip_distances` (the documented MoltenVK ClipDistance limitation, `specs/tracking/clip-distances.md`), 0 crash. Phase Review: 1 CRITICAL + 1 MAJOR fixed, MINOR triage in `specs/tracking/backlog.md`. Backlog item **A1** in
 `specs/tracking/backlog.md`. Depends on Block 99 (the advertisement
 now follows Dawn's device query; on Metal the cached
 `metal_device_supports_counter_sampling` decides the sampling mode
@@ -50,7 +50,9 @@ Metal, Vulkan (and any future backend) share it.
 - `HalQueryKind::Timestamp` (new variant; `#[non_exhaustive]` stays).
 - `HalAdapter::timestamp_period() -> f32` — nanoseconds per tick:
   - Vulkan: `limits.timestampPeriod`.
-  - Metal: calibrated once at adapter construction from
+  - Metal: calibrated **once per adapter, lazily on the first
+    `timestamp_period()` call** (Phase Review m7: the 2 ms sleep must not
+    sit on the adapter-enumeration path) from
     `sampleTimestamps:gpuTimestamp:`: sample `(cpu0, gpu0)`, sleep
     ≥ 2 ms, sample `(cpu1, gpu1)`, `period = (cpu1 − cpu0) as f64 / (gpu1 − gpu0) as f64`
     (`cpuTimestamp` is in nanoseconds — Dawn compares it against
@@ -99,8 +101,13 @@ Metal, Vulkan (and any future backend) share it.
   - **Resolve serialization (Dawn `MetalSerializeTimestampGenerationAndResolution`,
     crbug.com/372698905), carried on Apple8+:** before a timestamp-set
     resolve the queue encodes `encodeSignalEvent:value:` +
-    `encodeWaitForEvent:value:` on a device-owned `MTLSharedEvent`
-    (monotonic value). Without it a stamp written after a compute or
+    `encodeWaitForEvent:value:` on an `MTLSharedEvent` **owned by that
+    submission** (created lazily on the first timestamp resolve of the
+    copy list, values `1, 2, …` within the command buffer). A device-wide
+    event with a global counter is wrong: `submit_copies` encodes outside
+    `submission_lock`, so two threads can commit in the reverse order of
+    their values and the lower value then neither waits nor keeps the
+    event monotonic (Phase Review C1). Without it a stamp written after a compute or
     render pass resolves to `0` on the M2 (measured 2026-09-22: the e2e
     `end must follow begin: [t, 0]`). Both deviations together are what
     make every ordering pass; each alone leaves a failing case.
@@ -188,8 +195,8 @@ Metal, Vulkan (and any future backend) share it.
   Dawn's `TimestampParams` constructor:
   `upper = ceil(log2(period))`, `right_shift = 16 − min(upper, 16)`,
   `multiplier = (period · 2^right_shift) as u32`. Pure function,
-  unit-tested (period 1.0 → (65536, 16); 41.666… → (43690, 10);
-  83.333 → (21333, 8)).
+  unit-tested (period 1.0 → (65536, 16); 41.666… → (42666, 10);
+  83.333 → (42666, 9) — `ceil(log2(83.333)) = 7`, so `right_shift = 9`).
 - The pipeline is created lazily, once per `Device`, on the first
   timestamp resolve (`OnceLock` on `DeviceInner`), through the ordinary
   `create_shader_module` + `create_compute_pipeline` path with an
