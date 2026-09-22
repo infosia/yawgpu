@@ -1,6 +1,6 @@
 # Block 104 — Lazy zero-initialization Stage 2
 
-Status: **SPEC (2026-09-22)**. Backlog item **A3** in
+Status: **S1–S3 IMPLEMENTED (2026-09-22)** — S1 core `60744d8`, S2 Metal `99d786b`, S3 Vulkan `9aa1da3` (+ Vulkan barrier/validation follow-ups `974a818`). Real-GPU: Metal inline clear tests 5/5, `e2e_metal_lazy_init` 6/6 (Metal API validation layer clean); MoltenVK inline 4/4, `e2e_vulkan_lazy_init` 6/6 (Khronos validation layer clean). S5 CTS (8 `api,operation` trees: resource_init, render_pass, rendering, command_buffer, texture_view, sampling, storage_texture, compute): Metal **224,036 pass / 0 fail / 0 crash**; MoltenVK 224,027 pass / 9 fail — the 9 are byte-identical to a baseline built at `a2907ca` (pre-Block-104): `rendering,3d_texture_slices` ×7 and `depth_clip_clamp` ×2, the documented MoltenVK artifacts (F-139/F-140, perf ledger Run 5). GLES (S4) not started — Tier 2, catalogued. Phase Review pending. Backlog item **A3** in
 `specs/tracking/backlog.md`. Completes F-138 Stage 1
 (`specs/tracking/tint-migration-plan.md` → "F-138 — texture lazy
 zero-initialization"; commits `8ebdfa6`, `0449b89`).
