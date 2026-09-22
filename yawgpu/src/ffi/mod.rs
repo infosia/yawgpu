@@ -64,6 +64,8 @@ pub mod external_texture;
 pub mod instance;
 /// Pipelines module.
 pub mod pipelines;
+/// Proc-address lookup module.
+pub mod proc_address;
 /// Query module.
 pub mod query;
 /// Queue module.

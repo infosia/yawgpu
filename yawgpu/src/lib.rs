@@ -16,6 +16,7 @@ pub use ffi::encoder::*;
 pub use ffi::external_texture::*;
 pub use ffi::instance::*;
 pub use ffi::pipelines::*;
+pub use ffi::proc_address::*;
 pub use ffi::query::*;
 pub use ffi::queue::*;
 pub use ffi::render_pass::*;
