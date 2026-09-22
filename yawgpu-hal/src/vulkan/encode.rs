@@ -76,7 +76,12 @@ pub(super) fn record_and_submit_copies(
                     encode_buffer_clear(&queue.device.device, command_buffer, clear)?;
                 }
                 HalCopy::ClearTexture(clear) => {
-                    encode_texture_clear(&queue.device.device, command_buffer, clear)?;
+                    encode_texture_clear(
+                        &queue.device.device,
+                        command_buffer,
+                        clear,
+                        &mut temporary_resources,
+                    )?;
                 }
                 HalCopy::WriteTimestamp(write) => {
                     encode_write_timestamp(&queue.device.device, command_buffer, write)?;
@@ -791,27 +796,109 @@ pub(super) fn encode_buffer_clear(
     Ok(())
 }
 
-/// Records texture clear encode into the command stream.
-pub(super) fn encode_texture_clear(
-    device: &ash::Device,
-    command_buffer: vk::CommandBuffer,
+/// Selects how a `HalCopy::ClearTexture` is executed on Vulkan (Block 104 R6).
+///
+/// `vkCmdClearColorImage` is only defined for uncompressed color images, so the
+/// depth / stencil and block-compressed subresources that Stage 2 now asks the
+/// HAL to zero take the two other paths Dawn's `Texture::ClearTexture`
+/// (`TextureVk.cpp`) uses for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClearKind {
+    /// Uncompressed color, any sample count: `vkCmdClearColorImage`, which is
+    /// valid on a multisampled image.
+    Color,
+    /// Depth and/or stencil planes: `vkCmdClearDepthStencilImage` over this
+    /// aspect mask. The mask is empty when the requested aspect does not exist
+    /// on the format, in which case nothing is cleared.
+    DepthStencil(vk::ImageAspectFlags),
+    /// Block-compressed color: a zero-filled transient buffer copied in with
+    /// `vkCmdCopyBufferToImage`, because a compressed image rejects both image
+    /// clear commands.
+    Compressed {
+        /// Bytes occupied by one compressed block.
+        block_bytes: u32,
+        /// Block width in texels.
+        block_width: u32,
+        /// Block height in texels.
+        block_height: u32,
+    },
+}
+
+/// Returns the clear path for `format` restricted to the requested `aspect`.
+fn clear_kind(format: HalTextureFormat, aspect: HalTextureAspect) -> ClearKind {
+    let has_depth = format_has_depth_aspect(format);
+    let has_stencil = format_has_stencil_aspect(format);
+    if has_depth || has_stencil {
+        let mut aspects = vk::ImageAspectFlags::empty();
+        if has_depth && matches!(aspect, HalTextureAspect::All | HalTextureAspect::DepthOnly) {
+            aspects |= vk::ImageAspectFlags::DEPTH;
+        }
+        if has_stencil
+            && matches!(
+                aspect,
+                HalTextureAspect::All | HalTextureAspect::StencilOnly
+            )
+        {
+            aspects |= vk::ImageAspectFlags::STENCIL;
+        }
+        return ClearKind::DepthStencil(aspects);
+    }
+    match format.compressed_block_info() {
+        Some((block_bytes, block_width, block_height)) => ClearKind::Compressed {
+            block_bytes,
+            block_width,
+            block_height,
+        },
+        None => ClearKind::Color,
+    }
+}
+
+/// Returns `(bytes_per_row, bytes_per_image)` of the zeroed staging bytes one
+/// `width` x `height` texel subresource of a `block` format needs.
+///
+/// `block` is `(bytes, width, height)` as
+/// [`HalTextureFormat::compressed_block_info`] reports it. Both results count
+/// whole blocks, so a mip edge that does not fill its last block still gets a
+/// full block row.
+fn compressed_clear_layout(
+    width: u32,
+    height: u32,
+    block: (u32, u32, u32),
+) -> Result<(u64, u64), HalError> {
+    let (block_bytes, block_width, block_height) = block;
+    if block_width == 0 || block_height == 0 {
+        return Err(texture_error("compressed clear block size is zero"));
+    }
+    let bytes_per_row = u64::from(width.div_ceil(block_width))
+        .checked_mul(u64::from(block_bytes))
+        .ok_or_else(|| texture_error("compressed clear row size overflows"))?;
+    let bytes_per_image = bytes_per_row
+        .checked_mul(u64::from(height.div_ceil(block_height)))
+        .ok_or_else(|| texture_error("compressed clear image size overflows"))?;
+    Ok((bytes_per_row, bytes_per_image))
+}
+
+/// Rounds one mip axis up to a whole block grid (the physical mip size).
+fn block_aligned_extent(extent: u32, block: u32) -> Result<u32, HalError> {
+    if block == 0 {
+        return Err(texture_error("compressed clear block size is zero"));
+    }
+    extent
+        .div_ceil(block)
+        .checked_mul(block)
+        .ok_or_else(|| texture_error("compressed clear physical extent overflows"))
+}
+
+/// Returns the subresource range one `HalTextureClear` covers.
+///
+/// A 3D texture has a single array layer, so the whole mip — every depth
+/// slice — is the clear unit, as in Stage 1.
+fn texture_clear_subresource_range(
+    texture: &VulkanTexture,
     clear: &HalTextureClear,
-) -> Result<(), HalError> {
-    let crate::HalTexture::Vulkan(texture) = &clear.texture else {
-        return Err(texture_error("texture is not Vulkan-backed"));
-    };
-    validate_mip_level(texture, clear.mip_level)?;
-    let texture_inner = texture.inner()?;
-    let aspect = buffer_texture_copy_aspect_flags(clear.format, clear.aspect);
-    transition_image_aspect(
-        device,
-        command_buffer,
-        texture_inner,
-        aspect,
-        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-        IMAGE_LAYOUT_TRANSFER_DST,
-    );
-    let range = vk::ImageSubresourceRange::default()
+    aspect: vk::ImageAspectFlags,
+) -> vk::ImageSubresourceRange {
+    vk::ImageSubresourceRange::default()
         .aspect_mask(aspect)
         .base_mip_level(clear.mip_level)
         .level_count(1)
@@ -822,25 +909,27 @@ pub(super) fn encode_texture_clear(
         .layer_count(match texture.dimension {
             HalTextureDimension::D3 => 1,
             HalTextureDimension::D1 | HalTextureDimension::D2 => clear.array_layer_count,
-        });
-    let value = unsafe { vulkan_color_clear_value(clear.format, [0.0; 4]).color };
+        })
+}
+
+/// Orders the clear's transfer write against the transfer write or read that
+/// follows it in the same submission (F-138).
+fn texture_clear_write_after_write_barrier(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    image: vk::Image,
+    range: vk::ImageSubresourceRange,
+) {
+    let barrier = vk::ImageMemoryBarrier::default()
+        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .image(image)
+        .subresource_range(range)
+        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+        .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::TRANSFER_READ);
     unsafe {
-        device.cmd_clear_color_image(
-            command_buffer,
-            texture_inner.image,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            &value,
-            &[range],
-        );
-        let barrier = vk::ImageMemoryBarrier::default()
-            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .image(texture_inner.image)
-            .subresource_range(range)
-            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::TRANSFER_READ);
         device.cmd_pipeline_barrier(
             command_buffer,
             vk::PipelineStageFlags::TRANSFER,
@@ -851,6 +940,251 @@ pub(super) fn encode_texture_clear(
             &[barrier],
         );
     }
+}
+
+/// Records texture clear encode into the command stream.
+///
+/// Block 104 R6: the subresources are zeroed for **any** format and sample
+/// count. Uncompressed color (including multisampled) uses
+/// `vkCmdClearColorImage`; a depth and/or stencil aspect uses
+/// `vkCmdClearDepthStencilImage` with `{depth: 0.0, stencil: 0}`; a
+/// block-compressed image is filled from a zeroed transient buffer, which the
+/// submission retirement ring keeps alive through `temporary_resources`.
+///
+/// The image layout tracker is whole-image, so the transition to
+/// `TRANSFER_DST_OPTIMAL` always covers every aspect of the image even when the
+/// clear itself touches one plane — the same rule the discarded depth/stencil
+/// render-pass epilogue follows.
+pub(super) fn encode_texture_clear(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    clear: &HalTextureClear,
+    temporary_resources: &mut Vec<RetainedResource>,
+) -> Result<(), HalError> {
+    let crate::HalTexture::Vulkan(texture) = &clear.texture else {
+        return Err(texture_error("texture is not Vulkan-backed"));
+    };
+    validate_mip_level(texture, clear.mip_level)?;
+    let texture_inner = texture.inner()?;
+    match clear_kind(clear.format, clear.aspect) {
+        ClearKind::Color => {
+            let range =
+                texture_clear_subresource_range(texture, clear, vk::ImageAspectFlags::COLOR);
+            transition_image(
+                device,
+                command_buffer,
+                texture_inner,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                IMAGE_LAYOUT_TRANSFER_DST,
+            );
+            let value = unsafe { vulkan_color_clear_value(clear.format, [0.0; 4]).color };
+            unsafe {
+                device.cmd_clear_color_image(
+                    command_buffer,
+                    texture_inner.image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &value,
+                    &[range],
+                );
+            }
+            texture_clear_write_after_write_barrier(
+                device,
+                command_buffer,
+                texture_inner.image,
+                range,
+            );
+        }
+        ClearKind::DepthStencil(aspects) => {
+            if aspects.is_empty() {
+                return Ok(());
+            }
+            let range = texture_clear_subresource_range(texture, clear, aspects);
+            transition_image(
+                device,
+                command_buffer,
+                texture_inner,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                IMAGE_LAYOUT_TRANSFER_DST,
+            );
+            unsafe {
+                device.cmd_clear_depth_stencil_image(
+                    command_buffer,
+                    texture_inner.image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &vk::ClearDepthStencilValue {
+                        depth: 0.0,
+                        stencil: 0,
+                    },
+                    &[range],
+                );
+            }
+            texture_clear_write_after_write_barrier(
+                device,
+                command_buffer,
+                texture_inner.image,
+                range,
+            );
+        }
+        ClearKind::Compressed {
+            block_bytes,
+            block_width,
+            block_height,
+        } => encode_compressed_texture_clear(
+            device,
+            command_buffer,
+            clear,
+            texture,
+            texture_inner,
+            (block_bytes, block_width, block_height),
+            temporary_resources,
+        )?,
+    }
+    Ok(())
+}
+
+/// Zeroes a block-compressed subresource with a buffer-to-image copy of a
+/// zero-filled transient buffer, the path Dawn takes for a format both
+/// `vkCmdClearColorImage` and `vkCmdClearDepthStencilImage` reject.
+///
+/// The staging buffer is zeroed on the GPU with `vkCmdFillBuffer` so no host
+/// allocation scales with the subresource, and its size is rounded up to the
+/// four bytes that command requires. One `VkBufferImageCopy` per array layer
+/// (per depth slice for a 3D texture) keeps every `bufferOffset` a multiple of
+/// both four and the block size.
+fn encode_compressed_texture_clear(
+    device: &ash::Device,
+    command_buffer: vk::CommandBuffer,
+    clear: &HalTextureClear,
+    texture: &VulkanTexture,
+    texture_inner: &VulkanTextureInner,
+    block: (u32, u32, u32),
+    temporary_resources: &mut Vec<RetainedResource>,
+) -> Result<(), HalError> {
+    let (block_bytes, block_width, block_height) = block;
+    let (mip_width, mip_height) = mip_extent(texture.width, texture.height, clear.mip_level);
+    let (bytes_per_row, bytes_per_image) = compressed_clear_layout(mip_width, mip_height, block)?;
+    // Vulkan copies whole blocks: the region covers the block-rounded physical
+    // mip, and `buffer_image_copy` clamps `imageExtent` back to the logical mip
+    // size at the edge.
+    let physical_width = block_aligned_extent(mip_width, block_width)?;
+    let physical_height = block_aligned_extent(mip_height, block_height)?;
+    let (base_slice, slice_count) = match texture.dimension {
+        HalTextureDimension::D3 => (
+            0,
+            texture
+                .depth_or_array_layers
+                .checked_shr(clear.mip_level)
+                .unwrap_or(0)
+                .max(1),
+        ),
+        HalTextureDimension::D1 | HalTextureDimension::D2 => {
+            (clear.base_array_layer, clear.array_layer_count)
+        }
+    };
+    if slice_count == 0 {
+        return Ok(());
+    }
+    let size = bytes_per_image
+        .checked_mul(u64::from(slice_count))
+        .and_then(|size| size.checked_next_multiple_of(4))
+        .ok_or_else(|| texture_error("compressed clear buffer size overflows"))?;
+    let bytes_per_row = u32::try_from(bytes_per_row)
+        .map_err(|_| texture_error("compressed clear bytes per row is too large"))?;
+    let rows_per_image = mip_height.div_ceil(block_height);
+    let zeros = Arc::new(create_buffer(
+        Arc::clone(&texture_inner.device),
+        size,
+        HalBufferUsage {
+            copy_src: true,
+            copy_dst: true,
+            ..Default::default()
+        },
+    )?);
+    let zeros_handle = zeros.buffer;
+    // The submission retirement ring owns the allocation through fence
+    // completion, as it does for the temporary buffer of a compressed
+    // texture-to-texture copy. On recording errors the caller drops it after
+    // destroying the unsubmitted command pool.
+    temporary_resources.push(RetainedResource::Buffer {
+        _inner: Arc::clone(&zeros),
+    });
+    let staging = VulkanBuffer {
+        inner: Some(zeros),
+        size,
+    };
+    let mut regions = Vec::new();
+    for slice in 0..slice_count {
+        let offset = bytes_per_image
+            .checked_mul(u64::from(slice))
+            .ok_or_else(|| texture_error("compressed clear buffer offset overflows"))?;
+        let z = base_slice
+            .checked_add(slice)
+            .ok_or_else(|| texture_error("compressed clear layer range overflows"))?;
+        let copy = HalBufferTextureCopy {
+            buffer: HalBuffer::Vulkan(staging.clone()),
+            buffer_layout: crate::HalBufferTextureLayout {
+                offset,
+                bytes_per_row,
+                rows_per_image,
+            },
+            texture: clear.texture.clone(),
+            format: clear.format,
+            aspect: HalTextureAspect::All,
+            mip_level: clear.mip_level,
+            origin: crate::HalOrigin3d { x: 0, y: 0, z },
+            extent: HalExtent3d {
+                width: physical_width,
+                height: physical_height,
+                depth_or_array_layers: 1,
+            },
+        };
+        regions.push(buffer_image_copy(
+            &copy,
+            texture,
+            block_bytes,
+            vk::ImageAspectFlags::COLOR,
+        )?);
+    }
+    transition_image(
+        device,
+        command_buffer,
+        texture_inner,
+        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        IMAGE_LAYOUT_TRANSFER_DST,
+    );
+    unsafe {
+        device.cmd_fill_buffer(command_buffer, zeros_handle, 0, size, 0);
+        let barrier = vk::BufferMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .buffer(zeros_handle)
+            .offset(0)
+            .size(size);
+        device.cmd_pipeline_barrier(
+            command_buffer,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[barrier],
+            &[],
+        );
+        device.cmd_copy_buffer_to_image(
+            command_buffer,
+            zeros_handle,
+            texture_inner.image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &regions,
+        );
+    }
+    texture_clear_write_after_write_barrier(
+        device,
+        command_buffer,
+        texture_inner.image,
+        texture_clear_subresource_range(texture, clear, vk::ImageAspectFlags::COLOR),
+    );
     Ok(())
 }
 
@@ -5673,5 +6007,586 @@ mod tests {
         assert_eq!(mip_extent(16, 16, 2), (4, 4));
         assert_eq!(mip_extent(24, 10, 2), (6, 2));
         assert_eq!(mip_extent(1, 1, 8), (1, 1));
+    }
+
+    /// Block 104 R6: the clear path is chosen from the format's own aspects and
+    /// block layout, narrowed by the requested aspect — not from the requested
+    /// aspect alone.
+    #[test]
+    fn clear_kind_selects_depth_stencil_compressed_and_color_paths() {
+        assert_eq!(
+            clear_kind(HalTextureFormat::Rgba8Unorm, HalTextureAspect::All),
+            ClearKind::Color
+        );
+        assert_eq!(
+            clear_kind(HalTextureFormat::Depth32Float, HalTextureAspect::All),
+            ClearKind::DepthStencil(vk::ImageAspectFlags::DEPTH)
+        );
+        assert_eq!(
+            clear_kind(HalTextureFormat::Stencil8, HalTextureAspect::All),
+            ClearKind::DepthStencil(vk::ImageAspectFlags::STENCIL)
+        );
+        assert_eq!(
+            clear_kind(HalTextureFormat::Depth24PlusStencil8, HalTextureAspect::All),
+            ClearKind::DepthStencil(vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL)
+        );
+        assert_eq!(
+            clear_kind(
+                HalTextureFormat::Depth32FloatStencil8,
+                HalTextureAspect::DepthOnly
+            ),
+            ClearKind::DepthStencil(vk::ImageAspectFlags::DEPTH)
+        );
+        assert_eq!(
+            clear_kind(
+                HalTextureFormat::Depth32FloatStencil8,
+                HalTextureAspect::StencilOnly
+            ),
+            ClearKind::DepthStencil(vk::ImageAspectFlags::STENCIL)
+        );
+        // A stencil request on a depth-only format selects no plane, so the
+        // clear becomes a no-op instead of an invalid colour clear of a depth
+        // image.
+        assert_eq!(
+            clear_kind(
+                HalTextureFormat::Depth32Float,
+                HalTextureAspect::StencilOnly
+            ),
+            ClearKind::DepthStencil(vk::ImageAspectFlags::empty())
+        );
+        assert_eq!(
+            clear_kind(HalTextureFormat::Bc1RgbaUnorm, HalTextureAspect::All),
+            ClearKind::Compressed {
+                block_bytes: 8,
+                block_width: 4,
+                block_height: 4,
+            }
+        );
+        assert_eq!(
+            clear_kind(HalTextureFormat::Astc6x5Unorm, HalTextureAspect::All),
+            ClearKind::Compressed {
+                block_bytes: 16,
+                block_width: 6,
+                block_height: 5,
+            }
+        );
+    }
+
+    /// Block 104 R6: the zeroed staging bytes of a compressed clear count whole
+    /// blocks, so a mip edge that does not fill its last block still gets a
+    /// full block row and a full block column.
+    #[test]
+    fn compressed_clear_layout_counts_whole_blocks_at_the_mip_edge() {
+        let bc1 = (8, 4, 4);
+        assert_eq!(
+            compressed_clear_layout(8, 8, bc1).expect("bc1 8x8"),
+            (16, 32)
+        );
+        assert_eq!(
+            compressed_clear_layout(9, 9, bc1).expect("bc1 9x9"),
+            (24, 72)
+        );
+        assert_eq!(compressed_clear_layout(4, 4, bc1).expect("bc1 4x4"), (8, 8));
+        assert_eq!(compressed_clear_layout(1, 1, bc1).expect("bc1 1x1"), (8, 8));
+        let astc6x5 = (16, 6, 5);
+        assert_eq!(
+            compressed_clear_layout(7, 6, astc6x5).expect("astc6x5 7x6"),
+            (32, 64)
+        );
+        assert!(compressed_clear_layout(4, 4, (8, 0, 4)).is_err());
+        assert!(compressed_clear_layout(4, 4, (8, 4, 0)).is_err());
+    }
+
+    /// Block 104 R6: a compressed clear region covers the physical (block
+    /// rounded) mip so `vkCmdCopyBufferToImage` transfers whole blocks.
+    #[test]
+    fn block_aligned_extent_rounds_up_and_rejects_a_zero_block() {
+        assert_eq!(block_aligned_extent(9, 4).expect("9 texels"), 12);
+        assert_eq!(block_aligned_extent(8, 4).expect("8 texels"), 8);
+        assert_eq!(block_aligned_extent(1, 4).expect("1 texel"), 4);
+        assert_eq!(block_aligned_extent(7, 6).expect("7 texels"), 12);
+        assert!(block_aligned_extent(4, 0).is_err());
+    }
+
+    /// Returns the first Vulkan adapter together with a device created on it,
+    /// so a real-device test can skip on an optional format the adapter does
+    /// not advertise.
+    #[cfg(feature = "vulkan")]
+    fn vulkan_adapter_and_device() -> (VulkanAdapter, VulkanDevice) {
+        let instance = VulkanInstance::new().expect("create Vulkan instance");
+        let adapter = instance
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("at least one Vulkan adapter");
+        let device = adapter.create_device().expect("create Vulkan device");
+        (adapter, device)
+    }
+
+    /// Returns the usage of a texture that is rendered to and copied both ways.
+    #[cfg(feature = "vulkan")]
+    fn clear_test_attachment_usage() -> HalTextureUsage {
+        HalTextureUsage {
+            copy_src: true,
+            copy_dst: true,
+            texture_binding: false,
+            storage_binding: false,
+            render_attachment: true,
+            transient: false,
+        }
+    }
+
+    /// Returns the usage of a texture that is only copied both ways.
+    #[cfg(feature = "vulkan")]
+    fn clear_test_copy_usage() -> HalTextureUsage {
+        HalTextureUsage {
+            copy_src: true,
+            copy_dst: true,
+            texture_binding: false,
+            storage_binding: false,
+            render_attachment: false,
+            transient: false,
+        }
+    }
+
+    /// Returns the usage of a host-written upload buffer.
+    #[cfg(feature = "vulkan")]
+    fn upload_usage() -> HalBufferUsage {
+        HalBufferUsage {
+            copy_src: true,
+            map_write: true,
+            ..HalBufferUsage::default()
+        }
+    }
+
+    /// Reads `count` little-endian `f32` texels back from a buffer.
+    #[cfg(feature = "vulkan")]
+    fn read_f32s(buffer: &VulkanBuffer, count: u64) -> Vec<f32> {
+        buffer
+            .read(0, count * 4)
+            .expect("read float texels")
+            .chunks_exact(4)
+            .map(|chunk| {
+                let mut value = [0; 4];
+                value.copy_from_slice(chunk);
+                f32::from_le_bytes(value)
+            })
+            .collect()
+    }
+
+    /// Returns a buffer/texture copy of one full square 2D mip subresource of
+    /// `size` texels a side, tightly packed at `bytes_per_block` bytes per
+    /// texel (per compressed block for a block format).
+    #[cfg(feature = "vulkan")]
+    fn clear_test_copy(
+        buffer: &VulkanBuffer,
+        texture: &VulkanTexture,
+        format: HalTextureFormat,
+        aspect: HalTextureAspect,
+        mip_level: u32,
+        size: u32,
+        bytes_per_block: u32,
+    ) -> HalBufferTextureCopy {
+        let (_, block_width, block_height) = format.compressed_block_info().unwrap_or((1, 1, 1));
+        HalBufferTextureCopy {
+            buffer: HalBuffer::Vulkan(buffer.clone()),
+            buffer_layout: HalBufferTextureLayout {
+                offset: 0,
+                bytes_per_row: size.div_ceil(block_width) * bytes_per_block,
+                rows_per_image: size.div_ceil(block_height),
+            },
+            texture: HalTexture::Vulkan(texture.clone()),
+            format,
+            aspect,
+            mip_level,
+            origin: HalOrigin3d { x: 0, y: 0, z: 0 },
+            extent: HalExtent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+        }
+    }
+
+    /// Returns a whole-subresource clear of mip `mip_level`, layer 0.
+    #[cfg(feature = "vulkan")]
+    fn clear_test_clear(
+        texture: &VulkanTexture,
+        format: HalTextureFormat,
+        aspect: HalTextureAspect,
+        mip_level: u32,
+    ) -> HalCopy {
+        HalCopy::ClearTexture(HalTextureClear {
+            texture: HalTexture::Vulkan(texture.clone()),
+            format,
+            aspect,
+            mip_level,
+            base_array_layer: 0,
+            array_layer_count: 1,
+        })
+    }
+
+    /// Block 104 R6: `ClearTexture` zeroes a `depth32float` depth aspect on a
+    /// real device. The canary read back first proves the zeros come from the
+    /// clear and not from a freshly allocated (already zero) image.
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_clear_texture_zeroes_depth32float_after_canary() {
+        let device = vulkan_device();
+        let format = HalTextureFormat::Depth32Float;
+        let texture = device
+            .create_texture(&HalTextureDescriptor {
+                dimension: HalTextureDimension::D2,
+                format,
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: clear_test_copy_usage(),
+            })
+            .expect("create depth32float texture");
+        let upload = device
+            .create_buffer(64, upload_usage())
+            .expect("create upload buffer");
+        let readback = device
+            .create_buffer(64, readback_usage())
+            .expect("create readback buffer");
+        let canary: Vec<u8> = (0..16).flat_map(|_| 1.0f32.to_le_bytes()).collect();
+        upload.write(0, &canary).expect("write depth canary");
+        let depth_copy = |buffer: &VulkanBuffer| {
+            clear_test_copy(
+                buffer,
+                &texture,
+                format,
+                HalTextureAspect::DepthOnly,
+                0,
+                4,
+                4,
+            )
+        };
+
+        device
+            .queue()
+            .submit_copies(&[
+                HalCopy::BufferToTexture(depth_copy(&upload)),
+                HalCopy::TextureToBuffer(depth_copy(&readback)),
+            ])
+            .expect("submit depth canary");
+        device.queue().wait_idle().expect("wait idle");
+        assert_eq!(
+            read_f32s(&readback, 16),
+            vec![1.0; 16],
+            "the canary must land before the clear is measured"
+        );
+
+        device
+            .queue()
+            .submit_copies(&[
+                clear_test_clear(&texture, format, HalTextureAspect::DepthOnly, 0),
+                HalCopy::TextureToBuffer(depth_copy(&readback)),
+            ])
+            .expect("submit depth clear");
+        device.queue().wait_idle().expect("wait idle");
+
+        assert_eq!(read_f32s(&readback, 16), vec![0.0; 16]);
+    }
+
+    /// Block 104 R6: a `StencilOnly` clear of a combined depth-stencil texture
+    /// zeroes the stencil plane and leaves the depth plane's canary intact.
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_clear_texture_zeroes_stencil_aspect_only() {
+        let (adapter, device) = vulkan_adapter_and_device();
+        if !adapter.supports_depth32float_stencil8() {
+            eprintln!("skipping: adapter does not advertise depth32float-stencil8");
+            return;
+        }
+        let format = HalTextureFormat::Depth32FloatStencil8;
+        let texture = device
+            .create_texture(&HalTextureDescriptor {
+                dimension: HalTextureDimension::D2,
+                format,
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: clear_test_attachment_usage(),
+            })
+            .expect("create depth32float-stencil8 texture");
+        let depth_readback = device
+            .create_buffer(64, readback_usage())
+            .expect("create depth readback buffer");
+        let stencil_readback = device
+            .create_buffer(16, readback_usage())
+            .expect("create stencil readback buffer");
+        // The canary is written by an empty render pass that clears depth to
+        // 1.0 and stencil to 0xff, the only way to write both planes at once.
+        let canary_pass = HalCopy::RenderPassCommandStream(HalRenderPassCommandStream {
+            color_targets: Vec::new(),
+            framebuffer_fetch_color_slots: Vec::new(),
+            depth_stencil_attachment: Some(HalRenderDepthStencilAttachment {
+                texture: HalTexture::Vulkan(texture.clone()),
+                format,
+                mip_level: 0,
+                array_layer: 0,
+                depth_load_op: HalRenderLoadOp::Clear,
+                depth_store: true,
+                depth_clear_value: 1.0,
+                depth_read_only: false,
+                stencil_load_op: HalRenderLoadOp::Clear,
+                stencil_store: true,
+                stencil_clear_value: 0xff,
+                stencil_read_only: false,
+            }),
+            occlusion_query_set: None,
+            commands: Vec::new(),
+        });
+        let depth_copy = HalCopy::TextureToBuffer(clear_test_copy(
+            &depth_readback,
+            &texture,
+            format,
+            HalTextureAspect::DepthOnly,
+            0,
+            4,
+            4,
+        ));
+        let stencil_copy = HalCopy::TextureToBuffer(clear_test_copy(
+            &stencil_readback,
+            &texture,
+            format,
+            HalTextureAspect::StencilOnly,
+            0,
+            4,
+            1,
+        ));
+
+        // Both aspect readbacks ride in the same submission as the render pass
+        // that wrote them: the Vulkan image layout tracker is whole-image, so
+        // two per-aspect transitions in a row only move the first aspect.
+        device
+            .queue()
+            .submit_copies(&[canary_pass, depth_copy.clone(), stencil_copy.clone()])
+            .expect("submit depth-stencil canary");
+        device.queue().wait_idle().expect("wait idle");
+        assert_eq!(read_f32s(&depth_readback, 16), vec![1.0; 16]);
+        assert_eq!(
+            stencil_readback.read(0, 16).expect("read stencil canary"),
+            vec![0xff; 16],
+            "the stencil canary must land before the clear is measured"
+        );
+
+        device
+            .queue()
+            .submit_copies(&[
+                clear_test_clear(&texture, format, HalTextureAspect::StencilOnly, 0),
+                stencil_copy,
+                depth_copy,
+            ])
+            .expect("submit stencil clear");
+        device.queue().wait_idle().expect("wait idle");
+
+        assert_eq!(
+            stencil_readback.read(0, 16).expect("read cleared stencil"),
+            vec![0; 16]
+        );
+        assert_eq!(
+            read_f32s(&depth_readback, 16),
+            vec![1.0; 16],
+            "a stencil-only clear must not touch the depth plane"
+        );
+    }
+
+    /// Block 104 R6: `ClearTexture` zeroes every sample of a 4x MSAA colour
+    /// texture, observed through a resolve into a single-sample texture.
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_clear_texture_zeroes_multisampled_color() {
+        let device = vulkan_device();
+        let format = HalTextureFormat::Rgba8Unorm;
+        let multisampled = device
+            .create_texture(&HalTextureDescriptor {
+                dimension: HalTextureDimension::D2,
+                format,
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+                mip_level_count: 1,
+                sample_count: 4,
+                usage: HalTextureUsage {
+                    copy_src: false,
+                    copy_dst: false,
+                    texture_binding: false,
+                    storage_binding: false,
+                    render_attachment: true,
+                    transient: false,
+                },
+            })
+            .expect("create 4x MSAA texture");
+        let resolved = device
+            .create_texture(&HalTextureDescriptor {
+                dimension: HalTextureDimension::D2,
+                format,
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: clear_test_attachment_usage(),
+            })
+            .expect("create resolve target");
+        let readback = device
+            .create_buffer(64, readback_usage())
+            .expect("create readback buffer");
+        let resolve_pass = |load_op, clear_color| {
+            HalCopy::RenderPassCommandStream(HalRenderPassCommandStream {
+                color_targets: vec![Some(HalRenderColorTarget {
+                    texture: HalTexture::Vulkan(multisampled.clone()),
+                    view_format: format,
+                    resolve_target: Some(HalTexture::Vulkan(resolved.clone())),
+                    resolve_view_format: Some(format),
+                    mip_level: 0,
+                    array_layer: 0,
+                    depth_slice: 0,
+                    resolve_mip_level: 0,
+                    resolve_array_layer: 0,
+                    load_op,
+                    store: true,
+                    clear_color,
+                })],
+                framebuffer_fetch_color_slots: Vec::new(),
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                commands: Vec::new(),
+            })
+        };
+        let resolved_copy = HalCopy::TextureToBuffer(clear_test_copy(
+            &readback,
+            &resolved,
+            format,
+            HalTextureAspect::All,
+            0,
+            4,
+            4,
+        ));
+
+        device
+            .queue()
+            .submit_copies(&[
+                resolve_pass(HalRenderLoadOp::Clear, [1.0, 0.0, 0.0, 1.0]),
+                resolved_copy.clone(),
+            ])
+            .expect("submit MSAA canary");
+        device.queue().wait_idle().expect("wait idle");
+        assert_eq!(
+            readback.read(0, 64).expect("read MSAA canary"),
+            [255, 0, 0, 255].repeat(16),
+            "the canary must land before the clear is measured"
+        );
+
+        device
+            .queue()
+            .submit_copies(&[
+                clear_test_clear(&multisampled, format, HalTextureAspect::All, 0),
+                resolve_pass(HalRenderLoadOp::Load, [0.0; 4]),
+                resolved_copy,
+            ])
+            .expect("submit MSAA clear");
+        device.queue().wait_idle().expect("wait idle");
+
+        assert_eq!(
+            readback.read(0, 64).expect("read cleared MSAA"),
+            vec![0; 64]
+        );
+    }
+
+    /// Block 104 R6: `ClearTexture` of one mip of a block-compressed texture
+    /// zeroes that mip's blocks and leaves the other mip's canary intact.
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_clear_texture_zeroes_bc1_mip_and_keeps_canary_mip() {
+        let (adapter, device) = vulkan_adapter_and_device();
+        if !adapter.supports_texture_compression_bc() {
+            eprintln!("skipping: adapter does not advertise BC texture compression");
+            return;
+        }
+        let format = HalTextureFormat::Bc1RgbaUnorm;
+        let texture = device
+            .create_texture(&HalTextureDescriptor {
+                dimension: HalTextureDimension::D2,
+                format,
+                width: 8,
+                height: 8,
+                depth_or_array_layers: 1,
+                mip_level_count: 2,
+                sample_count: 1,
+                usage: clear_test_copy_usage(),
+            })
+            .expect("create bc1-rgba-unorm texture");
+        // 8x8 is 2x2 blocks of 8 bytes; mip 1 is 4x4, a single block.
+        let upload = device
+            .create_buffer(32, upload_usage())
+            .expect("create upload buffer");
+        let mip0_readback = device
+            .create_buffer(32, readback_usage())
+            .expect("create mip 0 readback buffer");
+        let mip1_readback = device
+            .create_buffer(8, readback_usage())
+            .expect("create mip 1 readback buffer");
+        let canary: Vec<u8> = (0..32u8).map(|byte| byte.wrapping_add(1)).collect();
+        upload.write(0, &canary).expect("write block canary");
+        let mip0_copy = |buffer: &VulkanBuffer| {
+            clear_test_copy(buffer, &texture, format, HalTextureAspect::All, 0, 8, 8)
+        };
+        let mip1_copy = |buffer: &VulkanBuffer| {
+            clear_test_copy(buffer, &texture, format, HalTextureAspect::All, 1, 4, 8)
+        };
+
+        // Both mips carry a canary, so the mip 1 zero assertion cannot pass on
+        // a freshly allocated (already zero) image.
+        device
+            .queue()
+            .submit_copies(&[
+                HalCopy::BufferToTexture(mip0_copy(&upload)),
+                HalCopy::BufferToTexture(mip1_copy(&upload)),
+                HalCopy::TextureToBuffer(mip0_copy(&mip0_readback)),
+                HalCopy::TextureToBuffer(mip1_copy(&mip1_readback)),
+            ])
+            .expect("submit block canary");
+        device.queue().wait_idle().expect("wait idle");
+        assert_eq!(
+            mip0_readback.read(0, 32).expect("read mip 0 canary"),
+            canary
+        );
+        assert_eq!(
+            mip1_readback.read(0, 8).expect("read mip 1 canary"),
+            canary[..8],
+            "the canary must land before the clear is measured"
+        );
+
+        device
+            .queue()
+            .submit_copies(&[
+                clear_test_clear(&texture, format, HalTextureAspect::All, 1),
+                HalCopy::TextureToBuffer(mip1_copy(&mip1_readback)),
+                HalCopy::TextureToBuffer(mip0_copy(&mip0_readback)),
+            ])
+            .expect("submit block clear");
+        device.queue().wait_idle().expect("wait idle");
+
+        assert_eq!(
+            mip1_readback.read(0, 8).expect("read cleared mip 1"),
+            vec![0; 8]
+        );
+        assert_eq!(
+            mip0_readback.read(0, 32).expect("read retained mip 0"),
+            canary,
+            "clearing mip 1 must not touch mip 0"
+        );
     }
 }
