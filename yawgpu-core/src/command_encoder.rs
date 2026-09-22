@@ -693,27 +693,26 @@ impl CommandEncoder {
         // carries a first error, so the validation closure below reports the
         // missing device rather than silently dropping the bytes.
         let device = self.inner.device.clone();
-        let command = match (&device, data.is_empty()) {
-            (Some(device), false) => Some(CommandExecution::BufferWrite(BufferWriteCommand {
-                device: device.clone(),
-                buffer: Arc::clone(&buffer),
-                offset,
-                data: data.to_vec(),
-            })),
-            _ => None,
-        };
-        self.record_buffer_command(vec![Arc::clone(&buffer)], command, || {
+        self.record_buffer_command_with(vec![Arc::clone(&buffer)], || {
             let size =
                 size.ok_or_else(|| "command encoder write buffer size is too large".to_owned())?;
             if size != 0 && device.is_none() {
                 return Err("command encoder write buffer requires a device".to_owned());
             }
-            validate_encoder_write_buffer(&buffer, offset, size)
+            validate_encoder_write_buffer(&buffer, offset, size)?;
+            Ok(match (&device, data.is_empty()) {
+                (Some(device), false) => Some(CommandExecution::BufferWrite(BufferWriteCommand {
+                    device: device.clone(),
+                    buffer: Arc::clone(&buffer),
+                    offset,
+                    data: data.to_vec(),
+                })),
+                _ => None,
+            })
         })
     }
 
     /// Records a timestamp write into the query set at `query_index`.
-    #[must_use]
     pub fn write_timestamp(&self, query_set: Arc<QuerySet>, query_index: u32) -> Option<String> {
         self.record_referenced_query_set((*query_set).clone());
         self.record_buffer_command(
@@ -730,7 +729,6 @@ impl CommandEncoder {
     }
 
     /// Records resolution of a query-set range into a destination buffer.
-    #[must_use]
     pub fn resolve_query_set(
         &self,
         query_set: Arc<QuerySet>,
@@ -1011,6 +1009,21 @@ impl CommandEncoder {
     where
         F: FnOnce() -> Result<(), String>,
     {
+        self.record_buffer_command_with(referenced_buffers, || {
+            validate()?;
+            Ok(command)
+        })
+    }
+
+    /// Validates the encoder before building a validated execution record.
+    fn record_buffer_command_with<F>(
+        &self,
+        referenced_buffers: Vec<Arc<Buffer>>,
+        build: F,
+    ) -> Option<String>
+    where
+        F: FnOnce() -> Result<Option<CommandExecution>, String>,
+    {
         if let Err(message) = self.record_command_guard() {
             let mut state = self.inner.state.lock();
             if state.lifecycle == CommandEncoderLifecycle::Recording {
@@ -1020,14 +1033,15 @@ impl CommandEncoder {
             return Some(message);
         }
 
-        if let Err(message) = validate() {
-            self.record_first_error(message);
-        } else {
-            let mut state = self.inner.state.lock();
-            state.has_recorded_command = true;
-            record_referenced_buffers_locked(&mut state, referenced_buffers);
-            if let Some(command) = command {
-                state.command_ops.push(command);
+        match build() {
+            Err(message) => self.record_first_error(message),
+            Ok(command) => {
+                let mut state = self.inner.state.lock();
+                state.has_recorded_command = true;
+                record_referenced_buffers_locked(&mut state, referenced_buffers);
+                if let Some(command) = command {
+                    state.command_ops.push(command);
+                }
             }
         }
         None
@@ -3357,6 +3371,25 @@ mod tests {
         });
         assert_eq!(error, None);
         Arc::new(view)
+    }
+
+    #[test]
+    fn write_buffer_validation_failure_does_not_copy_the_payload() {
+        let device = noop_device();
+        let destination = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 4,
+            mapped_at_creation: false,
+        }));
+        let encoder = device.create_command_encoder();
+        assert_eq!(encoder.write_buffer(destination.clone(), 0, &[0; 8]), None);
+        assert_eq!(encoder.write_buffer(destination, 2, &[0; 4]), None);
+        let state = encoder.inner.state.lock();
+        assert_eq!(
+            state.first_error.as_deref(),
+            Some("command encoder write buffer range exceeds buffer size")
+        );
+        assert!(state.command_ops.is_empty());
     }
 
     /// Block 100 R1: a successful `write_buffer` records a `BufferWrite`

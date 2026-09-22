@@ -427,6 +427,19 @@ mod tests {
 
     #[test]
     fn wgpuGetProcAddress_resolves_vendor_exports() {
+        let sources = [
+            include_str!("external_texture.rs"),
+            #[cfg(feature = "tiled")]
+            include_str!("tiled.rs"),
+        ];
+        for source in sources {
+            for declaration in source.split("pub unsafe extern \"C\" fn yawgpu").skip(1) {
+                let suffix = declaration.split('(').next().expect("export name").trim();
+                let name = format!("yawgpu{suffix}");
+                assert!(resolve(&name).is_some(), "{name} must resolve");
+            }
+        }
+
         assert_eq!(
             address_of(resolve("yawgpuDeviceCreateExternalTexture")),
             Some(crate::yawgpuDeviceCreateExternalTexture as *const () as usize)

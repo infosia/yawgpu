@@ -100,8 +100,6 @@ impl MetalDevice {
         kind: HalQueryKind,
         count: u32,
     ) -> Result<MetalQuerySet, HalError> {
-        self.allocations.fetch_add(1, Ordering::Relaxed);
-        let query_set = MetalQuerySet::new(&self.device, kind, count)?;
         if kind == HalQueryKind::Timestamp
             && timestamp_sampling_mode(
                 self.timestamp_resources.counter_sampling_at_stage_boundary,
@@ -112,6 +110,8 @@ impl MetalDevice {
         {
             return Err(buffer_error("Metal device has no timestamp sampling mode"));
         }
+        let query_set = MetalQuerySet::new(&self.device, kind, count)?;
+        self.allocations.fetch_add(1, Ordering::Relaxed);
         Ok(query_set)
     }
 

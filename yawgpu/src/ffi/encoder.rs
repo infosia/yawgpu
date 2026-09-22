@@ -271,7 +271,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderWriteBuffer(
 ) {
     let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
     let buffer = borrow_handle(buffer, "WGPUBuffer");
-    if u64::try_from(size).is_err() {
+    if size > isize::MAX as usize {
         dispatch_optional_error(
             &encoder.device,
             Some("command encoder write buffer size is too large".to_owned()),
@@ -791,6 +791,46 @@ mod tests {
             assert_eq!(
                 error.message,
                 "command encoder write buffer data must not be null"
+            );
+
+            // The rejected call recorded nothing: the encoder finishes clean.
+            wgpuDevicePushErrorScope(device_handle, native::WGPUErrorFilter_Validation);
+            let command_buffer = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert!(!command_buffer.is_null());
+            assert_eq!(device.core.pop_error_scope().expect("scope"), None);
+
+            wgpuCommandBufferRelease(command_buffer);
+            wgpuCommandEncoderRelease(encoder);
+            wgpuBufferRelease(buffer);
+            wgpuDeviceRelease(device_handle);
+        }
+    }
+
+    #[test]
+    fn wgpuCommandEncoderWriteBuffer_rejects_size_above_isize_max() {
+        let device = device_impl();
+        let device_handle = arc_to_handle(Arc::clone(&device));
+        unsafe {
+            let buffer = copy_dst_buffer(device_handle, 16);
+            let encoder = wgpuDeviceCreateCommandEncoder(device_handle, std::ptr::null());
+
+            wgpuDevicePushErrorScope(device_handle, native::WGPUErrorFilter_Validation);
+            wgpuCommandEncoderWriteBuffer(
+                encoder,
+                buffer,
+                0,
+                std::ptr::NonNull::<u8>::dangling().as_ptr().cast(),
+                isize::MAX as usize + 1,
+            );
+            let error = device
+                .core
+                .pop_error_scope()
+                .expect("scope")
+                .expect("oversized data must be a validation error");
+            assert_eq!(error.kind, core::ErrorKind::Validation);
+            assert_eq!(
+                error.message,
+                "command encoder write buffer size is too large"
             );
 
             // The rejected call recorded nothing: the encoder finishes clean.

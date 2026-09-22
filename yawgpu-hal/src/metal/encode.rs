@@ -533,7 +533,8 @@ fn encode_compute_buffer_sizes(
     let Some(slot) = pipeline.buffer_sizes_slot else {
         return Ok(());
     };
-    let sizes = msl_buffer_sizes(&pipeline.buffer_size_bindings, buffers)?;
+    let mut sizes = msl_buffer_sizes(&pipeline.buffer_size_bindings, buffers)?;
+    pad_msl_buffer_sizes(&mut sizes)?;
     if sizes.is_empty() {
         return Ok(());
     }
@@ -722,7 +723,7 @@ fn msl_buffer_sizes(
     size_bindings: &[HalMslBufferSizeBinding],
     buffers: &[HalBoundBuffer],
 ) -> Result<Vec<u32>, HalError> {
-    let mut sizes = size_bindings
+    size_bindings
         .iter()
         .map(|size_binding| {
             let Some(bound) = buffers.iter().find(|bound| {
@@ -733,9 +734,7 @@ fn msl_buffer_sizes(
             let size = bound_buffer_size(bound)?;
             msl_buffer_size_u32(size)
         })
-        .collect::<Result<Vec<_>, HalError>>()?;
-    pad_msl_buffer_sizes(&mut sizes)?;
-    Ok(sizes)
+        .collect()
 }
 
 /// Zero-pads size slots to whole `uint4` elements, leaving empty arrays empty.
@@ -1396,8 +1395,6 @@ fn compose_vertex_stage_sizes(
 ) -> Result<Vec<u32>, HalError> {
     // Storage-array sizes first.
     let mut sizes = msl_buffer_sizes(storage_bindings, bind_buffers)?;
-    // Keep vertex slots contiguous with storage slots; pad only the final array.
-    sizes.truncate(storage_bindings.len());
     // Vertex buffer sizes appended in vertex_buffer_mappings order.
     for &metal_index in vertex_buffer_metal_indices {
         let effective_size = vertex_buffers
@@ -1448,7 +1445,8 @@ fn encode_render_buffer_sizes(
         }
     }
     if let Some(slot) = pipeline.fragment_buffer_sizes_slot {
-        let sizes = msl_buffer_sizes(&pipeline.fragment_buffer_size_bindings, bind_buffers)?;
+        let mut sizes = msl_buffer_sizes(&pipeline.fragment_buffer_size_bindings, bind_buffers)?;
+        pad_msl_buffer_sizes(&mut sizes)?;
         if !sizes.is_empty() {
             unsafe {
                 encoder.setFragmentBytes_length_atIndex(
@@ -1931,24 +1929,16 @@ mod tests {
     }
 
     #[test]
-    fn msl_buffer_sizes_pads_to_uint4_elements() {
-        let bindings: Vec<_> = (0..5)
-            .map(|binding| HalMslBufferSizeBinding::new(0, binding))
-            .collect();
-        let buffers: Vec<_> = (0..5)
-            .map(|binding| make_vertex_bound_buffer(binding, 256, 16))
-            .collect();
-
+    fn pad_msl_buffer_sizes_pads_to_uint4_elements() {
         for (slots, expected) in [
             (0, vec![]),
             (1, vec![240, 0, 0, 0]),
             (4, vec![240; 4]),
             (5, vec![240, 240, 240, 240, 240, 0, 0, 0]),
         ] {
-            assert_eq!(
-                msl_buffer_sizes(&bindings[..slots], &buffers).expect("sizes must succeed"),
-                expected
-            );
+            let mut sizes = vec![240; slots];
+            pad_msl_buffer_sizes(&mut sizes).expect("padding");
+            assert_eq!(sizes, expected);
         }
     }
 

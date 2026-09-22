@@ -952,15 +952,21 @@ pub(super) fn encode_resolve_query_set(
                 vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
             );
         }
-        query_resolve_copy_to_shader_barrier(
-            device,
-            command_buffer,
-            destination_buffer,
-            resolve.destination_offset,
-            byte_count,
-        );
+        if query_resolve_needs_shader_barrier(query_set.kind()) {
+            query_resolve_copy_to_shader_barrier(
+                device,
+                command_buffer,
+                destination_buffer,
+                resolve.destination_offset,
+                byte_count,
+            );
+        }
     }
     Ok(())
+}
+
+fn query_resolve_needs_shader_barrier(kind: HalQueryKind) -> bool {
+    kind == HalQueryKind::Timestamp
 }
 
 fn query_resolve_fill_to_copy_barrier(
@@ -4205,6 +4211,16 @@ pub(super) fn to_image_extent(extent: HalExtent3d) -> vk::Extent3D {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn query_resolve_shader_barrier_is_timestamp_only() {
+        assert!(super::query_resolve_needs_shader_barrier(
+            crate::HalQueryKind::Timestamp
+        ));
+        assert!(!super::query_resolve_needs_shader_barrier(
+            crate::HalQueryKind::Occlusion
+        ));
+    }
+
     #[cfg(feature = "vulkan")]
     use super::super::test_helpers::{
         compute_spirv, sampler_descriptor, texture_descriptor, vulkan_device,

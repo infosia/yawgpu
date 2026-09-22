@@ -75,6 +75,8 @@ struct InFlightStagingChunk {
 
 #[derive(Debug, Default)]
 struct PendingWriteBatch {
+    #[cfg(test)]
+    fail_next_stage: bool,
     copies: Vec<HalCopy>,
     chunks: Vec<StagingChunk>,
     current_chunk: Option<usize>,
@@ -115,6 +117,15 @@ impl PendingWriteBatch {
         size: u64,
         alignment: u64,
     ) -> Result<(HalBuffer, u64), yawgpu_hal::HalError> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_stage) {
+            let buffer = self.take_chunk(device)?;
+            self.chunks.push(StagingChunk { buffer, cursor: 0 });
+            return Err(yawgpu_hal::HalError::BufferOperationFailed {
+                backend: "Noop",
+                message: "injected staging failure",
+            });
+        }
         if size > STAGING_CHUNK_SIZE {
             // Too large to sub-allocate: give this write a dedicated buffer.
             // It is never pooled (see `retire`), so its size is always
@@ -802,16 +813,22 @@ impl Queue {
                 break;
             }
         }
-        let staging_error = staging.error.take();
+        let staging_error = staging.error.take().map(device_error_from_staging);
         let staged = pending.take_submission();
-        debug_assert!(
-            staged.copies.is_empty(),
-            "no queue write can be recorded while the batch lock is held"
-        );
+        // Unreachable with the batch lock held: lowering calls stage but
+        // never appends queue writes. Keep a release-build check nevertheless.
+        let unexpected_copies = !staged.copies.is_empty();
         chunks.extend(staged.chunks);
         drop(pending);
 
-        if let Some(error) = staging_error {
+        let lowering_error = if unexpected_copies {
+            Some(DeviceError::internal(
+                "queue write recorded during submit lowering",
+            ))
+        } else {
+            staging_error
+        };
+        if let Some(error) = lowering_error {
             // Nothing from the command buffers runs: a partial replay would
             // be worse than none. The queue writes issued before this submit
             // still flush, as on the validation-error path above, and every
@@ -826,7 +843,7 @@ impl Queue {
                 let result = self.inner.hal.submit_copies(&copies);
                 let _ = self.finish_pending_submission(chunks, result);
             }
-            return Some(device_error_from_staging(error));
+            return Some(error);
         }
 
         let result = self.inner.hal.submit_copies(&copies);
@@ -4138,6 +4155,55 @@ fn fs() -> @location(0) vec4<f32> {
         let mut expected_after = expected.clone();
         expected_after[..8].fill(0xee);
         assert_eq!(a_hal.read(0, 32).expect("read"), expected_after);
+    }
+
+    #[test]
+    fn submit_with_failing_staging_reports_device_error_and_submits_no_command_buffer_copies() {
+        let device = noop_device();
+        let queue = device.queue();
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        assert_eq!(
+            queue.write_buffer(QueueBufferWrite {
+                device: device.hal(),
+                buffer: &buffer,
+                offset: 0,
+                data: &[1; 4],
+            }),
+            None
+        );
+        let encoder = device.create_command_encoder();
+        assert_eq!(encoder.write_buffer(buffer.clone(), 8, &[2; 4]), None);
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        queue.inner.pending_writes.lock().fail_next_stage = true;
+        assert_eq!(
+            queue.submit(&[Arc::new(command_buffer)]),
+            Some(device_error_from_staging(
+                yawgpu_hal::HalError::BufferOperationFailed {
+                    backend: "Noop",
+                    message: "injected staging failure",
+                }
+            ))
+        );
+        assert!(matches!(queue.hal(), HalQueue::Noop(q)
+            if matches!(q.submitted_copies().as_slice(), [HalCopy::Buffer(copy)]
+                if copy.destination_offset == 0 && copy.size == 4)));
+        assert_eq!(
+            buffer.hal().expect("buffer").read(0, 12).expect("read"),
+            vec![1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+        let submitted = queue.latest_submission_index();
+        {
+            let pending = queue.inner.pending_writes.lock();
+            assert_eq!(pending.pool_sizes(), (2, 0));
+            assert_eq!(pending.in_flight_submission_indices(), vec![submitted; 2]);
+        }
+        assert!(queue.submission_complete(submitted).expect("completion"));
+        assert_eq!(queue.inner.pending_writes.lock().pool_sizes(), (0, 2));
     }
 
     /// Block 100 R3 invariant: chunks an encoder write stages are retired

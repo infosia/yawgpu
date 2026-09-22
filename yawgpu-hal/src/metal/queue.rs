@@ -14,6 +14,7 @@ struct MetalTrackedSubmission {
     index: SubmissionIndex,
     command_buffer: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
     _retained_copies: Vec<HalCopy>,
+    _serialize_event: Option<Retained<ProtocolObject<dyn objc2_metal::MTLSharedEvent>>>,
 }
 
 // SAFETY: Entries are published only after encoding has validated that every
@@ -57,11 +58,13 @@ impl MetalSubmissionTracker {
         index: SubmissionIndex,
         command_buffer: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         retained_copies: Vec<HalCopy>,
+        serialize_event: Option<Retained<ProtocolObject<dyn objc2_metal::MTLSharedEvent>>>,
     ) {
         self.command_buffers.push_back(MetalTrackedSubmission {
             index,
             command_buffer,
             _retained_copies: retained_copies,
+            _serialize_event: serialize_event,
         });
     }
 
@@ -145,7 +148,7 @@ impl MetalQueue {
             let command_buffer = self.inner.commandBuffer().ok_or_else(|| {
                 queue_submission_error("submit-empty command buffer creation returned nil")
             })?;
-            self.commit_tracked(command_buffer, Vec::new())
+            self.commit_tracked(command_buffer, Vec::new(), None)
         })
     }
 
@@ -218,33 +221,22 @@ impl MetalQueue {
         self.wait_for_submission(last_issued)
     }
 
-    /// Signals and waits on the device's shared event before resolving a
-    /// timestamp query set (Dawn `MetalSerializeTimestampGenerationAndResolution`;
-    /// see `MetalTimestampResources::serialize_timestamps`). Occlusion sets and
-    /// devices below the Apple8 family are untouched. Must be called between
-    /// encoders, never inside one.
+    /// Signals and waits on this submission's event between encoders.
+    /// Apple8+ needs Dawn's timestamp-generation/resolve workaround.
     fn serialize_timestamp_resolution(
         &self,
         command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
-        resolve: &HalResolveQuerySet,
+        value: u64,
+        event: &mut Option<Retained<ProtocolObject<dyn objc2_metal::MTLSharedEvent>>>,
     ) -> Result<(), HalError> {
-        let resources = &self.timestamp_resources;
-        let HalQuerySet::Metal(set) = &resolve.query_set else {
-            return Ok(());
-        };
-        if !resources.serialize_timestamps || set.sample_buffer().is_none() {
-            return Ok(());
-        }
-        if resources.serialize_event.get().is_none() {
-            let event = self.inner.device().newSharedEvent().ok_or_else(|| {
+        if event.is_none() {
+            *event = Some(self.inner.device().newSharedEvent().ok_or_else(|| {
                 queue_submission_error("timestamp serialization shared event creation returned nil")
-            })?;
-            let _ = resources.serialize_event.set(event);
+            })?);
         }
-        let event = resources.serialize_event.get().ok_or_else(|| {
+        let event = event.as_ref().ok_or_else(|| {
             queue_submission_error("timestamp serialization shared event is unavailable")
         })?;
-        let value = resources.serialize_value.fetch_add(1, Ordering::Relaxed) + 1;
         let event: &ProtocolObject<dyn objc2_metal::MTLEvent> = ProtocolObject::from_ref(&**event);
         command_buffer.encodeSignalEvent_value(event, value);
         command_buffer.encodeWaitForEvent_value(event, value);
@@ -262,6 +254,8 @@ impl MetalQueue {
             let command_buffer = self.inner.commandBuffer().ok_or_else(|| {
                 queue_submission_error("submit command buffer creation returned nil")
             })?;
+            let mut serialize_event = None;
+            let mut serialize_value = 0;
             for copy in copies {
                 match copy {
                     HalCopy::Buffer(copy) => {
@@ -396,7 +390,19 @@ impl MetalQueue {
                         }
                     }
                     HalCopy::ResolveQuerySet(resolve) => {
-                        self.serialize_timestamp_resolution(&command_buffer, resolve)?;
+                        let timestamp = matches!(&resolve.query_set,
+                            HalQuerySet::Metal(set) if set.sample_buffer().is_some());
+                        if self.timestamp_resources.serialize_timestamps {
+                            if let Some(value) =
+                                next_timestamp_resolution_value(&mut serialize_value, timestamp)?
+                            {
+                                self.serialize_timestamp_resolution(
+                                    &command_buffer,
+                                    value,
+                                    &mut serialize_event,
+                                )?;
+                            }
+                        }
                         let blit = command_buffer.blitCommandEncoder().ok_or_else(|| {
                             queue_submission_error(
                                 "query-resolve blit encoder creation returned nil",
@@ -473,7 +479,7 @@ impl MetalQueue {
                     }
                 }
             }
-            self.commit_tracked(command_buffer, copies.to_vec())
+            self.commit_tracked(command_buffer, copies.to_vec(), serialize_event)
         })
     }
 
@@ -481,6 +487,7 @@ impl MetalQueue {
         &self,
         command_buffer: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         retained_copies: Vec<HalCopy>,
+        serialize_event: Option<Retained<ProtocolObject<dyn objc2_metal::MTLSharedEvent>>>,
     ) -> Result<SubmissionIndex, HalError> {
         let _submission = self
             .submission_lock
@@ -492,9 +499,23 @@ impl MetalQueue {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let index = submissions.reserve()?;
         command_buffer.commit();
-        submissions.register(index, command_buffer, retained_copies);
+        submissions.register(index, command_buffer, retained_copies, serialize_event);
         Ok(index)
     }
+}
+
+/// Advances only for timestamp resolves; each submission starts at zero.
+fn next_timestamp_resolution_value(
+    counter: &mut u64,
+    timestamp: bool,
+) -> Result<Option<u64>, HalError> {
+    if !timestamp {
+        return Ok(None);
+    }
+    *counter = counter
+        .checked_add(1)
+        .ok_or_else(|| queue_submission_error("timestamp serialization value exhausted"))?;
+    Ok(Some(*counter))
 }
 
 #[cfg(test)]
@@ -502,6 +523,27 @@ mod tests {
     use super::super::test_helpers::*;
     use super::*;
     use crate::HalBufferCopy;
+
+    #[test]
+    fn timestamp_resolution_numbering_is_per_submission() {
+        for kinds in [vec![], vec![false; 3], vec![true, false, true, true]] {
+            for _ in 0..2 {
+                let mut counter = 0;
+                let values: Vec<_> = kinds
+                    .iter()
+                    .filter_map(|&timestamp| {
+                        next_timestamp_resolution_value(&mut counter, timestamp).expect("numbering")
+                    })
+                    .collect();
+                assert_eq!(
+                    values,
+                    (1..=kinds.iter().filter(|&&v| v).count() as u64).collect::<Vec<_>>()
+                );
+            }
+        }
+        let mut exhausted = u64::MAX;
+        assert!(next_timestamp_resolution_value(&mut exhausted, true).is_err());
+    }
 
     #[must_use]
     fn resolve_timestamp_ticks(written: &[u32]) -> [u64; 2] {

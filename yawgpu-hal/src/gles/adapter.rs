@@ -157,7 +157,7 @@ impl GlesAdapter {
         }
     }
 
-    /// Returns nanoseconds per timestamp tick (S1 placeholder).
+    /// Returns the identity period, 1.0; timestamp-query is never advertised.
     #[must_use]
     pub(crate) fn timestamp_period(&self) -> f32 {
         1.0

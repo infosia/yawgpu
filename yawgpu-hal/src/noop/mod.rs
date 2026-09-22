@@ -98,7 +98,7 @@ impl NoopAdapter {
         true
     }
 
-    /// Returns nanoseconds per timestamp tick (S1 placeholder).
+    /// Returns the identity period: synthetic adapter ticks are nanoseconds.
     #[must_use]
     pub(crate) fn timestamp_period(&self) -> f32 {
         1.0

@@ -598,7 +598,11 @@ pub(crate) fn validate_bind_group_storage_texture(
 }
 
 impl Device {
-    /// Creates an internal bind group, skipping only storage buffer usage validation.
+    /// Creates an internal bind group, skipping only `BufferUsage::STORAGE` validation.
+    ///
+    /// The caller must guarantee that the backend buffer carries storage usage.
+    /// Today callers use only `QUERY_RESOLVE` buffers, which the Vulkan HAL's
+    /// `map_buffer_usage` creates with `STORAGE_BUFFER`. All other checks apply.
     #[must_use = "internal bind group validation can fail"]
     pub(crate) fn create_internal_bind_group(
         &self,
