@@ -224,3 +224,12 @@ Re-verification after the fixes: `cargo test --workspace` 1093/0, clippy default
 - `e2e_vulkan_clip_distances.rs` (port of the Metal e2e) and `e2e_vulkan_texture_component_swizzle.rs` (colour remap, depth swizzle composed over `(d, 0, 0, 1)`, identity depth, feature gate) added and green on the native NVIDIA driver under the validation layer.
 - native Vulkan CTS (this host, yawgpu `4d5bc52` release `--features vulkan`, CTS `2f0fb9f`, raw, 2026-09-22): `shader,execution,shader_io,vertex_builtins:outputs,clip_distances` 8/0, `capability_checks,features,clip_distances` 368/0, `shader,validation,extension,clip_distances` 4/0, `api,operation,texture_view,texture_component_swizzle` 32,832 pass / 19,494 skip (all skips = compressed formats this GPU does not expose; every depth/stencil-format subcase passes: depth16unorm 1,197, depth24plus 1,197, depth32float 1,197, depth24plus-stencil8 1,539, depth32float-stencil8 1,539, stencil8 342) / 0 fail, `capability_checks,features,texture_component_swizzle` 855/0, `encoding,programmable,pipeline_immediate` 181/0, `encoding,cmds,setImmediates` 378/0; summary pass=34,626 skip=19,495 fail=0 crash=0.
 - Tracking docs for Blocks 68 / 71 / 94 updated; D11 now lists only the ETC2 / ASTC probes.
+
+### 2026-09-22 (Mac) — Block 105 MoltenVK re-confirmation, portability-subset fixes
+
+- **Block 105 re-confirmed on MoltenVK** (`daf967e`): 10 CTS trees 274,884 pass / 9 fail = identical to the pre-Block-105 run (documented artifacts only); HAL `--ignored` 54/0; all `e2e_vulkan_*` 106/0 under the Khronos validation layer. Ledger updated.
+- **Two pre-existing `VK_KHR_portability_subset` gaps** surfaced by running every Vulkan e2e under the layer on MoltenVK, both fixed:
+  - `VUID-VkImageCreateInfo-imageView2DOn3DImage-04459`: `TYPE_2D_ARRAY_COMPATIBLE` was set on every 3D image (since F-043); now only for 3D colour-attachment images (Dawn rule) — `daf967e`.
+  - `VUID-VkImageViewCreateInfo-imageViewFormatSwizzle-04465`: the portability extension was enabled but `VkPhysicalDevicePortabilitySubsetFeaturesKHR` never queried/chained, so every portability feature stayed off; now queried and chained at device creation, and `texture-component-swizzle` is gated on `imageViewFormatSwizzle` on portability devices (unchanged on MoltenVK, which reports it true).
+- `e2e_vulkan_clip_distances` execution case skips on macOS (MoltenVK cannot lower `ClipDistance`; Block 106 verified it on native Vulkan).
+

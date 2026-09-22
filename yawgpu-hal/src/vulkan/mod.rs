@@ -405,10 +405,31 @@ impl VulkanAdapter {
         })
     }
 
-    /// Returns true when texture view component swizzling is supported by this physical device. Dawn enables this unconditionally on Vulkan, so the literal mirrors its rule.
+    /// Returns true when texture view component swizzling is supported by this
+    /// physical device. Dawn enables this unconditionally on Vulkan, so a
+    /// non-portability driver always reports `true`. A portability
+    /// implementation (`VK_KHR_portability_subset`, e.g. MoltenVK) may not
+    /// support a non-identity `VkComponentMapping` at all, so there the
+    /// advertisement is gated on its `imageViewFormatSwizzle` feature
+    /// (`VUID-VkImageViewCreateInfo-imageViewFormatSwizzle-04465`).
     #[must_use]
     pub fn supports_texture_component_swizzle(&self) -> bool {
-        true
+        let portability_subset_present = self.has_device_extension(vk::KHR_PORTABILITY_SUBSET_NAME);
+        if !portability_subset_present {
+            return true;
+        }
+        let mut portability_features = vk::PhysicalDevicePortabilitySubsetFeaturesKHR::default();
+        let mut features2 =
+            vk::PhysicalDeviceFeatures2::default().push_next(&mut portability_features);
+        unsafe {
+            self.instance
+                .instance
+                .get_physical_device_features2(self.physical_device, &mut features2);
+        }
+        texture_component_swizzle_supported(
+            portability_subset_present,
+            portability_features.image_view_format_swizzle,
+        )
     }
 
     /// Returns the optimal-tiling format feature flags the physical device
@@ -696,9 +717,37 @@ impl VulkanAdapter {
             .queue_priorities(&queue_priorities);
         let queue_create_infos = [queue_create_info];
         let mut extension_names = Vec::new();
-        if self.has_device_extension(vk::KHR_PORTABILITY_SUBSET_NAME) {
+        // A portability implementation (VK_KHR_portability_subset, e.g. MoltenVK)
+        // reports every optional subset feature it supports through
+        // VkPhysicalDevicePortabilitySubsetFeaturesKHR, and each one must be
+        // enabled *explicitly* at device creation: enabling the extension alone
+        // leaves them all VK_FALSE, so the device behaves as if none were
+        // supported. Without this chain the Khronos validation layer rejects
+        // e.g. every non-identity VkComponentMapping with
+        // VUID-VkImageViewCreateInfo-imageViewFormatSwizzle-04465, although
+        // MoltenVK reports imageViewFormatSwizzle = VK_TRUE. Bits the driver
+        // does not report stay VK_FALSE (enabling an unsupported feature is
+        // itself invalid), so the queried bits are mirrored unmodified.
+        let portability_subset_extension =
+            self.has_device_extension(vk::KHR_PORTABILITY_SUBSET_NAME);
+        if portability_subset_extension {
             extension_names.push(vk::KHR_PORTABILITY_SUBSET_NAME.as_ptr());
         }
+        let mut portability_subset_supported_features =
+            vk::PhysicalDevicePortabilitySubsetFeaturesKHR::default();
+        if portability_subset_extension {
+            let mut features2 = vk::PhysicalDeviceFeatures2::default()
+                .push_next(&mut portability_subset_supported_features);
+            unsafe {
+                self.instance
+                    .instance
+                    .get_physical_device_features2(self.physical_device, &mut features2);
+            }
+        }
+        let portability_subset_features = enabled_portability_subset_features(
+            portability_subset_extension,
+            portability_subset_supported_features,
+        );
         if self.has_device_extension(vk::KHR_SWAPCHAIN_NAME) {
             extension_names.push(vk::KHR_SWAPCHAIN_NAME.as_ptr());
         }
@@ -909,6 +958,7 @@ impl VulkanAdapter {
                 .vulkan_memory_model(true)
                 .vulkan_memory_model_device_scope(vulkan_memory_model_device_scope);
         let mut storage_16bit_enable_features = storage_16bit_features.to_vk();
+        let mut portability_subset_enable_features = portability_subset_features.to_vk();
         let mut create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&extension_names)
@@ -927,6 +977,9 @@ impl VulkanAdapter {
         }
         if storage_16bit_features.enabled {
             create_info = create_info.push_next(&mut storage_16bit_enable_features);
+        }
+        if portability_subset_features.enabled {
+            create_info = create_info.push_next(&mut portability_subset_enable_features);
         }
         let device = unsafe {
             self.instance
@@ -1018,6 +1071,55 @@ impl Enabled16BitStorageFeatures {
     }
 }
 
+/// The `VK_KHR_portability_subset` features to enable at device creation, as a
+/// pointer-free mirror of `VkPhysicalDevicePortabilitySubsetFeaturesKHR` (the
+/// queried struct carries a `pNext` that belongs to the query chain, so the
+/// bits are copied out and rebuilt rather than re-chained in place).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct EnabledPortabilitySubsetFeatures {
+    /// True when `VK_KHR_portability_subset` is present, i.e. the feature
+    /// struct must be chained into `VkDeviceCreateInfo.pNext`.
+    enabled: bool,
+    constant_alpha_color_blend_factors: bool,
+    events: bool,
+    image_view_format_reinterpretation: bool,
+    image_view_format_swizzle: bool,
+    image_view2_d_on3_d_image: bool,
+    multisample_array_image: bool,
+    mutable_comparison_samplers: bool,
+    point_polygons: bool,
+    sampler_mip_lod_bias: bool,
+    separate_stencil_mask_ref: bool,
+    shader_sample_rate_interpolation_functions: bool,
+    tessellation_isolines: bool,
+    tessellation_point_mode: bool,
+    triangle_fans: bool,
+    vertex_attribute_access_beyond_stride: bool,
+}
+
+impl EnabledPortabilitySubsetFeatures {
+    fn to_vk(self) -> vk::PhysicalDevicePortabilitySubsetFeaturesKHR<'static> {
+        vk::PhysicalDevicePortabilitySubsetFeaturesKHR::default()
+            .constant_alpha_color_blend_factors(self.constant_alpha_color_blend_factors)
+            .events(self.events)
+            .image_view_format_reinterpretation(self.image_view_format_reinterpretation)
+            .image_view_format_swizzle(self.image_view_format_swizzle)
+            .image_view2_d_on3_d_image(self.image_view2_d_on3_d_image)
+            .multisample_array_image(self.multisample_array_image)
+            .mutable_comparison_samplers(self.mutable_comparison_samplers)
+            .point_polygons(self.point_polygons)
+            .sampler_mip_lod_bias(self.sampler_mip_lod_bias)
+            .separate_stencil_mask_ref(self.separate_stencil_mask_ref)
+            .shader_sample_rate_interpolation_functions(
+                self.shader_sample_rate_interpolation_functions,
+            )
+            .tessellation_isolines(self.tessellation_isolines)
+            .tessellation_point_mode(self.tessellation_point_mode)
+            .triangle_fans(self.triangle_fans)
+            .vertex_attribute_access_beyond_stride(self.vertex_attribute_access_beyond_stride)
+    }
+}
+
 /// Maps all ASTC LDR variants through the texture creation format mapping.
 fn astc_ldr_formats() -> impl Iterator<Item = Result<vk::Format, HalError>> {
     use HalTextureFormat::*;
@@ -1082,6 +1184,18 @@ fn enabled_texture_compression_features(
 
 fn shader_float16_supported(extension_present: bool, shader_float16: vk::Bool32) -> bool {
     extension_present && shader_float16 == vk::TRUE
+}
+
+/// Block 106: WebGPU `texture-component-swizzle` needs a non-identity
+/// `VkComponentMapping` on the texture view. Dawn advertises the feature
+/// unconditionally on Vulkan, which holds for every non-portability driver. A
+/// portability implementation may not support it at all, so there the
+/// advertisement follows the reported `imageViewFormatSwizzle` bit.
+fn texture_component_swizzle_supported(
+    portability_subset_present: bool,
+    image_view_format_swizzle: vk::Bool32,
+) -> bool {
+    !portability_subset_present || image_view_format_swizzle == vk::TRUE
 }
 
 /// Block 99 R3: `timestamp-query` iff `limits.timestampComputeAndGraphics == VK_TRUE`.
@@ -1270,6 +1384,41 @@ fn subgroup_size_control_available(api_version: u32, extension_present: bool) ->
     let major = vk::api_version_major(api_version);
     let minor = vk::api_version_minor(api_version);
     (major, minor) >= (1, 3) || extension_present
+}
+
+/// Mirrors every portability-subset feature the physical device reports, so the
+/// whole set can be enabled explicitly at device creation. Features the driver
+/// does not report stay disabled; without the extension nothing is chained.
+fn enabled_portability_subset_features(
+    extension_present: bool,
+    supported: vk::PhysicalDevicePortabilitySubsetFeaturesKHR<'_>,
+) -> EnabledPortabilitySubsetFeatures {
+    if !extension_present {
+        return EnabledPortabilitySubsetFeatures::default();
+    }
+    EnabledPortabilitySubsetFeatures {
+        enabled: true,
+        constant_alpha_color_blend_factors: supported.constant_alpha_color_blend_factors
+            == vk::TRUE,
+        events: supported.events == vk::TRUE,
+        image_view_format_reinterpretation: supported.image_view_format_reinterpretation
+            == vk::TRUE,
+        image_view_format_swizzle: supported.image_view_format_swizzle == vk::TRUE,
+        image_view2_d_on3_d_image: supported.image_view2_d_on3_d_image == vk::TRUE,
+        multisample_array_image: supported.multisample_array_image == vk::TRUE,
+        mutable_comparison_samplers: supported.mutable_comparison_samplers == vk::TRUE,
+        point_polygons: supported.point_polygons == vk::TRUE,
+        sampler_mip_lod_bias: supported.sampler_mip_lod_bias == vk::TRUE,
+        separate_stencil_mask_ref: supported.separate_stencil_mask_ref == vk::TRUE,
+        shader_sample_rate_interpolation_functions: supported
+            .shader_sample_rate_interpolation_functions
+            == vk::TRUE,
+        tessellation_isolines: supported.tessellation_isolines == vk::TRUE,
+        tessellation_point_mode: supported.tessellation_point_mode == vk::TRUE,
+        triangle_fans: supported.triangle_fans == vk::TRUE,
+        vertex_attribute_access_beyond_stride: supported.vertex_attribute_access_beyond_stride
+            == vk::TRUE,
+    }
 }
 
 fn enabled_16bit_storage_features(
@@ -1593,7 +1742,7 @@ mod tests {
     #[test]
     #[ignore = "manual real Vulkan backend test"]
     #[cfg(feature = "vulkan")]
-    fn vulkan_adapter_supports_texture_component_swizzle_returns_true() {
+    fn vulkan_adapter_supports_texture_component_swizzle_follows_portability_bit() {
         let adapter = VulkanInstance::new()
             .expect("create Vulkan instance")
             .enumerate_adapters()
@@ -1601,7 +1750,24 @@ mod tests {
             .next()
             .expect("at least one Vulkan adapter");
 
-        assert!(adapter.supports_texture_component_swizzle());
+        if adapter.has_device_extension(vk::KHR_PORTABILITY_SUBSET_NAME) {
+            // Portability implementation (MoltenVK): the advertisement mirrors
+            // the reported imageViewFormatSwizzle bit, which MoltenVK sets.
+            let mut portability = vk::PhysicalDevicePortabilitySubsetFeaturesKHR::default();
+            let mut features2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut portability);
+            unsafe {
+                adapter
+                    .instance
+                    .instance
+                    .get_physical_device_features2(adapter.physical_device, &mut features2);
+            }
+            assert_eq!(
+                adapter.supports_texture_component_swizzle(),
+                portability.image_view_format_swizzle == vk::TRUE
+            );
+        } else {
+            assert!(adapter.supports_texture_component_swizzle());
+        }
     }
 
     #[test]
@@ -2280,5 +2446,109 @@ mod tests {
         let all_false =
             enabled_16bit_storage_features(true, vk::PhysicalDevice16BitStorageFeatures::default());
         assert_eq!(all_false, Enabled16BitStorageFeatures::default());
+    }
+
+    /// A portability implementation requires every supported subset feature to
+    /// be enabled explicitly, so device creation mirrors the queried struct
+    /// bit-for-bit — and chains nothing at all without the extension.
+    /// Pure-logic test, no real GPU required.
+    #[test]
+    fn vulkan_portability_subset_enablement_mirrors_reported_features() {
+        let supported = vk::PhysicalDevicePortabilitySubsetFeaturesKHR {
+            constant_alpha_color_blend_factors: vk::TRUE,
+            events: vk::TRUE,
+            image_view_format_reinterpretation: vk::TRUE,
+            image_view_format_swizzle: vk::TRUE,
+            image_view2_d_on3_d_image: vk::FALSE,
+            multisample_array_image: vk::TRUE,
+            mutable_comparison_samplers: vk::TRUE,
+            point_polygons: vk::FALSE,
+            sampler_mip_lod_bias: vk::FALSE,
+            separate_stencil_mask_ref: vk::TRUE,
+            shader_sample_rate_interpolation_functions: vk::FALSE,
+            tessellation_isolines: vk::FALSE,
+            tessellation_point_mode: vk::FALSE,
+            triangle_fans: vk::TRUE,
+            vertex_attribute_access_beyond_stride: vk::TRUE,
+            ..Default::default()
+        };
+
+        let enabled = enabled_portability_subset_features(true, supported);
+
+        assert!(enabled.enabled);
+        assert!(enabled.constant_alpha_color_blend_factors);
+        assert!(enabled.events);
+        assert!(enabled.image_view_format_reinterpretation);
+        assert!(enabled.image_view_format_swizzle);
+        assert!(!enabled.image_view2_d_on3_d_image);
+        assert!(enabled.multisample_array_image);
+        assert!(enabled.mutable_comparison_samplers);
+        assert!(!enabled.point_polygons);
+        assert!(!enabled.sampler_mip_lod_bias);
+        assert!(enabled.separate_stencil_mask_ref);
+        assert!(!enabled.shader_sample_rate_interpolation_functions);
+        assert!(!enabled.tessellation_isolines);
+        assert!(!enabled.tessellation_point_mode);
+        assert!(enabled.triangle_fans);
+        assert!(enabled.vertex_attribute_access_beyond_stride);
+
+        // No portability extension: nothing is chained into VkDeviceCreateInfo.
+        let absent = enabled_portability_subset_features(false, supported);
+        assert_eq!(absent, EnabledPortabilitySubsetFeatures::default());
+        assert!(!absent.enabled);
+
+        // Present but reporting nothing: still chained (a zeroed struct is the
+        // explicit "enable none of them"), with every bit left disabled.
+        let none_reported = enabled_portability_subset_features(
+            true,
+            vk::PhysicalDevicePortabilitySubsetFeaturesKHR::default(),
+        );
+        assert_eq!(
+            none_reported,
+            EnabledPortabilitySubsetFeatures {
+                enabled: true,
+                ..Default::default()
+            }
+        );
+    }
+
+    /// The chained `VkPhysicalDevicePortabilitySubsetFeaturesKHR` carries the
+    /// mirrored bits, the right `sType`, and a null `pNext` (the query chain's
+    /// `pNext` must not leak into device creation).
+    #[test]
+    fn vulkan_portability_subset_to_vk_rebuilds_the_feature_struct() {
+        let features = EnabledPortabilitySubsetFeatures {
+            enabled: true,
+            image_view_format_swizzle: true,
+            triangle_fans: true,
+            ..Default::default()
+        };
+
+        let vk_features = features.to_vk();
+
+        assert_eq!(
+            vk_features.s_type,
+            vk::StructureType::PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR
+        );
+        assert!(vk_features.p_next.is_null());
+        assert_eq!(vk_features.image_view_format_swizzle, vk::TRUE);
+        assert_eq!(vk_features.triangle_fans, vk::TRUE);
+        assert_eq!(vk_features.image_view2_d_on3_d_image, vk::FALSE);
+        assert_eq!(vk_features.sampler_mip_lod_bias, vk::FALSE);
+        assert_eq!(
+            enabled_portability_subset_features(true, vk_features),
+            features
+        );
+    }
+
+    /// `texture-component-swizzle` is unconditional on a normal Vulkan driver
+    /// (Dawn's rule) and follows `imageViewFormatSwizzle` on a portability one.
+    /// Pure-logic test, no real GPU required.
+    #[test]
+    fn vulkan_texture_component_swizzle_gates_on_portability_feature() {
+        assert!(texture_component_swizzle_supported(false, vk::FALSE));
+        assert!(texture_component_swizzle_supported(false, vk::TRUE));
+        assert!(texture_component_swizzle_supported(true, vk::TRUE));
+        assert!(!texture_component_swizzle_supported(true, vk::FALSE));
     }
 }
