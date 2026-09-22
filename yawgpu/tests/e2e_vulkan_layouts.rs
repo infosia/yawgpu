@@ -616,3 +616,157 @@ fn vulkan_copy_to_layer0_then_sample_layer1_then_copy_layer0_round_trips() {
         yawgpu::wgpuInstanceRelease(instance);
     }
 }
+
+/// A tiled draw transitions a sampled texture last written by a queue copy.
+#[cfg(feature = "tiled")]
+#[test]
+#[ignore = "manual real-backend test"]
+fn vulkan_tiled_subpass_samples_texture_written_by_copy() {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
+        return;
+    }
+    unsafe {
+        let instance = create_vulkan_instance();
+        let adapter = request_adapter(instance);
+        let errors = Mutex::new(Vec::new());
+        let device = request_device(instance, adapter, &errors);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+        let color = [0x10, 0x20, 0x30, 0xFF];
+        let mut texture_descriptor: native::WGPUTextureDescriptor = std::mem::zeroed();
+        texture_descriptor.usage =
+            native::WGPUTextureUsage_TextureBinding | native::WGPUTextureUsage_CopyDst;
+        texture_descriptor.dimension = native::WGPUTextureDimension_2D;
+        texture_descriptor.size = extent(4, 1);
+        texture_descriptor.format = native::WGPUTextureFormat_RGBA8Unorm;
+        texture_descriptor.mipLevelCount = 1;
+        texture_descriptor.sampleCount = 1;
+        let texture = yawgpu::wgpuDeviceCreateTexture(device, &texture_descriptor);
+        assert!(!texture.is_null());
+        write_pixels(queue, texture, 0, 0, 4, &color.repeat(16));
+        let sampled = yawgpu::wgpuTextureCreateView(texture, std::ptr::null());
+        assert!(!sampled.is_null());
+        texture_descriptor.usage =
+            native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_CopySrc;
+        let target = yawgpu::wgpuDeviceCreateTexture(device, &texture_descriptor);
+        assert!(!target.is_null());
+        let attachment = yawgpu::wgpuTextureCreateView(target, std::ptr::null());
+        assert!(!attachment.is_null());
+
+        let color_layout = yawgpu::YaWGPUAttachmentLayout {
+            format: native::WGPUTextureFormat_RGBA8Unorm,
+            sampleCount: 1,
+        };
+        let color_slot = 0u32;
+        let subpass_layout = yawgpu::YaWGPUSubpassLayout {
+            colorAttachmentIndices: &color_slot,
+            colorAttachmentIndexCount: 1,
+            usesDepthStencil: 0,
+            inputAttachments: std::ptr::null(),
+            inputAttachmentCount: 0,
+        };
+        let layout_descriptor = yawgpu::YaWGPUSubpassPassLayoutDescriptor {
+            nextInChain: std::ptr::null(),
+            label: empty_string_view(),
+            colorAttachments: &color_layout,
+            colorAttachmentCount: 1,
+            depthStencilAttachment: std::ptr::null(),
+            subpasses: &subpass_layout,
+            subpassCount: 1,
+            dependencies: std::ptr::null(),
+            dependencyCount: 0,
+        };
+        let pass_layout = yawgpu::yawgpuDeviceCreateSubpassPassLayout(device, &layout_descriptor);
+        assert!(!pass_layout.is_null());
+        let module = create_wgsl_module(
+            device,
+            r#"
+@group(0) @binding(0) var t: texture_2d<f32>;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+    let positions = array<vec2f, 3>(vec2f(-1, -1), vec2f(3, -1), vec2f(-1, 3));
+    return vec4f(positions[i], 0, 1);
+}
+@fragment fn fs() -> @location(0) vec4f { return textureLoad(t, vec2i(0, 0), 0); }
+"#,
+        );
+        let color_target = native::WGPUColorTargetState {
+            nextInChain: std::ptr::null_mut(),
+            format: native::WGPUTextureFormat_RGBA8Unorm,
+            blend: std::ptr::null(),
+            writeMask: native::WGPUColorWriteMask_All,
+        };
+        let mut fragment: native::WGPUFragmentState = std::mem::zeroed();
+        fragment.module = module;
+        fragment.entryPoint = string_view("fs");
+        fragment.targetCount = 1;
+        fragment.targets = &color_target;
+        let mut base: native::WGPURenderPipelineDescriptor = std::mem::zeroed();
+        base.vertex.module = module;
+        base.vertex.entryPoint = string_view("vs");
+        base.primitive = primitive_state();
+        base.multisample = multisample_state();
+        base.fragment = &fragment;
+        let pipeline_descriptor = yawgpu::YaWGPUSubpassRenderPipelineDescriptor {
+            nextInChain: std::ptr::null(),
+            base,
+            passLayout: pass_layout,
+            subpassIndex: 0,
+        };
+        let pipeline =
+            yawgpu::yawgpuDeviceCreateSubpassRenderPipeline(device, &pipeline_descriptor);
+        assert!(!pipeline.is_null());
+        let layout = yawgpu::wgpuRenderPipelineGetBindGroupLayout(pipeline, 0);
+        let group = create_bind_group(device, layout, sampled, None);
+        let readback = create_buffer(
+            device,
+            u64::from(BYTES_PER_ROW * 4),
+            native::WGPUBufferUsage_MapRead | native::WGPUBufferUsage_CopyDst,
+        );
+        let color_attachment = yawgpu::YaWGPUSubpassColorAttachment {
+            view: attachment,
+            resolveTarget: std::ptr::null(),
+            loadOp: native::WGPULoadOp_Clear,
+            storeOp: native::WGPUStoreOp_Store,
+            clearValue: native::WGPUColor {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        };
+        let descriptor = yawgpu::YaWGPUSubpassRenderPassDescriptor {
+            nextInChain: std::ptr::null(),
+            label: empty_string_view(),
+            passLayout: pass_layout,
+            extent: extent(4, 1),
+            colorAttachments: &color_attachment,
+            colorAttachmentCount: 1,
+            depthStencilAttachment: std::ptr::null(),
+        };
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        let pass = yawgpu::yawgpuCommandEncoderBeginSubpassRenderPass(encoder, &descriptor);
+        assert!(!pass.is_null());
+        yawgpu::yawgpuSubpassRenderPassEncoderSetPipeline(pass, pipeline);
+        yawgpu::yawgpuSubpassRenderPassEncoderSetBindGroup(pass, 0, group, 0, std::ptr::null());
+        yawgpu::yawgpuSubpassRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+        yawgpu::yawgpuSubpassRenderPassEncoderEnd(pass);
+        copy_pixels(encoder, target, readback, 4);
+        submit_encoder(queue, encoder);
+        assert_eq!(read_pixels(instance, readback, 4), color.repeat(16));
+        assert!(errors.lock().expect("error lock").is_empty(), "{errors:?}");
+        yawgpu::yawgpuSubpassRenderPassEncoderRelease(pass);
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuBindGroupRelease(group);
+        yawgpu::wgpuBindGroupLayoutRelease(layout);
+        yawgpu::wgpuRenderPipelineRelease(pipeline);
+        yawgpu::wgpuShaderModuleRelease(module);
+        yawgpu::yawgpuSubpassPassLayoutRelease(pass_layout);
+        yawgpu::wgpuTextureViewRelease(attachment);
+        yawgpu::wgpuTextureViewRelease(sampled);
+        yawgpu::wgpuTextureRelease(target);
+        yawgpu::wgpuTextureRelease(texture);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}

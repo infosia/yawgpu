@@ -2125,6 +2125,34 @@ pub(super) fn encode_subpass_render_pass(
             layout_id,
         )?;
     }
+    let mut attachments = Vec::new();
+    for resource in pass
+        .color_attachments
+        .iter()
+        .map(|attachment| &attachment.resource)
+        .chain(
+            pass.depth_stencil_attachment
+                .iter()
+                .map(|attachment| &attachment.resource),
+        )
+    {
+        let HalSubpassAttachmentResource::Persistent {
+            texture,
+            resolve_target,
+        } = resource;
+        for texture in std::iter::once(texture).chain(resolve_target.iter()) {
+            let crate::HalTexture::Vulkan(texture) = texture else {
+                return Err(texture_error("subpass attachment is not Vulkan-backed"));
+            };
+            let inner = texture.inner()?;
+            attachments.push((inner.image, inner.layouts.whole()));
+        }
+    }
+    let bound = subpass_bound_textures(pass);
+    // All barriers precede the pass and exclude its whole-image attachment views.
+    transition_sampled_textures(&device.device, command_buffer, &bound, &attachments)?;
+    // Storage follows sampled so GENERAL wins for a view bound both ways.
+    transition_storage_textures(&device.device, command_buffer, &bound, &attachments)?;
     let framebuffer_info = vk::FramebufferCreateInfo::default()
         .render_pass(render_pass)
         .attachments(&views)
@@ -2191,6 +2219,19 @@ pub(super) fn encode_subpass_render_pass(
         image_views,
         render_pass: None,
     })
+}
+
+/// Collects bound textures in subpass execution order, retaining repeated bindings.
+#[cfg(feature = "tiled")]
+fn subpass_bound_textures(pass: &HalSubpassRenderPassCommand) -> Vec<HalBoundTexture> {
+    (0..pass.layout.subpasses.len())
+        .flat_map(|subpass_index| {
+            pass.draws
+                .iter()
+                .filter(move |draw| draw.subpass_index as usize == subpass_index)
+                .flat_map(|draw| draw.bind_textures.iter().cloned())
+        })
+        .collect()
 }
 
 #[cfg(feature = "tiled")]
@@ -5760,6 +5801,76 @@ mod tests {
             assert_eq!(uint_clear.color.uint32, [1, 255, 65_535, 7]);
             assert_eq!(sint_clear.color.int32, [-1, 2, -3, 4]);
         }
+    }
+
+    /// Builds a two-subpass command for GPU-independent binding collection tests.
+    #[cfg(feature = "tiled")]
+    fn bound_texture_subpass_fixture() -> HalSubpassRenderPassCommand {
+        HalSubpassRenderPassCommand {
+            layout: HalSubpassPassLayout {
+                color_attachments: Vec::new(),
+                depth_stencil_attachment: None,
+                subpasses: vec![
+                    HalSubpassLayout {
+                        color_attachment_indices: Vec::new(),
+                        uses_depth_stencil: false,
+                        input_attachments: Vec::new(),
+                    };
+                    2
+                ],
+                dependencies: Vec::new(),
+            },
+            extent: HalExtent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            color_attachments: Vec::new(),
+            depth_stencil_attachment: None,
+            draws: Vec::new(),
+        }
+    }
+
+    /// Every subpass and draw contributes its bindings in execution order.
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn subpass_bound_textures_collects_all_draws_in_subpass_order() {
+        let mut pass = bound_texture_subpass_fixture();
+        let texture = dummy_texture(HalTextureFormat::Rgba8Unorm);
+        for (subpass_index, binding) in [(1, 2), (0, 0), (1, 3), (0, 1)] {
+            let mut bound = bound_texture(texture.clone());
+            bound.binding = binding;
+            pass.draws.push(HalSubpassDraw {
+                subpass_index,
+                pipeline: crate::HalRenderPipeline::Noop,
+                bind_buffers: Vec::new(),
+                bind_textures: vec![bound],
+                bind_samplers: Vec::new(),
+                vertex_buffers: Vec::new(),
+                viewport: None,
+                scissor_rect: None,
+                draw: HalDraw::Direct {
+                    vertex_count: 3,
+                    instance_count: 1,
+                    first_vertex: 0,
+                    first_instance: 0,
+                },
+            });
+        }
+        assert_eq!(
+            subpass_bound_textures(&pass)
+                .iter()
+                .map(|bound| bound.binding)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+    }
+
+    /// Subpasses without draws contribute no bound textures.
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn subpass_bound_textures_is_empty_without_draws() {
+        assert!(subpass_bound_textures(&bound_texture_subpass_fixture()).is_empty());
     }
 
     #[cfg(feature = "tiled")]
