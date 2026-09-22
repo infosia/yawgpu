@@ -1,11 +1,21 @@
 # Block 107 — Vulkan: drop the eager `storeOp: Discard` clear (backlog A8) and give sampled + storage-bound subresources one layout (backlog A9)
 
-Status: **IN PROGRESS (2026-09-23)** — S1 (A8) and S2 (A9) dispatched to
-the coding agent as one handoff; e2e red-before-fix on the Windows native
-NVIDIA host under `VK_LAYER_KHRONOS_validation`. Backlog items **A8** and
-**A9** (`specs/tracking/backlog.md`), both raised by the Block 105 Phase
-Review (MAJOR 2 → A8, m12 → A9). Host: Windows 11, NVIDIA RTX 5060 Ti,
-native Vulkan driver.
+Status: **S1 + S2 landed (2026-09-23), Phase Review in progress** — one
+coding-agent handoff (HAL + tests), reviewed and committed together (the
+two slices touch the same functions). Gates on the Windows native NVIDIA
+host: `cargo test --workspace` green; fmt + clippy default / `vulkan` /
+`vulkan,tiled` clean; HAL `--ignored` 54/0 and every `e2e_vulkan_*` binary
+green under `VK_LAYER_KHRONOS_validation` with **0 validation lines**
+(`e2e_vulkan_layouts` 6/6 incl. the three new cases, red-before-fix VUIDs
+recorded in the Tests section); CTS raw (release `--features vulkan`, CTS
+`2f0fb9f`): `render_pass,storeOp` 26/0, `storeop2` 2/0,
+`rendering,3d_texture_slices` 7/0, `storage_texture,*` 6/0,
+`resource_usages,texture,in_pass_encoder` 1,578/0, `resource_init,*`
+8/0, `command_buffer,*` 170,202/0 (35 skip), `rendering,*` 1,127/0
+(8 suite-deferred skips) — fail 0 / crash 0 everywhere. Backlog items
+**A8** and **A9** (`specs/tracking/backlog.md`), both raised by the Block
+105 Phase Review (MAJOR 2 → A8, m12 → A9). Host: Windows 11, NVIDIA RTX
+5060 Ti, native Vulkan driver.
 
 ## Problem
 
@@ -34,13 +44,28 @@ comes from `color_attachment_subresource_range`, which uses
 so:
 
 - `depthSlice > 0` → `baseArrayLayer >= arrayLayers`, invalid
-  (`VUID-vkCmdClearColorImage-pRanges-01692` class); the driver may
-  ignore it or corrupt memory;
+  (observed on the Khronos layer as
+  `VUID-vkCmdClearColorImage-baseArrayLayer-01472` +
+  `VUID-vkCmdClearColorImage-pRanges-01693`); the driver may ignore it
+  or corrupt memory;
 - `depthSlice == 0` → the clear covers layer 0 of the mip, i.e. **every
-  depth slice**, zeroing slices the pass never touched (data loss).
+  depth slice** — redundant with core's lazy clear (see below), not a
+  divergence from the oracle.
 
 Both are reachable by valid WebGPU: a 3D texture rendered through
 `depthSlice` with `storeOp: "discard"`.
+
+**Oracle note (found while executing, 2026-09-23).** Dawn tracks 3D
+texture initialization **per mip level** (`CommandBuffer.cpp`
+`LazyClearRenderPassAttachments`: "rendering to a single depthSlice marks
+the entire mip level as initialized", and `storeOp: Discard` calls
+`SetIsSubresourceContentInitialized(false, view range)` on that whole
+mip). Discarding one depth slice therefore leaves the **whole mip**
+uninitialized in Dawn, and the next read lazily zeroes every slice.
+yawgpu core mirrors this (`tracked_init_layer` maps every D3 slice to
+layer 0). The spec's first draft expected sibling slices to survive a
+Discard; that is stricter than the oracle and was dropped — e2e 4 asserts
+Dawn's behaviour (all slices zero, no validation output).
 
 ### A9 — a subresource bound sampled **and** read-only storage in one pass
 
@@ -161,19 +186,19 @@ core). No public API changes.
 Add to the existing file (reuse its helpers; extend `create_texture`
 for a 3D dimension or add a sibling helper):
 
-- **e2e 4 (A8)** `vulkan_3d_attachment_discard_keeps_other_slices_and_zeroes_discarded_slice`:
+- **e2e 4 (A8)** `vulkan_3d_attachment_discard_lazily_zeroes_the_whole_mip_without_validation_errors`:
   `rgba8unorm` 3D texture 8×8×3, mip 1, usage
   `RenderAttachment | CopySrc | CopyDst`; `writeTexture` a distinct
-  colour per slice (slices 0, 1, 2); render pass with a `TYPE_2D`-view
-  colour attachment on the whole texture with `depthSlice = 1`,
-  `loadOp = Clear` (any clear colour), `storeOp = Discard`, one draw
-  (any pipeline; the fullscreen triangle from e2e 1 is fine); then
-  `copyTextureToBuffer` each slice (`origin.z = 0 / 1 / 2`). Expect slice
-  0 and slice 2 **unchanged**, slice 1 **all zero**, no device error, and
-  **no validation-layer output**. Before R1 this case emits
-  `VUID-vkCmdClearColorImage-pRanges-01692` (or zeroes slices 0 / 2 when
-  a second variant uses `depthSlice = 0` — cover both `depthSlice` values
-  in one test body via a loop).
+  colour per slice (slices 0, 1, 2); render pass with a colour attachment
+  view of the whole texture at `depthSlice = 1` (second variant:
+  `depthSlice = 0`, both in one test body), `loadOp = Clear`,
+  `storeOp = Discard`, one fullscreen-triangle draw; then
+  `copyTextureToBuffer` each slice (`origin.z = 0 / 1 / 2`). Expect
+  **every slice all zero** (Dawn's per-mip 3D tracking — see the oracle
+  note above), no device error, and **no validation-layer output**.
+  Before R1 the `depthSlice = 1` variant emitted
+  `VUID-vkCmdClearColorImage-baseArrayLayer-01472` and
+  `VUID-vkCmdClearColorImage-pRanges-01693`.
 - **e2e 5 (A9)** `vulkan_compute_binds_one_texture_sampled_and_read_only_storage_in_one_pass`:
   `r32uint` 2D texture 4×4 (usage `TextureBinding | StorageBinding |
   CopyDst`), `writeTexture` a known texel; compute shader with
@@ -209,15 +234,18 @@ report records the VUID lines observed before the fix).
   `webgpu:api,operation,render_pass,storeOp:*`,
   `webgpu:api,operation,render_pass,storeop2:*`,
   `webgpu:api,operation,rendering,3d_texture_slices:*`,
-  `webgpu:api,operation,resource_init,texture_zero_init:*`,
+  `webgpu:api,operation,resource_init,*`,
   `webgpu:api,operation,storage_texture,*`,
-  `webgpu:api,validation,resource_usages,texture,in_pass_encoder:*`
-  — fail 0 / crash 0.
+  `webgpu:api,validation,resource_usages,texture,in_pass_encoder:*`,
+  plus the Block 105 re-confirmation trees `command_buffer,*` and
+  `rendering,*` — fail 0 / crash 0.
 
 ## Slices
 
 - **S1 (A8)** R1 + e2e 4.
 - **S2 (A9)** R2 + unit tests + e2e 5, 6.
 
-One coding-agent handoff covers both (small, same file); one commit per
-slice on review.
+One coding-agent handoff covers both (small, same functions); landed as
+one commit on review because the R1 removal and the R2 plumbing edit the
+same `encode_render_pass_impl` / transition helpers and cannot be split
+cleanly.

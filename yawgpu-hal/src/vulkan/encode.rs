@@ -1951,6 +1951,44 @@ fn bound_view_subresource_range(bound: &HalBoundTexture) -> SubresourceRange {
     }
 }
 
+/// Whether a sampled view overlaps a storage view of the same image anywhere in the pass.
+pub(super) fn sampled_binding_shares_storage(
+    bound: &HalBoundTexture,
+    pass_textures: &[HalBoundTexture],
+) -> bool {
+    if bound.storage_access.is_some() {
+        return false;
+    }
+    let HalTexture::Vulkan(texture) = &bound.texture else {
+        return false;
+    };
+    let Ok(inner) = texture.inner() else {
+        return false;
+    };
+    let range = bound_view_subresource_range(bound);
+    pass_textures.iter().any(|storage| {
+        if storage.storage_access.is_none() {
+            return false;
+        }
+        let HalTexture::Vulkan(texture) = &storage.texture else {
+            return false;
+        };
+        let Ok(storage_inner) = texture.inner() else {
+            return false;
+        };
+        let other = bound_view_subresource_range(storage);
+        inner.image == storage_inner.image
+            && u64::from(range.base_mip_level)
+                < u64::from(other.base_mip_level) + u64::from(other.mip_level_count)
+            && u64::from(other.base_mip_level)
+                < u64::from(range.base_mip_level) + u64::from(range.mip_level_count)
+            && u64::from(range.base_array_layer)
+                < u64::from(other.base_array_layer) + u64::from(other.array_layer_count)
+            && u64::from(other.base_array_layer)
+                < u64::from(range.base_array_layer) + u64::from(range.array_layer_count)
+    })
+}
+
 /// Subtracts exclusions, merging adjacent layers and then identical mip run lists.
 fn subtract_subresource_ranges(
     bound: SubresourceRange,
@@ -2005,7 +2043,7 @@ fn transition_storage_textures(
     Ok(())
 }
 
-/// Transitions sampled views to SHADER_READ_ONLY_OPTIMAL outside attachments.
+/// Transitions sampled views outside attachments, using GENERAL for storage overlap.
 /// A read-only depth-stencil attachment sampled in the same pass stays skipped
 /// (Block 105 "Known limitations"); other mips/layers of its image still transition.
 fn transition_sampled_textures(
@@ -2026,15 +2064,16 @@ fn transition_sampled_textures(
             .iter()
             .filter_map(|(image, range)| (*image == inner.image).then_some(*range))
             .collect();
-        for range in subtract_subresource_ranges(bound_view_subresource_range(bound), &exclusions) {
-            transition_image_range(
-                device,
-                command_buffer,
-                inner,
-                range,
+        let (layout, state) = if sampled_binding_shares_storage(bound, textures) {
+            (vk::ImageLayout::GENERAL, IMAGE_LAYOUT_GENERAL)
+        } else {
+            (
                 vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                 IMAGE_LAYOUT_SHADER_READ_ONLY,
-            )?;
+            )
+        };
+        for range in subtract_subresource_ranges(bound_view_subresource_range(bound), &exclusions) {
+            transition_image_range(device, command_buffer, inner, range, layout, state)?;
         }
     }
     Ok(())
@@ -2126,7 +2165,7 @@ pub(super) fn encode_subpass_render_pass(
     let bound = subpass_bound_textures(pass);
     // All barriers precede the pass and exclude its whole-image attachment views.
     transition_sampled_textures(&device.device, command_buffer, &bound, &attachments)?;
-    // Storage follows sampled so GENERAL wins for a view bound both ways.
+    // Sharing sampled views already use GENERAL across their whole range.
     transition_storage_textures(&device.device, command_buffer, &bound, &attachments)?;
     let framebuffer_info = vk::FramebufferCreateInfo::default()
         .render_pass(render_pass)
@@ -2164,7 +2203,8 @@ pub(super) fn encode_subpass_render_pass(
             .iter()
             .filter(|draw| draw.subpass_index as usize == subpass_index)
         {
-            let temps = encode_subpass_draw(&device.device, command_buffer, pass, draw, &views)?;
+            let temps =
+                encode_subpass_draw(&device.device, command_buffer, pass, draw, &views, &bound)?;
             if let Some(pool) = temps.descriptor_pool {
                 descriptor_pools.push(pool);
             }
@@ -2256,6 +2296,7 @@ fn encode_subpass_draw(
     pass: &HalSubpassRenderPassCommand,
     draw: &HalSubpassDraw,
     attachment_views: &[vk::ImageView],
+    pass_textures: &[HalBoundTexture],
 ) -> Result<SubpassDrawTemps, HalError> {
     let crate::HalRenderPipeline::Vulkan(pipeline) = &draw.pipeline else {
         return Err(shader_error("subpass render pipeline is not Vulkan-backed"));
@@ -2281,6 +2322,7 @@ fn encode_subpass_draw(
         draw,
         &descriptor_sets,
         attachment_views,
+        pass_textures,
     ) {
         Ok(image_views) => image_views,
         Err(error) => {
@@ -2357,6 +2399,7 @@ fn update_subpass_descriptor_sets(
     draw: &HalSubpassDraw,
     descriptor_sets: &[vk::DescriptorSet],
     attachment_views: &[vk::ImageView],
+    pass_textures: &[HalBoundTexture],
 ) -> Result<Vec<vk::ImageView>, HalError> {
     if pipeline.inner.descriptor_bindings.is_empty() {
         return Ok(Vec::new());
@@ -2369,6 +2412,7 @@ fn update_subpass_descriptor_sets(
         {
             let mut scratch = DescriptorUpdateScratch {
                 device,
+                pass_textures,
                 buffer_infos: &mut buffer_infos,
                 image_infos: &mut image_infos,
                 image_views: &mut image_views,
@@ -3010,7 +3054,7 @@ fn encode_render_pass_impl(
     }
     // Barriers precede the pass and exclude only attached subresources.
     transition_sampled_textures(vk_device, command_buffer, bind_textures, &attachments)?;
-    // Storage follows sampled so GENERAL wins for a view bound both ways.
+    // Sharing sampled views already use GENERAL across their whole range.
     transition_storage_textures(vk_device, command_buffer, bind_textures, &attachments)?;
     let color_formats = render_pass_color_formats(&pass.color_targets);
     let resolve_formats = render_pass_resolve_formats(&pass.color_targets)?;
@@ -3064,7 +3108,8 @@ fn encode_render_pass_impl(
         vk_device.cmd_begin_render_pass(command_buffer, &begin_info, vk::SubpassContents::INLINE);
     }
     let mut stream_temps = VulkanRenderStreamTemps::default();
-    let mut state = VulkanRenderStreamState::new(render_area, width, height, query_set);
+    let mut state =
+        VulkanRenderStreamState::new(render_area, width, height, query_set, bind_textures);
     encode_vulkan_render_commands(
         device,
         command_buffer,
@@ -3097,93 +3142,6 @@ fn encode_render_pass_impl(
             ),
             IMAGE_LAYOUT_TRANSFER_SRC,
         )?;
-    }
-    for (texture, target) in color_textures
-        .iter()
-        .copied()
-        .zip(pass.color_targets.iter())
-        .filter_map(|(texture, target)| texture.zip(target.as_ref()))
-        .filter(|(_, target)| !target.store)
-    {
-        let inner = texture.inner()?;
-        let attachment_range = attachment_subresource_range_of(
-            texture.dimension,
-            target.mip_level,
-            target.array_layer,
-        );
-        transition_image_range(
-            vk_device,
-            command_buffer,
-            inner,
-            attachment_range,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            IMAGE_LAYOUT_TRANSFER_DST,
-        )?;
-        let clear_value = unsafe { vulkan_color_clear_value(target.view_format, [0.0; 4]).color };
-        unsafe {
-            vk_device.cmd_clear_color_image(
-                command_buffer,
-                inner.image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &clear_value,
-                &[color_attachment_subresource_range(texture, target)],
-            );
-        }
-        transition_image_range(
-            vk_device,
-            command_buffer,
-            inner,
-            attachment_range,
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-            IMAGE_LAYOUT_TRANSFER_SRC,
-        )?;
-    }
-    if let (Some(texture), Some(attachment)) =
-        (depth_stencil_texture, &pass.depth_stencil_attachment)
-    {
-        let discarded_aspects = discarded_depth_stencil_aspects(
-            attachment.depth_store,
-            attachment.stencil_store,
-            attachment.format,
-        );
-        if !discarded_aspects.is_empty() {
-            let inner = texture.inner()?;
-            let attachment_range = attachment_subresource_range_of(
-                texture.dimension,
-                attachment.mip_level,
-                attachment.array_layer,
-            );
-            transition_image_range(
-                vk_device,
-                command_buffer,
-                inner,
-                attachment_range,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                IMAGE_LAYOUT_TRANSFER_DST,
-            )?;
-            let mut range = depth_stencil_attachment_subresource_range(attachment);
-            range.aspect_mask = discarded_aspects;
-            unsafe {
-                vk_device.cmd_clear_depth_stencil_image(
-                    command_buffer,
-                    inner.image,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    &vk::ClearDepthStencilValue {
-                        depth: 0.0,
-                        stencil: 0,
-                    },
-                    &[range],
-                );
-            }
-            transition_image_range(
-                vk_device,
-                command_buffer,
-                inner,
-                attachment_range,
-                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT,
-            )?;
-        }
     }
     Ok(RenderPassTemps {
         descriptor_pools: stream_temps.descriptor_pools,
@@ -3247,6 +3205,7 @@ struct VulkanRenderStreamTemps {
 }
 
 struct VulkanRenderStreamState<'a> {
+    pass_textures: &'a [HalBoundTexture],
     pipeline: Option<crate::HalRenderPipeline>,
     bind_buffers: Vec<HalBoundBuffer>,
     bind_textures: Vec<HalBoundTexture>,
@@ -3268,8 +3227,10 @@ impl<'a> VulkanRenderStreamState<'a> {
         width: u32,
         height: u32,
         query_set: Option<&'a VulkanQuerySet>,
+        pass_textures: &'a [HalBoundTexture],
     ) -> Self {
         Self {
+            pass_textures,
             pipeline: None,
             bind_buffers: Vec::new(),
             bind_textures: Vec::new(),
@@ -3618,6 +3579,7 @@ fn prepare_vulkan_render_draw(
             pipeline,
             &state.bind_buffers,
             &state.bind_textures,
+            state.pass_textures,
             &state.bind_samplers,
             color_attachment_views,
             &descriptor_sets,
@@ -3843,21 +3805,6 @@ fn depth_stencil_aspect_flags(format: HalTextureFormat) -> vk::ImageAspectFlags 
         flags |= vk::ImageAspectFlags::STENCIL;
     }
     flags
-}
-
-fn discarded_depth_stencil_aspects(
-    depth_store: bool,
-    stencil_store: bool,
-    format: HalTextureFormat,
-) -> vk::ImageAspectFlags {
-    let mut flags = vk::ImageAspectFlags::empty();
-    if !depth_store {
-        flags |= vk::ImageAspectFlags::DEPTH;
-    }
-    if !stencil_store {
-        flags |= vk::ImageAspectFlags::STENCIL;
-    }
-    flags & depth_stencil_aspect_flags(format)
 }
 
 fn copy_format_aspect_flags(format: HalTextureFormat) -> vk::ImageAspectFlags {
@@ -5212,6 +5159,160 @@ mod tests {
         );
     }
 
+    /// Builds Vulkan handles with inert dispatch tables; no loader or GPU is used.
+    fn sharing_texture(image: u64) -> HalBoundTexture {
+        use ash::vk::Handle;
+        unsafe extern "system" fn get_proc(
+            _: vk::Instance,
+            _: *const std::ffi::c_char,
+        ) -> vk::PFN_vkVoidFunction {
+            None
+        }
+        unsafe extern "system" fn destroy_instance(
+            _: vk::Instance,
+            _: *const vk::AllocationCallbacks<'_>,
+        ) {
+        }
+        unsafe extern "system" fn destroy_device(
+            _: vk::Device,
+            _: *const vk::AllocationCallbacks<'_>,
+        ) {
+        }
+        unsafe extern "system" fn destroy_view(
+            _: vk::Device,
+            _: vk::ImageView,
+            _: *const vk::AllocationCallbacks<'_>,
+        ) {
+        }
+        static ENTRY: OnceLock<ash::Entry> = OnceLock::new();
+        let entry = ENTRY.get_or_init(|| unsafe {
+            ash::Entry::from_static_fn(ash::StaticFn {
+                get_instance_proc_addr: get_proc,
+            })
+        });
+        let instance = unsafe {
+            ash::Instance::load_with(
+                |name| {
+                    if name.to_bytes() == b"vkDestroyInstance" {
+                        destroy_instance as *const () as *const std::ffi::c_void
+                    } else {
+                        std::ptr::null()
+                    }
+                },
+                vk::Instance::null(),
+            )
+        };
+        let device = unsafe {
+            ash::Device::load_with(
+                |name| match name.to_bytes() {
+                    b"vkDestroyDevice" => destroy_device as *const () as *const std::ffi::c_void,
+                    b"vkDestroyImageView" => destroy_view as *const () as *const std::ffi::c_void,
+                    _ => std::ptr::null(),
+                },
+                vk::Device::null(),
+            )
+        };
+        let device = Arc::new(VulkanDeviceInner {
+            _instance: Arc::new(VulkanInstanceInner {
+                _entry: entry,
+                instance,
+            }),
+            device,
+            physical_device: vk::PhysicalDevice::null(),
+            memory_properties: vk::PhysicalDeviceMemoryProperties::default(),
+            queue_family_index: 0,
+            occlusion_query_precise: false,
+            depth_clip_control: false,
+            sampler_anisotropy: false,
+            shader_demote_to_helper_invocation: false,
+            shader_float16: false,
+            vulkan_memory_model: false,
+            image_format_list: false,
+            storage_buffer16_bit_access: false,
+            uniform_and_storage_buffer16_bit_access: false,
+            storage_input_output16: false,
+            storage_push_constant16: false,
+            max_sampler_anisotropy: 1.0,
+            #[cfg(feature = "tiled")]
+            subpass_render_pass_cache: Mutex::new(BTreeMap::new()),
+            allocations: AtomicU64::new(0),
+        });
+        let mut texture =
+            dummy_vulkan_texture(HalTextureDimension::D2, HalTextureFormat::Rgba8Unorm);
+        texture.inner = Some(Arc::new(VulkanTextureInner {
+            device,
+            image: vk::Image::from_raw(image),
+            usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE,
+            view: vk::ImageView::null(),
+            bgra8_storage_view: vk::ImageView::null(),
+            memory: None,
+            owns_image: false,
+            mip_level_count: 4,
+            array_layers: 4,
+            aspect_flags: vk::ImageAspectFlags::COLOR,
+            layouts: SubresourceLayouts::new(4, 4),
+        }));
+        let mut bound = bound_texture(HalTexture::Vulkan(texture));
+        bound.mip_level_count = 2;
+        bound.array_layer_count = 2;
+        bound
+    }
+
+    fn sharing_pair() -> (HalBoundTexture, HalBoundTexture) {
+        let sampled = sharing_texture(17);
+        let mut storage = sampled.clone();
+        storage.group = 3;
+        storage.binding = 4;
+        storage.storage_access = Some(crate::HalStorageTextureAccess::ReadOnly);
+        storage.base_mip_level = 1;
+        storage.mip_level_count = 1;
+        storage.base_array_layer = 1;
+        storage.array_layer_count = 1;
+        (sampled, storage)
+    }
+
+    #[test]
+    fn sampled_binding_shares_storage_overlapping_mips_and_layers() {
+        let (sampled, storage) = sharing_pair();
+        assert!(sampled_binding_shares_storage(&sampled, &[storage]));
+    }
+
+    #[test]
+    fn sampled_binding_shares_storage_disjoint_mips() {
+        let (sampled, mut storage) = sharing_pair();
+        storage.base_mip_level = 2;
+        assert!(!sampled_binding_shares_storage(&sampled, &[storage]));
+    }
+
+    #[test]
+    fn sampled_binding_shares_storage_disjoint_layers() {
+        let (sampled, mut storage) = sharing_pair();
+        storage.base_array_layer = 2;
+        assert!(!sampled_binding_shares_storage(&sampled, &[storage]));
+    }
+
+    #[test]
+    fn sampled_binding_shares_storage_different_image() {
+        let (sampled, mut storage) = sharing_pair();
+        storage.texture = sharing_texture(18).texture;
+        assert!(!sampled_binding_shares_storage(&sampled, &[storage]));
+    }
+
+    #[test]
+    fn sampled_binding_shares_storage_rejects_storage_query() {
+        let (_, storage) = sharing_pair();
+        assert!(!sampled_binding_shares_storage(
+            &storage,
+            std::slice::from_ref(&storage)
+        ));
+    }
+
+    #[test]
+    fn sampled_binding_shares_storage_empty_pass() {
+        let (sampled, _) = sharing_pair();
+        assert!(!sampled_binding_shares_storage(&sampled, &[]));
+    }
+
     fn dummy_texture(format: HalTextureFormat) -> HalTexture {
         let device = noop::NoopDevice::new();
         HalTexture::Noop(
@@ -6013,30 +6114,6 @@ mod tests {
         assert_eq!(
             copy_format_aspect_flags(HalTextureFormat::Depth32FloatStencil8),
             vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
-        );
-    }
-
-    #[test]
-    fn discarded_depth_stencil_aspects_intersects_store_ops_with_format_planes() {
-        assert_eq!(
-            discarded_depth_stencil_aspects(false, true, HalTextureFormat::Depth32Float),
-            vk::ImageAspectFlags::DEPTH
-        );
-        assert_eq!(
-            discarded_depth_stencil_aspects(true, false, HalTextureFormat::Depth32Float),
-            vk::ImageAspectFlags::empty()
-        );
-        assert_eq!(
-            discarded_depth_stencil_aspects(true, false, HalTextureFormat::Stencil8),
-            vk::ImageAspectFlags::STENCIL
-        );
-        assert_eq!(
-            discarded_depth_stencil_aspects(false, true, HalTextureFormat::Depth32FloatStencil8),
-            vk::ImageAspectFlags::DEPTH
-        );
-        assert_eq!(
-            discarded_depth_stencil_aspects(true, true, HalTextureFormat::Depth32FloatStencil8),
-            vk::ImageAspectFlags::empty()
         );
     }
 

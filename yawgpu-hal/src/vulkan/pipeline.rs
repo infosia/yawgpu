@@ -1281,6 +1281,7 @@ pub(super) fn update_compute_descriptor_sets(
         {
             let mut scratch = DescriptorUpdateScratch {
                 device,
+                pass_textures: &pass.bind_textures,
                 buffer_infos: &mut buffer_infos,
                 image_infos: &mut image_infos,
                 image_views: &mut image_views,
@@ -1332,11 +1333,13 @@ pub(super) fn create_render_descriptor_pool(
 }
 
 /// Returns update render descriptor sets.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn update_render_descriptor_sets(
     device: &ash::Device,
     pipeline: &VulkanRenderPipeline,
     bind_buffers: &[HalBoundBuffer],
     bind_textures: &[HalBoundTexture],
+    pass_textures: &[HalBoundTexture],
     bind_samplers: &[HalBoundSampler],
     color_attachment_views: &[Option<vk::ImageView>],
     descriptor_sets: &[vk::DescriptorSet],
@@ -1352,6 +1355,7 @@ pub(super) fn update_render_descriptor_sets(
         {
             let mut scratch = DescriptorUpdateScratch {
                 device,
+                pass_textures,
                 buffer_infos: &mut buffer_infos,
                 image_infos: &mut image_infos,
                 image_views: &mut image_views,
@@ -1448,13 +1452,17 @@ struct DescriptorImageView {
     owned: bool,
 }
 
+/// Descriptor write storage and the pass-wide texture layout context.
 pub(super) struct DescriptorUpdateScratch<'a> {
+    /// All texture bindings participating in this pass's layout transitions.
+    pub(super) pass_textures: &'a [HalBoundTexture],
     pub(super) device: &'a ash::Device,
     pub(super) buffer_infos: &'a mut Vec<vk::DescriptorBufferInfo>,
     pub(super) image_infos: &'a mut Vec<vk::DescriptorImageInfo>,
     pub(super) image_views: &'a mut Vec<vk::ImageView>,
 }
 
+/// Builds one descriptor using the same pass-wide layout policy as image transitions.
 pub(super) fn descriptor_info(
     descriptor: &HalDescriptorBinding,
     buffers: &[HalBoundBuffer],
@@ -1486,10 +1494,16 @@ pub(super) fn descriptor_info(
             };
             let image_view = create_sampled_texture_image_view(scratch.device, texture, bound)?;
             scratch.image_views.push(image_view);
+            let layout =
+                if super::encode::sampled_binding_shares_storage(bound, scratch.pass_textures) {
+                    vk::ImageLayout::GENERAL
+                } else {
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+                };
             scratch.image_infos.push(
                 vk::DescriptorImageInfo::default()
                     .image_view(image_view)
-                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+                    .image_layout(layout),
             );
             Ok(DescriptorInfo::Image(scratch.image_infos.len() - 1))
         }

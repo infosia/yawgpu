@@ -247,9 +247,9 @@ In `encode_render_pass_impl`:
   (unchanged semantics).
 - After `cmd_end_render_pass`: `layouts.set(range, TRANSFER_SRC)` for
   each colour and resolve **attachment range only** (the `finalLayout`
-  applied to that subresource alone); the `storeOp: Discard` epilogue
-  clears use `transition_image_range` on the same attachment range
-  (colour) / the depth-stencil attachment range.
+  applied to that subresource alone). *(The `storeOp: Discard` epilogue
+  clears this sentence used to describe were removed by Block 107 R1 —
+  core's Block 104 un-mark + lazy clear covers zero-on-next-read.)*
 
 ### R5 — Tiled subpass passes (`tiled` feature)
 
@@ -364,13 +364,12 @@ attachment); `texture_copy_layouts`; the Metal and GLES backends; core.
   it needs a `DEPTH_STENCIL_READ_ONLY_OPTIMAL` state, matching
   `VkRenderPass` initial / final layouts and a per-binding descriptor
   layout — a follow-up backlog item, not part of A5.
-- A subresource bound both as a **sampled texture and a read-only
-  storage texture in one pass** (allowed by WebGPU) ends in `GENERAL`
-  ("storage follows sampled so `GENERAL` wins") while the sampled
-  descriptor declares `SHADER_READ_ONLY_OPTIMAL` — the same class as the
-  read-only depth-stencil case (pre-existing policy; a fix would declare
-  `GENERAL` on the sampled descriptor when the same subresource is also
-  storage-bound). Backlog A9.
+- ~~A subresource bound both as a sampled texture and a read-only storage
+  texture in one pass ends in `GENERAL` while the sampled descriptor
+  declares `SHADER_READ_ONLY_OPTIMAL`.~~ **Fixed by Block 107 R2**
+  (backlog A9): a sampled binding that shares subresources with a storage
+  binding in the same pass is transitioned to, and its descriptor
+  declares, `GENERAL`.
 - Layout state is not usage / stage tracked (Dawn's `shaderStages`
   reuse optimisation is not replicated); barriers are derived from the
   layout pair alone, as today.
