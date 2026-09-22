@@ -251,6 +251,90 @@ fn metal_surface_configure_srgb_immediate_premultiplied_and_copy_back() {
 }
 
 /// Block 103: `Rgba16Float` configures and presents.
+/// Block 104 (Phase Review M2 mirror): the acquired drawable is lazy-init
+/// eligible, so a `CopySrc` readback before any render pass reads zeros.
+#[test]
+#[ignore = "manual real-backend test"]
+fn metal_surface_texture_reads_zero_before_first_render_pass() {
+    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+        return;
+    }
+    unsafe {
+        let instance = create_metal_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+        let layer = CAMetalLayer::layer();
+        let surface = create_surface_from_layer(
+            instance,
+            (&*layer as *const CAMetalLayer).cast_mut().cast::<c_void>(),
+        );
+        let config = native::WGPUSurfaceConfiguration {
+            nextInChain: std::ptr::null_mut(),
+            device,
+            format: native::WGPUTextureFormat_BGRA8Unorm,
+            usage: native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_CopySrc,
+            width: 64,
+            height: 64,
+            viewFormatCount: 0,
+            viewFormats: std::ptr::null(),
+            alphaMode: native::WGPUCompositeAlphaMode_Opaque,
+            presentMode: native::WGPUPresentMode_Fifo,
+        };
+        yawgpu::wgpuSurfaceConfigure(surface, &config);
+        let mut surface_texture = native::WGPUSurfaceTexture {
+            nextInChain: std::ptr::null_mut(),
+            texture: std::ptr::null(),
+            status: 0,
+        };
+        yawgpu::wgpuSurfaceGetCurrentTexture(surface, &mut surface_texture);
+        assert_eq!(
+            surface_texture.status,
+            native::WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal
+        );
+        let texture = surface_texture.texture.cast_mut();
+        assert!(!texture.is_null());
+
+        // No render pass: the copy is the first use of the acquired drawable.
+        let readback = create_buffer(
+            device,
+            256 * 64,
+            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+        );
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        record_texture_to_buffer(encoder, texture, readback, 64, 64);
+        let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+        yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+        yawgpu::wgpuCommandBufferRelease(command_buffer);
+        yawgpu::wgpuCommandEncoderRelease(encoder);
+        let bytes = read_buffer(instance, readback, 256 * 64);
+        let nonzero = bytes.iter().filter(|&&b| b != 0).count();
+        assert_eq!(
+            nonzero, 0,
+            "uninitialized surface texture must read zero ({nonzero} non-zero bytes)"
+        );
+        assert_eq!(
+            yawgpu::wgpuSurfacePresent(surface),
+            native::WGPUStatus_Success
+        );
+        assert!(
+            errors.lock().expect("error lock").is_empty(),
+            "unexpected errors: {:?}",
+            errors.lock().expect("error lock")
+        );
+
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuTextureRelease(texture);
+        yawgpu::wgpuSurfaceUnconfigure(surface);
+        yawgpu::wgpuSurfaceRelease(surface);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
 #[test]
 #[ignore = "manual real-backend test"]
 fn metal_surface_configure_rgba16float_presents() {

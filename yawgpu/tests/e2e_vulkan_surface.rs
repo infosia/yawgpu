@@ -281,6 +281,104 @@ fn vulkan_surface_configure_reported_srgb_and_non_fifo_modes_and_copy_back() {
     }
 }
 
+/// Block 104 (Phase Review M2): a swapchain texture is lazy-init eligible,
+/// so reading it back through `CopySrc` before any render pass touches it
+/// must yield zeros — the clear needs `TRANSFER_DST` on the swapchain image.
+#[test]
+#[ignore = "manual real-backend test"]
+fn vulkan_surface_texture_reads_zero_before_first_render_pass() {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
+        return;
+    }
+    unsafe {
+        let instance = create_vulkan_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+        let layer = CAMetalLayer::layer();
+        layer.setBounds(CGRect {
+            origin: CGPoint { x: 0.0, y: 0.0 },
+            size: CGSize {
+                width: 64.0,
+                height: 64.0,
+            },
+        });
+        layer.setContentsScale(1.0);
+        layer.setDrawableSize(CGSize {
+            width: 64.0,
+            height: 64.0,
+        });
+        let surface = create_surface_from_layer(
+            instance,
+            (&*layer as *const CAMetalLayer).cast_mut().cast::<c_void>(),
+        );
+        let (format, present_mode, alpha_mode) = pick_reported_modes(surface, adapter);
+        let config = native::WGPUSurfaceConfiguration {
+            nextInChain: std::ptr::null_mut(),
+            device,
+            format,
+            usage: native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_CopySrc,
+            width: 64,
+            height: 64,
+            viewFormatCount: 0,
+            viewFormats: std::ptr::null(),
+            alphaMode: alpha_mode,
+            presentMode: present_mode,
+        };
+        yawgpu::wgpuSurfaceConfigure(surface, &config);
+        let mut surface_texture = native::WGPUSurfaceTexture {
+            nextInChain: std::ptr::null_mut(),
+            texture: std::ptr::null(),
+            status: 0,
+        };
+        yawgpu::wgpuSurfaceGetCurrentTexture(surface, &mut surface_texture);
+        assert_eq!(
+            surface_texture.status,
+            native::WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal
+        );
+        let texture = surface_texture.texture.cast_mut();
+        assert!(!texture.is_null());
+
+        // No render pass: the copy is the first use of the acquired image.
+        let readback = create_buffer(
+            device,
+            256 * 64,
+            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+        );
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        record_texture_to_buffer(encoder, texture, readback, 64, 64);
+        let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+        yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+        yawgpu::wgpuCommandBufferRelease(command_buffer);
+        yawgpu::wgpuCommandEncoderRelease(encoder);
+        let bytes = read_buffer(instance, readback, 256 * 64);
+        let nonzero = bytes.iter().filter(|&&b| b != 0).count();
+        assert_eq!(
+            nonzero, 0,
+            "uninitialized surface texture must read zero ({nonzero} non-zero bytes)"
+        );
+        assert_eq!(
+            yawgpu::wgpuSurfacePresent(surface),
+            native::WGPUStatus_Success
+        );
+        assert!(
+            errors.lock().expect("error lock").is_empty(),
+            "unexpected errors: {:?}",
+            errors.lock().expect("error lock")
+        );
+
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuTextureRelease(texture);
+        yawgpu::wgpuSurfaceUnconfigure(surface);
+        yawgpu::wgpuSurfaceRelease(surface);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
 /// Block 103: modes outside the reported capabilities are still rejected
 /// with the Block 70 messages, and a rejected configure leaves the surface
 /// unconfigured.
