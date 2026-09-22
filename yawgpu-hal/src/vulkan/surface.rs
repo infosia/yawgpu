@@ -621,6 +621,11 @@ impl VulkanSurface {
             return;
         };
         unsafe {
+            // Frame fences do not cover the subsequent present semaphore wait.
+            // Device idle retires submissions using all three semaphore arrays
+            // and the fences, plus the transition commands whose pool is freed next.
+            // Teardown must still proceed if the device has been lost.
+            let _ = swapchain.device.device.device_wait_idle();
             for semaphore in self.image_acquired_semaphores.drain(..) {
                 swapchain.device.device.destroy_semaphore(semaphore, None);
             }
@@ -685,6 +690,11 @@ impl fmt::Debug for VulkanSwapchainInner {
 
 impl Drop for VulkanSwapchainInner {
     fn drop(&mut self) {
+        // Guard the image views and swapchain even when outstanding texture
+        // handles defer this drop beyond the surface's synchronization teardown.
+        unsafe {
+            let _ = self.device.device.device_wait_idle();
+        }
         self.images.clear();
         unsafe {
             self.loader.destroy_swapchain(self.swapchain, None);
@@ -714,14 +724,7 @@ pub(super) fn create_swapchain(
     if capabilities.max_image_count > 0 {
         image_count = image_count.min(capabilities.max_image_count);
     }
-    let extent = if capabilities.current_extent.width == u32::MAX {
-        vk::Extent2D {
-            width: config.width,
-            height: config.height,
-        }
-    } else {
-        capabilities.current_extent
-    };
+    let extent = swapchain_extent(config.width, config.height, &capabilities)?;
     let present_modes = unsafe {
         surface_loader
             .get_physical_device_surface_present_modes(device.physical_device, surface.surface)
@@ -800,6 +803,33 @@ pub(super) fn create_swapchain(
     }))
 }
 
+/// Selects the fixed surface extent or bounds the configured extent to its limits.
+fn swapchain_extent(
+    config_w: u32,
+    config_h: u32,
+    caps: &vk::SurfaceCapabilitiesKHR,
+) -> Result<vk::Extent2D, HalError> {
+    let extent = if caps.current_extent.width == u32::MAX {
+        vk::Extent2D {
+            width: config_w
+                .max(caps.min_image_extent.width)
+                .min(caps.max_image_extent.width),
+            height: config_h
+                .max(caps.min_image_extent.height)
+                .min(caps.max_image_extent.height),
+        }
+    } else {
+        caps.current_extent
+    };
+    if extent.width == 0 || extent.height == 0 {
+        return Err(HalError::SwapchainCreationFailed {
+            backend: BACKEND,
+            message: "surface reports a zero extent",
+        });
+    }
+    Ok(extent)
+}
+
 fn select_present_mode(
     requested: crate::HalPresentMode,
     supported: &[vk::PresentModeKHR],
@@ -846,6 +876,7 @@ pub(super) fn create_swapchain_texture(
         inner: Some(Arc::new(VulkanTextureInner {
             device,
             image,
+            usage: hal_usage_to_vk_image_usage(config.usage),
             view,
             bgra8_storage_view: vk::ImageView::null(),
             memory: None,
@@ -962,6 +993,71 @@ fn hal_usage_to_vk_image_usage(usage: HalTextureUsage) -> vk::ImageUsageFlags {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn swapchain_extent_uses_current_extent() {
+        let caps = vk::SurfaceCapabilitiesKHR::default().current_extent(vk::Extent2D {
+            width: 64,
+            height: 64,
+        });
+        assert_eq!(
+            swapchain_extent(300, 200, &caps).unwrap(),
+            caps.current_extent
+        );
+    }
+
+    #[test]
+    fn swapchain_extent_clamps_configured_extent() {
+        let caps = vk::SurfaceCapabilitiesKHR::default()
+            .current_extent(vk::Extent2D {
+                width: u32::MAX,
+                height: u32::MAX,
+            })
+            .min_image_extent(vk::Extent2D {
+                width: 16,
+                height: 16,
+            })
+            .max_image_extent(vk::Extent2D {
+                width: 256,
+                height: 256,
+            });
+        assert_eq!(
+            swapchain_extent(300, 200, &caps).unwrap(),
+            vk::Extent2D {
+                width: 256,
+                height: 200
+            }
+        );
+        assert_eq!(
+            swapchain_extent(0, 1, &caps).unwrap(),
+            caps.min_image_extent
+        );
+    }
+
+    #[test]
+    fn swapchain_extent_rejects_zero_dimensions() {
+        for (width, height) in [(0, 0), (0, 64), (64, 0)] {
+            let caps = vk::SurfaceCapabilitiesKHR::default()
+                .current_extent(vk::Extent2D { width, height });
+            assert!(matches!(
+                swapchain_extent(64, 64, &caps),
+                Err(HalError::SwapchainCreationFailed {
+                    message: "surface reports a zero extent",
+                    ..
+                })
+            ));
+        }
+        let caps = vk::SurfaceCapabilitiesKHR::default()
+            .current_extent(vk::Extent2D {
+                width: u32::MAX,
+                height: u32::MAX,
+            })
+            .max_image_extent(vk::Extent2D {
+                width: 256,
+                height: 256,
+            });
+        assert!(swapchain_extent(0, 64, &caps).is_err());
+    }
+
     #[test]
     #[ignore = "manual real Vulkan backend test"]
     fn vulkan_swapchain_texture_skips_view_for_copy_only_usage() {

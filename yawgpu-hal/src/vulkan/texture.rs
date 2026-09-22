@@ -76,6 +76,8 @@ impl VulkanTexture {
 pub(super) struct VulkanTextureInner {
     pub(super) device: Arc<VulkanDeviceInner>,
     pub(super) image: vk::Image,
+    /// Usage flags supplied when the underlying image was created.
+    pub(super) usage: vk::ImageUsageFlags,
     pub(super) view: vk::ImageView,
     pub(super) bgra8_storage_view: vk::ImageView,
     pub(super) memory: Option<vk::DeviceMemory>,
@@ -375,6 +377,7 @@ pub(super) fn create_texture(
         VulkanTextureInner {
             device,
             image,
+            usage,
             view,
             bgra8_storage_view,
             memory: Some(memory),
@@ -525,6 +528,7 @@ pub(super) fn transition_image_aspect(
     if old_layout == new_layout {
         return;
     }
+    let aspect = barrier_aspect_mask(aspect, texture.aspect_flags);
     let barrier = vk::ImageMemoryBarrier::default()
         .old_layout(old_layout)
         .new_layout(new_layout)
@@ -548,6 +552,25 @@ pub(super) fn transition_image_aspect(
             &[],
             &[barrier],
         );
+    }
+}
+
+/// Returns the aspect mask a layout barrier must name for an image.
+///
+/// The layout tracker is whole-image, and Vulkan requires a barrier on a
+/// combined depth-stencil image to name **both** aspects unless
+/// `separateDepthStencilLayouts` is enabled
+/// (`VUID-VkImageMemoryBarrier-image-03320`), so an aspect-narrowed request
+/// (a `DepthOnly` / `StencilOnly` copy or clear) is widened to the image's
+/// full aspect set. Single-aspect images keep the requested mask.
+pub(super) fn barrier_aspect_mask(
+    requested: vk::ImageAspectFlags,
+    image_aspects: vk::ImageAspectFlags,
+) -> vk::ImageAspectFlags {
+    if image_aspects.contains(vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL) {
+        image_aspects
+    } else {
+        requested
     }
 }
 
@@ -918,6 +941,21 @@ mod tests {
     #[test]
     fn texture_usage_needs_view_returns_true_for_storage_binding() {
         assert!(texture_usage_needs_view(texture_usage(false, true, false)));
+    }
+
+    #[test]
+    fn barrier_aspect_mask_widens_only_combined_depth_stencil_images() {
+        let ds = vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL;
+        assert_eq!(barrier_aspect_mask(vk::ImageAspectFlags::STENCIL, ds), ds);
+        assert_eq!(barrier_aspect_mask(vk::ImageAspectFlags::DEPTH, ds), ds);
+        assert_eq!(
+            barrier_aspect_mask(vk::ImageAspectFlags::DEPTH, vk::ImageAspectFlags::DEPTH),
+            vk::ImageAspectFlags::DEPTH
+        );
+        assert_eq!(
+            barrier_aspect_mask(vk::ImageAspectFlags::COLOR, vk::ImageAspectFlags::COLOR),
+            vk::ImageAspectFlags::COLOR
+        );
     }
 
     #[test]

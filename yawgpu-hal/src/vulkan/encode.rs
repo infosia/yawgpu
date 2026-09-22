@@ -1018,11 +1018,18 @@ pub(super) fn encode_texture_clear(
                     &[range],
                 );
             }
+            // The clear itself is aspect-scoped, but a layout barrier on a
+            // combined depth-stencil image must name both aspects
+            // (VUID-VkImageMemoryBarrier-image-03320) — the tracker is
+            // whole-image anyway.
             texture_clear_write_after_write_barrier(
                 device,
                 command_buffer,
                 texture_inner.image,
-                range,
+                vk::ImageSubresourceRange {
+                    aspect_mask: texture_inner.aspect_flags,
+                    ..range
+                },
             );
         }
         ClearKind::Compressed {
@@ -1387,11 +1394,12 @@ pub(super) fn encode_buffer_to_texture(
     let texture_inner = texture.inner()?;
     let aspect = buffer_texture_copy_aspect_flags(copy.format, copy.aspect);
     let region = buffer_image_copy(copy, texture, texture_bytes_per_pixel(copy)?, aspect)?;
-    transition_image_aspect(
+    // The layout tracker covers the whole image, including both depth/stencil
+    // aspects. Only the copy region above may narrow the aspect selection.
+    transition_image(
         device,
         command_buffer,
         texture_inner,
-        aspect,
         vk::ImageLayout::TRANSFER_DST_OPTIMAL,
         IMAGE_LAYOUT_TRANSFER_DST,
     );
@@ -1426,11 +1434,12 @@ pub(super) fn encode_texture_to_buffer(
     let texture_inner = texture.inner()?;
     let aspect = buffer_texture_copy_aspect_flags(copy.format, copy.aspect);
     let region = buffer_image_copy(copy, texture, texture_bytes_per_pixel(copy)?, aspect)?;
-    transition_image_aspect(
+    // The layout tracker covers the whole image, including both depth/stencil
+    // aspects. Only the copy region above may narrow the aspect selection.
+    transition_image(
         device,
         command_buffer,
         texture_inner,
-        aspect,
         vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
         IMAGE_LAYOUT_TRANSFER_SRC,
     );
@@ -4153,7 +4162,7 @@ fn create_color_attachment_image_view(
     let (format, _) = map_texture_format(target.view_format)?;
     create_attachment_image_view(
         device,
-        texture.inner()?.image,
+        texture.inner()?,
         format,
         color_attachment_subresource_range(texture, target),
         color_attachment_image_view_usage(),
@@ -4169,7 +4178,7 @@ fn create_resolve_attachment_image_view(
     let (format, _) = map_texture_format(view_format)?;
     create_attachment_image_view(
         device,
-        texture.inner()?.image,
+        texture.inner()?,
         format,
         resolve_attachment_subresource_range(target),
         color_attachment_image_view_usage(),
@@ -4184,7 +4193,7 @@ fn create_depth_stencil_attachment_image_view(
     let (format, _) = map_texture_format(attachment.format)?;
     create_attachment_image_view(
         device,
-        texture.inner()?.image,
+        texture.inner()?,
         format,
         depth_stencil_attachment_subresource_range(attachment),
         depth_stencil_attachment_image_view_usage(),
@@ -4193,20 +4202,32 @@ fn create_depth_stencil_attachment_image_view(
 
 fn create_attachment_image_view(
     device: &ash::Device,
-    image: vk::Image,
+    texture: &VulkanTextureInner,
     format: vk::Format,
     subresource_range: vk::ImageSubresourceRange,
     usage: vk::ImageUsageFlags,
 ) -> Result<vk::ImageView, HalError> {
+    let usage = intersect_image_view_usage(usage, texture.usage);
     let mut view_usage_info = vk::ImageViewUsageCreateInfo::default().usage(usage);
-    let view_info = vk::ImageViewCreateInfo::default()
-        .image(image)
+    let mut view_info = vk::ImageViewCreateInfo::default()
+        .image(texture.image)
         .view_type(vk::ImageViewType::TYPE_2D)
         .format(format)
-        .subresource_range(subresource_range)
-        .push_next(&mut view_usage_info);
+        .subresource_range(subresource_range);
+    if usage != texture.usage {
+        view_info = view_info.push_next(&mut view_usage_info);
+    }
     unsafe { device.create_image_view(&view_info, None) }
         .map_err(|_| shader_error("attachment image view creation failed"))
+}
+
+/// Restricts view usage to bits present on the image, including swapchain images
+/// that lack INPUT_ATTACHMENT (VUID-VkImageViewCreateInfo-pNext-02662).
+fn intersect_image_view_usage(
+    requested: vk::ImageUsageFlags,
+    image_usage: vk::ImageUsageFlags,
+) -> vk::ImageUsageFlags {
+    requested & image_usage
 }
 
 fn color_attachment_image_view_usage() -> vk::ImageUsageFlags {
@@ -4545,6 +4566,47 @@ pub(super) fn to_image_extent(extent: HalExtent3d) -> vk::Extent3D {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn intersect_image_view_usage_limits_views_to_actual_image_usage() {
+        let attachment = vk::ImageUsageFlags::COLOR_ATTACHMENT;
+        let requested = attachment | vk::ImageUsageFlags::INPUT_ATTACHMENT;
+        assert_eq!(
+            intersect_image_view_usage(requested, attachment),
+            attachment
+        );
+        assert_eq!(
+            intersect_image_view_usage(requested, attachment | vk::ImageUsageFlags::TRANSFER_SRC),
+            attachment
+        );
+        assert_eq!(intersect_image_view_usage(requested, requested), requested);
+        assert_eq!(
+            intersect_image_view_usage(requested, vk::ImageUsageFlags::SAMPLED),
+            vk::ImageUsageFlags::empty()
+        );
+    }
+
+    #[test]
+    fn combined_depth_stencil_copy_aspects_preserve_whole_image_barrier_aspects() {
+        for format in [
+            HalTextureFormat::Depth24PlusStencil8,
+            HalTextureFormat::Depth32FloatStencil8,
+        ] {
+            let barrier_aspects = image_aspect_flags(format);
+            assert_eq!(
+                barrier_aspects,
+                vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+            );
+            for (aspect, expected) in [
+                (HalTextureAspect::DepthOnly, vk::ImageAspectFlags::DEPTH),
+                (HalTextureAspect::StencilOnly, vk::ImageAspectFlags::STENCIL),
+            ] {
+                let copy_aspects = buffer_texture_copy_aspect_flags(format, aspect);
+                assert_eq!(copy_aspects, expected);
+                assert_ne!(copy_aspects, barrier_aspects);
+            }
+        }
+    }
+
     #[test]
     fn query_resolve_shader_barrier_is_timestamp_only() {
         assert!(super::query_resolve_needs_shader_barrier(
