@@ -257,39 +257,55 @@ pub unsafe extern "C" fn wgpuCommandEncoderClearBuffer(
     );
 }
 
-/// Records a host-to-buffer write command. Noop validation does not consume
-/// the `data` bytes.
+/// Records a host-to-buffer write command (Block 100).
+///
+/// The `size` bytes at `data` are copied into the command buffer at encode
+/// time, so the caller may free or modify `data` as soon as this returns;
+/// the write executes at submit, ordered with the other commands of the
+/// command buffer. A null `data` with a non-zero `size` is a validation error
+/// routed to the device error sink; null with `size == 0` is a validated
+/// no-op.
 ///
 /// # Safety
 ///
-/// `command_encoder` and `buffer` must be non-null live yawgpu handles. `data`
-/// is not read by this P6.2 validation implementation.
-/// Returns WGPU command encoder write buffer.
+/// `command_encoder` and `buffer` must be non-null live yawgpu handles. When
+/// `size > 0`, `data` must be null or point to at least `size` readable
+/// bytes.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCommandEncoderWriteBuffer(
     command_encoder: native::WGPUCommandEncoder,
     buffer: native::WGPUBuffer,
     buffer_offset: u64,
-    _data: *const c_void,
+    data: *const c_void,
     size: usize,
 ) {
     let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
     let buffer = borrow_handle(buffer, "WGPUBuffer");
-    let size = match u64::try_from(size) {
-        Ok(size) => size,
-        Err(_) => {
-            dispatch_optional_error(
-                &encoder.device,
-                Some("command encoder write buffer size is too large".to_owned()),
-            );
-            return;
-        }
+    if u64::try_from(size).is_err() {
+        dispatch_optional_error(
+            &encoder.device,
+            Some("command encoder write buffer size is too large".to_owned()),
+        );
+        return;
+    }
+    let data = if size == 0 {
+        &[][..]
+    } else if data.is_null() {
+        dispatch_optional_error(
+            &encoder.device,
+            Some("command encoder write buffer data must not be null".to_owned()),
+        );
+        return;
+    } else {
+        // Safety: the caller guarantees `size` readable bytes at the non-null
+        // `data`; core copies them before returning.
+        std::slice::from_raw_parts(data.cast::<u8>(), size)
     };
     dispatch_optional_error(
         &encoder.device,
         encoder
             .core
-            .write_buffer(Arc::clone(&buffer.core), buffer_offset, size),
+            .write_buffer(Arc::clone(&buffer.core), buffer_offset, data),
     );
 }
 
@@ -592,4 +608,145 @@ fn validate_render_pass_descriptor_devices(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(non_snake_case)]
+
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn device_impl() -> Arc<WGPUDeviceImpl> {
+        let instance = Arc::new(WGPUInstanceImpl {
+            core: Arc::new(core::Instance::new_noop()),
+            timed_wait_any_enabled: false,
+            pending_callbacks: Mutex::new(BTreeMap::new()),
+        });
+        let adapter = instance
+            .core
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("Noop adapter");
+        let device = adapter
+            .create_device(None, &[], "device", "queue")
+            .expect("Noop device");
+        Arc::new(WGPUDeviceImpl {
+            core: Arc::new(device),
+            instance,
+            adapter: Arc::new(adapter),
+            device_lost_callback: DeviceLostCallbackInfo {
+                mode: native::WGPUCallbackMode_AllowProcessEvents,
+                callback: None,
+                userdata1: 0,
+                userdata2: 0,
+            },
+            device_lost_futures: Mutex::new(Vec::new()),
+            default_queue: Mutex::new(None),
+            shader_module_cache: ObjectCache::new(),
+            pipeline_layout_cache: ObjectCache::new(),
+            compute_pipeline_cache: ObjectCache::new(),
+            render_pipeline_cache: ObjectCache::new(),
+        })
+    }
+
+    unsafe fn copy_dst_buffer(device: native::WGPUDevice, size: u64) -> native::WGPUBuffer {
+        let descriptor = native::WGPUBufferDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: native::WGPUStringView {
+                data: std::ptr::null(),
+                length: 0,
+            },
+            usage: native::WGPUBufferUsage_CopyDst,
+            size,
+            mappedAtCreation: 0,
+        };
+        let buffer = wgpuDeviceCreateBuffer(device, &descriptor);
+        assert!(!buffer.is_null());
+        buffer
+    }
+
+    /// Block 100 R2: null `data` with a non-zero `size` is reported through
+    /// the device error sink without dereferencing, and nothing is recorded
+    /// on the encoder (finish still succeeds).
+    #[test]
+    fn wgpuCommandEncoderWriteBuffer_rejects_null_data_with_nonzero_size() {
+        let device = device_impl();
+        let device_handle = arc_to_handle(Arc::clone(&device));
+        unsafe {
+            let buffer = copy_dst_buffer(device_handle, 16);
+            let encoder = wgpuDeviceCreateCommandEncoder(device_handle, std::ptr::null());
+
+            wgpuDevicePushErrorScope(device_handle, native::WGPUErrorFilter_Validation);
+            wgpuCommandEncoderWriteBuffer(encoder, buffer, 0, std::ptr::null(), 4);
+            let error = device
+                .core
+                .pop_error_scope()
+                .expect("scope")
+                .expect("null data must be a validation error");
+            assert_eq!(error.kind, core::ErrorKind::Validation);
+            assert_eq!(
+                error.message,
+                "command encoder write buffer data must not be null"
+            );
+
+            // The rejected call recorded nothing: the encoder finishes clean.
+            wgpuDevicePushErrorScope(device_handle, native::WGPUErrorFilter_Validation);
+            let command_buffer = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert!(!command_buffer.is_null());
+            assert_eq!(device.core.pop_error_scope().expect("scope"), None);
+
+            wgpuCommandBufferRelease(command_buffer);
+            wgpuCommandEncoderRelease(encoder);
+            wgpuBufferRelease(buffer);
+            wgpuDeviceRelease(device_handle);
+        }
+    }
+
+    /// Block 100 R2: null `data` with `size == 0` is a validated no-op with
+    /// no error, and a non-null write still validates its range.
+    #[test]
+    fn wgpuCommandEncoderWriteBuffer_accepts_null_data_with_zero_size() {
+        let device = device_impl();
+        let device_handle = arc_to_handle(Arc::clone(&device));
+        unsafe {
+            let buffer = copy_dst_buffer(device_handle, 16);
+            let encoder = wgpuDeviceCreateCommandEncoder(device_handle, std::ptr::null());
+
+            wgpuDevicePushErrorScope(device_handle, native::WGPUErrorFilter_Validation);
+            wgpuCommandEncoderWriteBuffer(encoder, buffer, 8, std::ptr::null(), 0);
+            let bytes = [1_u8, 2, 3, 4];
+            wgpuCommandEncoderWriteBuffer(encoder, buffer, 4, bytes.as_ptr().cast(), bytes.len());
+            let command_buffer = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert!(!command_buffer.is_null());
+            assert_eq!(device.core.pop_error_scope().expect("scope"), None);
+
+            // Zero size past the end is still range-validated (encoder error
+            // surfaces at finish).
+            let invalid = wgpuDeviceCreateCommandEncoder(device_handle, std::ptr::null());
+            wgpuCommandEncoderWriteBuffer(invalid, buffer, 20, std::ptr::null(), 0);
+            wgpuDevicePushErrorScope(device_handle, native::WGPUErrorFilter_Validation);
+            let invalid_buffer = wgpuCommandEncoderFinish(invalid, std::ptr::null());
+            let error = device
+                .core
+                .pop_error_scope()
+                .expect("scope")
+                .expect("out-of-range zero write must fail at finish");
+            assert!(
+                error
+                    .message
+                    .contains("command encoder write buffer range exceeds buffer size"),
+                "{}",
+                error.message
+            );
+
+            wgpuCommandBufferRelease(invalid_buffer);
+            wgpuCommandEncoderRelease(invalid);
+            wgpuCommandBufferRelease(command_buffer);
+            wgpuCommandEncoderRelease(encoder);
+            wgpuBufferRelease(buffer);
+            wgpuDeviceRelease(device_handle);
+        }
+    }
 }

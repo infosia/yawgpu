@@ -222,6 +222,31 @@ impl PendingWriteBatch {
     fn pool_sizes(&self) -> (usize, usize) {
         (self.in_flight.len(), self.free_chunks.len())
     }
+
+    #[cfg(test)]
+    fn in_flight_submission_indices(&self) -> Vec<SubmissionIndex> {
+        self.in_flight
+            .iter()
+            .map(|chunk| chunk.submission_index)
+            .collect()
+    }
+}
+
+/// Staging sink for encoder-side buffer writes met during submit lowering
+/// (Block 100 R3).
+///
+/// The lowering walk stages each `CommandExecution::BufferWrite` into the
+/// queue's `PendingWriteBatch` (so the standard-chunk pool is reused) and
+/// emits the resulting `HalCopy::Buffer` **in place** in the copy list, so
+/// the write is ordered with the other commands of the command buffer rather
+/// than hoisted into the pre-submit flush. `Queue::submit` holds the batch
+/// lock for the whole walk and afterwards takes the chunks staged here so
+/// they are retired against the index of the submission that reads them.
+struct BufferWriteStaging<'a> {
+    batch: &'a mut PendingWriteBatch,
+    /// First staging failure; the walk stops at it and `Queue::submit`
+    /// reports it as a device error (`device_error_from_staging`).
+    error: Option<yawgpu_hal::HalError>,
 }
 
 fn align_up(value: u64, alignment: u64) -> Option<u64> {
@@ -730,14 +755,66 @@ impl Queue {
             };
             return self.finish_pending_submission(chunks, result);
         }
-        let PendingWriteSubmission { mut copies, chunks } = self.take_pending_writes();
         let all_ops: Vec<_> = command_buffers
             .iter()
             .flat_map(|command_buffer| command_buffer.command_ops().iter())
             .collect();
+
+        // Block 100 R3 chunk-retirement invariant. The pending-write batch is
+        // held locked for the whole lowering walk: the queued writes issued
+        // before this submit are taken first (they precede the command
+        // buffers, as before), encoder-side `BufferWrite`s then stage into
+        // the same batch in command order, and a second `take_submission`
+        // under the same lock collects exactly the chunks the walk consumed.
+        // No `Queue::write_buffer` can interleave while the lock is held, so
+        // that second take never captures foreign copies. Both chunk sets are
+        // retired below against the `SubmissionIndex` the HAL returns for
+        // this submission, so `recycle_completed` cannot hand a chunk back to
+        // a later write while this submission may still read it.
+        self.recycle_completed_staging();
+        let mut pending = self.inner.pending_writes.lock();
+        let PendingWriteSubmission {
+            mut copies,
+            mut chunks,
+        } = pending.take_submission();
+        let queued_copy_count = copies.len();
+        let mut staging = BufferWriteStaging {
+            batch: &mut pending,
+            error: None,
+        };
         for (op_index, op) in all_ops.iter().enumerate() {
-            append_hal_command_execution(&mut copies, op, &all_ops[..=op_index]);
+            append_hal_command_execution(&mut copies, op, &all_ops[..=op_index], &mut staging);
+            if staging.error.is_some() {
+                break;
+            }
         }
+        let staging_error = staging.error.take();
+        let staged = pending.take_submission();
+        debug_assert!(
+            staged.copies.is_empty(),
+            "no queue write can be recorded while the batch lock is held"
+        );
+        chunks.extend(staged.chunks);
+        drop(pending);
+
+        if let Some(error) = staging_error {
+            // Nothing from the command buffers runs: a partial replay would
+            // be worse than none. The queue writes issued before this submit
+            // still flush, as on the validation-error path above, and every
+            // chunk (including the ones the aborted walk staged) is retired
+            // against that flush so it recycles only once it is provably
+            // unread.
+            copies.truncate(queued_copy_count);
+            if copies.is_empty() {
+                let latest = self.latest_submission_index();
+                self.inner.pending_writes.lock().retire(latest, chunks);
+            } else {
+                let result = self.inner.hal.submit_copies(&copies);
+                let _ = self.finish_pending_submission(chunks, result);
+            }
+            return Some(device_error_from_staging(error));
+        }
+
         let result = self.inner.hal.submit_copies(&copies);
         self.finish_pending_submission(chunks, result)
     }
@@ -855,6 +932,7 @@ fn command_buffer_referenced_textures(command_buffer: &CommandBuffer) -> Vec<Tex
             }
             CommandExecution::BufferCopy(_)
             | CommandExecution::BufferClear(_)
+            | CommandExecution::BufferWrite(_)
             | CommandExecution::ResolveQuerySet(_)
             | CommandExecution::ComputePass(_) => {}
         }
@@ -967,7 +1045,12 @@ fn hal_command_execution_with_ops(
     command_ops: &[&CommandExecution],
 ) -> Option<HalCopy> {
     let mut copies = Vec::new();
-    append_hal_command_execution(&mut copies, op, command_ops);
+    let mut batch = PendingWriteBatch::default();
+    let mut staging = BufferWriteStaging {
+        batch: &mut batch,
+        error: None,
+    };
+    append_hal_command_execution(&mut copies, op, command_ops, &mut staging);
     copies.into_iter().next()
 }
 
@@ -975,8 +1058,40 @@ fn append_hal_command_execution(
     copies: &mut Vec<HalCopy>,
     op: &CommandExecution,
     command_ops: &[&CommandExecution],
+    staging: &mut BufferWriteStaging<'_>,
 ) {
     match op {
+        CommandExecution::BufferWrite(write) => {
+            // Block 100 R3: stage the encode-time snapshot into a queue-owned
+            // `copy_src` chunk and emit the copy at this command's position.
+            let Ok(size) = u64::try_from(write.data.len()) else {
+                return;
+            };
+            if size == 0 {
+                return;
+            }
+            let Some(destination) = write.buffer.hal() else {
+                return;
+            };
+            let (source, source_offset) =
+                match staging
+                    .batch
+                    .stage(write.device.hal(), &write.data, size, 4)
+                {
+                    Ok(staged) => staged,
+                    Err(error) => {
+                        staging.error = Some(error);
+                        return;
+                    }
+                };
+            copies.push(HalCopy::Buffer(HalBufferCopy {
+                source,
+                source_offset,
+                destination,
+                destination_offset: write.offset,
+                size,
+            }));
+        }
         CommandExecution::BufferCopy(copy) => {
             if copy.size == 0 {
                 return;
@@ -3754,6 +3869,231 @@ fn fs() -> @location(0) vec4<f32> {
             free, MAX_FREE_STAGING_CHUNKS,
             "the reuse pool is capped, excess chunks are dropped"
         );
+    }
+
+    // Block 100: encoder-side write_buffer lowering ---------------------------
+
+    /// Block 100 R3: a `BufferWrite` recorded before a copy that reads the
+    /// same buffer is lowered as a `HalCopy::Buffer` at its own position in
+    /// the command list, sourced from a queue-owned standard-size staging
+    /// chunk, and is not hoisted into the pre-submit pending flush.
+    #[test]
+    fn submit_lowers_buffer_write_before_a_later_copy_in_command_order() {
+        let device = noop_device();
+        let queue = device.queue();
+        let written = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
+            size: 8,
+            mapped_at_creation: false,
+        }));
+        let copied = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 8,
+            mapped_at_creation: false,
+        }));
+
+        // A queued write issued before the submit still precedes everything.
+        assert_eq!(
+            queue.write_buffer(QueueBufferWrite {
+                device: device.hal(),
+                buffer: &copied,
+                offset: 0,
+                data: &[9, 9, 9, 9],
+            }),
+            None
+        );
+
+        let encoder = device.create_command_encoder();
+        assert_eq!(
+            encoder.write_buffer(Arc::clone(&written), 0, &[1, 2, 3, 4, 5, 6, 7, 8]),
+            None
+        );
+        assert_eq!(
+            encoder.copy_buffer_to_buffer(Arc::clone(&written), 0, Arc::clone(&copied), 0, 8),
+            None
+        );
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert_eq!(queue.submit(&[Arc::new(command_buffer)]), None);
+
+        let submitted = match queue.hal() {
+            HalQueue::Noop(queue) => queue.submitted_copies(),
+            _ => panic!("expected Noop queue"),
+        };
+        let [HalCopy::Buffer(queued), HalCopy::Buffer(write), HalCopy::Buffer(copy)] =
+            submitted.as_slice()
+        else {
+            panic!("expected [queued write, encoder write, copy], got {submitted:?}");
+        };
+        assert_eq!((queued.destination_offset, queued.size), (0, 4));
+        // The encoder write reads from a staging chunk, not from a user buffer.
+        assert_eq!(write.source.size(), STAGING_CHUNK_SIZE);
+        assert_eq!(write.source_offset, 0);
+        assert_eq!(write.destination.size(), 8);
+        assert_eq!(write.destination_offset, 0);
+        assert_eq!(write.size, 8);
+        assert_eq!(
+            write
+                .source
+                .read(0, 8)
+                .expect("staging chunk is host readable"),
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
+        );
+        // The copy follows the write and reads the user buffer.
+        assert_eq!(copy.source.size(), 8);
+        assert_eq!(
+            (copy.source_offset, copy.destination_offset, copy.size),
+            (0, 0, 8)
+        );
+    }
+
+    /// Block 100 R4: on Noop the staged copy executes eagerly, so the bytes
+    /// land in the destination's host storage in command order -- a write
+    /// after a copy overrides it, and a write before a copy feeds it.
+    #[test]
+    fn submit_executes_buffer_write_into_noop_host_storage() {
+        let device = noop_device();
+        let queue = device.queue();
+        let a = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
+            size: 32,
+            mapped_at_creation: false,
+        }));
+        let b = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
+            size: 32,
+            mapped_at_creation: false,
+        }));
+        let data: Vec<u8> = (1..=16).collect();
+
+        // write(A) at offset 4, then copy A -> B: B observes the write.
+        let encoder = device.create_command_encoder();
+        assert_eq!(encoder.write_buffer(Arc::clone(&a), 4, &data), None);
+        assert_eq!(
+            encoder.copy_buffer_to_buffer(Arc::clone(&a), 0, Arc::clone(&b), 0, 32),
+            None
+        );
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert_eq!(queue.submit(&[Arc::new(command_buffer)]), None);
+
+        let mut expected = vec![0_u8; 32];
+        expected[4..20].copy_from_slice(&data);
+        let a_hal = a.hal().expect("valid buffer");
+        let b_hal = b.hal().expect("valid buffer");
+        assert_eq!(a_hal.read(0, 32).expect("read"), expected);
+        assert_eq!(b_hal.read(0, 32).expect("read"), expected);
+
+        // copy B -> A, then write(A): the write lands last.
+        let encoder = device.create_command_encoder();
+        assert_eq!(
+            encoder.copy_buffer_to_buffer(Arc::clone(&b), 0, Arc::clone(&a), 0, 32),
+            None
+        );
+        assert_eq!(encoder.write_buffer(Arc::clone(&a), 0, &[0xee; 8]), None);
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert_eq!(queue.submit(&[Arc::new(command_buffer)]), None);
+        let mut expected_after = expected.clone();
+        expected_after[..8].fill(0xee);
+        assert_eq!(a_hal.read(0, 32).expect("read"), expected_after);
+    }
+
+    /// Block 100 R3 invariant: chunks an encoder write stages are retired
+    /// against the `SubmissionIndex` of the submission that reads them (never
+    /// an earlier one) and recycle only once that submission completes.
+    #[test]
+    fn buffer_write_staging_chunks_are_retired_against_the_consuming_submission() {
+        let device = noop_device();
+        let queue = device.queue();
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+
+        // An earlier submission establishes a lower index the chunks must
+        // not be attributed to.
+        assert_eq!(queue.submit(&[]), None);
+        let earlier = queue.latest_submission_index();
+        assert!(earlier > SubmissionIndex::NONE);
+        assert_eq!(queue.inner.pending_writes.lock().pool_sizes(), (0, 0));
+
+        // One queued write and one encoder write share this submission; the
+        // batch resets its current chunk at take time, so they occupy two
+        // chunks and both must carry the same index.
+        assert_eq!(
+            queue.write_buffer(QueueBufferWrite {
+                device: device.hal(),
+                buffer: &buffer,
+                offset: 0,
+                data: &[1, 1, 1, 1],
+            }),
+            None
+        );
+        let encoder = device.create_command_encoder();
+        assert_eq!(encoder.write_buffer(Arc::clone(&buffer), 8, &[2; 8]), None);
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert_eq!(queue.submit(&[Arc::new(command_buffer)]), None);
+
+        let consuming = queue.latest_submission_index();
+        assert!(consuming > earlier);
+        {
+            let pending = queue.inner.pending_writes.lock();
+            assert_eq!(
+                pending.pool_sizes(),
+                (2, 0),
+                "staged, in flight, not yet free"
+            );
+            assert_eq!(
+                pending.in_flight_submission_indices(),
+                vec![consuming, consuming]
+            );
+        }
+
+        // Completion of the consuming submission is what frees them.
+        assert!(queue.submission_complete(consuming).expect("poll"));
+        assert_eq!(queue.inner.pending_writes.lock().pool_sizes(), (0, 2));
+
+        // And the pooled chunk is what the next encoder write reuses.
+        let encoder = device.create_command_encoder();
+        assert_eq!(encoder.write_buffer(Arc::clone(&buffer), 0, &[3; 4]), None);
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert_eq!(queue.submit(&[Arc::new(command_buffer)]), None);
+        let (in_flight, free) = queue.inner.pending_writes.lock().pool_sizes();
+        assert_eq!(
+            (in_flight, free),
+            (1, 1),
+            "one pooled chunk was taken, none allocated"
+        );
+    }
+
+    /// Block 100 R5: a destination destroyed after encoding is rejected at
+    /// submit like `copy_buffer_to_buffer`'s destination, and the aborted
+    /// submit lowers nothing.
+    #[test]
+    fn submit_rejects_buffer_write_to_a_destroyed_destination() {
+        let device = noop_device();
+        let queue = device.queue();
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        let encoder = device.create_command_encoder();
+        assert_eq!(encoder.write_buffer(Arc::clone(&buffer), 0, &[1; 4]), None);
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        buffer.destroy();
+
+        let error = queue
+            .submit(&[Arc::new(command_buffer)])
+            .expect("destroyed destination must fail at submit");
+        assert_eq!(error.message, "queue submit cannot use a destroyed buffer");
+        assert!(matches!(queue.hal(), HalQueue::Noop(q) if q.submitted_copies().is_empty()));
+        assert_eq!(queue.inner.pending_writes.lock().pool_sizes(), (0, 0));
     }
 
     // F-074: write_buffer staging-copy tests ---------------------------------

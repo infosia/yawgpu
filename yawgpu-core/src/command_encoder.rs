@@ -114,6 +114,21 @@ pub(crate) struct BufferClearCommand {
     pub(crate) size: u64,
 }
 
+/// Stores the data needed to replay an encoder-side buffer write (Block 100).
+///
+/// `data` is an encode-time snapshot of the caller's bytes (R1); the
+/// caller may free or modify its memory as soon as the record call returns.
+/// `device` is retained so the submit lowering can stage the snapshot into a
+/// queue-owned `copy_src` chunk (R3) without threading a device through
+/// `Queue::submit`.
+#[derive(Debug, Clone)]
+pub(crate) struct BufferWriteCommand {
+    pub(crate) device: Device,
+    pub(crate) buffer: Arc<Buffer>,
+    pub(crate) offset: u64,
+    pub(crate) data: Vec<u8>,
+}
+
 /// Enumerates texture copy command values.
 #[derive(Debug, Clone)]
 pub(crate) enum TextureCopyCommand {
@@ -154,6 +169,8 @@ pub(crate) enum CommandExecution {
     BufferCopy(BufferCopyCommand),
     /// Buffer clear variant.
     BufferClear(BufferClearCommand),
+    /// Encoder-side buffer write variant (Block 100).
+    BufferWrite(BufferWriteCommand),
     /// Texture copy variant.
     TextureCopy(TextureCopyCommand),
     /// Query-set resolve variant.
@@ -553,7 +570,7 @@ impl CommandEncoder {
 
     /// Records a validation error against the encoder, marking it unusable.
     pub fn record_validation_error(&self, message: impl Into<String>) -> Option<String> {
-        self.record_buffer_command(Vec::new(), None, None, None, || Err(message.into()))
+        self.record_buffer_command(Vec::new(), None, || Err(message.into()))
     }
 
     /// Records a buffer-to-buffer copy after validating the ranges and usages.
@@ -574,9 +591,7 @@ impl CommandEncoder {
         };
         self.record_buffer_command(
             vec![Arc::clone(&source), Arc::clone(&destination)],
-            Some(copy),
-            None,
-            None,
+            Some(CommandExecution::BufferCopy(copy)),
             || {
                 validate_copy_buffer_to_buffer(
                     &source,
@@ -596,14 +611,43 @@ impl CommandEncoder {
             offset,
             size,
         };
-        self.record_buffer_command(vec![Arc::clone(&buffer)], None, Some(clear), None, || {
-            validate_clear_buffer(&buffer, offset, size)
-        })
+        self.record_buffer_command(
+            vec![Arc::clone(&buffer)],
+            Some(CommandExecution::BufferClear(clear)),
+            || validate_clear_buffer(&buffer, offset, size),
+        )
     }
 
-    /// Records an encoder-side buffer write over the given range after validation.
-    pub fn write_buffer(&self, buffer: Arc<Buffer>, offset: u64, size: u64) -> Option<String> {
-        self.record_buffer_command(vec![Arc::clone(&buffer)], None, None, None, || {
+    /// Records an encoder-side buffer write of `data` at `offset` after
+    /// validation (Block 100).
+    ///
+    /// The bytes are copied at encode time (R1), so the caller may reuse
+    /// `data` as soon as this returns. An empty `data` is validated and then
+    /// records nothing, matching `Queue::write_buffer`. The destination is
+    /// registered as a referenced buffer so submit rejects a destroyed or
+    /// mapped one exactly like `copy_buffer_to_buffer`'s destination (R5).
+    /// Execution happens at submit, in command order (R3).
+    pub fn write_buffer(&self, buffer: Arc<Buffer>, offset: u64, data: &[u8]) -> Option<String> {
+        let size = u64::try_from(data.len()).ok();
+        // Only `new_error` builds an encoder without a device; it already
+        // carries a first error, so the validation closure below reports the
+        // missing device rather than silently dropping the bytes.
+        let device = self.inner.device.clone();
+        let command = match (&device, data.is_empty()) {
+            (Some(device), false) => Some(CommandExecution::BufferWrite(BufferWriteCommand {
+                device: device.clone(),
+                buffer: Arc::clone(&buffer),
+                offset,
+                data: data.to_vec(),
+            })),
+            _ => None,
+        };
+        self.record_buffer_command(vec![Arc::clone(&buffer)], command, || {
+            let size =
+                size.ok_or_else(|| "command encoder write buffer size is too large".to_owned())?;
+            if size != 0 && device.is_none() {
+                return Err("command encoder write buffer requires a device".to_owned());
+            }
             validate_encoder_write_buffer(&buffer, offset, size)
         })
     }
@@ -611,7 +655,7 @@ impl CommandEncoder {
     /// Records a timestamp write into the query set at `query_index`.
     pub fn write_timestamp(&self, query_set: Arc<QuerySet>, query_index: u32) -> Option<String> {
         self.record_referenced_query_set((*query_set).clone());
-        self.record_buffer_command(Vec::new(), None, None, None, || {
+        self.record_buffer_command(Vec::new(), None, || {
             validate_timestamp_query_set(&query_set, "write timestamp")?;
             validate_query_index(&query_set, query_index, "write timestamp query index")
         })
@@ -675,9 +719,7 @@ impl CommandEncoder {
         };
         self.record_buffer_command(
             vec![Arc::clone(&source.buffer)],
-            None,
-            None,
-            Some(copy),
+            Some(CommandExecution::TextureCopy(copy)),
             || {
                 validate_buffer_texture_copy(
                     source,
@@ -706,9 +748,7 @@ impl CommandEncoder {
         };
         self.record_buffer_command(
             vec![Arc::clone(&destination.buffer)],
-            None,
-            None,
-            Some(copy),
+            Some(CommandExecution::TextureCopy(copy)),
             || {
                 validate_buffer_texture_copy(
                     destination,
@@ -735,9 +775,11 @@ impl CommandEncoder {
             destination: destination.clone(),
             copy_size,
         };
-        self.record_buffer_command(Vec::new(), None, None, Some(copy), || {
-            validate_texture_to_texture_copy(source, destination, copy_size)
-        })
+        self.record_buffer_command(
+            Vec::new(),
+            Some(CommandExecution::TextureCopy(copy)),
+            || validate_texture_to_texture_copy(source, destination, copy_size),
+        )
     }
 
     /// Opens a debug group in the command stream.
@@ -813,12 +855,13 @@ impl CommandEncoder {
     }
 
     /// Records a command that references a buffer, validating the encoder and tracking the buffer.
+    ///
+    /// `command` is the execution record to append when validation passes;
+    /// `None` records a validated no-op (for example a zero-size write).
     pub(crate) fn record_buffer_command<F>(
         &self,
         referenced_buffers: Vec<Arc<Buffer>>,
-        buffer_copy: Option<BufferCopyCommand>,
-        buffer_clear: Option<BufferClearCommand>,
-        texture_copy: Option<TextureCopyCommand>,
+        command: Option<CommandExecution>,
         validate: F,
     ) -> Option<String>
     where
@@ -839,20 +882,8 @@ impl CommandEncoder {
             let mut state = self.inner.state.lock();
             state.has_recorded_command = true;
             record_referenced_buffers_locked(&mut state, referenced_buffers);
-            if let Some(copy) = buffer_copy {
-                state
-                    .command_ops
-                    .push(CommandExecution::BufferCopy(copy.clone()));
-            }
-            if let Some(clear) = buffer_clear {
-                state
-                    .command_ops
-                    .push(CommandExecution::BufferClear(clear.clone()));
-            }
-            if let Some(copy) = texture_copy {
-                state
-                    .command_ops
-                    .push(CommandExecution::TextureCopy(copy.clone()));
+            if let Some(command) = command {
+                state.command_ops.push(command);
             }
         }
         None
@@ -2997,6 +3028,136 @@ mod tests {
         Arc::new(view)
     }
 
+    /// Block 100 R1: a successful `write_buffer` records a `BufferWrite`
+    /// holding an encode-time copy of the bytes, so the caller's buffer can
+    /// be mutated after the call without affecting the recorded command.
+    #[test]
+    fn write_buffer_records_a_copy_of_the_bytes() {
+        let device = noop_device();
+        let destination = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 32,
+            mapped_at_creation: false,
+        }));
+        let encoder = device.create_command_encoder();
+        let mut data = [1_u8, 2, 3, 4, 5, 6, 7, 8];
+        assert_eq!(encoder.write_buffer(destination.clone(), 4, &data), None);
+        data.fill(0xff);
+
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        assert!(matches!(
+            command_buffer.command_ops(),
+            [CommandExecution::BufferWrite(write)]
+                if write.buffer.same(&destination)
+                    && write.offset == 4
+                    && write.data == vec![1, 2, 3, 4, 5, 6, 7, 8]
+                    && write.device.same(&device)
+        ));
+        assert_eq!(command_buffer.referenced_buffers().len(), 1);
+        assert!(command_buffer.referenced_buffers()[0].same(&destination));
+    }
+
+    /// Block 100 R1: an empty write is validated (so a bad buffer still
+    /// fails) but records no execution op, matching `Queue::write_buffer`.
+    #[test]
+    fn write_buffer_with_zero_size_records_nothing() {
+        let device = noop_device();
+        let destination = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 32,
+            mapped_at_creation: false,
+        }));
+        let encoder = device.create_command_encoder();
+        assert_eq!(encoder.write_buffer(destination.clone(), 8, &[]), None);
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert!(!command_buffer.is_error());
+        assert!(command_buffer.command_ops().is_empty());
+
+        let missing_copy_dst = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_SRC,
+            size: 32,
+            mapped_at_creation: false,
+        }));
+        let invalid = device.create_command_encoder();
+        assert_eq!(invalid.write_buffer(missing_copy_dst, 0, &[]), None);
+        let (command_buffer, error) = invalid.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("command encoder write buffer requires CopyDst usage".to_owned())
+        );
+    }
+
+    /// Block 100 R1: every validation failure records the first error on the
+    /// encoder and records no execution op; the second failure is not
+    /// reported over the first.
+    #[test]
+    fn write_buffer_validation_failure_records_first_error_and_nothing_else() {
+        let device = noop_device();
+        let destination = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 32,
+            mapped_at_creation: false,
+        }));
+        let cases: [(u64, usize, &str); 4] = [
+            (
+                2,
+                4,
+                "command encoder write buffer offset must be 4-byte aligned",
+            ),
+            (
+                0,
+                6,
+                "command encoder write buffer size must be 4-byte aligned",
+            ),
+            (
+                32,
+                4,
+                "command encoder write buffer range exceeds buffer size",
+            ),
+            (
+                u64::MAX - 3,
+                8,
+                "command encoder write buffer range overflows",
+            ),
+        ];
+        for (offset, size, expected) in cases {
+            let encoder = device.create_command_encoder();
+            let data = vec![0x5a; size];
+            assert_eq!(
+                encoder.write_buffer(destination.clone(), offset, &data),
+                None
+            );
+            // A second, otherwise valid write must not displace the first error
+            // and must not be recorded either.
+            assert_eq!(encoder.write_buffer(destination.clone(), 0, &[0; 4]), None);
+            let (command_buffer, error) = encoder.finish();
+            assert!(command_buffer.is_error(), "{expected}");
+            assert_eq!(error.as_deref(), Some(expected));
+            assert!(command_buffer.command_ops().is_empty());
+            assert!(command_buffer.referenced_buffers().is_empty());
+        }
+
+        let error_buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::NONE,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        assert!(error_buffer.is_error());
+        let encoder = device.create_command_encoder();
+        assert_eq!(encoder.write_buffer(error_buffer, 0, &[0; 4]), None);
+        let (command_buffer, error) = encoder.finish();
+        assert!(command_buffer.is_error());
+        assert_eq!(
+            error,
+            Some("command encoder write buffer cannot use an error buffer".to_owned())
+        );
+        assert!(command_buffer.command_ops().is_empty());
+    }
+
     #[test]
     fn command_encoder_buffer_copies_clear_and_write_validate_offsets() {
         let device = noop_device();
@@ -3017,11 +3178,14 @@ mod tests {
             None
         );
         assert_eq!(encoder.clear_buffer(destination.clone(), 0, 16), None);
-        assert_eq!(encoder.write_buffer(destination.clone(), 0, 16), None);
+        assert_eq!(
+            encoder.write_buffer(destination.clone(), 0, &[0xab; 16]),
+            None
+        );
         let (command_buffer, error) = encoder.finish();
         assert_eq!(error, None);
         assert!(!command_buffer.is_error());
-        assert_eq!(command_buffer.command_ops().len(), 2);
+        assert_eq!(command_buffer.command_ops().len(), 3);
         assert!(matches!(
             &command_buffer.command_ops()[0],
             CommandExecution::BufferCopy(copy)
@@ -3035,6 +3199,13 @@ mod tests {
             &command_buffer.command_ops()[1],
             CommandExecution::BufferClear(clear)
                 if clear.buffer.same(&destination) && clear.offset == 0 && clear.size == 16
+        ));
+        assert!(matches!(
+            &command_buffer.command_ops()[2],
+            CommandExecution::BufferWrite(write)
+                if write.buffer.same(&destination)
+                    && write.offset == 0
+                    && write.data == vec![0xab; 16]
         ));
 
         let invalid = device.create_command_encoder();
