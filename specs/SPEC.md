@@ -1,17 +1,18 @@
 # SPEC.md — yawgpu top-level specification & roadmap
 
 The implemented spec is `webgpu.h` (`webgpu-headers/webgpu.h`,
-6766 lines). Behaviour is pinned by Dawn's validation tests
-(`dawn/src/dawn/tests/unittests/validation`, 55 files), ported to
-Rust. See `reference/dawn-test-mapping.md` for the per-file port plan.
+6766 lines). Behaviour is pinned by the inline unit tests on every
+public fn, the Dawn-ported validation tests (`yawgpu/tests/*_validation.rs`,
+per-file mapping in `reference/dawn-test-mapping.md`), and the external
+WebGPU CTS run with Dawn as the oracle (see `CLAUDE.md`).
 
 ## Execution model
 
 Implementation is done by a **separate coding agent**; Claude plans,
 reviews, and commits. See `reference/workflow.md` for roles, the per-slice
-loop, and the task-handoff template. Each phase is decomposed into
-self-contained task handoffs recorded in per-topic tracking docs
-(`tracking/<topic>.md`).
+loop, and the task-handoff template. Each block is decomposed into
+self-contained task handoffs (`HANDOFF.md`); progress is recorded in
+per-topic tracking docs (`tracking/<topic>.md`).
 
 ## Phased roadmap
 

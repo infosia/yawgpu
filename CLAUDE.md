@@ -10,6 +10,9 @@ orchestrates** — it authors `specs/`, emits task handoffs, reviews the coding
 agent's diffs against acceptance criteria, runs `cargo build`/`cargo test`,
 and manages git (`init`/`add`/`commit`). Claude does not write production
 code; the coding agent does not plan, edit `specs/`, change scope, or commit.
+Two exceptions, because the coding agent's sandbox has no GPU and example
+work is trial-and-error: Claude writes `examples/` and the real-GPU
+`yawgpu/tests/e2e_{metal,vulkan}_*.rs` tests directly.
 Full detail: `specs/reference/workflow.md`.
 
 ## Backend support tiers
@@ -63,19 +66,6 @@ Tier 2 backend pass.**
    drops one ref, `wgpuXxxAddRef` clones. `Drop` releases backend
    resources.
 
-### Historical note — Dawn TDD (Phases 0–9)
-
-The project was bootstrapped Phases 0–9 by porting Dawn's
-`dawn/src/dawn/tests/unittests/validation` tests as
-integration tests against the C FFI (`yawgpu/tests/*.rs`), with
-that suite as the executable spec for each API area. **That was
-the bootstrap methodology, not a permanent principle.** The
-ported tests remain in the tree as a spec-conformance regression
-layer and continue to run on every Noop gate, but new public API
-work follows principle 1 above (direct unit tests) — porting a
-Dawn test is optional, useful when it materially closes a
-spec-coverage gap.
-
 ### CTS conformance — webgpu-native-cts
 
 WebGPU CTS conformance (`api/validation` + `api/operation`) is verified
@@ -101,9 +91,8 @@ construction. The default build links Tint, so it **requires the Dawn submodule
 initialized + its deps fetched** (`git submodule update --init third_party/dawn`,
 then `tools/fetch_dawn_dependencies.py`; see `specs/reference/dependencies.md`);
 without it `yawgpu-tint` is a non-functional stub. Shader-compiler issues are fixed
-in the `yawgpu-tint` shim (or upstream Dawn/Tint) — **there is no longer a naga fork
-to edit**. (Tint replaced the earlier naga frontend; the historical naga/`../wgpu`
-fork workflow is obsolete.)
+in the `yawgpu-tint` shim or upstream in Dawn/Tint; yawgpu has no naga dependency,
+so `../wgpu` is not part of the build.
 
 ## Code conventions
 
@@ -136,8 +125,7 @@ fork workflow is obsolete.)
    reach the cross-object interaction (or port the Dawn test if
    it materially closes a spec-conformance gap).
 5. Verify on Noop; log in the area's tracking doc
-   (`specs/tracking/<topic>.md`). Per-phase `phase-N.md` logs are no
-   longer written.
+   (`specs/tracking/<topic>.md`).
 6. Refactor for reuse/clarity before moving on.
 
 **Every phase ends with a mandatory Phase Review ("Clean Review Then
@@ -146,15 +134,13 @@ and emits `CRITICAL`/`MAJOR`/`MINOR` findings; findings are fixed in
 severity order; a phase cannot be COMPLETE with any open CRITICAL/MAJOR.
 Full process: `specs/reference/workflow.md` → "Phase Review".
 
-## Out of scope (initially)
+## Out of scope
 
-- **D3D backends (D3D11 / D3D12).** Permanently out of scope. (GLES is
-  now Tier 2 / experimental — see "Backend support tiers" above and
-  `specs/blocks/67-gles-backend.md` for the Android + Windows ANGLE
-  bring-up plan.)
+- **D3D backends (D3D11 / D3D12).** Permanently out of scope.
 - Dawn `wire/` tests — they validate dawn-wire IPC, which yawgpu has no
   analog for. The C ABI boundary is our equivalent boundary.
-- Dawn `end2end` tests — deferred to Phase 7 (real backends), GPU-gated.
+- Porting Dawn `end2end` tests — real-GPU behaviour is covered by
+  `yawgpu/tests/e2e_*.rs` and the external CTS.
 
 ## Privacy / repo hygiene
 

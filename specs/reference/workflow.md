@@ -7,66 +7,60 @@ Implementation is performed by a **separate coding agent**. Claude acts as
 
 | Actor | Responsibilities |
 |---|---|
-| **Claude** (planner/orchestrator) | Author & maintain `specs/` (SPEC, blocks, tracking, this doc); decompose each phase into a self-contained **task handoff**; review the coding agent's diff against acceptance criteria; run/inspect `cargo build` & `cargo test`; manage version control (`git init`, `git add`, `git commit`); update the area's `tracking/<topic>.md` doc and the `dawn-test-mapping.md` status column; decide go/no-go for the next slice. |
-| **Coding agent** (implementer) | Read the assigned task handoff + referenced block spec + Dawn source; write the code and the ported tests; make `cargo test` green on Noop; report what it changed. Does **not** edit `specs/`, commit, or change scope. |
+| **Claude** (planner/orchestrator) | Author & maintain `specs/` (SPEC, blocks, tracking, this doc); decompose each block into self-contained **task handoffs**; review the coding agent's diff against acceptance criteria; run/inspect `cargo build` & `cargo test`; manage version control (`git add`, `git commit`); update the area's `tracking/<topic>.md` doc; decide go/no-go for the next slice. Also writes `examples/` and the real-GPU `e2e_{metal,vulkan}_*.rs` tests directly (the coding agent's sandbox has no GPU). |
+| **Coding agent** (implementer) | Read `HANDOFF.md` + the referenced block spec; write the library code and its inline unit tests; make the targeted Noop gates green; write `REPORT.md`. Does **not** edit `specs/`, commit, or change scope. |
 
-Claude does **not** write production code itself; it writes specs, reviews,
-and integrates. The coding agent does **not** plan or commit.
-
-Tracking convention (since 2026-07-04): work is logged in **per-topic**
-tracking docs, `tracking/<topic>.md` (e.g. `adapter-limits.md`,
-`cts-coverage.md`). Per-phase `tracking/phase-N.md` logs are no longer
-written; the historical ones were removed from the repository and its
-history.
+Work is logged in **per-topic** tracking docs, `tracking/<topic>.md`
+(e.g. `adapter-limits.md`, `cts-coverage.md`).
 
 ## Per-slice loop
 
-A "slice" is one Dawn test file (or, for Phase 0, one scaffold deliverable).
+A "slice" is one independently reviewable step of a block
+(`specs/blocks/<NN>-<area>.md`, slices S1..Sn).
 
-1. **Plan (Claude)** — ensure the relevant `blocks/<area>.md` has the rules
-   extracted from the Dawn source; emit a task handoff (template below).
-2. **Implement (coding agent)** — produce code + ported test; make Noop
-   `cargo test` green; report.
+1. **Plan (Claude)** — the block spec states the rules and the slice's
+   behaviour contract; write the slice's task handoff to `HANDOFF.md`
+   (template below).
+2. **Implement (coding agent)** — library code + inline unit tests
+   (CLAUDE.md principle 1); targeted gates green; completion report in
+   `REPORT.md` (`blocks/91-cts-conformance.md` → "Completion report").
 3. **Review (Claude)** — verify against the handoff's acceptance criteria:
-   - test file faithfully ports the Dawn cases (no silently dropped cases),
+   - every new/changed public fn has its inline unit test,
    - validation routes through the device error sink (no panics in
      `yawgpu-core`/`yawgpu-hal`; FFI-boundary `expect` only where allowed),
    - conventions in `CLAUDE.md` honoured,
-   - `cargo build` + `cargo test` clean on Noop.
+   - `cargo test --workspace` + clippy clean on Noop; feature-gated HAL
+     tests and real-GPU e2e run where the slice touches a backend.
    On failure: return a revision handoff. Do not fix it inline.
-4. **Integrate (Claude)** — update the area's `tracking/<topic>.md` and the
-   status column in `dawn-test-mapping.md`; `git add` + `git commit` with a
-   message referencing the phase and Dawn file.
+4. **Integrate (Claude)** — update the area's `tracking/<topic>.md`;
+   `git add` + `git commit` (see "Version control").
 
 ## Task handoff template
 
-Claude produces one of these per slice (kept in the area's
-`tracking/<topic>.md` or inline when dispatching the coding agent):
+Illustrative shape of `HANDOFF.md`; adapt the sections to the slice.
 
 ```
-## Task: <area> — port <DawnFile>ValidationTests
+## Task: Block <NN> S<k> — <short>
 
 Goal: <one line>
 
 Inputs to read:
-- specs/blocks/<block>.md  (rules R1..Rn)
-- dawn/.../<DawnFile>ValidationTests.cpp
-- specs/reference/naming-conventions.md, CLAUDE.md
+- specs/blocks/<NN>-<area>.md  (rules R1..Rn, slice S<k>)
+- CLAUDE.md, specs/reference/naming-conventions.md
+- <oracle source when relevant, e.g. the Dawn file that implements the rule>
 
 Produce:
-- yawgpu/tests/<area>_validation.rs  (port every TEST_F case; map
-  ASSERT_DEVICE_ERROR -> assert_device_error!)
-- minimal impl in yawgpu-core (+ yawgpu FFI fns) to make them pass on Noop
+- <library changes by crate>
+- inline #[cfg(test)] unit tests for every new/changed public fn
 
-Out of scope: real backends, unrelated APIs, spec edits, commits.
+Out of scope: spec edits, commits, <anything the slice must not touch>.
 
 Acceptance criteria:
-- [ ] every Dawn TEST_F case in the file has a corresponding #[test]
-- [ ] cargo test green on Noop, no GPU
-- [ ] no panics in yawgpu-core/yawgpu-hal; CLAUDE.md conventions met
 - [ ] rules R1..Rn each exercised by at least one test
+- [ ] targeted Noop gates + clippy green (commands redirected to a file)
+- [ ] no panics in yawgpu-core/yawgpu-hal; CLAUDE.md conventions met
 
-Report back: files changed, any Dawn cases intentionally deferred (+why).
+Report: REPORT.md — files changed, commands + exit codes, anything deferred (+why).
 ```
 
 ## Coding-agent command execution (codex output-polling constraint)
@@ -112,7 +106,8 @@ issues that a context-primed reviewer rationalizes away.
 
 1. **Clean Review (fresh agent, no session context).** Claude spawns a
    subagent that has **no conversation history**. It is given only:
-   the phase's cumulative `git diff` (the `phase-N` commit range), the
+   the phase's cumulative `git diff` (the block's commit range, e.g.
+   `aaef70c..3f809b1`), the
    phase's `blocks/<area>.md`, `CLAUDE.md`,
    `specs/reference/naming-conventions.md`, and the phase exit criteria.
    It does **not** see this conversation or prior rationale. It produces
@@ -140,8 +135,8 @@ issues that a context-primed reviewer rationalizes away.
    (and a rule/Defer marker if it maps to one).
 5. **Log.** The area's `tracking/<topic>.md` records: the finding list
    with severities + file:line, triage decisions, the fix commits, and
-   the final gate result. Commit: `phase-N: phase review — <n> findings
-   (<c> CRITICAL / <m> MAJOR / <k> MINOR) fixed`.
+   the final gate result. Commit per "Version control", naming the review
+   in the subject, e.g. `fix(hal/vulkan): Block 107 Phase Review — <fixes>`.
 
 The Clean Review reviewer is a throwaway subagent per phase (no memory of
 previous phases beyond what the diff shows); this is deliberate.
@@ -155,5 +150,4 @@ is `feat` / `fix` / `test` / `docs` / `refactor` / `cts` / `build` and
 `scope` names the crate or layer (`core`, `hal/vulkan`, `hal/metal`, `ffi`,
 `e2e`, `specs`, …); the block and slice go in the subject, e.g.
 `feat(hal/vulkan): Block 105 S2 — render passes transition attachments and
-bound views per subresource`. The bootstrap-era form `phase-N: <area> —
-<short>` is historical (Phases 0–16).
+bound views per subresource`.
