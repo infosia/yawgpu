@@ -1,6 +1,9 @@
 # Block 108 — `subgroup-size-control` on Vulkan (`@subgroup_size`)
 
-Status: **S1 DONE (2026-09-26)** — core + FFI + Tint shim + Noop (commit
+Status: **COMPLETE (2026-09-26)**. The Phase Review found 0 CRITICAL /
+0 MAJOR / 4 MINOR; m1, m2 and m4 are fixed in the Phase Review commit and m3
+is deferred with a rationale (table below). Slice history follows.
+**S1 DONE (2026-09-26)** — core + FFI + Tint shim + Noop (commit
 "Block 108 S1"); coding agent: Claude subagent (codex usage limit). S1
 findings: **R4 rule 4 is core-enforced** — Tint rejects a zero /
 non-power-of-two *const* `@subgroup_size` at parse time, but
@@ -29,7 +32,7 @@ yawgpu). Targets on native NVIDIA: `compute_builtins:subgroup_size_attribute`
 raw sweep is 1,632,202 pass / 463,994 skip / 117 fail (the unchanged
 documented xfail set) / 0 crash: +94 pass / −94 skip against the 2026-09-25
 baseline, with no regression from `ALLOW_VARYING_SUBGROUP_SIZE`. S5 (Phase
-Review) next.
+Review) done, see below.
 Raised by the 2026-09-26 native-Vulkan CTS skip audit (Windows 11, NVIDIA
 RTX 5060 Ti, yawgpu `2c6ea6f`): after the ~381k ASTC / ETC2 / EAC hardware
 skips and the structural / C-API-N/A skips are removed,
@@ -187,11 +190,19 @@ when the entry point declares the attribute.
 
 ### R5 — Vulkan HAL lowering
 
-- **Device creation:** when R2's predicate holds, push
-  `VK_EXT_subgroup_size_control` and chain
-  `VkPhysicalDeviceSubgroupSizeControlFeatures{subgroupSizeControl, computeFullSubgroups}`
-  into `VkDeviceCreateInfo`. This happens independently of whether the
-  WebGPU feature was requested, matching Dawn's device-level extension use.
+- **Device creation:** enable `VK_EXT_subgroup_size_control` when all of
+  these hold: WGSL subgroups are supported, the extension is present, and
+  `subgroupSizeControl == TRUE`. Chain
+  `VkPhysicalDeviceSubgroupSizeControlFeatures{subgroupSizeControl: TRUE, computeFullSubgroups: <queried value>}`
+  into `VkDeviceCreateInfo`.
+  - This happens independently of whether the WebGPU feature was
+    requested, matching Dawn's device-level extension use.
+  - This condition is deliberately **weaker** than R2. A variable-width GPU
+    without `computeFullSubgroups`, or without `COMPUTE` in
+    `requiredSubgroupSizeStages`, still gets `ALLOW_VARYING` (below).
+    It does not advertise the WebGPU feature. (Phase Review m1: the first
+    S2 version tied the extension to the full R2 predicate, which was
+    stricter than Dawn for `ALLOW_VARYING`.)
 - **`create_compute_pipeline`, `Some(S)`:** chain
   `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo{requiredSubgroupSize: S}`
   into the stage and set `REQUIRE_FULL_SUBGROUPS_BIT`.
@@ -209,6 +220,34 @@ when the entry point declares the attribute.
 - **Out of scope:** Dawn's `FindDefaultComputeSubgroupSize` heuristic, which
   forces `2·min` on variable-width GPUs (Intel only) when no attribute is
   given. yawgpu leaves the driver's choice.
+
+## Phase Review (2026-09-26, fresh-context reviewer over `800d554..c728c83`)
+
+| ID | Sev | Finding | Disposition |
+|---|---|---|---|
+| m1 | MINOR | The extension (and so `ALLOW_VARYING`) was enabled only under the full R2 predicate. That is stricter than Dawn, which keys `ALLOW_VARYING` on `subgroupSizeControl` alone: a variable-width GPU without `computeFullSubgroups` kept the Block 62 deviation | **Fixed**. A separate `subgroup_size_control_extension_usable` predicate (subgroups + extension + `subgroupSizeControl`) gates enabling the extension, with `computeFullSubgroups` chained at its queried value. The WebGPU feature still needs full R2. R5 amended |
+| m2 | MINOR | Subgroup features/properties were re-queried on every feature enumeration and twice per device creation | **Fixed**. A per-adapter `SubgroupQuery` snapshot in an `Arc<OnceLock<_>>` serves the range, the caps and device creation |
+| m3 | MINOR | "Required size without extension" and the Metal/GLES rejection return `HalError::ShaderCompilationFailed` | **Deferred**. No fitting `HalError` variant exists and adding one is a public API change. Both paths are unreachable after core validation, so users see no difference |
+| m4 | MINOR | No direct test that the literal fast path declines `@subgroup_size` entry points, and none for the Vulkan "required size without extension" branch | **Fixed**. `compute_workgroup_size_fast_path_declines_subgroup_size_entry_points`. The guard is factored into the pure `check_required_subgroup_size_supported` and tested on both branches |
+
+The reviewer also confirmed, with no finding:
+- the shim ↔ Rust ABI (argument order; `has_subgroup_size` at offset 34);
+- the correctness of the override-resolved path and both caches;
+- rule order matching Dawn;
+- sync/async parity;
+- the `push_next` lifetime, with `ALLOW_VARYING` never set alongside a required size;
+- a single, correctly chained device-creation extension;
+- the Metal/GLES arms (read only, not compiled);
+- conventions.
+
+Re-verification after the fixes:
+- `cargo test --workspace` green; fmt and clippy clean for default, `vulkan`, `vulkan,tiled` and `gles`.
+- All 56 ignored Vulkan HAL tests pass under `VK_LAYER_KHRONOS_validation`, including the new once-per-adapter test.
+- e2e passes with 0 VUID lines: `e2e_vulkan_subgroup_size_control` 3/3, `e2e_vulkan_subgroups` 4/4, `e2e_vulkan_compute` 3/3.
+
+Owed on the Mac:
+- a `--features metal` compile check;
+- a MoltenVK run of the e2e test (record whether `computeFullSubgroups` is exposed).
 
 ## Slices
 

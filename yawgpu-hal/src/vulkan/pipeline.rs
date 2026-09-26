@@ -179,20 +179,7 @@ pub(super) fn create_compute_pipeline(
     let HalShaderSource::SpirV(code) = shader else {
         return Err(shader_error("Vulkan compute pipeline requires SPIR-V"));
     };
-    if let Some(size) = required_subgroup_size {
-        if !device.subgroup_size_control {
-            // Validation only produces Some(_) when the adapter advertises
-            // subgroup-size-control, which also enables the extension; never
-            // drop the requirement silently.
-            return Err(HalError::ShaderCompilationFailed {
-                backend: BACKEND,
-                message: format!(
-                    "required subgroup size {size} needs VK_EXT_subgroup_size_control, \
-                     which is not enabled on this device"
-                ),
-            });
-        }
-    }
+    check_required_subgroup_size_supported(required_subgroup_size, device.subgroup_size_control)?;
     let entry_point =
         CString::new(entry_point).map_err(|_| shader_error("compute entry point contains NUL"))?;
     let shader_info = vk::ShaderModuleCreateInfo::default().code(&code);
@@ -288,6 +275,29 @@ pub(super) fn create_compute_pipeline(
             immediates,
         }),
     })
+}
+
+/// Rejects a required subgroup size (WGSL `@subgroup_size`) on a device
+/// without `VK_EXT_subgroup_size_control` enabled (Block 108 R5).
+///
+/// Validation only produces `Some(_)` when the adapter advertises
+/// subgroup-size-control, whose predicate implies the extension is enabled, so
+/// the error is unreachable after validation; it exists so the requirement is
+/// never dropped silently.
+fn check_required_subgroup_size_supported(
+    required_subgroup_size: Option<u32>,
+    subgroup_size_control_enabled: bool,
+) -> Result<(), HalError> {
+    match required_subgroup_size {
+        Some(size) if !subgroup_size_control_enabled => Err(HalError::ShaderCompilationFailed {
+            backend: BACKEND,
+            message: format!(
+                "required subgroup size {size} needs VK_EXT_subgroup_size_control, \
+                 which is not enabled on this device"
+            ),
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// Selects the compute stage's subgroup create flags (Block 108 R5, Dawn
@@ -2086,6 +2096,24 @@ mod tests {
             compute_stage_subgroup_flags(None, false),
             vk::PipelineShaderStageCreateFlags::empty()
         );
+    }
+
+    #[test]
+    fn check_required_subgroup_size_supported_rejects_size_without_extension() {
+        assert!(check_required_subgroup_size_supported(None, false).is_ok());
+        assert!(check_required_subgroup_size_supported(None, true).is_ok());
+        assert!(check_required_subgroup_size_supported(Some(32), true).is_ok());
+        match check_required_subgroup_size_supported(Some(32), false) {
+            Err(HalError::ShaderCompilationFailed { backend, message }) => {
+                assert_eq!(backend, BACKEND);
+                assert!(message.contains("32"), "{message}");
+                assert!(
+                    message.contains("VK_EXT_subgroup_size_control"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected ShaderCompilationFailed, got {other:?}"),
+        }
     }
 
     #[test]

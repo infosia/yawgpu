@@ -2076,6 +2076,42 @@ fn cs() {}
         assert_eq!(module.codegen_miss_count(), 2);
     }
 
+    /// Block 108 R4: the literal fast path declines an entry point that
+    /// declares `@subgroup_size` (Tint's Inspector does not reflect it), so
+    /// an override-free module still reports the size through the IR path.
+    #[test]
+    fn compute_workgroup_size_fast_path_declines_subgroup_size_entry_points() {
+        let module = parse_and_validate_wgsl(
+            r#"
+enable subgroups;
+enable subgroup_size_control;
+
+@compute @workgroup_size(8) @subgroup_size(4)
+fn with_size() {}
+
+@compute @workgroup_size(8)
+fn without_size() {}
+"#,
+        )
+        .unwrap();
+        assert!(module.overrides().is_empty());
+
+        assert_eq!(module.compute_workgroup_size("with_size").unwrap(), None);
+        let literal = module
+            .compute_workgroup_size("without_size")
+            .unwrap()
+            .expect("literal fast path reflects a plain entry point");
+        assert_eq!(literal.literal_size, [8, 1, 1]);
+        assert_eq!(literal.subgroup_size, None);
+
+        let constants = PipelineConstants::default();
+        let resolved = module
+            .resolved_compute_workgroup_size("with_size", &constants)
+            .unwrap();
+        assert_eq!(resolved.literal_size, [8, 1, 1]);
+        assert_eq!(resolved.subgroup_size, Some(4));
+    }
+
     #[test]
     fn resolved_compute_workgroup_size_memoizes_const_eval_errors() {
         let module = parse_and_validate_wgsl(

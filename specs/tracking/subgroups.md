@@ -133,6 +133,8 @@ Spec: `specs/blocks/108-subgroup-size-control.md`.
 | S2 | Vulkan advertisement (`VK_EXT_subgroup_size_control` + `subgroupSizeControl` + `computeFullSubgroups`), device enable, `RequiredSubgroupSize` + `REQUIRE_FULL_SUBGROUPS` / `ALLOW_VARYING_SUBGROUP_SIZE`; predicate also requires `requiredSubgroupSizeStages ∋ COMPUTE` (VUID-02755, stricter than Dawn) | **DONE 2026-09-26** — NVIDIA caps `{32, 32, 32}`, 55 ignored HAL tests validation-clean |
 | S3 | `e2e_vulkan_subgroup_size_control.rs` (Claude) | **DONE 2026-09-26** — 3/3 under the Khronos layer, 0 VUID; `e2e_vulkan_subgroups` 4/4 + `e2e_vulkan_compute` 3/3 regression |
 | S4 | webgpu-native-cts port update + CTS runs | **DONE 2026-09-26** — CTS `c77b620`; targets 6/0 + 87/0 + 1/0; full sweep +94 pass / −94 skip, fail set unchanged |
-| S5 | Phase Review | open |
+| S5 | Phase Review | **DONE 2026-09-26**. 0 CRITICAL / 0 MAJOR / 4 MINOR; m1, m2, m4 fixed; m3 deferred (no fitting `HalError` variant, and adding one is an API change; unreachable after validation). Table in Block 108 |
 
 S1 finding: Tint validates a const `@subgroup_size` (zero / non-power-of-two rejected at parse) but not an override-driven one after `SubstituteOverrides`; core enforces rule 4.
+
+Owed on the Mac for Block 108: a `--features metal` compile check, and a MoltenVK run of `e2e_vulkan_subgroup_size_control` (is `computeFullSubgroups` exposed?).

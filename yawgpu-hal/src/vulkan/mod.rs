@@ -267,6 +267,7 @@ pub struct VulkanAdapter {
     physical_device: vk::PhysicalDevice,
     name: String,
     astc_sliced_3d_support: Arc<OnceLock<bool>>,
+    subgroup_query: Arc<OnceLock<SubgroupQuery>>,
 }
 
 impl VulkanAdapter {
@@ -288,6 +289,7 @@ impl VulkanAdapter {
             physical_device,
             name,
             astc_sliced_3d_support: Arc::new(OnceLock::new()),
+            subgroup_query: Arc::new(OnceLock::new()),
         })
     }
 
@@ -665,6 +667,32 @@ impl VulkanAdapter {
     /// Returns the supported subgroup size range for this physical device.
     #[must_use]
     pub(super) fn subgroup_size_range(&self) -> Option<(u32, u32)> {
+        self.subgroup_query().range
+    }
+
+    /// Returns the explicit compute subgroup size capabilities.
+    ///
+    /// `Some` iff WGSL `subgroups` is supported and `VK_EXT_subgroup_size_control`
+    /// is present with `subgroupSizeControl`, `computeFullSubgroups`, and
+    /// `COMPUTE` in `requiredSubgroupSizeStages` (Block 108 R2). The extension
+    /// is required even on a Vulkan 1.3 device because yawgpu runs at
+    /// `YAWGPU_VULKAN_API_VERSION` (1.1). The size range is
+    /// [`Self::subgroup_size_range`]'s, so the two always agree.
+    #[must_use]
+    pub(super) fn subgroup_size_control_caps(&self) -> Option<crate::HalSubgroupSizeControlCaps> {
+        self.subgroup_query().caps()
+    }
+
+    /// Returns the subgroup data of this physical device, queried on first use
+    /// and shared by every clone of the adapter.
+    fn subgroup_query(&self) -> &SubgroupQuery {
+        self.subgroup_query
+            .get_or_init(|| self.query_subgroup_properties())
+    }
+
+    /// Queries the subgroup properties and `VK_EXT_subgroup_size_control`
+    /// features backing [`SubgroupQuery`].
+    fn query_subgroup_properties(&self) -> SubgroupQuery {
         let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
         let mut size_control = vk::PhysicalDeviceSubgroupSizeControlProperties::default();
         let mut properties2 = vk::PhysicalDeviceProperties2::default()
@@ -675,48 +703,20 @@ impl VulkanAdapter {
                 .instance
                 .get_physical_device_properties2(self.physical_device, &mut properties2);
         }
-
-        if !subgroups_supported(subgroup.supported_operations, subgroup.supported_stages) {
-            return None;
-        }
-
         let api_version = unsafe {
             self.instance
                 .instance
                 .get_physical_device_properties(self.physical_device)
                 .api_version
         };
-        let size_control_available = subgroup_size_control_available(
-            api_version,
-            self.has_device_extension(vk::EXT_SUBGROUP_SIZE_CONTROL_NAME),
-        );
-        let range = if size_control_available
-            && size_control.min_subgroup_size != 0
-            && size_control.max_subgroup_size != 0
-        {
-            Some((
-                size_control.min_subgroup_size,
-                size_control.max_subgroup_size,
-            ))
-        } else if subgroup.subgroup_size != 0 {
-            Some((subgroup.subgroup_size, subgroup.subgroup_size))
-        } else {
-            None
-        }?;
-        validated_subgroup_size_range(range.0, range.1)
-    }
-
-    /// Returns the explicit compute subgroup size capabilities.
-    ///
-    /// `Some` iff WGSL `subgroups` is supported and `VK_EXT_subgroup_size_control`
-    /// is present with both `subgroupSizeControl` and `computeFullSubgroups`
-    /// (Block 108 R2). The extension is required even on a Vulkan 1.3 device
-    /// because yawgpu runs at `YAWGPU_VULKAN_API_VERSION` (1.1). The size
-    /// range is [`Self::subgroup_size_range`]'s, so the two always agree.
-    #[must_use]
-    pub(super) fn subgroup_size_control_caps(&self) -> Option<crate::HalSubgroupSizeControlCaps> {
-        let range = self.subgroup_size_range();
         let extension_present = self.has_device_extension(vk::EXT_SUBGROUP_SIZE_CONTROL_NAME);
+        let range = subgroup_size_range_from_properties(
+            subgroups_supported(subgroup.supported_operations, subgroup.supported_stages),
+            subgroup_size_control_available(api_version, extension_present),
+            subgroup.subgroup_size,
+            size_control.min_subgroup_size,
+            size_control.max_subgroup_size,
+        );
         let mut features = vk::PhysicalDeviceSubgroupSizeControlFeatures::default();
         if extension_present {
             let mut features2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut features);
@@ -726,31 +726,22 @@ impl VulkanAdapter {
                     .get_physical_device_features2(self.physical_device, &mut features2);
             }
         }
-        let mut properties = vk::PhysicalDeviceSubgroupSizeControlProperties::default();
-        if extension_present {
-            let mut properties2 =
-                vk::PhysicalDeviceProperties2::default().push_next(&mut properties);
-            unsafe {
-                self.instance
-                    .instance
-                    .get_physical_device_properties2(self.physical_device, &mut properties2);
-            }
-        }
-        if !subgroup_size_control_supported(
-            range.is_some(),
+        SubgroupQuery {
+            range,
             extension_present,
-            features.subgroup_size_control,
-            features.compute_full_subgroups,
-            properties.required_subgroup_size_stages,
-        ) {
-            return None;
+            subgroup_size_control: features.subgroup_size_control,
+            compute_full_subgroups: features.compute_full_subgroups,
+            required_subgroup_size_stages: if extension_present {
+                size_control.required_subgroup_size_stages
+            } else {
+                vk::ShaderStageFlags::empty()
+            },
+            max_compute_workgroup_subgroups: if extension_present {
+                size_control.max_compute_workgroup_subgroups
+            } else {
+                0
+            },
         }
-        let (min_size, max_size) = range?;
-        Some(crate::HalSubgroupSizeControlCaps::new(
-            min_size,
-            max_size,
-            properties.max_compute_workgroup_subgroups,
-        ))
     }
 
     /// Creates a device (and its default queue) on this adapter.
@@ -994,19 +985,22 @@ impl VulkanAdapter {
             extension_names.push(vk::KHR_IMAGE_FORMAT_LIST_NAME.as_ptr());
         }
         // Block 108 R5: like Dawn's device-level knob, enable
-        // VK_EXT_subgroup_size_control whenever the adapter advertises
-        // `subgroup-size-control`, independent of the requested WebGPU
-        // features. Compute pipelines then use ALLOW_VARYING_SUBGROUP_SIZE or
-        // a required size + REQUIRE_FULL_SUBGROUPS, both of which need the
-        // features enabled here.
-        let subgroup_size_control = self.subgroup_size_control_caps().is_some();
+        // VK_EXT_subgroup_size_control whenever WGSL subgroups are supported
+        // and the driver reports `subgroupSizeControl`, independent of the
+        // requested WebGPU features and of whether `subgroup-size-control`
+        // is advertised. Compute pipelines without `@subgroup_size` then use
+        // ALLOW_VARYING_SUBGROUP_SIZE; a required size + REQUIRE_FULL_SUBGROUPS
+        // additionally needs `computeFullSubgroups`, which is enabled only
+        // when the driver reports it (the WebGPU feature requires it).
+        let subgroup_query = *self.subgroup_query();
+        let subgroup_size_control = subgroup_query.extension_usable();
         if subgroup_size_control {
             extension_names.push(vk::EXT_SUBGROUP_SIZE_CONTROL_NAME.as_ptr());
         }
         let mut subgroup_size_control_features =
             vk::PhysicalDeviceSubgroupSizeControlFeatures::default()
                 .subgroup_size_control(true)
-                .compute_full_subgroups(true);
+                .compute_full_subgroups(subgroup_query.compute_full_subgroups == vk::TRUE);
         let mut depth_clip_enable_features =
             vk::PhysicalDeviceDepthClipEnableFeaturesEXT::default().depth_clip_enable(true);
         let mut shader_demote_features =
@@ -1326,8 +1320,10 @@ fn subgroups_supported(
     let required_stages = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT;
     // Deviation from Dawn: subgroup advertisement does not require
     // VK_EXT_subgroup_size_control. When the extension is enabled (Block 108
-    // R5), compute pipelines without `@subgroup_size` are created with
-    // ALLOW_VARYING_SUBGROUP_SIZE; without it they use the driver's default.
+    // R5: present with `subgroupSizeControl`, see
+    // `subgroup_size_control_extension_usable`), compute pipelines without
+    // `@subgroup_size` are created with ALLOW_VARYING_SUBGROUP_SIZE; without
+    // it they use the driver's default.
     supported_operations.contains(required_operations) && supported_stages.contains(required_stages)
 }
 
@@ -1448,6 +1444,94 @@ fn image_format_list_available(api_version: u32, extension_present: bool) -> boo
     (major, minor) >= (1, 2) || extension_present
 }
 
+/// Block 108 R5: device creation enables `VK_EXT_subgroup_size_control` iff
+/// WGSL `subgroups` is supported, the extension is present, and the driver
+/// reports `subgroupSizeControl`. Unlike [`subgroup_size_control_supported`]
+/// this needs neither `computeFullSubgroups` nor `COMPUTE` in
+/// `requiredSubgroupSizeStages`: `ALLOW_VARYING_SUBGROUP_SIZE` only needs
+/// `subgroupSizeControl` (Dawn `ComputePipelineVk.cpp` parity).
+fn subgroup_size_control_extension_usable(
+    subgroups_supported: bool,
+    extension_present: bool,
+    subgroup_size_control: vk::Bool32,
+) -> bool {
+    subgroups_supported && extension_present && subgroup_size_control == vk::TRUE
+}
+
+/// Subgroup data of one physical device, queried once per [`VulkanAdapter`]
+/// so feature enumeration and device creation read the same snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SubgroupQuery {
+    /// Validated WGSL subgroup size range; `None` when WGSL `subgroups` is
+    /// unsupported.
+    range: Option<(u32, u32)>,
+    /// Whether `VK_EXT_subgroup_size_control` is a device extension.
+    extension_present: bool,
+    /// `VkPhysicalDeviceSubgroupSizeControlFeatures::subgroupSizeControl`
+    /// (`FALSE` when the extension is absent).
+    subgroup_size_control: vk::Bool32,
+    /// `VkPhysicalDeviceSubgroupSizeControlFeatures::computeFullSubgroups`
+    /// (`FALSE` when the extension is absent).
+    compute_full_subgroups: vk::Bool32,
+    /// `requiredSubgroupSizeStages` (empty when the extension is absent).
+    required_subgroup_size_stages: vk::ShaderStageFlags,
+    /// `maxComputeWorkgroupSubgroups` (0 when the extension is absent).
+    max_compute_workgroup_subgroups: u32,
+}
+
+impl SubgroupQuery {
+    /// Whether device creation enables `VK_EXT_subgroup_size_control`.
+    fn extension_usable(&self) -> bool {
+        subgroup_size_control_extension_usable(
+            self.range.is_some(),
+            self.extension_present,
+            self.subgroup_size_control,
+        )
+    }
+
+    /// The WebGPU `subgroup-size-control` capabilities, `Some` iff the full
+    /// Block 108 R2 predicate holds.
+    fn caps(&self) -> Option<crate::HalSubgroupSizeControlCaps> {
+        if !subgroup_size_control_supported(
+            self.range.is_some(),
+            self.extension_present,
+            self.subgroup_size_control,
+            self.compute_full_subgroups,
+            self.required_subgroup_size_stages,
+        ) {
+            return None;
+        }
+        let (min_size, max_size) = self.range?;
+        Some(crate::HalSubgroupSizeControlCaps::new(
+            min_size,
+            max_size,
+            self.max_compute_workgroup_subgroups,
+        ))
+    }
+}
+
+/// Derives the validated WGSL subgroup size range: the size-control
+/// min/max when available and non-zero, else the fixed `subgroupSize`.
+fn subgroup_size_range_from_properties(
+    subgroups_supported: bool,
+    size_control_available: bool,
+    subgroup_size: u32,
+    min_subgroup_size: u32,
+    max_subgroup_size: u32,
+) -> Option<(u32, u32)> {
+    if !subgroups_supported {
+        return None;
+    }
+    let range = if size_control_available && min_subgroup_size != 0 && max_subgroup_size != 0 {
+        Some((min_subgroup_size, max_subgroup_size))
+    } else if subgroup_size != 0 {
+        Some((subgroup_size, subgroup_size))
+    } else {
+        None
+    }?;
+    validated_subgroup_size_range(range.0, range.1)
+}
+
 fn subgroup_size_control_available(api_version: u32, extension_present: bool) -> bool {
     let major = vk::api_version_major(api_version);
     let minor = vk::api_version_minor(api_version);
@@ -1460,8 +1544,9 @@ fn subgroup_size_control_available(api_version: u32, extension_present: bool) ->
 /// `subgroupSizeControl` and `computeFullSubgroups` (Dawn
 /// `hasComputeFullSubgroups`). Stricter than Dawn, `requiredSubgroupSizeStages`
 /// must also contain `COMPUTE`, because a required size on a compute stage is
-/// otherwise invalid (VUID-VkPipelineShaderStageCreateInfo-pNext-02755). The
-/// same predicate gates enabling the extension at device creation.
+/// otherwise invalid (VUID-VkPipelineShaderStageCreateInfo-pNext-02755).
+/// Implies [`subgroup_size_control_extension_usable`], so an advertising
+/// adapter always enables the extension at device creation.
 fn subgroup_size_control_supported(
     subgroups_supported: bool,
     extension_present: bool,
@@ -2561,6 +2646,142 @@ mod tests {
             vk::FALSE,
             vk::ShaderStageFlags::empty()
         ));
+    }
+
+    #[test]
+    fn vulkan_subgroup_size_control_extension_usable_truth_table() {
+        for subgroups in [false, true] {
+            for present in [false, true] {
+                for control in [vk::FALSE, vk::TRUE] {
+                    assert_eq!(
+                        subgroup_size_control_extension_usable(subgroups, present, control),
+                        subgroups && present && control == vk::TRUE,
+                        "{subgroups}/{present}/{control}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A snapshot that satisfies the full Block 108 R2 predicate.
+    fn full_subgroup_query() -> SubgroupQuery {
+        SubgroupQuery {
+            range: Some((16, 64)),
+            extension_present: true,
+            subgroup_size_control: vk::TRUE,
+            compute_full_subgroups: vk::TRUE,
+            required_subgroup_size_stages: vk::ShaderStageFlags::COMPUTE,
+            max_compute_workgroup_subgroups: 32,
+        }
+    }
+
+    #[test]
+    fn vulkan_subgroup_query_full_support_enables_extension_and_advertises_feature() {
+        let query = full_subgroup_query();
+        assert!(query.extension_usable());
+        assert_eq!(
+            query.caps(),
+            Some(crate::HalSubgroupSizeControlCaps::new(16, 64, 32))
+        );
+    }
+
+    /// Block 108 R5 (m1): without `computeFullSubgroups` the extension is
+    /// still enabled (so ALLOW_VARYING applies) but the WebGPU feature is not
+    /// advertised.
+    #[test]
+    fn vulkan_subgroup_query_without_compute_full_subgroups_enables_extension_only() {
+        let query = SubgroupQuery {
+            compute_full_subgroups: vk::FALSE,
+            ..full_subgroup_query()
+        };
+        assert!(query.extension_usable());
+        assert_eq!(query.caps(), None);
+
+        let query = SubgroupQuery {
+            required_subgroup_size_stages: vk::ShaderStageFlags::FRAGMENT,
+            ..full_subgroup_query()
+        };
+        assert!(query.extension_usable());
+        assert_eq!(query.caps(), None);
+    }
+
+    #[test]
+    fn vulkan_subgroup_query_disables_extension_and_feature_without_prerequisites() {
+        for query in [
+            SubgroupQuery {
+                range: None,
+                ..full_subgroup_query()
+            },
+            SubgroupQuery {
+                extension_present: false,
+                ..full_subgroup_query()
+            },
+            SubgroupQuery {
+                subgroup_size_control: vk::FALSE,
+                ..full_subgroup_query()
+            },
+        ] {
+            assert!(!query.extension_usable(), "{query:?}");
+            assert_eq!(query.caps(), None, "{query:?}");
+        }
+    }
+
+    #[test]
+    fn vulkan_subgroup_size_range_from_properties_prefers_size_control_range() {
+        assert_eq!(
+            subgroup_size_range_from_properties(true, true, 32, 16, 64),
+            Some((16, 64))
+        );
+        // Size control unavailable or unreported: fall back to subgroupSize.
+        assert_eq!(
+            subgroup_size_range_from_properties(true, false, 32, 16, 64),
+            Some((32, 32))
+        );
+        assert_eq!(
+            subgroup_size_range_from_properties(true, true, 32, 0, 64),
+            Some((32, 32))
+        );
+        assert_eq!(
+            subgroup_size_range_from_properties(true, true, 0, 0, 0),
+            None
+        );
+        // WGSL subgroups unsupported or the range outside WebGPU bounds.
+        assert_eq!(
+            subgroup_size_range_from_properties(false, true, 32, 16, 64),
+            None
+        );
+        assert_eq!(
+            subgroup_size_range_from_properties(true, true, 32, 1, 64),
+            None
+        );
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    fn vulkan_adapter_subgroup_query_is_computed_once_per_adapter() {
+        let Ok(instance) = VulkanInstance::new() else {
+            eprintln!("SKIP: Vulkan instance unavailable");
+            return;
+        };
+        let Some(adapter) = instance.enumerate_adapters().into_iter().next() else {
+            eprintln!("SKIP: no Vulkan adapter available");
+            return;
+        };
+        let cloned_adapter = adapter.clone();
+        assert!(Arc::ptr_eq(
+            &adapter.subgroup_query,
+            &cloned_adapter.subgroup_query
+        ));
+        assert!(adapter.subgroup_query.get().is_none());
+        let caps = adapter.subgroup_size_control_caps();
+        let snapshot = adapter.subgroup_query.get().copied();
+        assert!(snapshot.is_some());
+        assert_eq!(
+            cloned_adapter.subgroup_size_range(),
+            snapshot.and_then(|q| q.range)
+        );
+        assert_eq!(cloned_adapter.subgroup_size_control_caps(), caps);
+        assert_eq!(adapter.subgroup_query.get().copied(), snapshot);
     }
 
     #[test]
