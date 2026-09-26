@@ -130,6 +130,7 @@ impl ShaderModule {
         source: String,
         shader_f16: bool,
         subgroups: bool,
+        subgroup_size_control: bool,
         dual_source_blending: bool,
         clip_distances: bool,
         primitive_index: bool,
@@ -138,6 +139,7 @@ impl ShaderModule {
             &source,
             shader_f16,
             subgroups,
+            subgroup_size_control,
             dual_source_blending,
             clip_distances,
             primitive_index,
@@ -392,6 +394,58 @@ fn cs() {
 
         assert!(!valid.is_error());
         assert_eq!(valid.diagnostic(), None);
+    }
+
+    #[test]
+    fn shader_module_creation_gates_subgroup_size_control_on_required_feature() {
+        let source = r#"
+enable subgroups;
+enable subgroup_size_control;
+
+@compute @workgroup_size(8) @subgroup_size(4)
+fn cs() {}
+"#;
+        // `Subgroups` alone does not allow the extension.
+        let device_without_feature = noop_adapter()
+            .create_device(None, &[Feature::Subgroups], "", "")
+            .expect("Noop adapter should create subgroups device");
+        device_without_feature.push_error_scope(ErrorFilter::Validation);
+        let invalid = device_without_feature
+            .create_shader_module(ShaderModuleSource::Wgsl(source.to_owned()));
+        let scoped = device_without_feature
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("subgroup_size_control usage should be scoped");
+
+        assert!(invalid.is_error());
+        assert!(!scoped.message.is_empty());
+
+        let device_with_feature = noop_adapter()
+            .create_device(None, &[Feature::SubgroupSizeControl], "", "")
+            .expect("Noop adapter should create subgroup-size-control device");
+        let valid =
+            device_with_feature.create_shader_module(ShaderModuleSource::Wgsl(source.to_owned()));
+
+        assert!(!valid.is_error());
+        assert_eq!(valid.diagnostic(), None);
+
+        // `@subgroup_size` without `enable subgroup_size_control;` is an error
+        // even on a device with the feature.
+        let missing_enable = r#"
+enable subgroups;
+
+@compute @workgroup_size(8) @subgroup_size(4)
+fn cs() {}
+"#;
+        device_with_feature.push_error_scope(ErrorFilter::Validation);
+        let invalid = device_with_feature
+            .create_shader_module(ShaderModuleSource::Wgsl(missing_enable.to_owned()));
+        let scoped = device_with_feature
+            .pop_error_scope()
+            .expect("scope should exist");
+
+        assert!(invalid.is_error());
+        assert!(scoped.is_some());
     }
 
     #[test]

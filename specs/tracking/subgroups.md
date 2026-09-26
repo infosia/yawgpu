@@ -122,3 +122,17 @@ Phase is **COMPLETE** — no open CRITICAL/MAJOR.
 - Slice 1 keeps `subgroup_id`/`subgroup_uniformity` OUT of
   `SUPPORTED_WGSL_LANGUAGE_FEATURES`; the canonical-values unit test still asserts
   their absence until Slice 3.
+
+## Block 108 — `subgroup-size-control` (`@subgroup_size`)
+
+Spec: `specs/blocks/108-subgroup-size-control.md`.
+
+| Slice | Content | Status |
+|---|---|---|
+| S1 | core `Feature::SubgroupSizeControl` (⇒ `Subgroups`), FFI `0x17`, Tint `kSubgroupSizeControl` gate + override-resolved `subgroup_size`, core rules 4 → 1 → 2 → 3, HAL `subgroup_size_control_caps()` (Noop `{4,4,64}`, Metal/GLES/Vulkan `None`), `required_subgroup_size` HAL input | **DONE 2026-09-26** |
+| S2 | Vulkan advertisement (`VK_EXT_subgroup_size_control` + `subgroupSizeControl` + `computeFullSubgroups`), device enable, `RequiredSubgroupSize` + `REQUIRE_FULL_SUBGROUPS` / `ALLOW_VARYING_SUBGROUP_SIZE` | open |
+| S3 | `e2e_vulkan_subgroup_size_control.rs` (Claude) | open |
+| S4 | webgpu-native-cts port update + CTS runs | open |
+| S5 | Phase Review | open |
+
+S1 finding: Tint validates a const `@subgroup_size` (zero / non-power-of-two rejected at parse) but not an override-driven one after `SubstituteOverrides`; core enforces rule 4.

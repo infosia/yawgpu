@@ -706,6 +706,13 @@ impl VulkanAdapter {
         validated_subgroup_size_range(range.0, range.1)
     }
 
+    /// Returns the explicit compute subgroup size capabilities.
+    #[must_use]
+    pub(super) fn subgroup_size_control_caps(&self) -> Option<crate::HalSubgroupSizeControlCaps> {
+        // Block 108 S2 implements the VK_EXT_subgroup_size_control query.
+        None
+    }
+
     /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<VulkanDevice, HalError> {
         let queue_family_index = self

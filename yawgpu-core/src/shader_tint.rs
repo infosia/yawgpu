@@ -215,7 +215,7 @@ pub struct ReflectedModule {
 /// gated form directly so it can pass the device's actual feature set.
 #[cfg(test)]
 pub(crate) fn parse_and_validate_wgsl(src: &str) -> Result<ReflectedModule, String> {
-    parse_and_validate_wgsl_gated(src, true, true, true, true, true)
+    parse_and_validate_wgsl_gated(src, true, true, true, true, true, true)
 }
 
 /// Returns parse and validate wgsl using the supplied feature gates.
@@ -223,6 +223,7 @@ pub(crate) fn parse_and_validate_wgsl_gated(
     src: &str,
     shader_f16: bool,
     subgroups: bool,
+    subgroup_size_control: bool,
     dual_source_blending: bool,
     clip_distances: bool,
     primitive_index: bool,
@@ -231,6 +232,7 @@ pub(crate) fn parse_and_validate_wgsl_gated(
         src,
         shader_f16,
         subgroups,
+        subgroup_size_control,
         dual_source_blending,
         clip_distances,
         primitive_index,
@@ -650,8 +652,8 @@ impl ReflectedModule {
     }
 
     /// Returns compute workgroup size reflected by the validated shader
-    /// module, or `None` if `entry_point` is not a compute entry point, or
-    /// its `@workgroup_size` is not fully literal.
+    /// module, or `None` if `entry_point` is not a compute entry point, its
+    /// `@workgroup_size` is not fully literal, or it declares `@subgroup_size`.
     ///
     /// This is the literal-size fast path: Tint's Inspector only populates
     /// `EntryPoint::workgroup_size` when every dimension resolved to a
@@ -667,12 +669,16 @@ impl ReflectedModule {
         &self,
         entry_point: &str,
     ) -> Result<Option<ReflectedWorkgroupSize>, String> {
+        // `@subgroup_size` is not reflected by Tint's Inspector, so an entry
+        // point that declares it always takes the IR path, which reports the
+        // resolved value (Block 108 R4).
         let Some(literal_size) = self
             .raw_entry_points()
             .iter()
             .find(|entry| {
                 entry.name == entry_point && entry.stage == yawgpu_tint::PipelineStage::Compute
             })
+            .filter(|entry| !entry.has_subgroup_size)
             .and_then(|entry| entry.workgroup_size)
         else {
             return Ok(None);
@@ -681,6 +687,7 @@ impl ReflectedModule {
         Ok(Some(ReflectedWorkgroupSize {
             entry_point: entry_point.to_owned(),
             literal_size,
+            subgroup_size: None,
             workgroup_storage_size: self
                 .program
                 .workgroup_storage_size(&[])
@@ -736,13 +743,14 @@ impl ReflectedModule {
                 }
             }
             let overrides = override_values(pipeline_constants);
-            let literal_size = self
+            let info = self
                 .program
-                .resolved_workgroup_size(entry_point, &overrides)
+                .resolved_workgroup_info(entry_point, &overrides)
                 .map_err(|e| e.to_string())?;
             Ok(ReflectedWorkgroupSize {
                 entry_point: entry_point.to_owned(),
-                literal_size,
+                literal_size: info.workgroup_size,
+                subgroup_size: info.subgroup_size,
                 workgroup_storage_size: self
                     .program
                     .workgroup_storage_size(&overrides)
@@ -2695,6 +2703,7 @@ fn fs_plain() -> @location(0) vec4f {
 "#,
             false,
             false,
+            false,
             true,
             false,
             false,
@@ -2721,8 +2730,11 @@ fn main() -> Out {
 }
 "#;
 
-        assert!(parse_and_validate_wgsl_gated(source, true, true, true, false, false).is_err());
-        let module = parse_and_validate_wgsl_gated(source, true, true, true, true, false).unwrap();
+        assert!(
+            parse_and_validate_wgsl_gated(source, true, true, false, true, false, false).is_err()
+        );
+        let module =
+            parse_and_validate_wgsl_gated(source, true, true, false, true, true, false).unwrap();
         assert_eq!(module.vertex_clip_distances_size("main"), 1);
     }
 
@@ -2737,8 +2749,10 @@ fn main(@builtin(primitive_index) idx: u32) -> @location(0) vec4f {
 }
 "#;
 
-        assert!(parse_and_validate_wgsl_gated(source, true, true, true, true, false).is_err());
-        assert!(parse_and_validate_wgsl_gated(source, true, true, true, true, true).is_ok());
+        assert!(
+            parse_and_validate_wgsl_gated(source, true, true, false, true, true, false).is_err()
+        );
+        assert!(parse_and_validate_wgsl_gated(source, true, true, false, true, true, true).is_ok());
     }
 
     #[test]

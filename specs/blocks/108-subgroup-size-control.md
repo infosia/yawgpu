@@ -1,10 +1,21 @@
 # Block 108 — `subgroup-size-control` on Vulkan (`@subgroup_size`)
 
-Status: **PLANNED (2026-09-26)** — no slice started. Raised by the
-2026-09-26 native-Vulkan CTS skip audit (Windows 11, NVIDIA RTX 5060 Ti,
-yawgpu `2c6ea6f`): after the ~381k ASTC / ETC2 / EAC hardware skips and
-the structural / C-API-N/A skips are removed, `subgroup-size-control` is
-the only skipped WebGPU feature that yawgpu can implement on this host.
+Status: **S1 DONE (2026-09-26)** — core + FFI + Tint shim + Noop (commit
+"Block 108 S1"); coding agent: Claude subagent (codex usage limit). S1
+findings: **R4 rule 4 is core-enforced** — Tint rejects a zero /
+non-power-of-two *const* `@subgroup_size` at parse time, but
+`SubstituteOverrides` does not check an override-driven value (`sg=6` →
+`Some(6)`, `sg=0` → `Some(0)`), so `validate_explicit_subgroup_size`
+rejects it before rule 1; the Inspector does not reflect the attribute, so
+the shim reads its presence from the AST and the override-free fast path
+defers such entry points to the IR resolve. Gates: `cargo test --workspace`
+green, fmt + clippy default / `vulkan` / `tiled` / `gles` clean; `metal`
+not built (Windows host — Mac compile check owed). S2 (Vulkan) next.
+Raised by the 2026-09-26 native-Vulkan CTS skip audit (Windows 11, NVIDIA
+RTX 5060 Ti, yawgpu `2c6ea6f`): after the ~381k ASTC / ETC2 / EAC hardware
+skips and the structural / C-API-N/A skips are removed,
+`subgroup-size-control` is the only skipped WebGPU feature yawgpu can
+implement on this host.
 Ledger: `specs/tracking/subgroups.md` (new "Block 108" section when S1
 lands).
 

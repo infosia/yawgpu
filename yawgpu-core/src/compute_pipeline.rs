@@ -4,7 +4,7 @@ use std::sync::Arc;
 use yawgpu_hal::{
     HalBackend, HalBufferBindingKind, HalComputePipeline, HalDescriptorBinding,
     HalDescriptorBindingKind, HalDevice, HalMslBufferSizeBinding, HalMslImmediates,
-    HalShaderSource, HalStorageTextureAccess,
+    HalShaderSource, HalStorageTextureAccess, HalSubgroupSizeControlCaps,
 };
 
 use crate::bind_group_layout::*;
@@ -78,6 +78,10 @@ pub(crate) struct ComputePipelineInner {
 pub(crate) struct ResolvedComputeWorkgroup {
     pub(crate) size: [u32; 3],
     pub(crate) storage_size: u64,
+    /// Validated WGSL `@subgroup_size` (Block 108), passed to the HAL as the
+    /// pipeline's required subgroup size. `None` when the entry point does not
+    /// declare the attribute.
+    pub(crate) subgroup_size: Option<u32>,
 }
 
 /// Stores binding metadata.
@@ -256,6 +260,7 @@ pub(crate) fn resolve_compute_pipeline_descriptor_for_source(
     descriptor: &ComputePipelineDescriptor,
     limits: Limits,
     features: &FeatureSet,
+    subgroup_size_control: Option<HalSubgroupSizeControlCaps>,
     pipeline_id: u64,
 ) -> Result<ResolvedPipelineParts, String> {
     #[cfg(feature = "shader-passthrough")]
@@ -266,7 +271,13 @@ pub(crate) fn resolve_compute_pipeline_descriptor_for_source(
     if let Some((_source, entries)) = descriptor.shader_module.msl_passthrough() {
         return resolve_msl_passthrough_compute_pipeline_descriptor(descriptor, entries);
     }
-    resolve_compute_pipeline_descriptor(descriptor, limits, features, pipeline_id)
+    resolve_compute_pipeline_descriptor(
+        descriptor,
+        limits,
+        features,
+        subgroup_size_control,
+        pipeline_id,
+    )
 }
 
 /// Creates HAL compute pipeline and reports validation errors through the owning device.
@@ -321,6 +332,7 @@ pub(crate) fn create_hal_compute_pipeline(
         (workgroup.size[0], workgroup.size[1], workgroup.size[2]),
         &descriptor_bindings,
         user_immediate_size,
+        workgroup.subgroup_size,
     ) {
         Ok(pipeline) => (Some(pipeline), None),
         Err(error) => (None, Some(error.to_string())),
@@ -891,6 +903,7 @@ pub(crate) fn resolve_compute_pipeline_descriptor(
     descriptor: &ComputePipelineDescriptor,
     limits: Limits,
     features: &FeatureSet,
+    subgroup_size_control: Option<HalSubgroupSizeControlCaps>,
     pipeline_id: u64,
 ) -> Result<ResolvedPipelineParts, String> {
     if descriptor.shader_module.is_error() {
@@ -902,7 +915,13 @@ pub(crate) fn resolve_compute_pipeline_descriptor(
     let entry_name = resolve_compute_entry(module, descriptor.entry_point.as_deref())?;
     let overrides = module.overrides();
     let constants = resolve_pipeline_constants(&overrides, &descriptor.constants)?;
-    let workgroup = resolve_compute_workgroup(module, &entry_name, &constants, limits)?;
+    let workgroup = resolve_compute_workgroup(
+        module,
+        &entry_name,
+        &constants,
+        limits,
+        subgroup_size_control,
+    )?;
     let bindings = module.resource_bindings_for_entry(&entry_name)?;
     validate_compute_pipeline_layout(&descriptor.layout, &bindings)?;
     let immediate_size_budget =
@@ -954,6 +973,7 @@ pub(crate) fn resolve_msl_passthrough_compute_pipeline_descriptor(
         Some(ResolvedComputeWorkgroup {
             size: entry.workgroup_size,
             storage_size: 0,
+            subgroup_size: None,
         }),
         layout.bind_group_layouts().to_vec(),
         0,
@@ -975,6 +995,7 @@ pub(crate) fn resolve_spirv_passthrough_compute_pipeline_descriptor(
         Some(ResolvedComputeWorkgroup {
             size: [1, 1, 1],
             storage_size: 0,
+            subgroup_size: None,
         }),
         layout.bind_group_layouts().to_vec(),
         0,
@@ -1141,12 +1162,18 @@ pub(crate) fn validate_pipeline_constant_value(
     Ok(())
 }
 
-/// Records resolve into the command stream.
+/// Resolves and validates the compute entry point's workgroup (size, storage,
+/// and explicit `@subgroup_size`) after pipeline-constant substitution.
+///
+/// `subgroup_size_control` is the device adapter's explicit subgroup size
+/// caps (Block 108), consulted only when the entry point declares
+/// `@subgroup_size`.
 pub(crate) fn resolve_compute_workgroup(
     module: &frontend::ReflectedModule,
     entry_name: &str,
     constants: &[ResolvedOverrideConstant],
     limits: Limits,
+    subgroup_size_control: Option<HalSubgroupSizeControlCaps>,
 ) -> Result<ResolvedComputeWorkgroup, String> {
     let pipeline_constants = resolved_pipeline_constant_map(constants);
     let workgroup = module.resolved_compute_workgroup_size(entry_name, &pipeline_constants)?;
@@ -1174,11 +1201,68 @@ pub(crate) fn resolve_compute_workgroup(
     if workgroup.workgroup_storage_size > u64::from(limits.max_compute_workgroup_storage_size) {
         return Err("compute workgroup storage size exceeds the device limit".to_owned());
     }
+    let subgroup_size =
+        validate_explicit_subgroup_size(size, workgroup.subgroup_size, subgroup_size_control)?;
 
     Ok(ResolvedComputeWorkgroup {
         size,
         storage_size: workgroup.workgroup_storage_size,
+        subgroup_size,
     })
+}
+
+/// Validates an override-resolved WGSL `@subgroup_size` against the resolved
+/// workgroup size and the adapter's explicit subgroup size caps (Block 108
+/// R4), returning the size the HAL must require.
+///
+/// Rules run in Dawn order after the workgroup-size limit checks:
+/// 4 (power of two / non-zero; Tint enforces it only for const-expressions,
+/// not for override-driven values), then 1 (`x % S == 0`, Dawn
+/// `ValidateComputeStageWorkgroupSize`), 2 (`S` within the explicit range),
+/// and 3 (`x·y·z / S <= maxComputeWorkgroupSubgroups`; Dawn
+/// `ShaderModuleVk.cpp`). The rules are backend-independent.
+pub(crate) fn validate_explicit_subgroup_size(
+    workgroup_size: [u32; 3],
+    subgroup_size: Option<u32>,
+    caps: Option<HalSubgroupSizeControlCaps>,
+) -> Result<Option<u32>, String> {
+    let Some(subgroup_size) = subgroup_size else {
+        return Ok(None);
+    };
+    if !subgroup_size.is_power_of_two() {
+        return Err(format!(
+            "subgroup_size attribute ({subgroup_size}) must be a power of two greater than zero"
+        ));
+    }
+    if !workgroup_size[0].is_multiple_of(subgroup_size) {
+        return Err(format!(
+            "x-dimension of workgroup invocations ({}) is not a multiple of the \
+             subgroup_size attribute ({subgroup_size})",
+            workgroup_size[0]
+        ));
+    }
+    let Some(caps) = caps else {
+        return Err(format!(
+            "subgroup_size attribute ({subgroup_size}) requires subgroup-size-control \
+             capabilities, which this device does not have"
+        ));
+    };
+    if subgroup_size < caps.min_size || subgroup_size > caps.max_size {
+        return Err(format!(
+            "subgroup_size attribute ({subgroup_size}) is not in the allowed range ([{}, {}])",
+            caps.min_size, caps.max_size
+        ));
+    }
+    let invocations =
+        u64::from(workgroup_size[0]) * u64::from(workgroup_size[1]) * u64::from(workgroup_size[2]);
+    let subgroups = invocations / u64::from(subgroup_size);
+    if subgroups > u64::from(caps.max_compute_workgroup_subgroups) {
+        return Err(format!(
+            "number of subgroups per workgroup ({subgroups}) exceeds the maximum ({})",
+            caps.max_compute_workgroup_subgroups
+        ));
+    }
+    Ok(Some(subgroup_size))
 }
 
 fn resolved_pipeline_constant_map(
@@ -3004,6 +3088,7 @@ fn cs() {
             Some(ResolvedComputeWorkgroup {
                 size: [1, 1, 1],
                 storage_size: 0,
+                subgroup_size: None,
             })
         );
         assert_eq!(layouts.len(), layout.bind_group_layouts().len());
@@ -3061,6 +3146,7 @@ fn cs() {
             &spirv_passthrough_descriptor(module, ComputePipelineLayout::Auto),
             device.limits(),
             &FeatureSet::default(),
+            None,
             1,
         )
         .expect_err("auto layout should fail");
@@ -3087,6 +3173,7 @@ fn cs() {
             &descriptor,
             device.limits(),
             &FeatureSet::default(),
+            None,
             1,
         )
         .expect_err("constants should fail");
@@ -3136,6 +3223,7 @@ fn cs() {
             &msl_passthrough_descriptor(module, ComputePipelineLayout::Auto),
             device.limits(),
             &FeatureSet::default(),
+            None,
             1,
         )
         .expect_err("auto layout should fail");
@@ -3164,6 +3252,7 @@ fn cs() {
             &msl_passthrough_descriptor(missing, layout.clone()),
             device.limits(),
             &FeatureSet::default(),
+            None,
             1,
         )
         .expect_err("missing compute metadata should fail");
@@ -3183,6 +3272,7 @@ fn cs() {
             &msl_passthrough_descriptor(zero, layout),
             device.limits(),
             &FeatureSet::default(),
+            None,
             1,
         )
         .expect_err("zero workgroup metadata should fail");
@@ -3208,6 +3298,7 @@ fn cs() {
             &descriptor,
             device.limits(),
             &FeatureSet::default(),
+            None,
             1,
         )
         .expect_err("constants should fail");
@@ -3578,6 +3669,317 @@ fn test() {{
         assert_eq!(
             scoped.message,
             "textureGather with a filtering sampler requires a filterable texture binding"
+        );
+    }
+
+    // --- Block 108: `subgroup-size-control` (`@subgroup_size`) ---------------
+
+    const NOOP_SUBGROUP_SIZE_CONTROL_CAPS: HalSubgroupSizeControlCaps =
+        HalSubgroupSizeControlCaps::new(4, 4, 64);
+
+    fn subgroup_size_control_device() -> Device {
+        noop_adapter()
+            .create_device(None, &[Feature::SubgroupSizeControl], "", "")
+            .expect("Noop adapter should create a subgroup-size-control device")
+    }
+
+    /// A device whose workgroup-size limits admit more than
+    /// `maxComputeWorkgroupSubgroups · S` invocations, so rule 3 is reachable
+    /// behind the (Dawn-ordered) workgroup limit checks.
+    fn subgroup_size_control_device_with_large_workgroups() -> Device {
+        let mut limits = Limits::DEFAULT;
+        limits.max_compute_invocations_per_workgroup = 1024;
+        limits.max_compute_workgroup_size_x = 1024;
+        let features: FeatureSet = [Feature::SubgroupSizeControl, Feature::Subgroups]
+            .into_iter()
+            .collect();
+        Device::from_hal_with_adapter_properties(
+            hal_noop_device(),
+            limits,
+            features,
+            "",
+            "",
+            1.0,
+            Some(NOOP_SUBGROUP_SIZE_CONTROL_CAPS),
+        )
+    }
+
+    fn subgroup_size_wgsl(workgroup_size: &str, subgroup_size: &str) -> String {
+        format!(
+            "enable subgroups;\nenable subgroup_size_control;\n\
+             override sg: u32 = 4;\n\
+             @compute @workgroup_size({workgroup_size}) @subgroup_size({subgroup_size})\n\
+             fn cs() {{ _ = sg; }}\n"
+        )
+    }
+
+    fn subgroup_size_descriptor(
+        device: &Device,
+        wgsl: &str,
+        constants: Vec<PipelineConstant>,
+    ) -> ComputePipelineDescriptor {
+        let module =
+            Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(wgsl.to_owned())));
+        assert!(!module.is_error(), "{:?}", module.diagnostic());
+        ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Auto,
+            shader_module: module,
+            entry_point: Some("cs".to_owned()),
+            constants,
+            error: None,
+        }
+    }
+
+    /// Creates the pipeline through the error-dispatching (sync) path and
+    /// returns the scoped validation message, if any.
+    fn create_subgroup_size_pipeline(
+        device: &Device,
+        wgsl: &str,
+        constants: Vec<PipelineConstant>,
+    ) -> Option<String> {
+        let descriptor = subgroup_size_descriptor(device, wgsl, constants);
+        device.push_error_scope(ErrorFilter::Validation);
+        let pipeline = device.create_compute_pipeline(descriptor);
+        let scoped = device.pop_error_scope().expect("scope should exist");
+        assert_eq!(pipeline.is_error(), scoped.is_some());
+        scoped.map(|error| error.message)
+    }
+
+    fn sg_constant(value: f64) -> Vec<PipelineConstant> {
+        vec![PipelineConstant {
+            key: "sg".to_owned(),
+            value,
+        }]
+    }
+
+    #[test]
+    fn validate_explicit_subgroup_size_passes_through_absent_attribute() {
+        assert_eq!(
+            validate_explicit_subgroup_size([6, 1, 1], None, None),
+            Ok(None)
+        );
+        assert_eq!(
+            validate_explicit_subgroup_size([6, 1, 1], None, Some(NOOP_SUBGROUP_SIZE_CONTROL_CAPS)),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn validate_explicit_subgroup_size_applies_rules_in_dawn_order() {
+        let caps = Some(HalSubgroupSizeControlCaps::new(8, 32, 16));
+
+        assert_eq!(
+            validate_explicit_subgroup_size([64, 2, 1], Some(16), caps),
+            Ok(Some(16))
+        );
+        // Rule 4 (power of two / non-zero) precedes rule 1.
+        let err = validate_explicit_subgroup_size([7, 1, 1], Some(12), caps).unwrap_err();
+        assert!(err.contains("must be a power of two"), "{err}");
+        let err = validate_explicit_subgroup_size([8, 1, 1], Some(0), caps).unwrap_err();
+        assert!(err.contains("must be a power of two"), "{err}");
+        // Rule 1 precedes rule 2 (64 is out of range, 12 % 64 != 0).
+        let err = validate_explicit_subgroup_size([12, 1, 1], Some(64), caps).unwrap_err();
+        assert_eq!(
+            err,
+            "x-dimension of workgroup invocations (12) is not a multiple of the \
+             subgroup_size attribute (64)"
+        );
+        // Rule 2, below and above the range.
+        let err = validate_explicit_subgroup_size([8, 1, 1], Some(4), caps).unwrap_err();
+        assert_eq!(
+            err,
+            "subgroup_size attribute (4) is not in the allowed range ([8, 32])"
+        );
+        let err = validate_explicit_subgroup_size([64, 1, 1], Some(64), caps).unwrap_err();
+        assert!(err.contains("not in the allowed range"), "{err}");
+        // Rule 3: 8·4·5 / 8 = 20 > 16; exactly 16 passes.
+        let err = validate_explicit_subgroup_size([8, 4, 5], Some(8), caps).unwrap_err();
+        assert_eq!(
+            err,
+            "number of subgroups per workgroup (20) exceeds the maximum (16)"
+        );
+        assert_eq!(
+            validate_explicit_subgroup_size([8, 4, 4], Some(8), caps),
+            Ok(Some(8))
+        );
+    }
+
+    #[test]
+    fn validate_explicit_subgroup_size_rejects_attribute_without_caps() {
+        let err = validate_explicit_subgroup_size([8, 1, 1], Some(4), None).unwrap_err();
+        assert!(err.contains("subgroup-size-control"), "{err}");
+    }
+
+    #[test]
+    fn subgroup_size_attribute_valid_pipeline_creates() {
+        let device = subgroup_size_control_device();
+
+        assert_eq!(
+            create_subgroup_size_pipeline(&device, &subgroup_size_wgsl("8", "4"), Vec::new()),
+            None
+        );
+        // 256 invocations / 4 = 64 subgroups, exactly the Noop maximum.
+        assert_eq!(
+            create_subgroup_size_pipeline(&device, &subgroup_size_wgsl("256", "4"), Vec::new()),
+            None
+        );
+    }
+
+    #[test]
+    fn subgroup_size_attribute_rule_1_rejects_x_not_multiple() {
+        let device = subgroup_size_control_device();
+
+        let message =
+            create_subgroup_size_pipeline(&device, &subgroup_size_wgsl("6", "4"), Vec::new())
+                .expect("x = 6 is not a multiple of 4");
+        assert_eq!(
+            message,
+            "x-dimension of workgroup invocations (6) is not a multiple of the \
+             subgroup_size attribute (4)"
+        );
+    }
+
+    #[test]
+    fn subgroup_size_attribute_rule_2_rejects_out_of_range_size() {
+        let device = subgroup_size_control_device();
+
+        let message =
+            create_subgroup_size_pipeline(&device, &subgroup_size_wgsl("8", "8"), Vec::new())
+                .expect("8 is outside the Noop range [4, 4]");
+        assert_eq!(
+            message,
+            "subgroup_size attribute (8) is not in the allowed range ([4, 4])"
+        );
+    }
+
+    #[test]
+    fn subgroup_size_attribute_rule_3_rejects_too_many_subgroups() {
+        let device = subgroup_size_control_device_with_large_workgroups();
+
+        assert_eq!(
+            create_subgroup_size_pipeline(&device, &subgroup_size_wgsl("256", "4"), Vec::new()),
+            None
+        );
+        let message =
+            create_subgroup_size_pipeline(&device, &subgroup_size_wgsl("260", "4"), Vec::new())
+                .expect("260 / 4 = 65 subgroups");
+        assert_eq!(
+            message,
+            "number of subgroups per workgroup (65) exceeds the maximum (64)"
+        );
+        let message = create_subgroup_size_pipeline(
+            &device,
+            &subgroup_size_wgsl("4, 4, 17", "4"),
+            Vec::new(),
+        )
+        .expect("4·4·17 / 4 = 68 subgroups");
+        assert_eq!(
+            message,
+            "number of subgroups per workgroup (68) exceeds the maximum (64)"
+        );
+    }
+
+    #[test]
+    fn subgroup_size_attribute_override_driven_size_is_validated_after_substitution() {
+        let device = subgroup_size_control_device();
+        let wgsl = subgroup_size_wgsl("8", "sg");
+
+        // Default (4) and an explicit valid constant succeed.
+        assert_eq!(
+            create_subgroup_size_pipeline(&device, &wgsl, Vec::new()),
+            None
+        );
+        assert_eq!(
+            create_subgroup_size_pipeline(&device, &wgsl, sg_constant(4.0)),
+            None
+        );
+        // Out of range after substitution (rule 2).
+        let message = create_subgroup_size_pipeline(&device, &wgsl, sg_constant(8.0))
+            .expect("sg = 8 is outside [4, 4]");
+        assert!(message.contains("not in the allowed range"), "{message}");
+        // Tint does not reject a non-power-of-two / zero override value, so
+        // core rule 4 does (before rule 1: 8 % 6 != 0 would also fail).
+        let message = create_subgroup_size_pipeline(&device, &wgsl, sg_constant(6.0))
+            .expect("sg = 6 is not a power of two");
+        assert_eq!(
+            message,
+            "subgroup_size attribute (6) must be a power of two greater than zero"
+        );
+        let message = create_subgroup_size_pipeline(&device, &wgsl, sg_constant(0.0))
+            .expect("sg = 0 is not a power of two");
+        assert!(message.contains("must be a power of two"), "{message}");
+    }
+
+    #[test]
+    fn subgroup_size_attribute_async_path_reports_same_errors() {
+        let device = subgroup_size_control_device();
+        let cases = [
+            (subgroup_size_wgsl("8", "4"), Vec::new(), false),
+            (subgroup_size_wgsl("6", "4"), Vec::new(), true),
+            (subgroup_size_wgsl("8", "8"), Vec::new(), true),
+            (subgroup_size_wgsl("8", "sg"), sg_constant(6.0), true),
+        ];
+        for (wgsl, constants, expect_error) in cases {
+            let descriptor = subgroup_size_descriptor(&device, &wgsl, constants.clone());
+            device.push_error_scope(ErrorFilter::Validation);
+            let pipeline = device.create_compute_pipeline_without_error_dispatch(descriptor);
+            let scoped = device.pop_error_scope().expect("scope should exist");
+
+            assert!(scoped.is_none(), "async path must not dispatch: {wgsl}");
+            assert_eq!(pipeline.is_error(), expect_error, "{wgsl}");
+            // Same verdict as the sync path.
+            assert_eq!(
+                create_subgroup_size_pipeline(&device, &wgsl, constants).is_some(),
+                expect_error,
+                "{wgsl}"
+            );
+        }
+    }
+
+    #[test]
+    fn required_subgroup_size_reaches_hal_descriptor() {
+        let device = subgroup_size_control_device();
+        let resolve = |wgsl: &str, constants: Vec<PipelineConstant>| {
+            let descriptor = subgroup_size_descriptor(&device, wgsl, constants);
+            let (_, _, workgroup, _, _) = resolve_compute_pipeline_descriptor(
+                &descriptor,
+                device.limits(),
+                &device.features(),
+                device.inner.subgroup_size_control_caps,
+                1,
+            )
+            .expect("pipeline should resolve");
+            workgroup
+                .expect("WGSL compute pipelines resolve a workgroup")
+                .subgroup_size
+        };
+
+        assert_eq!(resolve(&subgroup_size_wgsl("8", "4"), Vec::new()), Some(4));
+        // Override-free module: the literal fast path must not drop the attribute.
+        assert_eq!(
+            resolve(
+                "enable subgroups;
+enable subgroup_size_control;
+                 @compute @workgroup_size(8) @subgroup_size(4) fn cs() {}",
+                Vec::new()
+            ),
+            Some(4)
+        );
+        assert_eq!(
+            resolve(&subgroup_size_wgsl("8", "sg"), sg_constant(4.0)),
+            Some(4)
+        );
+        assert_eq!(
+            resolve("@compute @workgroup_size(8) fn cs() {}", Vec::new()),
+            None
+        );
+        // A module with overrides but no attribute also resolves to `None`.
+        assert_eq!(
+            resolve(
+                "override n: u32 = 8;\n@compute @workgroup_size(n) fn cs() {}",
+                Vec::new()
+            ),
+            None
         );
     }
 }

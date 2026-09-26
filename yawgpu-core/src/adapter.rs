@@ -82,6 +82,7 @@ impl Adapter {
         add_texture_compression_features(&mut features, &self.inner.hal);
         add_shader_float16_feature(&mut features, &self.inner.hal);
         add_subgroups_feature(&mut features, &self.inner.hal);
+        add_subgroup_size_control_feature(&mut features, &self.inner.hal);
         add_depth_clip_control_feature(&mut features, &self.inner.hal);
         add_float32_blendable_feature(&mut features, &self.inner.hal);
         add_dual_source_blending_feature(&mut features, &self.inner.hal);
@@ -140,13 +141,14 @@ impl Adapter {
         let features = self.resolve_features(required_features)?;
         let hal = self.inner.hal.create_device()?;
         *consumed = true;
-        Ok(Device::from_hal_with_timestamp_period(
+        Ok(Device::from_hal_with_adapter_properties(
             hal,
             limits,
             features,
             label,
             queue_label,
             self.inner.hal.timestamp_period(),
+            self.inner.hal.subgroup_size_control_caps(),
         ))
     }
 
@@ -216,6 +218,10 @@ pub enum Feature {
     ShaderF16,
     /// WGSL `subgroups` support.
     Subgroups,
+    /// WGSL `subgroup_size_control` support: compute entry points may declare
+    /// `@subgroup_size(S)` to require an explicit subgroup size. Implies
+    /// [`Feature::Subgroups`].
+    SubgroupSizeControl,
     /// Depth clip control support.
     DepthClipControl,
     /// Float32 color target blend support.
@@ -315,6 +321,14 @@ fn add_subgroups_feature(features: &mut FeatureSet, hal: &HalAdapter) {
     }
 }
 
+fn add_subgroup_size_control_feature(features: &mut FeatureSet, hal: &HalAdapter) {
+    // Advertisement guarantees `Subgroups` too: every backend that reports
+    // caps also supports subgroups (Block 108 R1/R2).
+    if hal.subgroup_size_control_caps().is_some() {
+        features.insert(Feature::SubgroupSizeControl);
+    }
+}
+
 fn add_depth_clip_control_feature(features: &mut FeatureSet, hal: &HalAdapter) {
     if hal.supports_depth_clip_control() {
         features.insert(Feature::DepthClipControl);
@@ -402,6 +416,9 @@ pub(crate) fn apply_feature_implications(features: &mut FeatureSet) {
     }
     if features.contains(&Feature::TextureFormatsTier1) {
         features.insert(Feature::Rg11b10UfloatRenderable);
+    }
+    if features.contains(&Feature::SubgroupSizeControl) {
+        features.insert(Feature::Subgroups);
     }
 }
 
@@ -561,6 +578,46 @@ mod tests {
         assert!(features.contains(&Feature::Subgroups));
         assert_eq!(adapter.subgroup_min_size(), 4);
         assert_eq!(adapter.subgroup_max_size(), 4);
+    }
+
+    #[test]
+    fn subgroup_size_control_feature_is_adapter_gated_and_noop_advertises() {
+        let base = supported_features();
+        assert!(!base.contains(&Feature::SubgroupSizeControl));
+
+        let adapter = noop_adapter();
+        assert!(adapter.has_feature(Feature::SubgroupSizeControl));
+        // Advertisement implies the adapter also supports `Subgroups`.
+        assert!(adapter.has_feature(Feature::Subgroups));
+    }
+
+    #[test]
+    fn feature_implications_subgroup_size_control_adds_subgroups() {
+        let mut features = FeatureSet::new();
+        features.insert(Feature::SubgroupSizeControl);
+
+        apply_feature_implications(&mut features);
+
+        assert!(features.contains(&Feature::SubgroupSizeControl));
+        assert!(features.contains(&Feature::Subgroups));
+
+        let mut without = FeatureSet::new();
+        apply_feature_implications(&mut without);
+        assert!(!without.contains(&Feature::Subgroups));
+    }
+
+    #[test]
+    fn create_device_with_only_subgroup_size_control_enables_subgroups() {
+        let device = noop_adapter()
+            .create_device(None, &[Feature::SubgroupSizeControl], "", "")
+            .expect("Noop adapter should create a subgroup-size-control device");
+
+        assert!(device.features().contains(&Feature::SubgroupSizeControl));
+        assert!(device.features().contains(&Feature::Subgroups));
+        assert_eq!(
+            device.inner.subgroup_size_control_caps,
+            Some(yawgpu_hal::HalSubgroupSizeControlCaps::new(4, 4, 64))
+        );
     }
 
     #[test]

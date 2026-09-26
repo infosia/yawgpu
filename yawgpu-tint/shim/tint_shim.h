@@ -51,6 +51,7 @@ YAWGPU_TINT_API void yawgpu_tint_initialize(void);
 /* Parse + validate WGSL. Returns NULL on failure with *err set.
  * If shader_f16 is true, Tint allows the f16 WGSL extension.
  * If subgroups is true, Tint allows the subgroups WGSL extension.
+ * If subgroup_size_control is true, Tint allows the subgroup_size_control WGSL extension.
  * If dual_source_blending is true, Tint allows the dual-source-blending WGSL extension.
  * If clip_distances is true, Tint allows the clip-distances WGSL extension.
  * If primitive_index is true, Tint allows the primitive-index WGSL extension.
@@ -60,6 +61,7 @@ YAWGPU_TINT_API YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
                                               size_t wgsl_len,
                                               bool shader_f16,
                                               bool subgroups,
+                                              bool subgroup_size_control,
                                               bool dual_source_blending,
                                               bool clip_distances,
                                               bool primitive_index,
@@ -86,6 +88,11 @@ typedef struct {
      * shading; mirrors tint::inspector::EntryPoint::frag_position_used. */
     bool frag_position_used;
     bool has_clip_distances;
+    /* Whether the entry point declares `@subgroup_size(...)` (literal or
+     * override-driven). The value itself is only reported, override-resolved,
+     * by yawgpu_tint_resolved_workgroup_size. Occupies former padding, so the
+     * struct size is unchanged. */
+    bool has_subgroup_size;
     uint32_t clip_distances_size;
 } YawgpuTintEntryPoint;
 
@@ -388,12 +395,19 @@ YAWGPU_TINT_API bool yawgpu_tint_workgroup_storage_size(const YawgpuTintProgram*
    does not name an entry point in the module, an override value is
    invalid/unknown, override substitution const-eval fails for `ep`, or the
    entry point's workgroup size does not resolve to constants (e.g. `ep` is
-   not a compute entry point). */
+   not a compute entry point). On success, *has_subgroup_size reports whether
+   `ep` declares `@subgroup_size`, and *subgroup_size carries its
+   override-resolved value (Tint's WorkgroupInfo::subgroup_size; 0 when
+   absent). The value is reported as-is: Tint does not re-check the
+   power-of-two rule for override-driven values here, so callers validate it.
+   Both pointers must be non-NULL. */
 YAWGPU_TINT_API bool yawgpu_tint_resolved_workgroup_size(const YawgpuTintProgram*,
                                           const char* ep,
                                           const YawgpuTintOverrideValue* ov,
                                           size_t n_ov,
                                           uint32_t out[3],
+                                          bool* has_subgroup_size,
+                                          uint32_t* subgroup_size,
                                           char** err);
 
 /* Generates GLSL ES 3.1 for `ep`. `has_first_instance_offset` follows the

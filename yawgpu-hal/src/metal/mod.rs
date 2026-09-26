@@ -478,6 +478,15 @@ impl MetalAdapter {
         self.supports_subgroups().then_some((32, 32))
     }
 
+    /// Returns the explicit compute subgroup size capabilities.
+    ///
+    /// Metal cannot require a subgroup size (Dawn does not support
+    /// `subgroup-size-control` on Metal; Apple GPUs have a fixed width of 32).
+    #[must_use]
+    pub(super) fn subgroup_size_control_caps(&self) -> Option<crate::HalSubgroupSizeControlCaps> {
+        None
+    }
+
     /// Creates a device (and its default queue) on this adapter.
     #[must_use = "device creation can fail"]
     pub fn create_device(&self) -> Result<MetalDevice, HalError> {

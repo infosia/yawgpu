@@ -588,6 +588,7 @@ mod tests {
             native::WGPUFeatureName_TimestampQuery,
             native::WGPUFeatureName_ShaderF16,
             native::WGPUFeatureName_Subgroups,
+            native::WGPUFeatureName_SubgroupSizeControl,
             native::WGPUFeatureName_DepthClipControl,
             native::WGPUFeatureName_Float32Blendable,
             native::WGPUFeatureName_DualSourceBlending,

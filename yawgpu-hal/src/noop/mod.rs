@@ -176,6 +176,16 @@ impl NoopAdapter {
         Some((4, 4))
     }
 
+    /// Returns the explicit compute subgroup size capabilities.
+    ///
+    /// Nominal values (Block 108): the range matches
+    /// [`Self::subgroup_size_range`], and 64 subgroups per workgroup lets the
+    /// core `@subgroup_size` rules be exercised without a GPU.
+    #[must_use]
+    pub(super) fn subgroup_size_control_caps(&self) -> Option<crate::HalSubgroupSizeControlCaps> {
+        Some(crate::HalSubgroupSizeControlCaps::new(4, 4, 64))
+    }
+
     /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<NoopDevice, HalError> {
         Ok(NoopDevice::new())
@@ -623,6 +633,16 @@ mod tests {
 
         assert!(adapter.supports_subgroups());
         assert_eq!(adapter.subgroup_size_range(), Some((4, 4)));
+    }
+
+    #[test]
+    fn noop_adapter_subgroup_size_control_caps_are_nominal() {
+        let adapter = NoopAdapter::synthetic();
+
+        assert_eq!(
+            adapter.subgroup_size_control_caps(),
+            Some(crate::HalSubgroupSizeControlCaps::new(4, 4, 64))
+        );
     }
 
     #[test]

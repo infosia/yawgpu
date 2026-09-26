@@ -244,6 +244,22 @@ pub struct EntryPoint {
     pub frag_position_used: bool,
     /// Size of the vertex clip-distances builtin array, when present.
     pub clip_distances_size: Option<u32>,
+    /// Whether the entry point declares `@subgroup_size(...)`, either as a
+    /// const-expression or an override-expression. The resolved value is
+    /// reported by [`Program::resolved_workgroup_info`].
+    pub has_subgroup_size: bool,
+}
+
+/// An entry point's override-resolved compute workgroup info (Tint's
+/// `WorkgroupInfo`, restricted to the fields yawgpu consumes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedWorkgroupInfo {
+    /// Resolved `@workgroup_size` as `[x, y, z]`.
+    pub workgroup_size: [u32; 3],
+    /// Resolved `@subgroup_size`, when the entry point declares one. Reported
+    /// as resolved by Tint, without re-checking the power-of-two rule for
+    /// override-driven values.
+    pub subgroup_size: Option<u32>,
 }
 
 /// A reflected entry point input or output variable.
@@ -953,6 +969,7 @@ mod real {
         subgroup_size_used: bool,
         frag_position_used: bool,
         has_clip_distances: bool,
+        has_subgroup_size: bool,
         clip_distances_size: u32,
     }
 
@@ -978,6 +995,7 @@ mod real {
         assert!(core::mem::offset_of!(RawEntryPoint, subgroup_size_used) == 31);
         assert!(core::mem::offset_of!(RawEntryPoint, frag_position_used) == 32);
         assert!(core::mem::offset_of!(RawEntryPoint, has_clip_distances) == 33);
+        assert!(core::mem::offset_of!(RawEntryPoint, has_subgroup_size) == 34);
         assert!(core::mem::offset_of!(RawEntryPoint, clip_distances_size) == 36);
     };
 
@@ -999,6 +1017,7 @@ mod real {
                 subgroup_size_used: raw.subgroup_size_used,
                 frag_position_used: raw.frag_position_used,
                 clip_distances_size: raw.has_clip_distances.then_some(raw.clip_distances_size),
+                has_subgroup_size: raw.has_subgroup_size,
             })
         }
     }
@@ -1367,6 +1386,7 @@ mod real {
             wgsl_len: usize,
             shader_f16: bool,
             subgroups: bool,
+            subgroup_size_control: bool,
             dual_source_blending: bool,
             clip_distances: bool,
             primitive_index: bool,
@@ -1470,6 +1490,8 @@ mod real {
             ov: *const RawOverrideValue,
             n_ov: usize,
             out: *mut u32,
+            has_subgroup_size: *mut bool,
+            subgroup_size: *mut u32,
             err: *mut *mut c_char,
         ) -> bool;
         fn yawgpu_tint_immediate_data_size(
@@ -1720,10 +1742,12 @@ mod real {
 
     impl Program {
         /// Parses WGSL into a Tint program.
+        #[allow(clippy::too_many_arguments)]
         pub fn parse(
             wgsl: &str,
             shader_f16: bool,
             subgroups: bool,
+            subgroup_size_control: bool,
             dual_source_blending: bool,
             clip_distances: bool,
             primitive_index: bool,
@@ -1739,6 +1763,7 @@ mod real {
                     wgsl.len(),
                     shader_f16,
                     subgroups,
+                    subgroup_size_control,
                     dual_source_blending,
                     clip_distances,
                     primitive_index,
@@ -1778,6 +1803,7 @@ mod real {
                     subgroup_size_used: false,
                     frag_position_used: false,
                     has_clip_distances: false,
+                    has_subgroup_size: false,
                     clip_distances_size: 0,
                 };
                 // SAFETY: `raw` points to valid writable memory.
@@ -2147,11 +2173,28 @@ mod real {
             entry_point: &str,
             overrides: &[OverrideValue],
         ) -> Result<[u32; 3], TintError> {
+            self.resolved_workgroup_info(entry_point, overrides)
+                .map(|info| info.workgroup_size)
+        }
+
+        /// Returns `entry_point`'s override-resolved compute workgroup info:
+        /// the `@workgroup_size` of [`Self::resolved_workgroup_size`] plus the
+        /// resolved `@subgroup_size` (Tint's `WorkgroupInfo::subgroup_size`),
+        /// both read off the same entry-scoped, override-substituted IR. Fails
+        /// under the same conditions as [`Self::resolved_workgroup_size`].
+        pub fn resolved_workgroup_info(
+            &self,
+            entry_point: &str,
+            overrides: &[OverrideValue],
+        ) -> Result<ResolvedWorkgroupInfo, TintError> {
             let ep = cstring(entry_point, "entry point").map_err(TintError::Codegen)?;
             let raw_overrides = RawOverrideValues::new(overrides)?;
             let mut out = [0u32; 3];
+            let mut has_subgroup_size = false;
+            let mut subgroup_size = 0u32;
             let mut err = ptr::null_mut();
-            // SAFETY: `ep`, `out`, and `err` point to valid memory for the call.
+            // SAFETY: `ep`, `out`, `has_subgroup_size`, `subgroup_size`, and
+            // `err` point to valid memory for the call.
             let ok = unsafe {
                 yawgpu_tint_resolved_workgroup_size(
                     self.raw,
@@ -2159,13 +2202,18 @@ mod real {
                     raw_overrides.as_ptr(),
                     raw_overrides.len(),
                     out.as_mut_ptr(),
+                    &mut has_subgroup_size,
+                    &mut subgroup_size,
                     &mut err,
                 )
             };
             if !ok {
                 return Err(TintError::Codegen(take_error(err)));
             }
-            Ok(out)
+            Ok(ResolvedWorkgroupInfo {
+                workgroup_size: out,
+                subgroup_size: has_subgroup_size.then_some(subgroup_size),
+            })
         }
 
         /// Returns `entry_point`'s immediate data size in bytes -- the total
@@ -2376,10 +2424,12 @@ mod stub {
 
     impl Program {
         /// Parses WGSL into a Tint program.
+        #[allow(clippy::too_many_arguments)]
         pub fn parse(
             _wgsl: &str,
             _shader_f16: bool,
             _subgroups: bool,
+            _subgroup_size_control: bool,
             _dual_source_blending: bool,
             _clip_distances: bool,
             _primitive_index: bool,
@@ -2475,6 +2525,15 @@ mod stub {
             _entry_point: &str,
             _overrides: &[OverrideValue],
         ) -> Result<[u32; 3], TintError> {
+            Err(TintError::Unavailable)
+        }
+
+        /// Returns `entry_point`'s override-resolved compute workgroup info.
+        pub fn resolved_workgroup_info(
+            &self,
+            _entry_point: &str,
+            _overrides: &[OverrideValue],
+        ) -> Result<ResolvedWorkgroupInfo, TintError> {
             Err(TintError::Unavailable)
         }
 
@@ -2588,6 +2647,7 @@ fn cs() {
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -2600,6 +2660,7 @@ fn cs() {
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -2607,6 +2668,7 @@ fn cs() {
 
         let program = Program::parse(
             "@fragment fn fs() -> @location(0) vec4f { return vec4f(); }",
+            false,
             false,
             false,
             false,
@@ -2627,6 +2689,7 @@ fn main() {
   d[0] = 1u;
 }
 "#,
+            false,
             false,
             false,
             false,
@@ -2664,7 +2727,8 @@ fn uses_immediate() {
 @compute @workgroup_size(1)
 fn no_immediate() {}
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[11]).unwrap();
+        let program =
+            Program::parse(wgsl, false, false, false, false, false, false, &[11]).unwrap();
         // Entry point that statically accesses `used_imm` (a vec4f = 16 bytes);
         // `unused_imm` is declared but never touched by this entry point, so
         // it does not contribute to the size (matches Dawn's
@@ -2704,7 +2768,8 @@ fn main() {
   _ = params;
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[11]).unwrap();
+        let program =
+            Program::parse(wgsl, false, false, false, false, false, false, &[11]).unwrap();
 
         assert_eq!(program.immediate_data_size("main").unwrap(), 32);
         assert_eq!(
@@ -2715,8 +2780,17 @@ fn main() {
 
     #[test]
     fn compute_generates_msl_spirv_glsl() {
-        let program =
-            Program::parse(compute_wgsl(), false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            compute_wgsl(),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let bindings = Bindings::default();
         let msl = program
             .generate_msl("cs", &bindings, &[], 0, true, false, &[], 0xFFFF_FFFF, 0)
@@ -2751,7 +2825,7 @@ fn fs() -> @location(0) vec4f {
   return textureSample(t, s, vec3f(1.0, 0.0, 0.0), 0);
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let glsl = program
             .generate_glsl("fs", &Bindings::default(), &[], None)
             .unwrap()
@@ -2788,6 +2862,7 @@ fn vs(@builtin(instance_index) ii: u32, @builtin(vertex_index) vi: u32) -> @buil
     fn generate_glsl_first_instance_offset_only_applied_when_requested() {
         let program = Program::parse(
             instance_index_vertex_wgsl(),
+            false,
             false,
             false,
             false,
@@ -2840,7 +2915,7 @@ fn fs() -> @builtin(sample_mask) u32 {
   return 1u;
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let glsl = program
             .generate_glsl("fs", &Bindings::default(), &[], None)
             .unwrap()
@@ -2863,7 +2938,7 @@ fn fs(@builtin(sample_mask) mask_in: u32) -> @location(0) vec4f {
   return vec4f(0.0, 0.0, 0.0, 1.0);
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let glsl = program
             .generate_glsl("fs", &Bindings::default(), &[], None)
             .unwrap()
@@ -2885,7 +2960,7 @@ fn fs(@builtin(sample_index) sample_index: u32) -> @location(0) vec4f {
   return textureLoad(t, vec2i(0, 0), sample_index);
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let glsl = program
             .generate_glsl("fs", &Bindings::default(), &[], None)
             .unwrap()
@@ -2912,7 +2987,7 @@ fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
   return vec4f(d, d, d, 1.0);
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let glsl = program
             .generate_glsl("fs", &Bindings::default(), &[], None)
             .unwrap()
@@ -2943,7 +3018,7 @@ fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
   return textureGather(t, s, uv);
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let glsl = program
             .generate_glsl("fs", &Bindings::default(), &[], None)
             .unwrap()
@@ -2974,7 +3049,7 @@ fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
   return vec4f(d, d, d, 1.0);
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let glsl = program
             .generate_glsl("fs", &Bindings::default(), &[], None)
             .unwrap()
@@ -3002,7 +3077,7 @@ fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
   return vec4f(raw, cmp, 0.0, 1.0);
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let glsl = program
             .generate_glsl("fs", &Bindings::default(), &[], None)
             .unwrap()
@@ -3047,7 +3122,8 @@ fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
                 }
             }
             wgsl.push_str("}\n");
-            let program = Program::parse(&wgsl, false, false, false, false, false, &[]).unwrap();
+            let program =
+                Program::parse(&wgsl, false, false, false, false, false, false, &[]).unwrap();
             let mut bindings = Bindings::default();
             bindings.texture.push(BindingRemap {
                 group: 0,
@@ -3099,7 +3175,7 @@ fn main() {
   dst[0] = textureNumLevels(src);
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let mut bindings = Bindings::default();
         bindings.texture.push(BindingRemap {
             group: 2,
@@ -3159,7 +3235,7 @@ fn fs() -> @location(0) vec4f {
   return vec4f(f32(a + b), 0.0, 0.0, 1.0);
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let mut bindings = Bindings::default();
         // yawgpu's flat remap: each texture keeps its binding as the flat value
         // under group 0 (unique per texture across the pipeline).
@@ -3224,7 +3300,7 @@ fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
   return textureSample(t, s, uv);
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let output = program
             .generate_glsl("fs", &Bindings::default(), &[], None)
             .unwrap();
@@ -3261,7 +3337,7 @@ fn fs() -> @location(0) vec4f {
   return textureLoad(t, vec2i(0, 0), 0);
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let output = program
             .generate_glsl("fs", &Bindings::default(), &[], None)
             .unwrap();
@@ -3312,7 +3388,7 @@ fn cs() {
   data[0] = u32(u.scale);
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let bindings = Bindings::default();
         let glsl = program
             .generate_glsl("cs", &bindings, &[], None)
@@ -3359,7 +3435,7 @@ fn cs() {
   data[0] = u32(u.scale);
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let bindings = Bindings {
             uniform: vec![BindingRemap {
                 group: 0,
@@ -3400,7 +3476,7 @@ fn main() {
   _ = cx;
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let err = program
             .generate_spirv(
                 "main",
@@ -3433,7 +3509,7 @@ fn cs() {
   }
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let msl = program
             .generate_msl(
                 "cs",
@@ -3473,7 +3549,7 @@ fn cs() {
   atomicAdd(&wg, 1u);
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let msl = program
             .generate_msl(
                 "cs",
@@ -3503,7 +3579,7 @@ fn cs() {
     #[test]
     fn render_stages_generate_msl_and_spirv() {
         let program =
-            Program::parse(render_wgsl(), false, false, false, false, false, &[]).unwrap();
+            Program::parse(render_wgsl(), false, false, false, false, false, false, &[]).unwrap();
         let bindings = Bindings::default();
         for ep in ["vs", "fs"] {
             let msl = program
@@ -3522,6 +3598,7 @@ fn cs() {
     fn framebuffer_fetch_reflects_color_and_generates_code() {
         let program = Program::parse(
             framebuffer_fetch_wgsl(),
+            false,
             false,
             false,
             false,
@@ -3576,6 +3653,7 @@ fn cs() {
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -3616,6 +3694,7 @@ fn cs() {
     fn input_attachment_msl_missing_color_slot_returns_err() {
         let program = Program::parse(
             input_attachment_wgsl(),
+            false,
             false,
             false,
             false,
@@ -3672,6 +3751,7 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
   return vec4<f32>(uv, 0.0, 1.0);
 }
 "#,
+            false,
             false,
             false,
             false,
@@ -3770,7 +3850,8 @@ fn cs() {
   _ = v;
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[11]).unwrap();
+        let program =
+            Program::parse(wgsl, false, false, false, false, false, false, &[11]).unwrap();
 
         // `params` is a vec4f (16 bytes): with the matching layout budget the
         // depth-range pair lands at bytes {16, 20} and generation succeeds.
@@ -3844,6 +3925,7 @@ fn cs() {
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -3869,6 +3951,7 @@ fn cs() {
     fn multisampled_input_attachment_flag_reaches_spirv_writer() {
         let program = Program::parse(
             input_attachment_wgsl(),
+            false,
             false,
             false,
             false,
@@ -3917,6 +4000,7 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
     fn multisampled_input_attachment_generates_spirv() {
         let program = Program::parse(
             multisampled_input_attachment_wgsl(),
+            false,
             false,
             false,
             false,
@@ -3977,6 +4061,7 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -4023,6 +4108,7 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap_err();
@@ -4034,6 +4120,7 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
     fn input_attachment_enable_requires_tiled_feature() {
         let err = Program::parse(
             input_attachment_wgsl(),
+            false,
             false,
             false,
             false,
@@ -4059,6 +4146,7 @@ fn fs(@color(0) prev: vec4<f32>) -> @location(0) vec4<f32> {
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap_err();
@@ -4077,7 +4165,7 @@ fn vs(i: VIn) -> @builtin(position) vec4f {
   return i.p;
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let default_msl = program
             .generate_msl(
                 "vs",
@@ -4135,7 +4223,7 @@ fn fs() -> @location(0) vec4f {
   return vec4f(1.0);
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let default_msl = program
             .generate_msl(
                 "fs",
@@ -4166,8 +4254,17 @@ fn fs() -> @builtin(frag_depth) f32 {
   return 2.0;
 }
 "#;
-        let program =
-            Program::parse(frag_depth_wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            frag_depth_wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let frag_depth_msl = program
             .generate_msl(
                 "fs",
@@ -4195,7 +4292,8 @@ fn fs() -> @location(0) vec4f {
   return vec4f(0.0);
 }
 "#;
-        let program = Program::parse(color_wgsl, false, false, false, false, false, &[]).unwrap();
+        let program =
+            Program::parse(color_wgsl, false, false, false, false, false, false, &[]).unwrap();
         let color_msl = program
             .generate_msl(
                 "fs",
@@ -4228,7 +4326,8 @@ fn cs() {
   _ = v;
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[11]).unwrap();
+        let program =
+            Program::parse(wgsl, false, false, false, false, false, false, &[11]).unwrap();
         // `params` is a vec4f (16 bytes); the owning pipeline layout reserves
         // exactly that much user-immediate budget.
         let msl = program
@@ -4280,7 +4379,8 @@ fn fs() -> @builtin(frag_depth) f32 {
   return v.x;
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[11]).unwrap();
+        let program =
+            Program::parse(wgsl, false, false, false, false, false, false, &[11]).unwrap();
         // `params` is a vec4f (16 bytes): the clamp range must land at byte
         // offset 16, not overlap `params` at `[0, 16)`.
         let msl = program
@@ -4357,7 +4457,7 @@ fn cs() {
   s.value[0] = u.value + c;
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let entries = program.entry_points().unwrap();
         assert_eq!(entries[0].workgroup_size, Some([8, 4, 1]));
         let bindings = program.resource_bindings("cs").unwrap();
@@ -4379,6 +4479,7 @@ fn cs() {
     fn exposes_non_error_diagnostics() {
         let program = Program::parse(
             "diagnostic(info, bogus_rule);\n@compute @workgroup_size(1) fn cs() {}",
+            false,
             false,
             false,
             false,
@@ -4414,7 +4515,7 @@ fn cs() {
   _ = helper(gather_tex);
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let bindings = program.resource_bindings("cs").unwrap();
         let usage = |binding: u32| {
             bindings
@@ -4447,7 +4548,7 @@ fn fs(@location(0) value: f32, @location(1) @interpolate(flat) index: u32) -> @l
   return vec4f(value + f32(index), 0.0, 0.0, 1.0);
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
 
         let inputs = program.entry_point_inputs("fs").unwrap();
         let value = inputs
@@ -4481,7 +4582,7 @@ override x: u32 = 4;
 @compute @workgroup_size(x, 1, 1)
 fn cs() {}
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let overrides = program.overrides().unwrap();
         assert_eq!(overrides.len(), 1);
         assert_eq!(overrides[0].name, "x");
@@ -4536,7 +4637,7 @@ override u: u32 = 7u;
 override i: i32 = -3i;
 @compute @workgroup_size(1) fn cs() {}
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let overrides = program.overrides().unwrap();
         let default = |name: &str| {
             overrides
@@ -4562,7 +4663,7 @@ fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
   return textureSampleBaseClampToEdge(t, s, p.xy);
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let bindings = Bindings {
             sampler: vec![BindingRemap {
                 group: 0,
@@ -4600,7 +4701,7 @@ struct U { value: vec4f }
 @compute @workgroup_size(1)
 fn cs() { _ = u.value; }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let default_bindings = Bindings::default();
         let remapped = Bindings {
             uniform: vec![BindingRemap {
@@ -4653,6 +4754,7 @@ fn cs() { _ = u.value; }
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -4674,7 +4776,7 @@ fn cs() {
   _ = value;
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[1]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[1]).unwrap();
         drop(program);
     }
 
@@ -4698,7 +4800,7 @@ fn cs() {
   _ = value;
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[3]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[3]).unwrap();
         drop(program);
     }
 
@@ -4717,8 +4819,8 @@ fn fs() -> Out {
   return Out(vec4f(), vec4f());
 }
 "#;
-        assert!(Program::parse(wgsl, false, false, false, false, false, &[]).is_err());
-        let program = Program::parse(wgsl, false, false, true, false, false, &[]).unwrap();
+        assert!(Program::parse(wgsl, false, false, false, false, false, false, &[]).is_err());
+        let program = Program::parse(wgsl, false, false, false, true, false, false, &[]).unwrap();
         let outputs = program.entry_point_outputs("fs").unwrap();
         assert!(outputs.iter().any(|variable| variable.blend_src == Some(0)));
         assert!(outputs.iter().any(|variable| variable.blend_src == Some(1)));
@@ -4740,8 +4842,8 @@ fn vs() -> Out {
 }
 "#;
 
-        assert!(Program::parse(wgsl, false, false, false, false, false, &[]).is_err());
-        let program = Program::parse(wgsl, false, false, false, true, false, &[]).unwrap();
+        assert!(Program::parse(wgsl, false, false, false, false, false, false, &[]).is_err());
+        let program = Program::parse(wgsl, false, false, false, false, true, false, &[]).unwrap();
         let entry_points = program.entry_points().unwrap();
         let vertex = entry_points
             .iter()
@@ -4761,8 +4863,8 @@ fn fs(@builtin(primitive_index) idx: u32) -> @location(0) vec4f {
 }
 "#;
 
-        assert!(Program::parse(wgsl, false, false, false, false, false, &[]).is_err());
-        let program = Program::parse(wgsl, false, false, false, false, true, &[]).unwrap();
+        assert!(Program::parse(wgsl, false, false, false, false, false, false, &[]).is_err());
+        let program = Program::parse(wgsl, false, false, false, false, false, true, &[]).unwrap();
         let entry_points = program.entry_points().unwrap();
         let fragment = entry_points
             .iter()
@@ -4781,7 +4883,7 @@ fn cs() {
   _ = x;
 }
 "#;
-        let program = Program::parse(wgsl, true, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, true, false, false, false, false, false, &[]).unwrap();
         let msl = program
             .generate_msl(
                 "cs",
@@ -4809,14 +4911,199 @@ fn cs() {
   _ = x;
 }
 "#;
-        assert!(Program::parse(wgsl, false, false, false, false, false, &[]).is_err());
-        assert!(Program::parse(wgsl, false, true, false, false, false, &[]).is_ok());
+        assert!(Program::parse(wgsl, false, false, false, false, false, false, &[]).is_err());
+        assert!(Program::parse(wgsl, false, true, false, false, false, false, &[]).is_ok());
+    }
+
+    const SUBGROUP_SIZE_CONTROL_WGSL: &str = r#"
+enable subgroups;
+enable subgroup_size_control;
+
+@compute @workgroup_size(8) @subgroup_size(4)
+fn cs() {}
+"#;
+
+    #[test]
+    fn subgroup_size_control_extension_is_gated_by_parse_option() {
+        let wgsl = SUBGROUP_SIZE_CONTROL_WGSL;
+        assert!(Program::parse(wgsl, false, true, false, false, false, false, &[]).is_err());
+        assert!(Program::parse(wgsl, false, true, true, false, false, false, &[]).is_ok());
+
+        // `@subgroup_size` without `enable subgroup_size_control;` is rejected
+        // even when the extension is allowed.
+        let missing_enable = r#"
+enable subgroups;
+
+@compute @workgroup_size(8) @subgroup_size(4)
+fn cs() {}
+"#;
+        assert!(
+            Program::parse(missing_enable, false, true, true, false, false, false, &[]).is_err()
+        );
+    }
+
+    #[test]
+    fn entry_points_reflect_subgroup_size_attribute_presence() {
+        let program = Program::parse(
+            r#"
+enable subgroups;
+enable subgroup_size_control;
+
+override sg: u32 = 4;
+
+@compute @workgroup_size(8) @subgroup_size(4)
+fn literal() {}
+
+@compute @workgroup_size(8) @subgroup_size(sg)
+fn from_override() {}
+
+@compute @workgroup_size(8)
+fn plain() {}
+"#,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let entries = program.entry_points().unwrap();
+        let has = |name: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .map(|entry| entry.has_subgroup_size)
+        };
+        assert_eq!(has("literal"), Some(true));
+        assert_eq!(has("from_override"), Some(true));
+        assert_eq!(has("plain"), Some(false));
+    }
+
+    #[test]
+    fn resolved_workgroup_info_reports_literal_subgroup_size() {
+        let program = Program::parse(
+            SUBGROUP_SIZE_CONTROL_WGSL,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            program.resolved_workgroup_info("cs", &[]).unwrap(),
+            ResolvedWorkgroupInfo {
+                workgroup_size: [8, 1, 1],
+                subgroup_size: Some(4),
+            }
+        );
+        // The size-only wrapper keeps its contract.
+        assert_eq!(
+            program.resolved_workgroup_size("cs", &[]).unwrap(),
+            [8, 1, 1]
+        );
+
+        let plain = Program::parse(
+            compute_wgsl(),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            plain
+                .resolved_workgroup_info("cs", &[])
+                .unwrap()
+                .subgroup_size,
+            None
+        );
+        assert!(plain.resolved_workgroup_info("missing", &[]).is_err());
+    }
+
+    /// Block 108 R4 rule 4 probe: Tint rejects a zero / non-power-of-two
+    /// `@subgroup_size` only when it is a const-expression (at parse time).
+    /// For an override-driven value, entry-scoped `SubstituteOverrides`
+    /// resolves whatever the pipeline constant says and reports it as-is, so
+    /// the power-of-two / non-zero rule has to be enforced by yawgpu-core.
+    #[test]
+    fn resolved_workgroup_info_reports_override_driven_subgroup_size_unchecked() {
+        // Const-expression: Tint enforces the rule at parse time.
+        for bad in ["6", "0"] {
+            let wgsl = format!(
+                "enable subgroups;\nenable subgroup_size_control;\n\
+                 @compute @workgroup_size(12) @subgroup_size({bad}) fn cs() {{}}\n"
+            );
+            assert!(
+                Program::parse(&wgsl, false, true, true, false, false, false, &[]).is_err(),
+                "const @subgroup_size({bad}) must fail to parse"
+            );
+        }
+
+        let program = Program::parse(
+            r#"
+enable subgroups;
+enable subgroup_size_control;
+
+override sg: u32 = 4;
+
+@compute @workgroup_size(12) @subgroup_size(sg)
+fn cs() {}
+"#,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let resolve = |value: f64| {
+            program
+                .resolved_workgroup_info(
+                    "cs",
+                    &[OverrideValue {
+                        name: "sg".into(),
+                        value,
+                    }],
+                )
+                .map(|info| info.subgroup_size)
+        };
+        assert_eq!(
+            program
+                .resolved_workgroup_info("cs", &[])
+                .unwrap()
+                .subgroup_size,
+            Some(4)
+        );
+        assert_eq!(resolve(2.0).unwrap(), Some(2));
+        // Neither a non-power-of-two nor a zero override value is rejected by
+        // Tint during override substitution.
+        assert_eq!(resolve(6.0).unwrap(), Some(6));
+        assert_eq!(resolve(0.0).unwrap(), Some(0));
     }
 
     #[test]
     fn invalid_wgsl_reports_error() {
-        let err =
-            Program::parse("this is not wgsl", false, false, false, false, false, &[]).unwrap_err();
+        let err = Program::parse(
+            "this is not wgsl",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap_err();
         assert!(!err.to_string().is_empty());
     }
 
@@ -4824,8 +5111,17 @@ fn cs() {
     fn parse_then_generate_msl_smoke_test() {
         // Was `wgsl_to_msl(compute_wgsl(), "cs")` via the now-deleted legacy
         // free-fn wrapper (refactor R5, F9); inlined per its removal note.
-        let program =
-            Program::parse(compute_wgsl(), false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            compute_wgsl(),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let msl = program
             .generate_msl(
                 "cs",
@@ -4875,8 +5171,8 @@ fn cs() {
   }
 }
 "#;
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
-        let fresh = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
+        let fresh = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
 
         let generate_msl = |program: &Program| {
             program
@@ -4968,8 +5264,8 @@ fn fs(in: VsOut) -> @location(0) vec4f {
                 shader_location: 0,
             }],
         }];
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
-        let fresh = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
+        let fresh = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
 
         let generate_vs_msl = |program: &Program| {
             program
@@ -5030,8 +5326,8 @@ fn cs() {}
             name: "x".into(),
             value: 8.0,
         }];
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
-        let fresh = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
+        let fresh = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
 
         let generate = |program: &Program| {
             program
@@ -5080,7 +5376,7 @@ fn cs() {}
             name: "x".into(),
             value: 8.0,
         }];
-        let program = Program::parse(wgsl, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let output = program
             .generate_msl(
                 "cs",
@@ -5114,8 +5410,8 @@ fn cs() {
   _ = x;
 }
 "#;
-        let program = Program::parse(wgsl, true, false, false, false, false, &[]).unwrap();
-        let fresh = Program::parse(wgsl, true, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(wgsl, true, false, false, false, false, false, &[]).unwrap();
+        let fresh = Program::parse(wgsl, true, false, false, false, false, false, &[]).unwrap();
 
         let generate_msl = |program: &Program| {
             program
@@ -5178,6 +5474,7 @@ fn cs() {
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -5196,6 +5493,7 @@ override x: u32 = 4;
 @compute @workgroup_size(x, 2, 1)
 fn cs() {}
 "#,
+            false,
             false,
             false,
             false,
@@ -5233,6 +5531,7 @@ fn cs() {}
 @compute @workgroup_size(x)
 fn cs() {}
 "#,
+            false,
             false,
             false,
             false,
@@ -5279,6 +5578,7 @@ fn cs() {}
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -5305,6 +5605,7 @@ fn cs() {}
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -5321,6 +5622,7 @@ override x: u32 = 4;
 @compute @workgroup_size(x)
 fn cs() {}
 "#,
+            false,
             false,
             false,
             false,
@@ -5367,6 +5669,7 @@ fn main_ok() {}
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -5384,6 +5687,7 @@ fn main_ok() {}
     fn resolved_workgroup_size_errors_on_non_compute_entry_point() {
         let program = Program::parse(
             "@fragment fn fs() -> @location(0) vec4f { return vec4f(); }",
+            false,
             false,
             false,
             false,

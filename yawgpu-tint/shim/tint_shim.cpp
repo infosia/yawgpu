@@ -47,10 +47,12 @@
 #include "src/tint/lang/msl/writer/common/options.h"
 #include "src/tint/lang/msl/writer/writer.h"
 #include "src/tint/lang/spirv/writer/writer.h"
+#include "src/tint/lang/wgsl/ast/function.h"
 #include "src/tint/lang/wgsl/ast/id_attribute.h"
 #include "src/tint/lang/wgsl/ast/identifier.h"
 #include "src/tint/lang/wgsl/ast/module.h"
 #include "src/tint/lang/wgsl/ast/override.h"
+#include "src/tint/lang/wgsl/ast/subgroup_size_attribute.h"
 #include "src/tint/lang/wgsl/enums.h"
 #include "src/tint/lang/wgsl/inspector/inspector.h"
 #include "src/tint/lang/wgsl/reader/reader.h"
@@ -452,6 +454,8 @@ static_assert(offsetof(YawgpuTintEntryPoint, frag_position_used) == 32,
               "YawgpuTintEntryPoint layout changed");
 static_assert(offsetof(YawgpuTintEntryPoint, has_clip_distances) == 33,
               "YawgpuTintEntryPoint layout changed");
+static_assert(offsetof(YawgpuTintEntryPoint, has_subgroup_size) == 34,
+              "YawgpuTintEntryPoint layout changed");
 static_assert(offsetof(YawgpuTintEntryPoint, clip_distances_size) == 36,
               "YawgpuTintEntryPoint layout changed");
 
@@ -683,6 +687,10 @@ struct YawgpuTintProgram {
     std::unique_ptr<tint::Source::File> file;
     tint::Program program;
     std::vector<tint::inspector::EntryPoint> entry_points;
+    // Parallel to `entry_points`: whether each entry point declares
+    // `@subgroup_size(...)`. The Inspector does not reflect the attribute, so
+    // it is read off the AST once at program creation.
+    std::vector<bool> entry_point_has_subgroup_size;
     std::vector<tint::inspector::Override> overrides;
     std::vector<std::string> diagnostic_messages;
     std::vector<uint8_t> diagnostic_severities;
@@ -1370,7 +1378,9 @@ uint32_t* dup_binding_pairs(const std::vector<tint::BindingPoint>& bindings) {
     return out;
 }
 
-void fill_entry_point(const tint::inspector::EntryPoint& ep, YawgpuTintEntryPoint* out) {
+void fill_entry_point(const tint::inspector::EntryPoint& ep,
+                      bool has_subgroup_size,
+                      YawgpuTintEntryPoint* out) {
     out->name = ep.name.c_str();
     out->stage = static_cast<uint8_t>(ep.stage);
     out->has_workgroup_size = ep.workgroup_size.has_value();
@@ -1387,6 +1397,7 @@ void fill_entry_point(const tint::inspector::EntryPoint& ep, YawgpuTintEntryPoin
     out->subgroup_size_used = ep.subgroup_size_used;
     out->frag_position_used = ep.frag_position_used;
     out->has_clip_distances = ep.clip_distances_size.has_value();
+    out->has_subgroup_size = has_subgroup_size;
     out->clip_distances_size = ep.clip_distances_size.value_or(0);
 }
 
@@ -1766,6 +1777,7 @@ YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
                                               size_t wgsl_len,
                                               bool shader_f16,
                                               bool subgroups,
+                                              bool subgroup_size_control,
                                               bool dual_source_blending,
                                               bool clip_distances,
                                               bool primitive_index,
@@ -1802,6 +1814,10 @@ YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
         if (subgroups) {
             options.allowed_features.extensions.insert(tint::wgsl::Extension::kSubgroups);
         }
+        if (subgroup_size_control) {
+            options.allowed_features.extensions.insert(
+                tint::wgsl::Extension::kSubgroupSizeControl);
+        }
         if (dual_source_blending) {
             options.allowed_features.extensions.insert(
                 tint::wgsl::Extension::kDualSourceBlending);
@@ -1834,6 +1850,19 @@ YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
         }
         tint::inspector::Inspector inspector(out->program);
         out->entry_points = inspector.GetEntryPoints();
+        out->entry_point_has_subgroup_size.reserve(out->entry_points.size());
+        for (const auto& entry : out->entry_points) {
+            bool has_subgroup_size = false;
+            for (const auto* func : out->program.AST().Functions()) {
+                if (func->IsEntryPoint() && func->name->symbol.Name() == entry.name) {
+                    has_subgroup_size =
+                        tint::ast::HasAttribute<tint::ast::SubgroupSizeAttribute>(
+                            func->attributes);
+                    break;
+                }
+            }
+            out->entry_point_has_subgroup_size.push_back(has_subgroup_size);
+        }
         out->overrides = inspector.Overrides();
         if (inspector.has_error()) {
             set_error_string(err, inspector.error());
@@ -1863,7 +1892,7 @@ bool yawgpu_tint_entry_point_get(const YawgpuTintProgram* program,
     if (program == nullptr || out == nullptr || i >= program->entry_points.size()) {
         return false;
     }
-    fill_entry_point(program->entry_points[i], out);
+    fill_entry_point(program->entry_points[i], program->entry_point_has_subgroup_size[i], out);
     return true;
 }
 
@@ -2361,6 +2390,8 @@ bool yawgpu_tint_resolved_workgroup_size(const YawgpuTintProgram* program,
                                         const YawgpuTintOverrideValue* ov,
                                         size_t n_ov,
                                         uint32_t out[3],
+                                        bool* has_subgroup_size,
+                                        uint32_t* subgroup_size,
                                         char** err) {
     if (err != nullptr) {
         *err = nullptr;
@@ -2368,8 +2399,15 @@ bool yawgpu_tint_resolved_workgroup_size(const YawgpuTintProgram* program,
     if (out != nullptr) {
         out[0] = out[1] = out[2] = 0;
     }
+    if (has_subgroup_size != nullptr) {
+        *has_subgroup_size = false;
+    }
+    if (subgroup_size != nullptr) {
+        *subgroup_size = 0;
+    }
     try {
-        if (program == nullptr || ep == nullptr || out == nullptr) {
+        if (program == nullptr || ep == nullptr || out == nullptr ||
+            has_subgroup_size == nullptr || subgroup_size == nullptr) {
             set_error_string(err, "invalid NULL argument");
             return false;
         }
@@ -2418,6 +2456,12 @@ bool yawgpu_tint_resolved_workgroup_size(const YawgpuTintProgram* program,
         out[0] = (*wg_size)[0];
         out[1] = (*wg_size)[1];
         out[2] = (*wg_size)[2];
+        // `@subgroup_size` resolves on the same override-substituted IR, i.e.
+        // exactly Tint's `WorkgroupInfo::subgroup_size` for this entry point.
+        if (auto sg_size = ep_func->SubgroupSizeAsConst()) {
+            *has_subgroup_size = true;
+            *subgroup_size = *sg_size;
+        }
         return true;
     } catch (const std::exception& e) {
         set_error_string(err, e.what());

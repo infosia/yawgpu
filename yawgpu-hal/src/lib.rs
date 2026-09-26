@@ -227,6 +227,59 @@ impl HalLimits {
     };
 }
 
+/// Stores backend-reported explicit compute subgroup size capabilities
+/// (WebGPU `subgroup-size-control`, WGSL `@subgroup_size`).
+///
+/// On Vulkan these mirror `VkPhysicalDeviceSubgroupSizeControlProperties`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HalSubgroupSizeControlCaps {
+    /// Smallest explicit subgroup size a compute pipeline may require.
+    pub min_size: u32,
+    /// Largest explicit subgroup size a compute pipeline may require.
+    pub max_size: u32,
+    /// Maximum number of subgroups in one compute workgroup.
+    pub max_compute_workgroup_subgroups: u32,
+}
+
+impl HalSubgroupSizeControlCaps {
+    /// Creates capabilities from an explicit size range and subgroup-count limit.
+    #[must_use]
+    pub const fn new(min_size: u32, max_size: u32, max_compute_workgroup_subgroups: u32) -> Self {
+        Self {
+            min_size,
+            max_size,
+            max_compute_workgroup_subgroups,
+        }
+    }
+}
+
+/// Rejects a required explicit subgroup size on a backend that cannot honor
+/// it (Block 108).
+///
+/// Validation only produces `Some(_)` when the device has the
+/// `subgroup-size-control` feature, which such backends never advertise, so
+/// reaching this with `Some(_)` is a HAL error rather than a silent no-op.
+#[cfg_attr(
+    not(any(feature = "vulkan", feature = "metal", feature = "gles")),
+    allow(dead_code)
+)]
+fn reject_required_subgroup_size(
+    backend: &'static str,
+    required_subgroup_size: Option<u32>,
+) -> Result<(), HalError> {
+    match required_subgroup_size {
+        None => Ok(()),
+        Some(size) => Err(HalError::ShaderCompilationFailed {
+            backend,
+            message: format!(
+                "required subgroup size {size} is not supported: \
+                 subgroup-size-control is not available on this backend"
+            ),
+        }),
+    }
+}
+
 /// Noop module.
 #[cfg(feature = "noop")]
 pub mod noop;
@@ -628,6 +681,14 @@ impl HalAdapter {
         hal_dispatch!(self, adapter => adapter.subgroup_size_range())
     }
 
+    /// Returns the explicit compute subgroup size capabilities
+    /// (`subgroup-size-control`), or `None` when the adapter cannot run a
+    /// compute pipeline with a required subgroup size.
+    #[must_use]
+    pub fn subgroup_size_control_caps(&self) -> Option<HalSubgroupSizeControlCaps> {
+        hal_dispatch!(self, adapter => adapter.subgroup_size_control_caps())
+    }
+
     /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<HalDevice, HalError> {
         hal_dispatch!(self, adapter => adapter.create_device(), map HalDevice)
@@ -859,6 +920,13 @@ impl HalDevice {
     /// byte budget (Block 94, 0..=64). Vulkan sizes the compute push-constant
     /// range with it; Metal instead carries its immediates metadata inside
     /// [`HalShaderSource::MslWithBufferSizes`], and Noop/GLES ignore it.
+    ///
+    /// `required_subgroup_size` is `Some(S)` exactly when the compute entry
+    /// point declares WGSL `@subgroup_size(S)` (Block 108). Noop ignores it;
+    /// Metal and GLES never advertise `subgroup-size-control` and return a
+    /// [`HalError`] for `Some(_)`. Vulkan also returns a [`HalError`] for
+    /// `Some(_)` until the Block 108 S2 lowering lands.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_compute_pipeline(
         &self,
         shader: HalShaderSource,
@@ -866,32 +934,49 @@ impl HalDevice {
         workgroup_size: (u32, u32, u32),
         bindings: &[HalDescriptorBinding],
         user_immediate_size: u32,
+        required_subgroup_size: Option<u32>,
     ) -> Result<HalComputePipeline, HalError> {
         #[cfg(not(any(feature = "gles", feature = "metal", feature = "vulkan")))]
-        let _ = (shader, entry_point, workgroup_size, bindings);
+        let _ = (
+            shader,
+            entry_point,
+            workgroup_size,
+            bindings,
+            required_subgroup_size,
+        );
         #[cfg(not(feature = "vulkan"))]
         let _ = user_immediate_size;
         match self {
             #[cfg(feature = "noop")]
             Self::Noop(_) => Ok(HalComputePipeline::Noop),
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(device) => device
-                .create_compute_pipeline(
-                    shader,
-                    entry_point,
-                    workgroup_size,
-                    bindings,
-                    user_immediate_size,
-                )
-                .map(HalComputePipeline::Vulkan),
+            Self::Vulkan(device) => {
+                // Block 108 S2 replaces this with the required-subgroup-size stage chain.
+                reject_required_subgroup_size("vulkan", required_subgroup_size)?;
+                device
+                    .create_compute_pipeline(
+                        shader,
+                        entry_point,
+                        workgroup_size,
+                        bindings,
+                        user_immediate_size,
+                    )
+                    .map(HalComputePipeline::Vulkan)
+            }
             #[cfg(feature = "metal")]
-            Self::Metal(device) => device
-                .create_compute_pipeline(shader, entry_point, workgroup_size, bindings)
-                .map(HalComputePipeline::Metal),
+            Self::Metal(device) => {
+                reject_required_subgroup_size("metal", required_subgroup_size)?;
+                device
+                    .create_compute_pipeline(shader, entry_point, workgroup_size, bindings)
+                    .map(HalComputePipeline::Metal)
+            }
             #[cfg(feature = "gles")]
-            Self::Gles(device) => device
-                .create_compute_pipeline(shader, entry_point, workgroup_size, bindings)
-                .map(HalComputePipeline::Gles),
+            Self::Gles(device) => {
+                reject_required_subgroup_size("gles", required_subgroup_size)?;
+                device
+                    .create_compute_pipeline(shader, entry_point, workgroup_size, bindings)
+                    .map(HalComputePipeline::Gles)
+            }
         }
     }
 
@@ -1579,6 +1664,49 @@ mod tests {
     }
 
     #[test]
+    fn hal_adapter_subgroup_size_control_caps_noop_returns_nominal_caps() {
+        let adapter = HalInstance::new_noop()
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("Noop adapter exists");
+
+        let caps = adapter
+            .subgroup_size_control_caps()
+            .expect("Noop advertises subgroup-size-control caps");
+        assert_eq!(caps, HalSubgroupSizeControlCaps::new(4, 4, 64));
+        // The explicit range matches the adapter's subgroup size range.
+        assert_eq!(
+            adapter.subgroup_size_range(),
+            Some((caps.min_size, caps.max_size))
+        );
+    }
+
+    #[test]
+    fn hal_subgroup_size_control_caps_new_sets_every_field() {
+        let caps = HalSubgroupSizeControlCaps::new(8, 64, 32);
+
+        assert_eq!(caps.min_size, 8);
+        assert_eq!(caps.max_size, 64);
+        assert_eq!(caps.max_compute_workgroup_subgroups, 32);
+    }
+
+    #[test]
+    fn reject_required_subgroup_size_accepts_none_and_rejects_some() {
+        assert!(reject_required_subgroup_size("metal", None).is_ok());
+        let error =
+            reject_required_subgroup_size("gles", Some(32)).expect_err("Some(_) must be rejected");
+        assert!(matches!(
+            error,
+            HalError::ShaderCompilationFailed {
+                backend: "gles",
+                ..
+            }
+        ));
+        assert!(error.to_string().contains("required subgroup size 32"));
+    }
+
+    #[test]
     fn hal_adapter_supports_depth_clip_control_noop_returns_true() {
         let adapter = HalInstance::new_noop()
             .enumerate_adapters()
@@ -1739,6 +1867,24 @@ mod tests {
             (1, 1, 1),
             &[],
             0,
+            None,
+        )?;
+
+        assert!(matches!(pipeline, HalComputePipeline::Noop));
+        Ok(())
+    }
+
+    #[test]
+    fn hal_device_create_compute_pipeline_noop_ignores_required_subgroup_size(
+    ) -> Result<(), HalError> {
+        let device = noop_device()?;
+        let pipeline = device.create_compute_pipeline(
+            HalShaderSource::Msl(String::new()),
+            "main",
+            (8, 1, 1),
+            &[],
+            0,
+            Some(4),
         )?;
 
         assert!(matches!(pipeline, HalComputePipeline::Noop));
@@ -2020,6 +2166,7 @@ mod tests {
             (1, 1, 1),
             &[],
             0,
+            None,
         )?;
 
         queue.submit_copies(&[HalCopy::ComputePass(HalComputePass {

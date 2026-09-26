@@ -333,6 +333,10 @@ pub(crate) struct ReflectedWorkgroupSize {
     pub entry_point: String,
     /// Literal size.
     pub literal_size: [u32; 3],
+    /// Override-resolved WGSL `@subgroup_size`, when the entry point declares
+    /// one (Block 108). Not yet checked against the power-of-two rule or the
+    /// device's subgroup-size-control caps.
+    pub subgroup_size: Option<u32>,
     /// Workgroup storage size.
     pub workgroup_storage_size: u64,
 }

@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
-use yawgpu_hal::{HalDevice, HalError, HalQueryKind};
+use yawgpu_hal::{HalDevice, HalError, HalQueryKind, HalSubgroupSizeControlCaps};
 
 use crate::adapter::*;
 use crate::bind_group::*;
@@ -32,6 +32,10 @@ pub struct Device {
 #[derive(Debug)]
 pub(crate) struct DeviceInner {
     pub(crate) timestamp_period: f32,
+    /// Explicit compute subgroup size caps captured from the adapter
+    /// (Block 108). `None` for devices built without an adapter
+    /// ([`Device::from_hal`]) or on backends without `subgroup-size-control`.
+    pub(crate) subgroup_size_control_caps: Option<HalSubgroupSizeControlCaps>,
     pub(crate) timestamp_pipeline: OnceLock<Result<Arc<ComputePipeline>, String>>,
     pub(crate) hal: HalDevice,
     pub(crate) queue: Queue,
@@ -66,23 +70,26 @@ impl Device {
         label: impl Into<String>,
         queue_label: impl Into<String>,
     ) -> Self {
-        Self::from_hal_with_timestamp_period(hal, limits, features, label, queue_label, 1.0)
+        Self::from_hal_with_adapter_properties(hal, limits, features, label, queue_label, 1.0, None)
     }
 
-    /// Constructs a device with the timestamp period captured from its adapter.
+    /// Constructs a device with the timestamp period and explicit compute
+    /// subgroup size caps captured from its adapter.
     #[must_use]
-    pub(crate) fn from_hal_with_timestamp_period(
+    pub(crate) fn from_hal_with_adapter_properties(
         hal: HalDevice,
         limits: Limits,
         features: FeatureSet,
         label: impl Into<String>,
         queue_label: impl Into<String>,
         timestamp_period: f32,
+        subgroup_size_control_caps: Option<HalSubgroupSizeControlCaps>,
     ) -> Self {
         let queue = Queue::from_hal(hal.queue(), queue_label);
         Self {
             inner: Arc::new(DeviceInner {
                 timestamp_period,
+                subgroup_size_control_caps,
                 timestamp_pipeline: OnceLock::new(),
                 hal,
                 queue,
@@ -424,6 +431,7 @@ impl Device {
         }
         let shader_f16 = self.inner.features.contains(&Feature::ShaderF16);
         let subgroups = self.inner.features.contains(&Feature::Subgroups);
+        let subgroup_size_control = self.inner.features.contains(&Feature::SubgroupSizeControl);
         let dual_source_blending = self.inner.features.contains(&Feature::DualSourceBlending);
         let clip_distances = self.inner.features.contains(&Feature::ClipDistances);
         let primitive_index = self.inner.features.contains(&Feature::PrimitiveIndex);
@@ -433,6 +441,7 @@ impl Device {
                     source,
                     shader_f16,
                     subgroups,
+                    subgroup_size_control,
                     dual_source_blending,
                     clip_distances,
                     primitive_index,
@@ -573,6 +582,7 @@ impl Device {
                 &descriptor,
                 self.limits(),
                 &self.inner.features,
+                self.inner.subgroup_size_control_caps,
                 pipeline_id,
             );
             let error = result.as_ref().err().cloned();

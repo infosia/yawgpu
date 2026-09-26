@@ -22,6 +22,7 @@ pub fn map_feature(value: native::WGPUFeatureName) -> core::Feature {
         native::WGPUFeatureName_TimestampQuery => core::Feature::TimestampQuery,
         native::WGPUFeatureName_ShaderF16 => core::Feature::ShaderF16,
         native::WGPUFeatureName_Subgroups => core::Feature::Subgroups,
+        native::WGPUFeatureName_SubgroupSizeControl => core::Feature::SubgroupSizeControl,
         native::WGPUFeatureName_DepthClipControl => core::Feature::DepthClipControl,
         native::WGPUFeatureName_Float32Blendable => core::Feature::Float32Blendable,
         native::WGPUFeatureName_DualSourceBlending => core::Feature::DualSourceBlending,
@@ -59,6 +60,7 @@ pub fn map_feature_to_native(value: core::Feature) -> native::WGPUFeatureName {
         core::Feature::TimestampQuery => native::WGPUFeatureName_TimestampQuery,
         core::Feature::ShaderF16 => native::WGPUFeatureName_ShaderF16,
         core::Feature::Subgroups => native::WGPUFeatureName_Subgroups,
+        core::Feature::SubgroupSizeControl => native::WGPUFeatureName_SubgroupSizeControl,
         core::Feature::DepthClipControl => native::WGPUFeatureName_DepthClipControl,
         core::Feature::Float32Blendable => native::WGPUFeatureName_Float32Blendable,
         core::Feature::DualSourceBlending => native::WGPUFeatureName_DualSourceBlending,
@@ -89,6 +91,19 @@ mod tests {
         assert_eq!(
             map_feature_to_native(core::Feature::Subgroups),
             native::WGPUFeatureName_Subgroups
+        );
+    }
+
+    #[test]
+    fn maps_subgroup_size_control_feature_round_trip() {
+        assert_eq!(native::WGPUFeatureName_SubgroupSizeControl, 0x17);
+        assert_eq!(
+            map_feature(native::WGPUFeatureName_SubgroupSizeControl),
+            core::Feature::SubgroupSizeControl
+        );
+        assert_eq!(
+            map_feature_to_native(core::Feature::SubgroupSizeControl),
+            native::WGPUFeatureName_SubgroupSizeControl
         );
     }
 

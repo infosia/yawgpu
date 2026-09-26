@@ -265,6 +265,14 @@ impl GlesAdapter {
         None
     }
 
+    /// Returns the explicit compute subgroup size capabilities.
+    ///
+    /// GLES never advertises `subgroup-size-control` (Tier 2; Block 108).
+    #[must_use]
+    pub(crate) fn subgroup_size_control_caps(&self) -> Option<crate::HalSubgroupSizeControlCaps> {
+        None
+    }
+
     /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<GlesDevice, HalError> {
         match &self.inner {
