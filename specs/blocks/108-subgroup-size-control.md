@@ -20,7 +20,16 @@ not built (Windows host — Mac compile check owed).
 `e2e_vulkan_subgroups` 4/4 + `e2e_vulkan_compute` 3/3 `ALLOW_VARYING`
 regression guard, and all 55 ignored Vulkan HAL tests. A layer negative check
 (a `(1,1,1)` module with required size 32 → VUID-02757) proves the chain
-reaches the driver. S4 (CTS) next.
+reaches the driver.
+**S4 DONE (2026-09-26)** — webgpu-native-cts `c77b620` (port:
+`enables_subgroups` implemented; `subgroup_size_attribute` enabled for
+yawgpu). Targets on native NVIDIA: `compute_builtins:subgroup_size_attribute`
+6/0, `shader,validation,extension,subgroup_size_control` 87/0,
+`capability_checks,features,subgroup_size_control` 1/0. The full four-area
+raw sweep is 1,632,202 pass / 463,994 skip / 117 fail (the unchanged
+documented xfail set) / 0 crash: +94 pass / −94 skip against the 2026-09-25
+baseline, with no regression from `ALLOW_VARYING_SUBGROUP_SIZE`. S5 (Phase
+Review) next.
 Raised by the 2026-09-26 native-Vulkan CTS skip audit (Windows 11, NVIDIA
 RTX 5060 Ti, yawgpu `2c6ea6f`): after the ~381k ASTC / ETC2 / EAC hardware
 skips and the structural / C-API-N/A skips are removed,

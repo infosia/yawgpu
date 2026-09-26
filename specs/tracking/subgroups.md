@@ -132,7 +132,7 @@ Spec: `specs/blocks/108-subgroup-size-control.md`.
 | S1 | core `Feature::SubgroupSizeControl` (⇒ `Subgroups`), FFI `0x17`, Tint `kSubgroupSizeControl` gate + override-resolved `subgroup_size`, core rules 4 → 1 → 2 → 3, HAL `subgroup_size_control_caps()` (Noop `{4,4,64}`, Metal/GLES/Vulkan `None`), `required_subgroup_size` HAL input | **DONE 2026-09-26** |
 | S2 | Vulkan advertisement (`VK_EXT_subgroup_size_control` + `subgroupSizeControl` + `computeFullSubgroups`), device enable, `RequiredSubgroupSize` + `REQUIRE_FULL_SUBGROUPS` / `ALLOW_VARYING_SUBGROUP_SIZE`; predicate also requires `requiredSubgroupSizeStages ∋ COMPUTE` (VUID-02755, stricter than Dawn) | **DONE 2026-09-26** — NVIDIA caps `{32, 32, 32}`, 55 ignored HAL tests validation-clean |
 | S3 | `e2e_vulkan_subgroup_size_control.rs` (Claude) | **DONE 2026-09-26** — 3/3 under the Khronos layer, 0 VUID; `e2e_vulkan_subgroups` 4/4 + `e2e_vulkan_compute` 3/3 regression |
-| S4 | webgpu-native-cts port update + CTS runs | open |
+| S4 | webgpu-native-cts port update + CTS runs | **DONE 2026-09-26** — CTS `c77b620`; targets 6/0 + 87/0 + 1/0; full sweep +94 pass / −94 skip, fail set unchanged |
 | S5 | Phase Review | open |
 
 S1 finding: Tint validates a const `@subgroup_size` (zero / non-power-of-two rejected at parse) but not an override-driven one after `SubstituteOverrides`; core enforces rule 4.
