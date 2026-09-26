@@ -10,14 +10,23 @@ rejects it before rule 1; the Inspector does not reflect the attribute, so
 the shim reads its presence from the AST and the override-free fast path
 defers such entry points to the IR resolve. Gates: `cargo test --workspace`
 green, fmt + clippy default / `vulkan` / `tiled` / `gles` clean; `metal`
-not built (Windows host — Mac compile check owed). S2 (Vulkan) next.
+not built (Windows host — Mac compile check owed).
+**S2 + S3 DONE (2026-09-26)** — Vulkan HAL (advertisement predicate incl.
+`requiredSubgroupSizeStages ∋ COMPUTE`, device enable, `RequiredSubgroupSize`
++ `REQUIRE_FULL_SUBGROUPS` / `ALLOW_VARYING_SUBGROUP_SIZE`) and
+`e2e_vulkan_subgroup_size_control.rs`. Native NVIDIA caps
+`{min 32, max 32, maxComputeWorkgroupSubgroups 32}`. Under
+`VK_LAYER_KHRONOS_validation` with 0 VUID lines: e2e 3/3, the
+`e2e_vulkan_subgroups` 4/4 + `e2e_vulkan_compute` 3/3 `ALLOW_VARYING`
+regression guard, and all 55 ignored Vulkan HAL tests. A layer negative check
+(a `(1,1,1)` module with required size 32 → VUID-02757) proves the chain
+reaches the driver. S4 (CTS) next.
 Raised by the 2026-09-26 native-Vulkan CTS skip audit (Windows 11, NVIDIA
 RTX 5060 Ti, yawgpu `2c6ea6f`): after the ~381k ASTC / ETC2 / EAC hardware
 skips and the structural / C-API-N/A skips are removed,
 `subgroup-size-control` is the only skipped WebGPU feature yawgpu can
 implement on this host.
-Ledger: `specs/tracking/subgroups.md` (new "Block 108" section when S1
-lands).
+Ledger: `specs/tracking/subgroups.md` ("Block 108" section).
 
 ## Problem
 
@@ -102,6 +111,11 @@ New `HalAdapter::subgroup_size_control_caps() -> Option<HalSubgroupSizeControlCa
     cannot be enabled at device creation.
   - `VkPhysicalDeviceSubgroupSizeControlFeatures.subgroupSizeControl == TRUE`
   - `...computeFullSubgroups == TRUE`
+  - `VkPhysicalDeviceSubgroupSizeControlProperties.requiredSubgroupSizeStages`
+    contains `COMPUTE`. This is **stricter than Dawn**, which does not check
+    it. It is a hard Vulkan requirement for chaining a required size on a
+    compute stage (VUID-VkPipelineShaderStageCreateInfo-pNext-02755), so a
+    driver without it must not advertise the feature. Added in the S2 review.
   - Values come from `VkPhysicalDeviceSubgroupSizeControlProperties`
     `{minSubgroupSize, maxSubgroupSize, maxComputeWorkgroupSubgroups}`.
     `min_size` / `max_size` must equal `subgroup_size_range()` (same
@@ -237,7 +251,9 @@ be green on Noop.
    `k ∈ {1, 2, 4}`: every invocation writes
    `subgroup_size == S && subgroupAdd(1u) == S` (all invocations active).
    All pass.
-3. Validation errors 1–3 surface through `wgpuDevicePopErrorScope`.
+3. Validation errors for rules 1, 2 and 4 (override-driven) surface on the
+   device error sink (rule 3 is unreachable behind the workgroup-size limit on
+   the verified hosts, so it is Noop-tested only).
 4. A plain `subgroups` compute pipeline (no attribute) still passes the
    Block 62 e2e (`e2e_vulkan_subgroups`) under the layer — the
    `ALLOW_VARYING` regression guard.

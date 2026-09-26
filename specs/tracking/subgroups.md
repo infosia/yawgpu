@@ -130,8 +130,8 @@ Spec: `specs/blocks/108-subgroup-size-control.md`.
 | Slice | Content | Status |
 |---|---|---|
 | S1 | core `Feature::SubgroupSizeControl` (⇒ `Subgroups`), FFI `0x17`, Tint `kSubgroupSizeControl` gate + override-resolved `subgroup_size`, core rules 4 → 1 → 2 → 3, HAL `subgroup_size_control_caps()` (Noop `{4,4,64}`, Metal/GLES/Vulkan `None`), `required_subgroup_size` HAL input | **DONE 2026-09-26** |
-| S2 | Vulkan advertisement (`VK_EXT_subgroup_size_control` + `subgroupSizeControl` + `computeFullSubgroups`), device enable, `RequiredSubgroupSize` + `REQUIRE_FULL_SUBGROUPS` / `ALLOW_VARYING_SUBGROUP_SIZE` | open |
-| S3 | `e2e_vulkan_subgroup_size_control.rs` (Claude) | open |
+| S2 | Vulkan advertisement (`VK_EXT_subgroup_size_control` + `subgroupSizeControl` + `computeFullSubgroups`), device enable, `RequiredSubgroupSize` + `REQUIRE_FULL_SUBGROUPS` / `ALLOW_VARYING_SUBGROUP_SIZE`; predicate also requires `requiredSubgroupSizeStages ∋ COMPUTE` (VUID-02755, stricter than Dawn) | **DONE 2026-09-26** — NVIDIA caps `{32, 32, 32}`, 55 ignored HAL tests validation-clean |
+| S3 | `e2e_vulkan_subgroup_size_control.rs` (Claude) | **DONE 2026-09-26** — 3/3 under the Khronos layer, 0 VUID; `e2e_vulkan_subgroups` 4/4 + `e2e_vulkan_compute` 3/3 regression |
 | S4 | webgpu-native-cts port update + CTS runs | open |
 | S5 | Phase Review | open |
 

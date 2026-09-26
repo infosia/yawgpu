@@ -86,6 +86,11 @@ backend:
   for advertisement, because it does not yet create varying-subgroup-size
   pipelines (`ALLOW_VARYING_SUBGROUP_SIZE`); the op/stage set is the
   spec-meaningful requirement.
+  **Update (Block 108 R5):** when the extension is enabled on the device
+  (the adapter advertises `subgroup-size-control`), every compute pipeline
+  without `@subgroup_size` is now created with
+  `ALLOW_VARYING_SUBGROUP_SIZE_BIT`, as Dawn does. Subgroup advertisement
+  itself still does not require the extension.
 - **Noop** — reports **supported**, size range 4..=4 (nominal). This keeps the
   accept-path validation unit-testable with no GPU, mirroring `shader-f16`'s
   Noop=`true`. Noop never executes, so a nominal width is harmless.

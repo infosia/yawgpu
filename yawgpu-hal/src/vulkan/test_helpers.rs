@@ -123,6 +123,21 @@ pub(crate) fn compute_spirv() -> Vec<u32> {
     ]
 }
 
+/// Returns [`compute_spirv`] with its workgroup size changed to `(x, 1, 1)`.
+///
+/// Both the `LocalSize` execution mode and the `WorkgroupSize` builtin
+/// constant (which takes precedence) carry `x`; the latter gets a new
+/// `OpConstant` id 10, so the id bound grows from 10 to 11.
+pub(crate) fn compute_spirv_with_workgroup_size_x(x: u32) -> Vec<u32> {
+    vec![
+        119734787, 65536, 524299, 11, 0, 131089, 1, 393227, 1, 1280527431, 1685353262, 808793134,
+        0, 196622, 0, 1, 327695, 5, 4, 1852399981, 0, 393232, 4, 17, x, 1, 1, 196611, 2, 450,
+        262149, 4, 1852399981, 0, 262215, 9, 11, 25, 131091, 2, 196641, 3, 2, 262165, 6, 32, 0,
+        262167, 7, 6, 3, 262187, 6, 8, 1, 262187, 6, 10, x, 393260, 7, 9, 10, 8, 8, 327734, 2, 4,
+        0, 3, 131320, 5, 65789, 65592,
+    ]
+}
+
 /// Returns vertex spirv.
 pub(crate) fn vertex_spirv() -> Vec<u32> {
     vec![

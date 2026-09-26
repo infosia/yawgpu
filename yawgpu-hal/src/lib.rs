@@ -260,10 +260,7 @@ impl HalSubgroupSizeControlCaps {
 /// Validation only produces `Some(_)` when the device has the
 /// `subgroup-size-control` feature, which such backends never advertise, so
 /// reaching this with `Some(_)` is a HAL error rather than a silent no-op.
-#[cfg_attr(
-    not(any(feature = "vulkan", feature = "metal", feature = "gles")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(any(feature = "metal", feature = "gles")), allow(dead_code))]
 fn reject_required_subgroup_size(
     backend: &'static str,
     required_subgroup_size: Option<u32>,
@@ -924,8 +921,8 @@ impl HalDevice {
     /// `required_subgroup_size` is `Some(S)` exactly when the compute entry
     /// point declares WGSL `@subgroup_size(S)` (Block 108). Noop ignores it;
     /// Metal and GLES never advertise `subgroup-size-control` and return a
-    /// [`HalError`] for `Some(_)`. Vulkan also returns a [`HalError`] for
-    /// `Some(_)` until the Block 108 S2 lowering lands.
+    /// [`HalError`] for `Some(_)`. Vulkan requires subgroup size `S` with full
+    /// subgroups (`VK_EXT_subgroup_size_control`).
     #[allow(clippy::too_many_arguments)]
     pub fn create_compute_pipeline(
         &self,
@@ -950,19 +947,16 @@ impl HalDevice {
             #[cfg(feature = "noop")]
             Self::Noop(_) => Ok(HalComputePipeline::Noop),
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(device) => {
-                // Block 108 S2 replaces this with the required-subgroup-size stage chain.
-                reject_required_subgroup_size("vulkan", required_subgroup_size)?;
-                device
-                    .create_compute_pipeline(
-                        shader,
-                        entry_point,
-                        workgroup_size,
-                        bindings,
-                        user_immediate_size,
-                    )
-                    .map(HalComputePipeline::Vulkan)
-            }
+            Self::Vulkan(device) => device
+                .create_compute_pipeline(
+                    shader,
+                    entry_point,
+                    workgroup_size,
+                    bindings,
+                    user_immediate_size,
+                    required_subgroup_size,
+                )
+                .map(HalComputePipeline::Vulkan),
             #[cfg(feature = "metal")]
             Self::Metal(device) => {
                 reject_required_subgroup_size("metal", required_subgroup_size)?;

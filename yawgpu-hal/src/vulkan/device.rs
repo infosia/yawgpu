@@ -24,6 +24,11 @@ pub(super) struct VulkanDeviceInner {
     pub(super) vulkan_memory_model: bool,
     /// Whether `VkImageFormatListCreateInfo` is available for mutable image views.
     pub(super) image_format_list: bool,
+    /// Whether `VK_EXT_subgroup_size_control` with `subgroupSizeControl` and
+    /// `computeFullSubgroups` was enabled (Block 108 R5). Compute pipelines
+    /// need it for a required subgroup size and for
+    /// `ALLOW_VARYING_SUBGROUP_SIZE`.
+    pub(super) subgroup_size_control: bool,
     /// Whether `VK_KHR_16bit_storage` / `storageBuffer16BitAccess` was enabled.
     pub(super) storage_buffer16_bit_access: bool,
     /// Whether `VK_KHR_16bit_storage` / `uniformAndStorageBuffer16BitAccess` was enabled.
@@ -52,6 +57,7 @@ impl fmt::Debug for VulkanDeviceInner {
             .field("shader_float16", &self.shader_float16)
             .field("vulkan_memory_model", &self.vulkan_memory_model)
             .field("image_format_list", &self.image_format_list)
+            .field("subgroup_size_control", &self.subgroup_size_control)
             .field(
                 "storage_buffer16_bit_access",
                 &self.storage_buffer16_bit_access,
@@ -169,6 +175,11 @@ impl VulkanDevice {
     ///
     /// `user_immediate_size` is the pipeline layout's reserved user-immediate
     /// byte budget (Block 94 S3); it sizes the compute push-constant range.
+    ///
+    /// `required_subgroup_size` is `Some(S)` when the entry point declares WGSL
+    /// `@subgroup_size(S)` (Block 108): the stage requires subgroup size `S`
+    /// with full subgroups. It returns a [`HalError`] when the device did not
+    /// enable `VK_EXT_subgroup_size_control`.
     pub fn create_compute_pipeline(
         &self,
         shader: HalShaderSource,
@@ -176,6 +187,7 @@ impl VulkanDevice {
         _workgroup_size: (u32, u32, u32),
         bindings: &[HalDescriptorBinding],
         user_immediate_size: u32,
+        required_subgroup_size: Option<u32>,
     ) -> Result<VulkanComputePipeline, HalError> {
         create_compute_pipeline(
             Arc::clone(&self.inner),
@@ -183,6 +195,7 @@ impl VulkanDevice {
             entry_point,
             bindings,
             user_immediate_size,
+            required_subgroup_size,
         )
     }
 
@@ -337,8 +350,47 @@ mod tests {
                 (1, 1, 1),
                 &[],
                 0,
+                None,
             )
             .expect("create compute pipeline");
+        assert_ne!(pipeline.inner.pipeline, vk::Pipeline::null());
+    }
+
+    /// Block 108 R2 + R5: on an adapter advertising `subgroup-size-control`,
+    /// the device enables the extension and a compute pipeline requiring
+    /// `min_size` with a `(min_size, 1, 1)` workgroup creates.
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_device_create_compute_pipeline_honors_required_subgroup_size() {
+        let instance = VulkanInstance::new().expect("create Vulkan instance");
+        let adapter = instance
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("at least one Vulkan adapter");
+        let Some(caps) = adapter.subgroup_size_control_caps() else {
+            eprintln!("skipping: adapter does not advertise subgroup-size-control");
+            return;
+        };
+        eprintln!("subgroup-size-control caps: {caps:?}");
+        assert_eq!(
+            adapter.subgroup_size_range(),
+            Some((caps.min_size, caps.max_size))
+        );
+        let device = adapter.create_device().expect("create Vulkan device");
+        assert!(device.inner.subgroup_size_control);
+
+        let pipeline = device
+            .create_compute_pipeline(
+                HalShaderSource::SpirV(compute_spirv_with_workgroup_size_x(caps.min_size)),
+                "main",
+                (caps.min_size, 1, 1),
+                &[],
+                0,
+                Some(caps.min_size),
+            )
+            .expect("create compute pipeline with a required subgroup size");
         assert_ne!(pipeline.inner.pipeline, vk::Pipeline::null());
     }
 

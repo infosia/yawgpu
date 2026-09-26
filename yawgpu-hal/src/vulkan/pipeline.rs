@@ -162,16 +162,37 @@ impl Drop for VulkanRenderPipelineInner {
 /// byte budget (Block 94 S3); when non-zero the `VkPipelineLayout` declares
 /// a compute-stage `VkPushConstantRange` of that size and every dispatch
 /// pushes the pass's user immediate bytes.
+///
+/// `required_subgroup_size` is `Some(S)` when the entry point declares WGSL
+/// `@subgroup_size(S)` (Block 108 R5): the stage chains
+/// `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo{S}` and sets
+/// `REQUIRE_FULL_SUBGROUPS`. `Some(_)` on a device without
+/// `VK_EXT_subgroup_size_control` enabled is a [`HalError`].
 pub(super) fn create_compute_pipeline(
     device: Arc<VulkanDeviceInner>,
     shader: HalShaderSource,
     entry_point: &str,
     bindings: &[HalDescriptorBinding],
     user_immediate_size: u32,
+    required_subgroup_size: Option<u32>,
 ) -> Result<VulkanComputePipeline, HalError> {
     let HalShaderSource::SpirV(code) = shader else {
         return Err(shader_error("Vulkan compute pipeline requires SPIR-V"));
     };
+    if let Some(size) = required_subgroup_size {
+        if !device.subgroup_size_control {
+            // Validation only produces Some(_) when the adapter advertises
+            // subgroup-size-control, which also enables the extension; never
+            // drop the requirement silently.
+            return Err(HalError::ShaderCompilationFailed {
+                backend: BACKEND,
+                message: format!(
+                    "required subgroup size {size} needs VK_EXT_subgroup_size_control, \
+                     which is not enabled on this device"
+                ),
+            });
+        }
+    }
     let entry_point =
         CString::new(entry_point).map_err(|_| shader_error("compute entry point contains NUL"))?;
     let shader_info = vk::ShaderModuleCreateInfo::default().code(&code);
@@ -211,10 +232,20 @@ pub(super) fn create_compute_pipeline(
             return Err(shader_error("pipeline layout creation failed"));
         }
     };
-    let stage = vk::PipelineShaderStageCreateInfo::default()
+    let mut required_subgroup_size_info =
+        vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo::default()
+            .required_subgroup_size(required_subgroup_size.unwrap_or(0));
+    let mut stage = vk::PipelineShaderStageCreateInfo::default()
+        .flags(compute_stage_subgroup_flags(
+            required_subgroup_size,
+            device.subgroup_size_control,
+        ))
         .stage(vk::ShaderStageFlags::COMPUTE)
         .module(shader_module)
         .name(&entry_point);
+    if required_subgroup_size.is_some() {
+        stage = stage.push_next(&mut required_subgroup_size_info);
+    }
     let pipeline_info = vk::ComputePipelineCreateInfo::default()
         .stage(stage)
         .layout(pipeline_layout);
@@ -257,6 +288,31 @@ pub(super) fn create_compute_pipeline(
             immediates,
         }),
     })
+}
+
+/// Selects the compute stage's subgroup create flags (Block 108 R5, Dawn
+/// `ComputePipelineVk.cpp` parity).
+///
+/// - `Some(_)` (WGSL `@subgroup_size`): `REQUIRE_FULL_SUBGROUPS` only; the
+///   caller chains the required size.
+/// - `None` with `VK_EXT_subgroup_size_control` enabled:
+///   `ALLOW_VARYING_SUBGROUP_SIZE` only, so `@builtin(subgroup_size)` reports
+///   the dispatched width on variable-width GPUs.
+/// - `None` without the extension: no flags.
+///
+/// Never both flags: `ALLOW_VARYING_SUBGROUP_SIZE` is illegal alongside a
+/// required size (VUID-VkPipelineShaderStageCreateInfo-pNext-02754).
+fn compute_stage_subgroup_flags(
+    required_subgroup_size: Option<u32>,
+    subgroup_size_control_enabled: bool,
+) -> vk::PipelineShaderStageCreateFlags {
+    match required_subgroup_size {
+        Some(_) => vk::PipelineShaderStageCreateFlags::REQUIRE_FULL_SUBGROUPS,
+        None if subgroup_size_control_enabled => {
+            vk::PipelineShaderStageCreateFlags::ALLOW_VARYING_SUBGROUP_SIZE
+        }
+        None => vk::PipelineShaderStageCreateFlags::empty(),
+    }
 }
 
 /// Creates render pipeline and reports validation errors through the owning device.
@@ -2015,6 +2071,37 @@ mod tests {
     use super::*;
     use crate::{noop, HalTextureDescriptor, HalTextureDimension, HalTextureUsage};
     use ash::vk::Handle;
+
+    #[test]
+    fn compute_stage_subgroup_flags_selects_full_varying_or_none() {
+        let full = vk::PipelineShaderStageCreateFlags::REQUIRE_FULL_SUBGROUPS;
+        let varying = vk::PipelineShaderStageCreateFlags::ALLOW_VARYING_SUBGROUP_SIZE;
+
+        assert_eq!(compute_stage_subgroup_flags(Some(32), true), full);
+        // Unreachable after validation (the caller rejects it first), but
+        // the flags still never include ALLOW_VARYING for a required size.
+        assert_eq!(compute_stage_subgroup_flags(Some(32), false), full);
+        assert_eq!(compute_stage_subgroup_flags(None, true), varying);
+        assert_eq!(
+            compute_stage_subgroup_flags(None, false),
+            vk::PipelineShaderStageCreateFlags::empty()
+        );
+    }
+
+    #[test]
+    fn compute_stage_subgroup_flags_never_sets_both_flags() {
+        let both = vk::PipelineShaderStageCreateFlags::REQUIRE_FULL_SUBGROUPS
+            | vk::PipelineShaderStageCreateFlags::ALLOW_VARYING_SUBGROUP_SIZE;
+        for required in [None, Some(4), Some(32), Some(128)] {
+            for enabled in [false, true] {
+                let flags = compute_stage_subgroup_flags(required, enabled);
+                assert!(
+                    !flags.contains(both),
+                    "{required:?}/{enabled}: both subgroup flags set"
+                );
+            }
+        }
+    }
 
     fn dummy_bound_texture(format: HalTextureFormat, aspect: HalTextureAspect) -> HalBoundTexture {
         let device = noop::NoopDevice::new();

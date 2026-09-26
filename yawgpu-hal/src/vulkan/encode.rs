@@ -5434,6 +5434,7 @@ mod tests {
                 (1, 1, 1),
                 &[],
                 0,
+                None,
             )
             .expect("create compute pipeline");
         let indirect = device
