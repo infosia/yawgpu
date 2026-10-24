@@ -474,6 +474,7 @@ fn blit_back_buffer_to_window(
         // (y0 = height, y1 = 0) so the presented image matches the Vulkan/Metal
         // backends. (Confirmed on real GLES: offscreen render + readback is
         // already top-left correct, so the flip belongs only at present.)
+        gl.disable(glow::SCISSOR_TEST);
         gl.blit_framebuffer(
             0,
             0,

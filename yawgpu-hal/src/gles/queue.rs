@@ -1592,6 +1592,7 @@ impl Drop for RenderPassCleanup<'_> {
             self.gl.active_texture(glow::TEXTURE0);
             self.gl.color_mask(true, true, true, true);
             self.gl.disable(glow::BLEND);
+            self.gl.disable(glow::SCISSOR_TEST);
             self.gl.disable(glow::DEPTH_TEST);
             self.gl.disable(glow::POLYGON_OFFSET_FILL);
             self.gl.depth_mask(true);
@@ -1664,22 +1665,28 @@ fn create_render_fbo(
             }),
         })
         .transpose()?;
-    let size_texture = color_targets
+    let (size_texture, mip_level) = color_targets
         .iter()
         .flatten()
-        .map(|(_, texture, _)| *texture)
+        .map(|(target, texture, _)| (*texture, target.mip_level))
         .next()
-        .or(depth_stencil_target)
+        .or_else(|| {
+            depth_stencil_target.zip(
+                pass.depth_stencil_attachment
+                    .as_ref()
+                    .map(|attachment| attachment.mip_level),
+            )
+        })
         .ok_or(HalError::BufferOperationFailed {
             backend: BACKEND,
             message: "render pass requires an attachment",
         })?;
     let width = i32_from_u32(
-        size_texture.meta().width,
+        mip_dimension(size_texture.meta().width, mip_level),
         "render target width exceeds GLES limit",
     )?;
     let height = i32_from_u32(
-        size_texture.meta().height,
+        mip_dimension(size_texture.meta().height, mip_level),
         "render target height exceeds GLES limit",
     )?;
 
@@ -2079,15 +2086,17 @@ fn resolve_render_pass(
                 });
                 break;
             }
+            // Blits obey the scissor test left by the last draw.
+            gl.disable(glow::SCISSOR_TEST);
             gl.blit_framebuffer(
                 0,
                 0,
-                source.meta().width as i32,
-                source.meta().height as i32,
+                mip_dimension(source.meta().width, target.mip_level) as i32,
+                mip_dimension(source.meta().height, target.mip_level) as i32,
                 0,
                 0,
-                resolve.meta().width as i32,
-                resolve.meta().height as i32,
+                mip_dimension(resolve.meta().width, target.resolve_mip_level) as i32,
+                mip_dimension(resolve.meta().height, target.resolve_mip_level) as i32,
                 glow::COLOR_BUFFER_BIT,
                 glow::NEAREST,
             );
@@ -3253,6 +3262,7 @@ fn submit_buffer_to_texture(
     gl: &glow::Context,
     copy: &HalBufferTextureCopy,
 ) -> Result<(), HalError> {
+    validate_buffer_to_texture_aspect(copy.format, copy.aspect)?;
     let HalBuffer::Gles(source) = &copy.buffer else {
         return Err(HalError::BufferOperationFailed {
             backend: BACKEND,
@@ -3342,6 +3352,23 @@ fn submit_buffer_to_texture(
         gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
     }
 
+    Ok(())
+}
+
+fn validate_buffer_to_texture_aspect(
+    format: HalTextureFormat,
+    aspect: HalTextureAspect,
+) -> Result<(), HalError> {
+    if matches!(
+        format,
+        HalTextureFormat::Depth24PlusStencil8 | HalTextureFormat::Depth32FloatStencil8
+    ) && matches!(aspect, HalTextureAspect::StencilOnly)
+    {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES cannot upload stencil formats",
+        });
+    }
     Ok(())
 }
 
@@ -4282,6 +4309,53 @@ fn u32_from_u64(value: u64, message: &'static str) -> Result<u32, HalError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attachment_mip_dimensions_cover_viewport_and_resolve_extents() {
+        // A mip-0 MSAA source can resolve into a larger texture's mip 2.
+        let source = (mip_dimension(16, 0), mip_dimension(8, 0));
+        let resolve = (mip_dimension(64, 2), mip_dimension(32, 2));
+        assert_eq!(source, (16, 8));
+        assert_eq!(resolve, source);
+        assert_eq!((mip_dimension(31, 2), mip_dimension(9, 2)), (7, 2));
+        for level in [4, 31, 32, u32::MAX] {
+            assert_eq!((mip_dimension(8, level), mip_dimension(1, level)), (1, 1));
+        }
+    }
+
+    #[test]
+    fn buffer_to_texture_rejects_only_combined_stencil_aspect_uploads() {
+        for format in [
+            HalTextureFormat::Stencil8,
+            HalTextureFormat::Depth24PlusStencil8,
+            HalTextureFormat::Depth32FloatStencil8,
+            HalTextureFormat::Rgba8Unorm,
+            HalTextureFormat::Depth32Float,
+        ] {
+            for aspect in [
+                HalTextureAspect::StencilOnly,
+                HalTextureAspect::All,
+                HalTextureAspect::DepthOnly,
+            ] {
+                let result = validate_buffer_to_texture_aspect(format, aspect);
+                if matches!(
+                    format,
+                    HalTextureFormat::Depth24PlusStencil8 | HalTextureFormat::Depth32FloatStencil8
+                ) && aspect == HalTextureAspect::StencilOnly
+                {
+                    assert!(matches!(
+                        result,
+                        Err(HalError::BufferOperationFailed {
+                            backend: "gles",
+                            message: "GLES cannot upload stencil formats",
+                        })
+                    ));
+                } else {
+                    assert!(result.is_ok(), "{format:?} / {aspect:?}");
+                }
+            }
+        }
+    }
 
     fn depth_stencil_state(compare: HalCompareFunction, write: bool) -> HalDepthStencilState {
         let stencil = HalStencilFaceState {

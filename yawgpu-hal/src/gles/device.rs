@@ -469,6 +469,8 @@ impl GlesDevice {
         gl: glow::Context,
         caps: GlesDeviceCaps,
     ) -> Self {
+        // WebGPU strip indices use the fixed all-ones restart sentinel.
+        unsafe { gl.enable(glow::PRIMITIVE_RESTART_FIXED_INDEX) };
         let placeholder_sampler = unsafe { create_nearest_placeholder_sampler(&gl) };
         let inner = Arc::new(GlesDeviceInner::Egl(EglDeviceState {
             instance,
@@ -494,6 +496,7 @@ impl GlesDevice {
 
     #[cfg(windows)]
     pub(super) fn from_wgl(state: super::wgl::WglDeviceState) -> Self {
+        unsafe { state.gl().enable(glow::PRIMITIVE_RESTART_FIXED_INDEX) };
         let inner = Arc::new(GlesDeviceInner::Wgl(state));
         let queue = GlesQueue::new(Arc::clone(&inner));
         Self { inner, queue }
