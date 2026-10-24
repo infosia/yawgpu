@@ -195,6 +195,7 @@ pub(crate) struct BufferState {
     pub(crate) is_error: bool,
     pub(crate) is_destroyed: bool,
     pub(crate) pending_map: Option<PendingMap>,
+    next_map_serial: u64,
     pub(crate) active_map: Option<ActiveMap>,
     pub(crate) mapped_ranges: Vec<MappedRange>,
 }
@@ -202,6 +203,7 @@ pub(crate) struct BufferState {
 /// Stores pending map data used by validation and backend submission.
 #[derive(Debug)]
 pub(crate) struct PendingMap {
+    pub(crate) serial: u64,
     pub(crate) mode: MapMode,
     pub(crate) offset: u64,
     pub(crate) size: u64,
@@ -224,14 +226,14 @@ pub(crate) struct MappedRange {
 
 /// Stores host buffer data used by validation and backend submission.
 pub(crate) struct HostBuffer {
-    pub(crate) bytes: Box<[UnsafeCell<u8>]>,
+    bytes: Mutex<Box<[UnsafeCell<u8>]>>,
 }
 
 impl HostBuffer {
     /// Creates a zero-length host buffer used for error buffers and non-mapped buffers.
     pub(crate) fn empty() -> Self {
         Self {
-            bytes: Box::new([]),
+            bytes: Mutex::new(Box::new([])),
         }
     }
 
@@ -248,18 +250,19 @@ impl HostBuffer {
         // `resize` after a successful reserve does not reallocate.
         v.resize_with(len, || UnsafeCell::new(0));
         Ok(Self {
-            bytes: v.into_boxed_slice(),
+            bytes: Mutex::new(v.into_boxed_slice()),
         })
     }
 
     /// Returns ptr at.
     pub(crate) fn ptr_at(&self, offset: u64) -> Option<*mut u8> {
         let offset = usize::try_from(offset).ok()?;
-        if offset > self.bytes.len() {
+        let bytes = self.bytes.lock();
+        if offset > bytes.len() {
             return None;
         }
         // One-past-the-end is valid for zero-sized mapped ranges.
-        Some(unsafe { self.bytes.as_ptr().add(offset).cast::<u8>().cast_mut() })
+        Some(unsafe { bytes.as_ptr().add(offset).cast::<u8>().cast_mut() })
     }
 
     /// Records a write command.
@@ -268,10 +271,11 @@ impl HostBuffer {
         let end = offset
             .checked_add(data.len())
             .ok_or("host buffer write range overflows")?;
-        if end > self.bytes.len() {
+        let bytes = self.bytes.lock();
+        if end > bytes.len() {
             return Err("host buffer write range exceeds buffer size".to_owned());
         }
-        for (cell, byte) in self.bytes[offset..end].iter().zip(data) {
+        for (cell, byte) in bytes[offset..end].iter().zip(data) {
             unsafe {
                 *cell.get() = *byte;
             }
@@ -286,13 +290,14 @@ impl HostBuffer {
         let end = offset
             .checked_add(size)
             .ok_or("host buffer read range overflows")?;
-        if end > self.bytes.len() {
+        let bytes = self.bytes.lock();
+        if end > bytes.len() {
             return Err("host buffer read range exceeds buffer size".to_owned());
         }
         let mut data: Vec<u8> = Vec::new();
         data.try_reserve_exact(size)
             .map_err(|_| "host buffer read allocation failed".to_owned())?;
-        for cell in &self.bytes[offset..end] {
+        for cell in &bytes[offset..end] {
             data.push(unsafe { *cell.get() });
         }
         Ok(data)
@@ -302,15 +307,10 @@ impl HostBuffer {
 impl fmt::Debug for HostBuffer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HostBuffer")
-            .field("len", &self.bytes.len())
+            .field("len", &self.bytes.lock().len())
             .finish()
     }
 }
-
-// Mapped ranges expose raw pointers whose synchronization is governed by the
-// WebGPU map/unmap state machine rather than Rust references.
-unsafe impl Send for HostBuffer {}
-unsafe impl Sync for HostBuffer {}
 
 impl Buffer {
     /// Creates an error buffer, optionally with a fallible host mapping.
@@ -368,6 +368,7 @@ impl Buffer {
                     is_error: true,
                     is_destroyed: false,
                     pending_map: None,
+                    next_map_serial: 0,
                     active_map,
                     mapped_ranges: Vec::new(),
                 }),
@@ -375,7 +376,7 @@ impl Buffer {
         }
     }
 
-    /// Attempts to create a valid (non-error) buffer with host storage.
+    /// Attempts to create a valid buffer, allocating host storage only for fallback maps.
     ///
     /// Returns `Err(hal)` if the host-side backing allocation fails
     /// (out-of-memory).  The caller is responsible for dispatching an
@@ -385,10 +386,17 @@ impl Buffer {
         descriptor: BufferDescriptor,
         hal: Option<HalBuffer>,
     ) -> Result<Self, Option<HalBuffer>> {
-        // All map paths (mappedAtCreation write, MapAsync write-back, and
-        // MapAsync read-back) require host-side storage.  Allocation is
-        // fallible so that a huge-but-valid size cannot abort the process.
-        let host = HostBuffer::try_new(descriptor.size).map_err(|_| hal.clone())?;
+        // Direct HAL mappings already provide storage. Other buffers need a
+        // host copy only if a map can expose it. Keep allocation fallible (F-073).
+        let needs_host = (descriptor.mapped_at_creation
+            || (descriptor.usage.contains(BufferUsage::MAP_READ)
+                || descriptor.usage.contains(BufferUsage::MAP_WRITE)))
+            && hal.as_ref().and_then(HalBuffer::mapped_ptr).is_none();
+        let host = if needs_host {
+            HostBuffer::try_new(descriptor.size).map_err(|_| hal.clone())?
+        } else {
+            HostBuffer::empty()
+        };
 
         let (map_state, active_map) = if descriptor.mapped_at_creation {
             (
@@ -414,6 +422,7 @@ impl Buffer {
                     is_error: false,
                     is_destroyed: false,
                     pending_map: None,
+                    next_map_serial: 0,
                     active_map,
                     mapped_ranges: Vec::new(),
                 }),
@@ -457,38 +466,36 @@ impl Buffer {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 
-    /// Marks any pending map as aborted without draining `pending_map`.
-    ///
-    /// The transient invariant is `map_state == Unmapped` while
-    /// `pending_map.is_some()` until the callback consumes it through
-    /// `resolve_pending_map`.
+    /// Cancels any pending map and clears the mapped state.
     pub fn destroy(&self) {
         let mut state = self.inner.state.lock();
         state.is_destroyed = true;
-        if let Some(pending) = state.pending_map.as_mut() {
-            pending.outcome = MapAsyncStatus::Aborted;
-        }
+        state.pending_map = None;
         state.map_state = BufferMapState::Unmapped;
         state.active_map = None;
         state.mapped_ranges.clear();
     }
 
-    /// Marks any pending map as aborted without draining `pending_map`.
-    ///
-    /// The transient invariant is `map_state == Unmapped` while
-    /// `pending_map.is_some()` until the callback consumes it through
-    /// `resolve_pending_map`.
+    /// Cancels any pending map and clears the mapped state.
     pub fn unmap(&self) -> Option<DeviceError> {
         let mut state = self.inner.state.lock();
         let active_map = state.active_map;
-        if let Some(pending) = state.pending_map.as_mut() {
-            pending.outcome = MapAsyncStatus::Aborted;
-        }
+        state.pending_map = None;
         state.map_state = BufferMapState::Unmapped;
         state.active_map = None;
         state.mapped_ranges.clear();
         drop(state);
 
+        let result = self.flush_host_map(active_map);
+        if !self.usage().contains(BufferUsage::MAP_READ)
+            && !self.usage().contains(BufferUsage::MAP_WRITE)
+        {
+            *self.inner.host.bytes.lock() = Box::new([]);
+        }
+        result
+    }
+
+    fn flush_host_map(&self, active_map: Option<ActiveMap>) -> Option<DeviceError> {
         let active_map = active_map?;
         if active_map.mode != MapMode::Write {
             return None;
@@ -508,8 +515,8 @@ impl Buffer {
             .map(|error| DeviceError::internal(error.to_string()))
     }
 
-    /// Begins an asynchronous map of the buffer range, moving it into the pending-map state.
-    pub fn begin_map(&self, mode: MapMode, offset: u64, size: u64) -> Result<(), &'static str> {
+    /// Begins an asynchronous map and returns its serial for completion.
+    pub fn begin_map(&self, mode: MapMode, offset: u64, size: u64) -> Result<u64, &'static str> {
         let mut state = self.inner.state.lock();
         if state.is_error {
             return Err("cannot map an error buffer");
@@ -547,8 +554,14 @@ impl Buffer {
             return Err("map range exceeds buffer size");
         }
 
+        let serial = state
+            .next_map_serial
+            .checked_add(1)
+            .ok_or("map serial exhausted")?;
+        state.next_map_serial = serial;
         state.map_state = BufferMapState::Pending;
         state.pending_map = Some(PendingMap {
+            serial,
             mode,
             offset,
             size,
@@ -556,22 +569,31 @@ impl Buffer {
         });
         state.active_map = None;
         state.mapped_ranges.clear();
-        Ok(())
+        Ok(serial)
     }
 
-    /// Completes the pending map, transitioning the buffer to the mapped state.
+    /// Completes the identified pending map; stale serials abort without changing state.
     #[must_use]
-    pub fn resolve_pending_map(&self) -> MapAsyncStatus {
-        self.resolve_pending_map_with_gpu_completion(|| true)
+    pub fn resolve_pending_map(&self, serial: u64) -> MapAsyncStatus {
+        self.resolve_pending_map_with_gpu_completion(serial, || true)
     }
 
-    /// Completes the pending map after ensuring GPU work has completed for read maps.
+    /// Completes the identified map after GPU completion for reads.
+    /// Stale serials abort without calling the hook or changing buffer state.
     #[must_use]
     pub fn resolve_pending_map_with_gpu_completion(
         &self,
+        serial: u64,
         ensure_gpu_complete: impl FnOnce() -> bool,
     ) -> MapAsyncStatus {
         let mut state = self.inner.state.lock();
+        if state
+            .pending_map
+            .as_ref()
+            .is_none_or(|pending| pending.serial != serial)
+        {
+            return MapAsyncStatus::Aborted;
+        }
         let pending = state.pending_map.take();
         let mut outcome = pending
             .as_ref()
@@ -619,15 +641,24 @@ impl Buffer {
         outcome
     }
 
-    /// Marks a pending map as aborted without draining `pending_map`.
-    ///
-    /// The transient invariant is `map_state == Unmapped` while
-    /// `pending_map.is_some()` until the callback consumes it through
-    /// `resolve_pending_map`.
+    /// Cancels any pending map when the owning handle is released.
     pub fn abort_pending_map(&self) {
+        self.cancel_pending_map(None);
+    }
+
+    /// Cancels the identified pending map; stale serials leave current state unchanged.
+    pub fn abort_pending_map_with_serial(&self, serial: u64) {
+        self.cancel_pending_map(Some(serial));
+    }
+
+    fn cancel_pending_map(&self, serial: Option<u64>) {
         let mut state = self.inner.state.lock();
-        if let Some(pending) = state.pending_map.as_mut() {
-            pending.outcome = MapAsyncStatus::Aborted;
+        if state
+            .pending_map
+            .as_ref()
+            .is_some_and(|pending| serial.is_none_or(|serial| pending.serial == serial))
+        {
+            state.pending_map = None;
             state.map_state = BufferMapState::Unmapped;
             state.active_map = None;
             state.mapped_ranges.clear();
@@ -1059,6 +1090,109 @@ mod tests {
     }
 
     #[test]
+    fn stale_map_serial_cannot_consume_or_unmap_a_new_request() {
+        for complete_new_first in [false, true] {
+            let buffer = noop_buffer(16, BufferUsage::MAP_READ);
+            let first = buffer.begin_map(MapMode::Read, 0, 8).unwrap();
+            assert_eq!(buffer.unmap(), None);
+            assert!(buffer.inner.state.lock().pending_map.is_none());
+            let second = buffer.begin_map(MapMode::Read, 8, 8).unwrap();
+            assert_ne!(first, second);
+            buffer.abort_pending_map_with_serial(first);
+            assert_eq!(buffer.map_state(), BufferMapState::Pending);
+            if complete_new_first {
+                assert_eq!(buffer.resolve_pending_map(second), MapAsyncStatus::Success);
+            }
+            assert_eq!(
+                buffer.resolve_pending_map_with_gpu_completion(first, || {
+                    panic!("a stale map must not wait for or read GPU data")
+                }),
+                MapAsyncStatus::Aborted
+            );
+            assert_eq!(
+                buffer.map_state(),
+                if complete_new_first {
+                    BufferMapState::Mapped
+                } else {
+                    BufferMapState::Pending
+                }
+            );
+            if !complete_new_first {
+                assert_eq!(buffer.resolve_pending_map(second), MapAsyncStatus::Success);
+            }
+            assert_eq!(buffer.resolve_pending_map(first), MapAsyncStatus::Aborted);
+            assert_eq!(buffer.map_state(), BufferMapState::Mapped);
+            assert!(buffer.mapped_range(true, 8, Some(8)).is_some());
+        }
+    }
+
+    #[test]
+    fn abort_pending_map_with_serial_cancels_only_its_request() {
+        let buffer = noop_buffer(8, BufferUsage::MAP_WRITE);
+        let first = buffer.begin_map(MapMode::Write, 0, 8).unwrap();
+        buffer.abort_pending_map_with_serial(first + 1);
+        assert_eq!(buffer.map_state(), BufferMapState::Pending);
+        buffer.abort_pending_map_with_serial(first);
+        assert_eq!(buffer.map_state(), BufferMapState::Unmapped);
+        assert!(buffer.inner.state.lock().pending_map.is_none());
+        assert_eq!(buffer.resolve_pending_map(first), MapAsyncStatus::Aborted);
+    }
+
+    #[test]
+    fn destroy_clears_pending_map_and_old_serial_aborts() {
+        let buffer = noop_buffer(8, BufferUsage::MAP_WRITE);
+        let serial = buffer.begin_map(MapMode::Write, 0, 8).unwrap();
+        buffer.destroy();
+        assert!(buffer.inner.state.lock().pending_map.is_none());
+        assert_eq!(buffer.resolve_pending_map(serial), MapAsyncStatus::Aborted);
+        assert_eq!(buffer.map_state(), BufferMapState::Unmapped);
+    }
+
+    #[test]
+    fn host_storage_is_only_allocated_for_fallback_maps() {
+        // No HAL allocation is needed to prove even an unrepresentably large
+        // unmappable buffer never allocates a host copy.
+        let storage = Buffer::try_new(
+            BufferDescriptor {
+                usage: BufferUsage::STORAGE,
+                size: u64::MAX,
+                mapped_at_creation: false,
+            },
+            None,
+        )
+        .unwrap();
+        assert!(storage.inner.host.bytes.lock().is_empty());
+        let storage = noop_buffer(1024 * 1024, BufferUsage::STORAGE);
+        assert!(storage.inner.host.bytes.lock().is_empty());
+        for usage in [BufferUsage::MAP_READ, BufferUsage::MAP_WRITE] {
+            let buffer = noop_buffer(16, usage);
+            assert_eq!(buffer.inner.host.bytes.lock().len(), 16);
+        }
+        let mapped = noop_device().create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE,
+            size: 16,
+            mapped_at_creation: true,
+        });
+        assert_eq!(mapped.inner.host.bytes.lock().len(), 16);
+        let ptr = mapped.mapped_range(false, 0, Some(16)).unwrap();
+        unsafe {
+            *ptr = 42;
+        }
+        assert_eq!(mapped.unmap(), None);
+        assert!(mapped.inner.host.bytes.lock().is_empty());
+        assert_eq!(mapped.hal().unwrap().read(0, 1).unwrap(), vec![42]);
+        assert!(Buffer::try_new(
+            BufferDescriptor {
+                usage: BufferUsage::MAP_READ,
+                size: u64::MAX,
+                mapped_at_creation: false,
+            },
+            None
+        )
+        .is_err());
+    }
+
+    #[test]
     fn buffer_map_state_machine_transitions_and_mapped_range_bounds() {
         let mapped = noop_device().create_buffer(BufferDescriptor {
             usage: BufferUsage::MAP_WRITE | BufferUsage::COPY_SRC,
@@ -1075,9 +1209,9 @@ mod tests {
         assert_eq!(mapped.unmap(), None);
 
         let buffer = noop_buffer(16, BufferUsage::MAP_READ | BufferUsage::COPY_DST);
-        assert_eq!(buffer.begin_map(MapMode::Read, 0, 8), Ok(()));
+        assert_eq!(buffer.begin_map(MapMode::Read, 0, 8), Ok(1));
         assert_eq!(buffer.map_state(), BufferMapState::Pending);
-        assert_eq!(buffer.resolve_pending_map(), MapAsyncStatus::Success);
+        assert_eq!(buffer.resolve_pending_map(1), MapAsyncStatus::Success);
         assert_eq!(buffer.map_state(), BufferMapState::Mapped);
         assert!(buffer.mapped_range(true, 0, Some(8)).is_some());
         assert_eq!(buffer.mapped_range(false, 0, Some(8)), None);
@@ -1087,8 +1221,8 @@ mod tests {
         assert_eq!(buffer.map_state(), BufferMapState::Unmapped);
 
         let partial = noop_buffer(64, BufferUsage::MAP_WRITE);
-        assert_eq!(partial.begin_map(MapMode::Write, 16, 16), Ok(()));
-        assert_eq!(partial.resolve_pending_map(), MapAsyncStatus::Success);
+        assert_eq!(partial.begin_map(MapMode::Write, 16, 16), Ok(1));
+        assert_eq!(partial.resolve_pending_map(1), MapAsyncStatus::Success);
         assert_eq!(partial.mapped_range(false, 16, None), None);
         assert!(partial.mapped_range(false, 16, Some(16)).is_some());
     }
@@ -1097,11 +1231,11 @@ mod tests {
     fn buffer_abort_pending_map_returns_unmapped_and_resolve_reports_aborted() {
         let buffer = noop_buffer(16, BufferUsage::MAP_READ | BufferUsage::COPY_DST);
 
-        assert_eq!(buffer.begin_map(MapMode::Read, 0, 8), Ok(()));
+        assert_eq!(buffer.begin_map(MapMode::Read, 0, 8), Ok(1));
         assert_eq!(buffer.map_state(), BufferMapState::Pending);
         buffer.abort_pending_map();
         assert_eq!(buffer.map_state(), BufferMapState::Unmapped);
-        assert_eq!(buffer.resolve_pending_map(), MapAsyncStatus::Aborted);
+        assert_eq!(buffer.resolve_pending_map(1), MapAsyncStatus::Aborted);
         assert_eq!(buffer.map_state(), BufferMapState::Unmapped);
     }
 
@@ -1109,10 +1243,10 @@ mod tests {
     fn resolve_pending_map_gpu_completion_hook_runs_only_for_successful_read() {
         let calls = Arc::new(AtomicUsize::new(0));
         let read_buffer = noop_buffer(8, BufferUsage::MAP_READ);
-        assert_eq!(read_buffer.begin_map(MapMode::Read, 0, 8), Ok(()));
+        assert_eq!(read_buffer.begin_map(MapMode::Read, 0, 8), Ok(1));
         let read_calls = Arc::clone(&calls);
         assert_eq!(
-            read_buffer.resolve_pending_map_with_gpu_completion(|| {
+            read_buffer.resolve_pending_map_with_gpu_completion(1, || {
                 read_calls.fetch_add(1, Ordering::Relaxed);
                 true
             }),
@@ -1121,10 +1255,10 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 1);
 
         let write_buffer = noop_buffer(8, BufferUsage::MAP_WRITE);
-        assert_eq!(write_buffer.begin_map(MapMode::Write, 0, 8), Ok(()));
+        assert_eq!(write_buffer.begin_map(MapMode::Write, 0, 8), Ok(1));
         let write_calls = Arc::clone(&calls);
         assert_eq!(
-            write_buffer.resolve_pending_map_with_gpu_completion(|| {
+            write_buffer.resolve_pending_map_with_gpu_completion(1, || {
                 write_calls.fetch_add(1, Ordering::Relaxed);
                 true
             }),
@@ -1133,11 +1267,11 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 1);
 
         let aborted_buffer = noop_buffer(8, BufferUsage::MAP_READ);
-        assert_eq!(aborted_buffer.begin_map(MapMode::Read, 0, 8), Ok(()));
+        assert_eq!(aborted_buffer.begin_map(MapMode::Read, 0, 8), Ok(1));
         aborted_buffer.abort_pending_map();
         let aborted_calls = Arc::clone(&calls);
         assert_eq!(
-            aborted_buffer.resolve_pending_map_with_gpu_completion(|| {
+            aborted_buffer.resolve_pending_map_with_gpu_completion(1, || {
                 aborted_calls.fetch_add(1, Ordering::Relaxed);
                 true
             }),
@@ -1150,9 +1284,9 @@ mod tests {
     fn resolve_pending_map_gpu_completion_failure_returns_error() {
         let buffer = noop_buffer(8, BufferUsage::MAP_READ);
 
-        assert_eq!(buffer.begin_map(MapMode::Read, 0, 8), Ok(()));
+        assert_eq!(buffer.begin_map(MapMode::Read, 0, 8), Ok(1));
         assert_eq!(
-            buffer.resolve_pending_map_with_gpu_completion(|| false),
+            buffer.resolve_pending_map_with_gpu_completion(1, || false),
             MapAsyncStatus::Error
         );
         assert_eq!(buffer.map_state(), BufferMapState::Unmapped);
@@ -1161,12 +1295,14 @@ mod tests {
     #[test]
     fn read_map_wait_decision_depends_on_mode_outcome_and_live_hal_only() {
         let read = PendingMap {
+            serial: 1,
             mode: MapMode::Read,
             offset: 0,
             size: 4,
             outcome: MapAsyncStatus::Success,
         };
         let write = PendingMap {
+            serial: 1,
             mode: MapMode::Write,
             offset: 0,
             size: 4,
@@ -1210,7 +1346,7 @@ mod tests {
         buffer
             .begin_map(MapMode::Write, 0, 80)
             .expect("map should begin");
-        assert_eq!(buffer.resolve_pending_map(), MapAsyncStatus::Success);
+        assert_eq!(buffer.resolve_pending_map(1), MapAsyncStatus::Success);
 
         assert!(buffer.mapped_range(false, 16, Some(20)).is_some());
         assert_eq!(buffer.mapped_range(false, 24, Some(0)), None);
@@ -1220,7 +1356,7 @@ mod tests {
         buffer
             .begin_map(MapMode::Write, 0, 80)
             .expect("map should begin after unmap");
-        assert_eq!(buffer.resolve_pending_map(), MapAsyncStatus::Success);
+        assert_eq!(buffer.resolve_pending_map(2), MapAsyncStatus::Success);
         assert!(buffer.mapped_range(false, 24, Some(0)).is_some());
     }
 
@@ -1229,8 +1365,8 @@ mod tests {
         let buffer = noop_buffer(32, BufferUsage::MAP_WRITE);
         assert_eq!(buffer.mapped_range_for_copy(false, 0, 4), None);
 
-        assert_eq!(buffer.begin_map(MapMode::Write, 0, 32), Ok(()));
-        assert_eq!(buffer.resolve_pending_map(), MapAsyncStatus::Success);
+        assert_eq!(buffer.begin_map(MapMode::Write, 0, 32), Ok(1));
+        assert_eq!(buffer.resolve_pending_map(1), MapAsyncStatus::Success);
         assert!(buffer.mapped_range_for_copy(false, 0, 4).is_some());
         assert!(buffer.mapped_range_for_copy(false, 0, 4).is_some());
         assert!(buffer.mapped_range(false, 0, Some(4)).is_some());
@@ -1242,8 +1378,8 @@ mod tests {
         assert_eq!(buffer.mapped_range_for_copy(false, 0, 4), None);
 
         let read_buffer = noop_buffer(16, BufferUsage::MAP_READ);
-        assert_eq!(read_buffer.begin_map(MapMode::Read, 0, 16), Ok(()));
-        assert_eq!(read_buffer.resolve_pending_map(), MapAsyncStatus::Success);
+        assert_eq!(read_buffer.begin_map(MapMode::Read, 0, 16), Ok(1));
+        assert_eq!(read_buffer.resolve_pending_map(1), MapAsyncStatus::Success);
         assert!(read_buffer.mapped_range_for_copy(true, 0, 4).is_some());
         assert_eq!(read_buffer.mapped_range_for_copy(false, 0, 4), None);
         read_buffer.destroy();
@@ -1414,8 +1550,8 @@ mod tests {
             mapped_at_creation: false,
         });
         assert_eq!(read_buf.size(), 0);
-        assert_eq!(read_buf.begin_map(MapMode::Read, 0, 0), Ok(()));
-        assert_eq!(read_buf.resolve_pending_map(), MapAsyncStatus::Success);
+        assert_eq!(read_buf.begin_map(MapMode::Read, 0, 0), Ok(1));
+        assert_eq!(read_buf.resolve_pending_map(1), MapAsyncStatus::Success);
         assert_eq!(read_buf.map_state(), BufferMapState::Mapped);
         // WGPU_WHOLE_MAP_SIZE == None → uses buffer size (0) minus offset (0) = 0.
         assert!(

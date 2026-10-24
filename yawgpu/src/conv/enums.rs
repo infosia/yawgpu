@@ -191,7 +191,10 @@ pub fn map_mipmap_filter_mode(
 
 /// Converts compare function into the corresponding yawgpu representation.
 #[must_use]
-pub fn map_compare_function(value: native::WGPUCompareFunction) -> Option<core::CompareFunction> {
+pub fn map_compare_function(
+    value: native::WGPUCompareFunction,
+    error: &mut Option<String>,
+) -> Option<core::CompareFunction> {
     match value {
         native::WGPUCompareFunction_Undefined => None,
         native::WGPUCompareFunction_Never => Some(core::CompareFunction::Never),
@@ -202,7 +205,10 @@ pub fn map_compare_function(value: native::WGPUCompareFunction) -> Option<core::
         native::WGPUCompareFunction_NotEqual => Some(core::CompareFunction::NotEqual),
         native::WGPUCompareFunction_GreaterEqual => Some(core::CompareFunction::GreaterEqual),
         native::WGPUCompareFunction_Always => Some(core::CompareFunction::Always),
-        _ => None,
+        _ => {
+            set_first_error(error, "invalid compare function");
+            None
+        }
     }
 }
 
@@ -220,11 +226,20 @@ pub fn map_texture_usage_to_native(value: core::TextureUsage) -> native::WGPUTex
 
 /// Converts texture dimension into the corresponding yawgpu representation.
 #[must_use]
-pub fn map_texture_dimension(value: native::WGPUTextureDimension) -> core::TextureDimension {
+pub fn map_texture_dimension(
+    value: native::WGPUTextureDimension,
+    error: &mut Option<String>,
+) -> core::TextureDimension {
     match value {
         native::WGPUTextureDimension_1D => core::TextureDimension::D1,
         native::WGPUTextureDimension_3D => core::TextureDimension::D3,
-        _ => core::TextureDimension::D2,
+        native::WGPUTextureDimension_Undefined | native::WGPUTextureDimension_2D => {
+            core::TextureDimension::D2
+        }
+        _ => {
+            set_first_error(error, "invalid texture dimension");
+            core::TextureDimension::D2
+        }
     }
 }
 
@@ -294,5 +309,32 @@ pub fn map_texture_aspect(value: native::WGPUTextureAspect) -> Option<core::Text
         native::WGPUTextureAspect_DepthOnly => Some(core::TextureAspect::DepthOnly),
         native::WGPUTextureAspect_StencilOnly => Some(core::TextureAspect::StencilOnly),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn compare_function_and_texture_dimension_distinguish_defaults_from_invalid() {
+        let mut error = None;
+        assert_eq!(
+            map_compare_function(native::WGPUCompareFunction_Undefined, &mut error),
+            None
+        );
+        assert_eq!(
+            map_texture_dimension(native::WGPUTextureDimension_Undefined, &mut error),
+            core::TextureDimension::D2
+        );
+        assert_eq!(error, None);
+        assert_eq!(map_compare_function(0xCAFE, &mut error), None);
+        assert_eq!(error.as_deref(), Some("invalid compare function"));
+        error = None;
+        assert_eq!(
+            map_texture_dimension(0xCAFE, &mut error),
+            core::TextureDimension::D2
+        );
+        assert_eq!(error.as_deref(), Some("invalid texture dimension"));
     }
 }

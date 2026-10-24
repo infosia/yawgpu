@@ -655,11 +655,11 @@ mod tests {
             (native::WGPUTextureDimension_2D, core::TextureDimension::D2),
             (native::WGPUTextureDimension_3D, core::TextureDimension::D3),
         ] {
-            assert_eq!(map_texture_dimension(native_value), core_value);
+            assert_eq!(map_texture_dimension(native_value, &mut None), core_value);
             assert_eq!(map_texture_dimension_to_native(core_value), native_value);
         }
         assert_eq!(
-            map_texture_dimension(native::WGPUTextureDimension_Undefined),
+            map_texture_dimension(native::WGPUTextureDimension_Undefined, &mut None),
             core::TextureDimension::D2
         );
     }
@@ -957,42 +957,42 @@ mod tests {
     #[test]
     fn map_compare_function_maps_known_values_and_rejects_undefined() {
         assert_eq!(
-            map_compare_function(native::WGPUCompareFunction_Undefined),
+            map_compare_function(native::WGPUCompareFunction_Undefined, &mut None),
             None
         );
         assert_eq!(
-            map_compare_function(native::WGPUCompareFunction_Never),
+            map_compare_function(native::WGPUCompareFunction_Never, &mut None),
             Some(core::CompareFunction::Never)
         );
         assert_eq!(
-            map_compare_function(native::WGPUCompareFunction_Less),
+            map_compare_function(native::WGPUCompareFunction_Less, &mut None),
             Some(core::CompareFunction::Less)
         );
         assert_eq!(
-            map_compare_function(native::WGPUCompareFunction_Equal),
+            map_compare_function(native::WGPUCompareFunction_Equal, &mut None),
             Some(core::CompareFunction::Equal)
         );
         assert_eq!(
-            map_compare_function(native::WGPUCompareFunction_LessEqual),
+            map_compare_function(native::WGPUCompareFunction_LessEqual, &mut None),
             Some(core::CompareFunction::LessEqual)
         );
         assert_eq!(
-            map_compare_function(native::WGPUCompareFunction_Greater),
+            map_compare_function(native::WGPUCompareFunction_Greater, &mut None),
             Some(core::CompareFunction::Greater)
         );
         assert_eq!(
-            map_compare_function(native::WGPUCompareFunction_NotEqual),
+            map_compare_function(native::WGPUCompareFunction_NotEqual, &mut None),
             Some(core::CompareFunction::NotEqual)
         );
         assert_eq!(
-            map_compare_function(native::WGPUCompareFunction_GreaterEqual),
+            map_compare_function(native::WGPUCompareFunction_GreaterEqual, &mut None),
             Some(core::CompareFunction::GreaterEqual)
         );
         assert_eq!(
-            map_compare_function(native::WGPUCompareFunction_Always),
+            map_compare_function(native::WGPUCompareFunction_Always, &mut None),
             Some(core::CompareFunction::Always)
         );
-        assert_eq!(map_compare_function(0xCAFE), None);
+        assert_eq!(map_compare_function(0xCAFE, &mut None), None);
     }
 
     #[test]
@@ -1164,7 +1164,7 @@ mod tests {
             compare: native::WGPUCompareFunction_Undefined,
             maxAnisotropy: 4,
         };
-        let mapped = map_sampler_descriptor(Some(&descriptor));
+        let mapped = map_sampler_descriptor(Some(&descriptor), &mut None);
         assert_eq!(mapped.address_mode_u, Some(core::AddressMode::ClampToEdge));
         assert_eq!(mapped.address_mode_v, Some(core::AddressMode::Repeat));
         assert_eq!(mapped.address_mode_w, Some(core::AddressMode::MirrorRepeat));
@@ -2101,7 +2101,7 @@ mod tests {
             viewFormatCount: 1,
             viewFormats: view_formats.as_ptr(),
         };
-        let mapped = unsafe { map_texture_descriptor(&descriptor) };
+        let mapped = unsafe { map_texture_descriptor(&descriptor, &mut None) };
         assert_eq!(mapped.usage.bits(), descriptor.usage);
         assert_eq!(mapped.dimension, core::TextureDimension::D3);
         assert_eq!(mapped.size.width, 8);
@@ -2112,9 +2112,11 @@ mod tests {
             viewFormats: std::ptr::null(),
             ..descriptor
         };
-        assert!(unsafe { map_texture_descriptor(&null_view_formats) }
-            .view_formats
-            .is_empty());
+        assert!(
+            unsafe { map_texture_descriptor(&null_view_formats, &mut None) }
+                .view_formats
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2131,7 +2133,7 @@ mod tests {
             aspect: native::WGPUTextureAspect_All,
             usage: native::WGPUTextureUsage_TextureBinding,
         };
-        let mapped = map_texture_view_descriptor(Some(&descriptor));
+        let mapped = map_texture_view_descriptor(Some(&descriptor), &mut None);
         assert_eq!(
             mapped.format,
             Some(native::WGPUTextureFormat_RGBA8Unorm.into())
@@ -2144,7 +2146,7 @@ mod tests {
         assert_eq!(mapped.aspect, Some(core::TextureAspect::All));
         assert_eq!(mapped.swizzle, None);
 
-        let defaulted = map_texture_view_descriptor(None);
+        let defaulted = map_texture_view_descriptor(None, &mut None);
         assert_eq!(defaulted.format, None);
         assert_eq!(defaulted.dimension, None);
         assert_eq!(defaulted.mip_level_count, None);
@@ -2179,7 +2181,7 @@ mod tests {
             usage: native::WGPUTextureUsage_None,
         };
 
-        let mapped = map_texture_view_descriptor(Some(&descriptor));
+        let mapped = map_texture_view_descriptor(Some(&descriptor), &mut None);
         let mapped_swizzle = mapped.swizzle.expect("swizzle should map from chain");
         assert_eq!(mapped_swizzle.r, core::ComponentSwizzle::G);
         assert_eq!(mapped_swizzle.g, core::ComponentSwizzle::G);
@@ -2200,7 +2202,7 @@ mod tests {
             nextInChain: std::ptr::from_ref(&identity.chain).cast_mut(),
             ..descriptor
         };
-        assert!(map_texture_view_descriptor(Some(&descriptor))
+        assert!(map_texture_view_descriptor(Some(&descriptor), &mut None)
             .swizzle
             .expect("identity swizzle should map from chain")
             .is_identity());

@@ -4433,9 +4433,9 @@ fn fs() -> @location(0) vec4<f32> {
             }),
             None
         );
-        assert_eq!(buffer.begin_map(MapMode::Read, 0, 4), Ok(()));
+        assert_eq!(buffer.begin_map(MapMode::Read, 0, 4), Ok(1));
         assert_eq!(
-            buffer.resolve_pending_map_with_gpu_completion(|| queue.wait_idle().is_none()),
+            buffer.resolve_pending_map_with_gpu_completion(1, || queue.wait_idle().is_none()),
             MapAsyncStatus::Success
         );
         let ptr = buffer
@@ -4855,9 +4855,9 @@ fn fs() -> @location(0) vec4<f32> {
         );
 
         // Map the full buffer for reading and explicitly drain the queue.
-        assert_eq!(buffer.begin_map(MapMode::Read, 0, 16), Ok(()));
+        assert_eq!(buffer.begin_map(MapMode::Read, 0, 16), Ok(1));
         assert_eq!(queue.wait_idle(), None);
-        let status = buffer.resolve_pending_map_with_gpu_completion(|| true);
+        let status = buffer.resolve_pending_map_with_gpu_completion(1, || true);
         assert_eq!(status, MapAsyncStatus::Success);
 
         // getMappedRange requires 8-byte-aligned offset; read from offset 8.

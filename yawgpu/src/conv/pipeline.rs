@@ -176,7 +176,7 @@ pub unsafe fn map_render_pipeline_descriptor(
         depth_stencil: descriptor
             .depthStencil
             .as_ref()
-            .map(map_depth_stencil_state),
+            .map(|state| map_depth_stencil_state(state, &mut error)),
         multisample: map_multisample_state(descriptor.multisample),
         fragment,
         error,
@@ -298,13 +298,16 @@ fn map_primitive_state(
     }
 }
 
-fn map_depth_stencil_state(state: &native::WGPUDepthStencilState) -> core::DepthStencilState {
+fn map_depth_stencil_state(
+    state: &native::WGPUDepthStencilState,
+    error: &mut Option<String>,
+) -> core::DepthStencilState {
     core::DepthStencilState {
         format: map_texture_format(state.format),
-        depth_write_enabled: map_optional_bool(state.depthWriteEnabled),
-        depth_compare: map_compare_function(state.depthCompare),
-        stencil_front: map_stencil_face_state(state.stencilFront),
-        stencil_back: map_stencil_face_state(state.stencilBack),
+        depth_write_enabled: map_optional_bool(state.depthWriteEnabled, error),
+        depth_compare: map_compare_function(state.depthCompare, error),
+        stencil_front: map_stencil_face_state(state.stencilFront, error),
+        stencil_back: map_stencil_face_state(state.stencilBack, error),
         stencil_read_mask: state.stencilReadMask,
         stencil_write_mask: state.stencilWriteMask,
         depth_bias: state.depthBias,
@@ -339,38 +342,54 @@ fn map_color_targets(
         .iter()
         .map(|target| core::ColorTargetState {
             format: map_texture_format(target.format),
-            blend: unsafe { target.blend.as_ref() }.map(map_blend_state),
+            blend: unsafe { target.blend.as_ref() }.map(|state| map_blend_state(state, error)),
             write_mask: target.writeMask,
         })
         .collect()
 }
 
-fn map_blend_state(state: &native::WGPUBlendState) -> core::BlendState {
+fn map_blend_state(state: &native::WGPUBlendState, error: &mut Option<String>) -> core::BlendState {
     core::BlendState {
-        color: map_blend_component(state.color),
-        alpha: map_blend_component(state.alpha),
+        color: map_blend_component(state.color, error),
+        alpha: map_blend_component(state.alpha, error),
     }
 }
 
-fn map_blend_component(component: native::WGPUBlendComponent) -> core::BlendComponent {
+fn map_blend_component(
+    component: native::WGPUBlendComponent,
+    error: &mut Option<String>,
+) -> core::BlendComponent {
     core::BlendComponent {
-        operation: map_blend_operation(component.operation),
-        src_factor: map_blend_factor(component.srcFactor),
-        dst_factor: map_blend_factor(component.dstFactor),
+        operation: map_blend_operation(component.operation, error),
+        src_factor: map_blend_factor(component.srcFactor, core::BlendFactor::One, error),
+        dst_factor: map_blend_factor(component.dstFactor, core::BlendFactor::Zero, error),
     }
 }
 
-fn map_blend_operation(value: native::WGPUBlendOperation) -> core::BlendOperation {
+fn map_blend_operation(
+    value: native::WGPUBlendOperation,
+    error: &mut Option<String>,
+) -> core::BlendOperation {
     match value {
         native::WGPUBlendOperation_Subtract => core::BlendOperation::Subtract,
         native::WGPUBlendOperation_ReverseSubtract => core::BlendOperation::ReverseSubtract,
         native::WGPUBlendOperation_Min => core::BlendOperation::Min,
         native::WGPUBlendOperation_Max => core::BlendOperation::Max,
-        _ => core::BlendOperation::Add,
+        native::WGPUBlendOperation_Undefined | native::WGPUBlendOperation_Add => {
+            core::BlendOperation::Add
+        }
+        _ => {
+            set_first_error(error, "invalid blend operation");
+            core::BlendOperation::Add
+        }
     }
 }
 
-fn map_blend_factor(value: native::WGPUBlendFactor) -> core::BlendFactor {
+fn map_blend_factor(
+    value: native::WGPUBlendFactor,
+    default: core::BlendFactor,
+    error: &mut Option<String>,
+) -> core::BlendFactor {
     match value {
         native::WGPUBlendFactor_Zero => core::BlendFactor::Zero,
         native::WGPUBlendFactor_Src => core::BlendFactor::Src,
@@ -388,28 +407,44 @@ fn map_blend_factor(value: native::WGPUBlendFactor) -> core::BlendFactor {
         native::WGPUBlendFactor_OneMinusSrc1 => core::BlendFactor::OneMinusSrc1,
         native::WGPUBlendFactor_Src1Alpha => core::BlendFactor::Src1Alpha,
         native::WGPUBlendFactor_OneMinusSrc1Alpha => core::BlendFactor::OneMinusSrc1Alpha,
-        _ => core::BlendFactor::One,
+        native::WGPUBlendFactor_Undefined => default,
+        native::WGPUBlendFactor_One => core::BlendFactor::One,
+        _ => {
+            set_first_error(error, "invalid blend factor");
+            default
+        }
     }
 }
 
-fn map_optional_bool(value: native::WGPUOptionalBool) -> Option<bool> {
+fn map_optional_bool(value: native::WGPUOptionalBool, error: &mut Option<String>) -> Option<bool> {
     match value {
         native::WGPUOptionalBool_False => Some(false),
         native::WGPUOptionalBool_True => Some(true),
-        _ => None,
+        native::WGPUOptionalBool_Undefined => None,
+        _ => {
+            set_first_error(error, "invalid optional bool");
+            None
+        }
     }
 }
 
-fn map_stencil_face_state(value: native::WGPUStencilFaceState) -> core::StencilFaceState {
+fn map_stencil_face_state(
+    value: native::WGPUStencilFaceState,
+    error: &mut Option<String>,
+) -> core::StencilFaceState {
     core::StencilFaceState {
-        compare: map_compare_function(value.compare).unwrap_or(core::CompareFunction::Always),
-        fail_op: map_stencil_operation(value.failOp),
-        depth_fail_op: map_stencil_operation(value.depthFailOp),
-        pass_op: map_stencil_operation(value.passOp),
+        compare: map_compare_function(value.compare, error)
+            .unwrap_or(core::CompareFunction::Always),
+        fail_op: map_stencil_operation(value.failOp, error),
+        depth_fail_op: map_stencil_operation(value.depthFailOp, error),
+        pass_op: map_stencil_operation(value.passOp, error),
     }
 }
 
-fn map_stencil_operation(value: native::WGPUStencilOperation) -> core::StencilOperation {
+fn map_stencil_operation(
+    value: native::WGPUStencilOperation,
+    error: &mut Option<String>,
+) -> core::StencilOperation {
     match value {
         native::WGPUStencilOperation_Zero => core::StencilOperation::Zero,
         native::WGPUStencilOperation_Replace => core::StencilOperation::Replace,
@@ -418,6 +453,116 @@ fn map_stencil_operation(value: native::WGPUStencilOperation) -> core::StencilOp
         native::WGPUStencilOperation_DecrementClamp => core::StencilOperation::DecrementClamp,
         native::WGPUStencilOperation_IncrementWrap => core::StencilOperation::IncrementWrap,
         native::WGPUStencilOperation_DecrementWrap => core::StencilOperation::DecrementWrap,
-        _ => core::StencilOperation::Keep,
+        native::WGPUStencilOperation_Undefined | native::WGPUStencilOperation_Keep => {
+            core::StencilOperation::Keep
+        }
+        _ => {
+            set_first_error(error, "invalid stencil operation");
+            core::StencilOperation::Keep
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blend_component_defaults_are_field_specific_and_invalid_values_error() {
+        let mut error = None;
+        let component = map_blend_component(unsafe { std::mem::zeroed() }, &mut error);
+        assert_eq!(component.operation, core::BlendOperation::Add);
+        assert_eq!(component.src_factor, core::BlendFactor::One);
+        assert_eq!(component.dst_factor, core::BlendFactor::Zero);
+        assert_eq!(error, None);
+        for (operation, src_factor, dst_factor, expected) in [
+            (0xCAFE, 0, 0, "invalid blend operation"),
+            (0, 0xCAFE, 0, "invalid blend factor"),
+            (0, 0, 0xCAFE, "invalid blend factor"),
+        ] {
+            let mut error = None;
+            map_blend_component(
+                native::WGPUBlendComponent {
+                    operation,
+                    srcFactor: src_factor,
+                    dstFactor: dst_factor,
+                },
+                &mut error,
+            );
+            assert_eq!(error.as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn blend_mappers_accept_defined_values_and_preserve_first_error() {
+        let mut error = None;
+        assert_eq!(
+            map_blend_operation(native::WGPUBlendOperation_Add, &mut error),
+            core::BlendOperation::Add
+        );
+        assert_eq!(
+            map_blend_factor(
+                native::WGPUBlendFactor_One,
+                core::BlendFactor::Zero,
+                &mut error
+            ),
+            core::BlendFactor::One
+        );
+        assert_eq!(
+            map_blend_factor(
+                native::WGPUBlendFactor_Zero,
+                core::BlendFactor::One,
+                &mut error
+            ),
+            core::BlendFactor::Zero
+        );
+        assert_eq!(error, None);
+        error = Some("first error".into());
+        map_blend_operation(0xCAFE, &mut error);
+        map_blend_factor(0xCAFE, core::BlendFactor::Zero, &mut error);
+        assert_eq!(error.as_deref(), Some("first error"));
+    }
+
+    #[test]
+    fn stencil_and_optional_bool_defaults_and_invalid_values() {
+        let mut error = None;
+        assert_eq!(
+            map_stencil_operation(native::WGPUStencilOperation_Undefined, &mut error),
+            core::StencilOperation::Keep
+        );
+        assert_eq!(
+            map_stencil_operation(native::WGPUStencilOperation_Keep, &mut error),
+            core::StencilOperation::Keep
+        );
+        assert_eq!(
+            map_optional_bool(native::WGPUOptionalBool_Undefined, &mut error),
+            None
+        );
+        assert_eq!(
+            map_optional_bool(native::WGPUOptionalBool_False, &mut error),
+            Some(false)
+        );
+        assert_eq!(
+            map_optional_bool(native::WGPUOptionalBool_True, &mut error),
+            Some(true)
+        );
+        assert_eq!(error, None);
+        map_stencil_operation(0xCAFE, &mut error);
+        assert_eq!(error.as_deref(), Some("invalid stencil operation"));
+        error = None;
+        map_optional_bool(0xCAFE, &mut error);
+        assert_eq!(error.as_deref(), Some("invalid optional bool"));
+        error = None;
+        let face = map_stencil_face_state(unsafe { std::mem::zeroed() }, &mut error);
+        assert_eq!(face.compare, core::CompareFunction::Always);
+        assert_eq!(error, None);
+        map_stencil_face_state(
+            native::WGPUStencilFaceState {
+                compare: 0xCAFE,
+                ..unsafe { std::mem::zeroed() }
+            },
+            &mut error,
+        );
+        assert_eq!(error.as_deref(), Some("invalid compare function"));
     }
 }

@@ -355,10 +355,23 @@ impl Device {
     /// Validates the descriptor and creates a texture on this device.
     #[must_use]
     pub fn create_texture(&self, descriptor: TextureDescriptor) -> Texture {
+        self.create_texture_with_error(descriptor, None)
+    }
+
+    /// Creates a texture, preserving an earlier descriptor conversion error.
+    #[must_use]
+    pub fn create_texture_with_error(
+        &self,
+        descriptor: TextureDescriptor,
+        error: Option<String>,
+    ) -> Texture {
         if self.is_lost() {
             return Texture::new(descriptor, None, true, self.features());
         }
-        let error = validate_texture_descriptor(&descriptor, self.limits(), &self.inner.features);
+        let error = error.or_else(|| {
+            validate_texture_descriptor(&descriptor, self.limits(), &self.inner.features)
+                .map(str::to_owned)
+        });
         let is_error = error.is_some();
         if let Some(message) = error {
             self.dispatch_error(ErrorKind::Validation, message);
@@ -394,11 +407,21 @@ impl Device {
     /// Validates the descriptor and creates a sampler on this device.
     #[must_use]
     pub fn create_sampler(&self, descriptor: SamplerDescriptor) -> Sampler {
+        self.create_sampler_with_error(descriptor, None)
+    }
+
+    /// Creates a sampler, preserving an earlier descriptor conversion error.
+    #[must_use]
+    pub fn create_sampler_with_error(
+        &self,
+        descriptor: SamplerDescriptor,
+        error: Option<String>,
+    ) -> Sampler {
         let resolved = ResolvedSamplerDescriptor::from_descriptor(descriptor);
         if self.is_lost() {
             return Sampler::new(resolved, None, true);
         }
-        let error = validate_sampler_descriptor(&resolved);
+        let error = error.or_else(|| validate_sampler_descriptor(&resolved).map(str::to_owned));
         let is_error = error.is_some();
         if let Some(message) = error {
             self.dispatch_error(ErrorKind::Validation, message);
@@ -1083,6 +1106,48 @@ mod tests {
         assert!(invalid.is_error());
         assert_eq!(validation.kind, ErrorKind::Validation);
         assert_eq!(validation.message, "buffer size exceeds device limit");
+    }
+
+    #[test]
+    fn device_create_texture_with_error_preserves_conversion_failure() {
+        let device = noop_device();
+        assert!(!device
+            .create_texture_with_error(valid_texture_descriptor(), None)
+            .is_error());
+        let before = device.allocation_count();
+        device.push_error_scope(ErrorFilter::Validation);
+        assert!(device
+            .create_texture_with_error(
+                valid_texture_descriptor(),
+                Some("invalid texture dimension".into())
+            )
+            .is_error());
+        assert_eq!(
+            device.pop_error_scope().unwrap().unwrap().message,
+            "invalid texture dimension"
+        );
+        assert_eq!(device.allocation_count(), before);
+    }
+
+    #[test]
+    fn device_create_sampler_with_error_preserves_conversion_failure() {
+        let device = noop_device();
+        assert!(!device
+            .create_sampler_with_error(SamplerDescriptor::default(), None)
+            .is_error());
+        let before = device.allocation_count();
+        device.push_error_scope(ErrorFilter::Validation);
+        assert!(device
+            .create_sampler_with_error(
+                SamplerDescriptor::default(),
+                Some("invalid compare function".into())
+            )
+            .is_error());
+        assert_eq!(
+            device.pop_error_scope().unwrap().unwrap().message,
+            "invalid compare function"
+        );
+        assert_eq!(device.allocation_count(), before);
     }
 
     #[test]

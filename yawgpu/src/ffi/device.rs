@@ -194,9 +194,9 @@ pub unsafe extern "C" fn wgpuDeviceCreateTexture(
     let descriptor = descriptor
         .as_ref()
         .expect("WGPUTextureDescriptor must not be null");
-    let texture = device
-        .core
-        .create_texture(map_texture_descriptor(descriptor));
+    let mut error = None;
+    let mapped = map_texture_descriptor(descriptor, &mut error);
+    let texture = device.core.create_texture_with_error(mapped, error);
     arc_to_handle(Arc::new(WGPUTextureImpl {
         core: Arc::new(texture),
         device: Arc::clone(&device.core),
@@ -231,9 +231,9 @@ pub unsafe extern "C" fn wgpuDeviceCreateSampler(
     descriptor: *const native::WGPUSamplerDescriptor,
 ) -> native::WGPUSampler {
     let device = borrow_handle(device, "WGPUDevice");
-    let sampler = device
-        .core
-        .create_sampler(map_sampler_descriptor(descriptor.as_ref()));
+    let mut error = None;
+    let mapped = map_sampler_descriptor(descriptor.as_ref(), &mut error);
+    let sampler = device.core.create_sampler_with_error(mapped, error);
     arc_to_handle(Arc::new(WGPUSamplerImpl {
         _core: Arc::new(sampler),
         _device: Arc::clone(&device.core),

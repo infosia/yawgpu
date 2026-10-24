@@ -46,8 +46,14 @@ pub unsafe extern "C" fn wgpuTextureCreateView(
     let texture = borrow_handle(texture, "WGPUTexture");
     let native_descriptor = descriptor.as_ref();
     let label = native_descriptor.and_then(|descriptor| label_from_string_view(descriptor.label));
-    let descriptor = map_texture_view_descriptor(native_descriptor);
+    let mut conversion_error = None;
+    let mut descriptor = map_texture_view_descriptor(native_descriptor, &mut conversion_error);
+    if conversion_error.is_some() {
+        // Force an error view through the existing core validation path.
+        descriptor.mip_level_count = Some(0);
+    }
     let (view, error) = texture.core.create_view(descriptor);
+    let error = conversion_error.as_deref().or(error);
     if let Some(message) = error {
         texture
             .device

@@ -643,11 +643,12 @@ impl WGPUInstanceImpl {
                 PendingCallback::BufferMap {
                     device: callback_device,
                     buffer,
+                    serial,
                     status,
                     ..
                 } if callback_device.same(device) => {
                     if let Some(buffer) = buffer.take() {
-                        buffer.abort_pending_map();
+                        buffer.abort_pending_map_with_serial(*serial);
                     }
                     *status = core::MapAsyncStatus::Aborted;
                     callback.clear_submission_gate();
@@ -1747,6 +1748,8 @@ pub(crate) enum PendingCallback {
         device: Arc<core::Device>,
         /// Buffer variant.
         buffer: Option<core::Buffer>,
+        /// Serial identifying the map request owned by this callback.
+        serial: u64,
         /// Status variant.
         status: core::MapAsyncStatus,
         /// Queue-timeline gate for submissions preceding the map request.
@@ -1851,12 +1854,13 @@ impl PendingCallback {
             Self::BufferMap {
                 device,
                 buffer,
+                serial,
                 status,
                 gate,
                 ..
             } => {
                 if let Some(buffer) = buffer.as_ref() {
-                    buffer.abort_pending_map();
+                    buffer.abort_pending_map_with_serial(*serial);
                 }
                 *status = core::MapAsyncStatus::Error;
                 *gate = None;
@@ -1974,20 +1978,21 @@ impl PendingCallback {
                 callback,
                 device: _,
                 buffer,
+                serial,
                 status,
                 userdata1,
                 userdata2,
                 ..
             } => {
+                let status = buffer.as_ref().map_or(status, |buffer| {
+                    let resolved = buffer.resolve_pending_map(serial);
+                    if status == core::MapAsyncStatus::Success {
+                        resolved
+                    } else {
+                        status
+                    }
+                });
                 if let Some(callback) = callback {
-                    let status = buffer.as_ref().map_or(status, |buffer| {
-                        let resolved = buffer.resolve_pending_map();
-                        if status == core::MapAsyncStatus::Success {
-                            resolved
-                        } else {
-                            status
-                        }
-                    });
                     callback(
                         map_map_async_status(status),
                         string_view(map_async_message(status).as_bytes()),
@@ -6371,6 +6376,109 @@ mod tests {
             wgpuQueueRelease(queue);
             wgpuBufferRelease(buffer);
             wgpuBufferRelease(mapped);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn ffi_resource_enum_conversion_errors_return_error_objects() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let mut desc = texture_descriptor(native::WGPUTextureUsage_TextureBinding, 4);
+            desc.dimension = 0xCAFE;
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let invalid_texture = wgpuDeviceCreateTexture(device, &desc);
+            assert!(borrow_handle(invalid_texture, "WGPUTexture")
+                .core
+                .is_error());
+            assert_validation_error_contains(instance, device, "invalid texture dimension");
+            wgpuTextureRelease(invalid_texture);
+
+            let mut sampler_desc = default_sampler_descriptor();
+            sampler_desc.compare = 0xCAFE;
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let sampler = wgpuDeviceCreateSampler(device, &sampler_desc);
+            assert!(borrow_handle(sampler, "WGPUSampler")._core.is_error());
+            assert_validation_error_contains(instance, device, "invalid compare function");
+            wgpuSamplerRelease(sampler);
+
+            desc.dimension = native::WGPUTextureDimension_2D;
+            let texture = wgpuDeviceCreateTexture(device, &desc);
+            let mut swizzle = native::WGPUTextureComponentSwizzleDescriptor {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: native::WGPUSType_TextureComponentSwizzleDescriptor,
+                },
+                swizzle: native::WGPUTextureComponentSwizzle {
+                    r: 0xCAFE,
+                    ..std::mem::zeroed()
+                },
+            };
+            let mut view_desc =
+                texture_view_descriptor_with_format(native::WGPUTextureFormat_Undefined);
+            view_desc.nextInChain = &mut swizzle.chain;
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let view = wgpuTextureCreateView(texture, &view_desc);
+            assert!(borrow_handle(view, "WGPUTextureView")._core.is_error());
+            assert_validation_error_contains(instance, device, "invalid component swizzle");
+            wgpuTextureViewRelease(view);
+            wgpuTextureRelease(texture);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuBufferMapAsync_null_callback_still_completes_mapping() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let desc = buffer_descriptor(native::WGPUBufferUsage_MapWrite, 16);
+            let buffer = wgpuDeviceCreateBuffer(device, &desc);
+            wgpuBufferMapAsync(
+                buffer,
+                native::WGPUMapMode_Write,
+                0,
+                16,
+                native::WGPUBufferMapCallbackInfo {
+                    mode: native::WGPUCallbackMode_AllowProcessEvents,
+                    callback: None,
+                    ..std::mem::zeroed()
+                },
+            );
+            wgpuInstanceProcessEvents(instance);
+            assert_eq!(
+                wgpuBufferGetMapState(buffer),
+                native::WGPUBufferMapState_Mapped
+            );
+            assert!(!wgpuBufferGetMappedRange(buffer, 0, 16).is_null());
+            wgpuBufferUnmap(buffer);
+            wgpuBufferRelease(buffer);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuBufferMapAsync_unmap_remap_before_callbacks_preserves_new_map() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let desc = buffer_descriptor(native::WGPUBufferUsage_MapRead, 16);
+            let buffer = wgpuDeviceCreateBuffer(device, &desc);
+            let mut first = BufferMapAsyncState::default();
+            let mut second = BufferMapAsyncState::default();
+            map_buffer_async(buffer, native::WGPUMapMode_Read, 0, 8, &mut first);
+            wgpuBufferUnmap(buffer);
+            map_buffer_async(buffer, native::WGPUMapMode_Read, 8, 8, &mut second);
+            wgpuInstanceProcessEvents(instance);
+            assert_eq!(first.fired, 1);
+            assert_eq!(first.status, native::WGPUMapAsyncStatus_Aborted);
+            assert_eq!(second.fired, 1);
+            assert_eq!(second.status, native::WGPUMapAsyncStatus_Success);
+            assert_eq!(
+                wgpuBufferGetMapState(buffer),
+                native::WGPUBufferMapState_Mapped
+            );
+            assert!(!wgpuBufferGetConstMappedRange(buffer, 8, 8).is_null());
+            wgpuBufferUnmap(buffer);
+            wgpuBufferRelease(buffer);
             release_handles(instance, adapter, device);
         }
     }

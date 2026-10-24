@@ -51,12 +51,12 @@ pub unsafe extern "C" fn wgpuBufferMapAsync(
     let buffer = borrow_handle(buffer, "WGPUBuffer");
     match validate_map_async(buffer, mode, offset, size) {
         Ok((mode, offset, size)) => match buffer.core.begin_map(mode, offset, size) {
-            Ok(()) => {
+            Ok(serial) => {
                 let queue = buffer.device.queue();
                 let mut status = core::MapAsyncStatus::Success;
                 if let Some(error) = queue.flush_pending_writes() {
                     buffer.device.dispatch_error(error.kind, error.message);
-                    buffer.core.abort_pending_map();
+                    buffer.core.abort_pending_map_with_serial(serial);
                     status = core::MapAsyncStatus::Error;
                 }
                 let submission_index = queue.latest_submission_index();
@@ -67,6 +67,7 @@ pub unsafe extern "C" fn wgpuBufferMapAsync(
                         callback: callback_info.callback,
                         device: Arc::clone(&buffer.device),
                         buffer: Some((*buffer.core).clone()),
+                        serial,
                         status,
                         gate: Some(SubmissionGate {
                             queue,
@@ -87,6 +88,7 @@ pub unsafe extern "C" fn wgpuBufferMapAsync(
                         callback: callback_info.callback,
                         device: Arc::clone(&buffer.device),
                         buffer: None,
+                        serial: 0,
                         status: core::MapAsyncStatus::Error,
                         gate: None,
                         userdata1: callback_info.userdata1 as usize,
@@ -105,6 +107,7 @@ pub unsafe extern "C" fn wgpuBufferMapAsync(
                     callback: callback_info.callback,
                     device: Arc::clone(&buffer.device),
                     buffer: None,
+                    serial: 0,
                     status: core::MapAsyncStatus::Error,
                     gate: None,
                     userdata1: callback_info.userdata1 as usize,

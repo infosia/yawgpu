@@ -30,6 +30,7 @@ pub fn map_buffer_descriptor(value: &native::WGPUBufferDescriptor) -> core::Buff
 #[must_use]
 pub fn map_sampler_descriptor(
     value: Option<&native::WGPUSamplerDescriptor>,
+    error: &mut Option<String>,
 ) -> core::SamplerDescriptor {
     let Some(value) = value else {
         return core::SamplerDescriptor::default();
@@ -43,7 +44,7 @@ pub fn map_sampler_descriptor(
         mipmap_filter: map_mipmap_filter_mode(value.mipmapFilter),
         lod_min_clamp: value.lodMinClamp,
         lod_max_clamp: value.lodMaxClamp,
-        compare: map_compare_function(value.compare),
+        compare: map_compare_function(value.compare, error),
         max_anisotropy: value.maxAnisotropy,
     }
 }
@@ -237,7 +238,13 @@ pub unsafe fn map_subpass_pass_layout_descriptor(
             crate::YaWGPUSubpassDependencyType_ColorDepthToInput => {
                 core::SubpassDependencyType::ColorDepthToInput
             }
-            _ => core::SubpassDependencyType::ColorToInput,
+            crate::YaWGPUSubpassDependencyType_ColorToInput => {
+                core::SubpassDependencyType::ColorToInput
+            }
+            _ => {
+                set_first_error(&mut error, "invalid subpass dependency type");
+                core::SubpassDependencyType::ColorToInput
+            }
         },
         by_region: dependency.byRegion != 0,
     })
@@ -384,17 +391,19 @@ unsafe fn slice_or_error<'a, T>(
 
 unsafe fn texture_component_swizzle(
     chain: *const native::WGPUChainedStruct,
+    error: &mut Option<String>,
 ) -> Option<core::TextureComponentSwizzle> {
     find_in_chain::<native::WGPUTextureComponentSwizzleDescriptor>(
         chain,
         native::WGPUSType_TextureComponentSwizzleDescriptor,
     )
-    .map(|descriptor| map_texture_component_swizzle(descriptor.swizzle))
+    .map(|descriptor| map_texture_component_swizzle(descriptor.swizzle, error))
 }
 
 fn map_component_swizzle(
     value: native::WGPUComponentSwizzle,
     default: core::ComponentSwizzle,
+    error: &mut Option<String>,
 ) -> core::ComponentSwizzle {
     match value {
         native::WGPUComponentSwizzle_Undefined => default,
@@ -404,18 +413,22 @@ fn map_component_swizzle(
         native::WGPUComponentSwizzle_G => core::ComponentSwizzle::G,
         native::WGPUComponentSwizzle_B => core::ComponentSwizzle::B,
         native::WGPUComponentSwizzle_A => core::ComponentSwizzle::A,
-        _ => core::ComponentSwizzle::Zero,
+        _ => {
+            set_first_error(error, "invalid component swizzle");
+            default
+        }
     }
 }
 
 fn map_texture_component_swizzle(
     value: native::WGPUTextureComponentSwizzle,
+    error: &mut Option<String>,
 ) -> core::TextureComponentSwizzle {
     core::TextureComponentSwizzle {
-        r: map_component_swizzle(value.r, core::ComponentSwizzle::R),
-        g: map_component_swizzle(value.g, core::ComponentSwizzle::G),
-        b: map_component_swizzle(value.b, core::ComponentSwizzle::B),
-        a: map_component_swizzle(value.a, core::ComponentSwizzle::A),
+        r: map_component_swizzle(value.r, core::ComponentSwizzle::R, error),
+        g: map_component_swizzle(value.g, core::ComponentSwizzle::G, error),
+        b: map_component_swizzle(value.b, core::ComponentSwizzle::B, error),
+        a: map_component_swizzle(value.a, core::ComponentSwizzle::A, error),
     }
 }
 
@@ -534,6 +547,7 @@ pub fn map_color(value: native::WGPUColor) -> core::Color {
 /// to `viewFormatCount` valid `WGPUTextureFormat` entries.
 pub unsafe fn map_texture_descriptor(
     value: &native::WGPUTextureDescriptor,
+    error: &mut Option<String>,
 ) -> core::TextureDescriptor {
     let view_formats = if value.viewFormatCount == 0 || value.viewFormats.is_null() {
         Vec::new()
@@ -546,7 +560,7 @@ pub unsafe fn map_texture_descriptor(
     };
     core::TextureDescriptor {
         usage: map_texture_usage(value.usage),
-        dimension: map_texture_dimension(value.dimension),
+        dimension: map_texture_dimension(value.dimension, error),
         size: map_extent_3d(value.size),
         format: map_texture_format(value.format),
         mip_level_count: value.mipLevelCount,
@@ -559,6 +573,7 @@ pub unsafe fn map_texture_descriptor(
 #[must_use]
 pub fn map_texture_view_descriptor(
     value: Option<&native::WGPUTextureViewDescriptor>,
+    error: &mut Option<String>,
 ) -> core::TextureViewDescriptor {
     let Some(value) = value else {
         return core::TextureViewDescriptor {
@@ -573,7 +588,7 @@ pub fn map_texture_view_descriptor(
             swizzle: None,
         };
     };
-    let swizzle = unsafe { texture_component_swizzle(value.nextInChain) };
+    let swizzle = unsafe { texture_component_swizzle(value.nextInChain, error) };
     core::TextureViewDescriptor {
         format: if value.format == native::WGPUTextureFormat_Undefined {
             None
@@ -600,5 +615,65 @@ pub fn map_texture_view_descriptor(
             Some(map_texture_usage(value.usage))
         },
         swizzle,
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn swizzle_defaults_to_each_channel_and_rejects_invalid_values() {
+        let mut error = None;
+        assert_eq!(
+            map_texture_component_swizzle(unsafe { std::mem::zeroed() }, &mut error),
+            core::TextureComponentSwizzle {
+                r: core::ComponentSwizzle::R,
+                g: core::ComponentSwizzle::G,
+                b: core::ComponentSwizzle::B,
+                a: core::ComponentSwizzle::A,
+            }
+        );
+        assert_eq!(error, None);
+        assert_eq!(
+            map_component_swizzle(
+                native::WGPUComponentSwizzle_One,
+                core::ComponentSwizzle::R,
+                &mut error
+            ),
+            core::ComponentSwizzle::One
+        );
+        assert_eq!(error, None);
+        map_component_swizzle(0xCAFE, core::ComponentSwizzle::R, &mut error);
+        assert_eq!(error.as_deref(), Some("invalid component swizzle"));
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn subpass_dependency_type_rejects_invalid_values() {
+        for (kind, expected_error) in [
+            (crate::YaWGPUSubpassDependencyType_ColorToInput, false),
+            (crate::YaWGPUSubpassDependencyType_DepthToInput, false),
+            (crate::YaWGPUSubpassDependencyType_ColorDepthToInput, false),
+            (0xCAFE, true),
+        ] {
+            let dependency = crate::YaWGPUSubpassDependency {
+                dependencyType: kind,
+                ..unsafe { std::mem::zeroed() }
+            };
+            let descriptor = crate::YaWGPUSubpassPassLayoutDescriptor {
+                dependencies: &dependency,
+                dependencyCount: 1,
+                ..unsafe { std::mem::zeroed() }
+            };
+            let mapped = unsafe { map_subpass_pass_layout_descriptor(&descriptor) };
+            assert_eq!(mapped.error.is_some(), expected_error);
+            if expected_error {
+                assert_eq!(
+                    mapped.error.as_deref(),
+                    Some("invalid subpass dependency type")
+                );
+            }
+        }
     }
 }
