@@ -574,8 +574,8 @@ pub(super) fn encode_texture_to_texture(
     source.validate_origin_extent(copy.source_origin, copy.extent)?;
     destination.validate_origin_extent(copy.destination_origin, copy.extent)?;
     unsafe {
-        if matches!(source.dimension, HalTextureDimension::D3)
-            || matches!(destination.dimension, HalTextureDimension::D3)
+        if source.dimension == HalTextureDimension::D3
+            && destination.dimension == HalTextureDimension::D3
         {
             blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
                 source.inner()?,
@@ -598,21 +598,43 @@ pub(super) fn encode_texture_to_texture(
                 ..copy.extent
             })?;
             for layer in 0..copy.extent.depth_or_array_layers {
+                let (source_slice, source_origin) =
+                    texture_copy_location(source.dimension, copy.source_origin, layer)?;
+                let (destination_slice, destination_origin) =
+                    texture_copy_location(destination.dimension, copy.destination_origin, layer)?;
                 blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
                     source.inner()?,
-                    to_ns(u64::from(copy.source_origin.z + layer))?,
+                    source_slice,
                     to_ns(u64::from(copy.source_mip_level))?,
-                    to_mtl_origin(copy.source_origin.x, copy.source_origin.y, 0)?,
+                    source_origin,
                     size,
                     destination.inner()?,
-                    to_ns(u64::from(copy.destination_origin.z + layer))?,
+                    destination_slice,
                     to_ns(u64::from(copy.destination_mip_level))?,
-                    to_mtl_origin(copy.destination_origin.x, copy.destination_origin.y, 0)?,
+                    destination_origin,
                 );
             }
         }
     }
     Ok(())
+}
+
+// Metal addresses array layers with source/destinationSlice, but volume planes
+// with origin.z. Mixed 2D/3D copies must use one depth-1 blit per plane (Dawn).
+fn texture_copy_location(
+    dimension: HalTextureDimension,
+    origin: crate::HalOrigin3d,
+    layer: u32,
+) -> Result<(usize, MTLOrigin), HalError> {
+    let z = origin
+        .z
+        .checked_add(layer)
+        .ok_or_else(|| texture_error("texture copy z range overflows"))?;
+    if dimension == HalTextureDimension::D3 {
+        Ok((0, to_mtl_origin(origin.x, origin.y, z)?))
+    } else {
+        Ok((to_ns(u64::from(z))?, to_mtl_origin(origin.x, origin.y, 0)?))
+    }
 }
 
 /// Returns the `MTLBlitOption` needed to extract a single plane of a *packed*
@@ -976,43 +998,7 @@ fn render_pass_descriptor_parts(
         let Some(color_target) = color_target else {
             continue;
         };
-        let HalTexture::Metal(texture) = &color_target.texture else {
-            return Err(texture_error("render target is not Metal-backed"));
-        };
-        let color_attachments = descriptor.colorAttachments();
-        let color = unsafe { color_attachments.objectAtIndexedSubscript(to_ns(index as u64)?) };
-        color.setTexture(Some(texture.inner()?));
-        color.setLevel(to_ns(u64::from(color_target.mip_level))?);
-        if texture.dimension == HalTextureDimension::D3 {
-            color.setSlice(0);
-            color.setDepthPlane(to_ns(u64::from(color_target.depth_slice))?);
-        } else {
-            color.setSlice(to_ns(u64::from(color_target.array_layer))?);
-            color.setDepthPlane(0);
-        }
-        color.setLoadAction(mtl_load_action(color_target.load_op));
-        if let Some(resolve_target) = &color_target.resolve_target {
-            let HalTexture::Metal(resolve_texture) = resolve_target else {
-                return Err(texture_error("resolve target is not Metal-backed"));
-            };
-            color.setResolveTexture(Some(resolve_texture.inner()?));
-            color.setResolveLevel(to_ns(u64::from(color_target.resolve_mip_level))?);
-            color.setResolveSlice(to_ns(u64::from(color_target.resolve_array_layer))?);
-            color.setStoreAction(if color_target.store {
-                MTLStoreAction::StoreAndMultisampleResolve
-            } else {
-                MTLStoreAction::MultisampleResolve
-            });
-        } else {
-            color.setStoreAction(mtl_store_action(color_target.store));
-        }
-        let [r, g, b, a] = color_target.clear_color;
-        color.setClearColor(MTLClearColor {
-            red: r,
-            green: g,
-            blue: b,
-            alpha: a,
-        });
+        set_render_color_target(&descriptor, index, color_target)?;
     }
     if let Some(depth_stencil) = depth_stencil_attachment {
         let HalTexture::Metal(texture) = &depth_stencil.texture else {
@@ -1049,6 +1035,87 @@ fn render_pass_descriptor_parts(
     Ok(descriptor)
 }
 
+// A format-only view preserves the original mip and slice numbering. Metal's
+// attachment descriptor retains the view after this function returns.
+fn attachment_format_view(
+    texture: &MetalTexture,
+    view_format: HalTextureFormat,
+) -> Result<Option<Retained<ProtocolObject<dyn MTLTextureTrait>>>, HalError> {
+    match attachment_view_pixel_format(texture.format, view_format)? {
+        None => Ok(None),
+        Some(format) => texture
+            .inner()?
+            .newTextureViewWithPixelFormat(format)
+            .map(Some)
+            .ok_or_else(|| texture_error("attachment texture view allocation failed")),
+    }
+}
+
+fn attachment_view_pixel_format(
+    texture_format: HalTextureFormat,
+    view_format: HalTextureFormat,
+) -> Result<Option<MTLPixelFormat>, HalError> {
+    if texture_format == view_format {
+        Ok(None)
+    } else {
+        Ok(Some(map_texture_format(view_format)?.0))
+    }
+}
+
+fn set_render_color_target(
+    descriptor: &MTLRenderPassDescriptor,
+    index: usize,
+    color_target: &crate::HalRenderColorTarget,
+) -> Result<(), HalError> {
+    let HalTexture::Metal(texture) = &color_target.texture else {
+        return Err(texture_error("render target is not Metal-backed"));
+    };
+    let color_attachments = descriptor.colorAttachments();
+    let color = unsafe { color_attachments.objectAtIndexedSubscript(to_ns(index as u64)?) };
+    let view = attachment_format_view(texture, color_target.view_format)?;
+    color.setTexture(Some(view.as_deref().unwrap_or(texture.inner()?)));
+    color.setLevel(to_ns(u64::from(color_target.mip_level))?);
+    if texture.dimension == HalTextureDimension::D3 {
+        color.setSlice(0);
+        color.setDepthPlane(to_ns(u64::from(color_target.depth_slice))?);
+    } else {
+        color.setSlice(to_ns(u64::from(color_target.array_layer))?);
+        color.setDepthPlane(0);
+    }
+    color.setLoadAction(mtl_load_action(color_target.load_op));
+    if let Some(resolve_target) = &color_target.resolve_target {
+        let HalTexture::Metal(resolve_texture) = resolve_target else {
+            return Err(texture_error("resolve target is not Metal-backed"));
+        };
+        let resolve_view = attachment_format_view(
+            resolve_texture,
+            color_target
+                .resolve_view_format
+                .unwrap_or(resolve_texture.format),
+        )?;
+        color.setResolveTexture(Some(
+            resolve_view.as_deref().unwrap_or(resolve_texture.inner()?),
+        ));
+        color.setResolveLevel(to_ns(u64::from(color_target.resolve_mip_level))?);
+        color.setResolveSlice(to_ns(u64::from(color_target.resolve_array_layer))?);
+        color.setStoreAction(if color_target.store {
+            MTLStoreAction::StoreAndMultisampleResolve
+        } else {
+            MTLStoreAction::MultisampleResolve
+        });
+    } else {
+        color.setStoreAction(mtl_store_action(color_target.store));
+    }
+    let [r, g, b, a] = color_target.clear_color;
+    color.setClearColor(MTLClearColor {
+        red: r,
+        green: g,
+        blue: b,
+        alpha: a,
+    });
+    Ok(())
+}
+
 fn mtl_load_action(load_op: HalRenderLoadOp) -> MTLLoadAction {
     match load_op {
         HalRenderLoadOp::Load => MTLLoadAction::Load,
@@ -1075,24 +1142,18 @@ pub(super) fn subpass_render_pass_descriptor(
             "subpass render pass requires at least one subpass",
         ));
     }
-    let color_attachments = descriptor.colorAttachments();
     for attachment_index in subpass_color_attachment_indices(pass) {
-        let slot = to_ns(u64::from(attachment_index))?;
         let binding = pass
             .color_attachments
             .get(attachment_index as usize)
             .ok_or_else(|| texture_error("subpass color attachment binding missing"))?;
-        let color = unsafe { color_attachments.objectAtIndexedSubscript(slot) };
-        color.setTexture(Some(subpass_attachment_texture(&binding.resource)?));
-        color.setLoadAction(mtl_load_action(binding.load_op));
-        color.setStoreAction(mtl_store_action(binding.store));
-        let [r, g, b, a] = binding.clear_color;
-        color.setClearColor(MTLClearColor {
-            red: r,
-            green: g,
-            blue: b,
-            alpha: a,
-        });
+        let layout = pass
+            .layout
+            .color_attachments
+            .get(attachment_index as usize)
+            .ok_or_else(|| texture_error("subpass color attachment layout missing"))?;
+        let target = subpass_color_target(binding, layout.format);
+        set_render_color_target(&descriptor, attachment_index as usize, &target)?;
     }
     if let Some(layout_depth_stencil) = &pass.layout.depth_stencil_attachment {
         let uses_depth_stencil = pass
@@ -1106,6 +1167,8 @@ pub(super) fn subpass_render_pass_descriptor(
                 if format_has_depth_aspect(format) {
                     let depth_attachment = descriptor.depthAttachment();
                     depth_attachment.setTexture(Some(subpass_attachment_texture(&depth.resource)?));
+                    depth_attachment.setLevel(0);
+                    depth_attachment.setSlice(0);
                     depth_attachment.setLoadAction(mtl_load_action(depth.depth_load_op));
                     depth_attachment.setStoreAction(mtl_store_action(depth.depth_store));
                     depth_attachment.setClearDepth(f64::from(depth.depth_clear_value));
@@ -1114,6 +1177,8 @@ pub(super) fn subpass_render_pass_descriptor(
                     let stencil_attachment = descriptor.stencilAttachment();
                     stencil_attachment
                         .setTexture(Some(subpass_attachment_texture(&depth.resource)?));
+                    stencil_attachment.setLevel(0);
+                    stencil_attachment.setSlice(0);
                     stencil_attachment.setLoadAction(mtl_load_action(depth.stencil_load_op));
                     stencil_attachment.setStoreAction(mtl_store_action(depth.stencil_store));
                     stencil_attachment.setClearStencil(depth.stencil_clear_value);
@@ -1122,6 +1187,34 @@ pub(super) fn subpass_render_pass_descriptor(
         }
     }
     Ok(descriptor)
+}
+
+// Persistent subpass resources carry whole textures, with no mip/layer view
+// metadata. Bind their base subresource explicitly, including the resolve.
+#[cfg(feature = "tiled")]
+fn subpass_color_target(
+    binding: &crate::HalSubpassColorAttachment,
+    format: HalTextureFormat,
+) -> crate::HalRenderColorTarget {
+    match &binding.resource {
+        HalSubpassAttachmentResource::Persistent {
+            texture,
+            resolve_target,
+        } => crate::HalRenderColorTarget {
+            texture: texture.clone(),
+            view_format: format,
+            resolve_target: resolve_target.clone(),
+            resolve_view_format: resolve_target.as_ref().map(|_| format),
+            mip_level: 0,
+            array_layer: 0,
+            depth_slice: 0,
+            resolve_mip_level: 0,
+            resolve_array_layer: 0,
+            load_op: binding.load_op,
+            store: binding.store,
+            clear_color: binding.clear_color,
+        },
+    }
 }
 
 #[cfg(feature = "tiled")]
@@ -1143,7 +1236,15 @@ fn subpass_attachment_texture(
 ) -> Result<&ProtocolObject<dyn MTLTextureTrait>, HalError> {
     #[allow(unreachable_patterns)]
     match resource {
-        HalSubpassAttachmentResource::Persistent { texture, .. } => {
+        HalSubpassAttachmentResource::Persistent {
+            texture,
+            resolve_target,
+        } => {
+            if resolve_target.is_some() {
+                return Err(texture_error(
+                    "depth-stencil subpass resolve is unsupported",
+                ));
+            }
             let HalTexture::Metal(texture) = texture else {
                 return Err(texture_error("subpass attachment is not Metal-backed"));
             };
@@ -2083,6 +2184,233 @@ mod tests {
     };
 
     #[test]
+    fn attachment_view_format_uses_raw_texture_only_when_formats_match() {
+        use HalTextureFormat::{Rgba8Unorm, Rgba8UnormSrgb};
+        for format in [Rgba8Unorm, Rgba8UnormSrgb] {
+            assert_eq!(attachment_view_pixel_format(format, format).unwrap(), None);
+        }
+        assert_eq!(
+            attachment_view_pixel_format(Rgba8Unorm, Rgba8UnormSrgb).unwrap(),
+            Some(MTLPixelFormat::RGBA8Unorm_sRGB)
+        );
+        assert_eq!(
+            attachment_view_pixel_format(Rgba8UnormSrgb, Rgba8Unorm).unwrap(),
+            Some(MTLPixelFormat::RGBA8Unorm)
+        );
+    }
+
+    #[test]
+    fn texture_copy_locations_preserve_xy_and_select_array_slice_or_volume_z() {
+        for dimension in [
+            HalTextureDimension::D1,
+            HalTextureDimension::D2,
+            HalTextureDimension::D3,
+        ] {
+            let origin = crate::HalOrigin3d { x: 2, y: 3, z: 4 };
+            for layer in 0..3 {
+                let (slice, location) = texture_copy_location(dimension, origin, layer).unwrap();
+                assert_eq!((location.x, location.y), (2, 3));
+                if dimension == HalTextureDimension::D3 {
+                    assert_eq!((slice, location.z), (0, (4 + layer) as usize));
+                } else {
+                    assert_eq!((slice, location.z), ((4 + layer) as usize, 0));
+                }
+            }
+            assert!(texture_copy_location(
+                dimension,
+                crate::HalOrigin3d {
+                    x: 0,
+                    y: 0,
+                    z: u32::MAX,
+                },
+                1
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "noop", feature = "tiled"))]
+    fn subpass_color_builder_preserves_resolve_and_binds_base_subresources() {
+        let device = crate::noop::NoopDevice::new();
+        let texture = HalTexture::Noop(device.create_texture(&texture_descriptor()).unwrap());
+        for resolve in [false, true] {
+            for store in [false, true] {
+                let binding = HalSubpassColorAttachment {
+                    resource: HalSubpassAttachmentResource::Persistent {
+                        texture: texture.clone(),
+                        resolve_target: resolve.then(|| texture.clone()),
+                    },
+                    load_op: HalRenderLoadOp::Clear,
+                    store,
+                    clear_color: [0.25, 0.5, 0.75, 1.0],
+                };
+                let target = subpass_color_target(&binding, HalTextureFormat::Rgba8UnormSrgb);
+                assert_eq!(target.resolve_target.is_some(), resolve);
+                assert_eq!(target.view_format, HalTextureFormat::Rgba8UnormSrgb);
+                assert_eq!(
+                    target.resolve_view_format,
+                    resolve.then_some(HalTextureFormat::Rgba8UnormSrgb)
+                );
+                assert_eq!(
+                    (target.mip_level, target.array_layer, target.depth_slice),
+                    (0, 0, 0)
+                );
+                assert_eq!(
+                    (target.resolve_mip_level, target.resolve_array_layer),
+                    (0, 0)
+                );
+                assert_eq!(target.store, store);
+                assert!(matches!(target.load_op, HalRenderLoadOp::Clear));
+                assert_eq!(target.clear_color, binding.clear_color);
+                if resolve {
+                    assert!(subpass_attachment_texture(&binding.resource).is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    fn texture_copy_encoder_handles_array_volume_directions() {
+        let device = metal_device();
+        let mut descriptor = texture_descriptor();
+        descriptor.depth_or_array_layers = 5;
+        let array = device.create_texture(&descriptor).unwrap();
+        descriptor.dimension = HalTextureDimension::D3;
+        let volume = device.create_texture(&descriptor).unwrap();
+        let volume_destination = device.create_texture(&descriptor).unwrap();
+        descriptor.dimension = HalTextureDimension::D2;
+        let array_destination = device.create_texture(&descriptor).unwrap();
+        let command = device.queue().inner.commandBuffer().unwrap();
+        let blit = command.blitCommandEncoder().unwrap();
+        // Nonzero, different source/destination z offsets in both directions.
+        for (source, destination) in [
+            (&array, &volume),
+            (&volume, &array),
+            (&volume, &volume_destination),
+            (&array, &array_destination),
+        ] {
+            let copy = HalTextureCopy {
+                source: HalTexture::Metal(source.clone()),
+                destination: HalTexture::Metal(destination.clone()),
+                source_mip_level: 0,
+                destination_mip_level: 0,
+                source_origin: crate::HalOrigin3d { x: 0, y: 0, z: 1 },
+                destination_origin: crate::HalOrigin3d { x: 0, y: 0, z: 2 },
+                extent: HalExtent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 3,
+                },
+            };
+            encode_texture_to_texture(&blit, &copy).unwrap();
+        }
+        blit.endEncoding();
+        finish_clear_test_commands(&command);
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    fn color_descriptor_uses_independent_format_views_and_original_subresources() {
+        let device = metal_device();
+        let mut descriptor = texture_descriptor();
+        descriptor.width = 8;
+        descriptor.height = 8;
+        descriptor.depth_or_array_layers = 3;
+        descriptor.mip_level_count = 2;
+        let texture = device.create_texture(&descriptor).unwrap();
+        let resolve = device.create_texture(&descriptor).unwrap();
+        for (color_format, resolve_format) in [
+            (
+                HalTextureFormat::Rgba8Unorm,
+                HalTextureFormat::Rgba8UnormSrgb,
+            ),
+            (
+                HalTextureFormat::Rgba8UnormSrgb,
+                HalTextureFormat::Rgba8Unorm,
+            ),
+        ] {
+            let target = crate::HalRenderColorTarget {
+                texture: HalTexture::Metal(texture.clone()),
+                view_format: color_format,
+                resolve_target: Some(HalTexture::Metal(resolve.clone())),
+                resolve_view_format: Some(resolve_format),
+                mip_level: 1,
+                array_layer: 2,
+                depth_slice: 0,
+                resolve_mip_level: 1,
+                resolve_array_layer: 1,
+                load_op: HalRenderLoadOp::Clear,
+                store: true,
+                clear_color: [0.25, 0.5, 0.75, 1.0],
+            };
+            let pass = HalRenderPassCommandStream {
+                color_targets: vec![Some(target)],
+                ..Default::default()
+            };
+            let result = render_pass_command_stream_descriptor(&pass).unwrap();
+            let color = unsafe { result.colorAttachments().objectAtIndexedSubscript(0) };
+            assert_eq!(
+                color.texture().unwrap().pixelFormat(),
+                map_texture_format(color_format).unwrap().0
+            );
+            assert_eq!(
+                color.resolveTexture().unwrap().pixelFormat(),
+                map_texture_format(resolve_format).unwrap().0
+            );
+            assert_eq!((color.level(), color.slice()), (1, 2));
+            assert_eq!((color.resolveLevel(), color.resolveSlice()), (1, 1));
+            assert_eq!(
+                color.storeAction(),
+                MTLStoreAction::StoreAndMultisampleResolve
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "tiled")]
+    #[ignore = "manual real Metal backend test"]
+    fn subpass_descriptor_sets_resolve_texture_and_store_action() {
+        let device = metal_device();
+        let mut descriptor = texture_descriptor();
+        let resolve = device.create_texture(&descriptor).unwrap();
+        descriptor.sample_count = 4;
+        let texture = device.create_texture(&descriptor).unwrap();
+        for store in [false, true] {
+            let mut binding = subpass_attachment(HalTexture::Metal(texture.clone()));
+            binding.resource = HalSubpassAttachmentResource::Persistent {
+                texture: HalTexture::Metal(texture.clone()),
+                resolve_target: Some(HalTexture::Metal(resolve.clone())),
+            };
+            binding.store = store;
+            let mut pass = two_subpass_shared_color_command(vec![binding]);
+            pass.layout.color_attachments[0].sample_count = 4;
+            let result = subpass_render_pass_descriptor(&pass).unwrap();
+            let color = unsafe { result.colorAttachments().objectAtIndexedSubscript(0) };
+            assert!(color.texture().is_some());
+            assert!(color.resolveTexture().is_some());
+            assert_eq!(
+                (
+                    color.level(),
+                    color.slice(),
+                    color.resolveLevel(),
+                    color.resolveSlice()
+                ),
+                (0, 0, 0, 0)
+            );
+            assert_eq!(
+                color.storeAction(),
+                if store {
+                    MTLStoreAction::StoreAndMultisampleResolve
+                } else {
+                    MTLStoreAction::MultisampleResolve
+                }
+            );
+        }
+    }
+
+    #[test]
     fn clear_strategy_selects_aspects_samples_and_blocks() {
         use HalTextureAspect::{All, DepthOnly, StencilOnly};
         for format in [
@@ -2718,7 +3046,7 @@ mod tests {
             error,
             HalError::BufferOperationFailed {
                 backend: "metal",
-                message: "subpass attachment is not Metal-backed"
+                message: "render target is not Metal-backed"
             }
         ));
     }
