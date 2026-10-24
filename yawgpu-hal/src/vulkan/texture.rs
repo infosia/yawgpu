@@ -594,6 +594,7 @@ pub(super) fn buffer_write_read_barrier_dst_access_mask() -> vk::AccessFlags {
         | vk::AccessFlags::TRANSFER_WRITE
         | vk::AccessFlags::INDIRECT_COMMAND_READ
         | vk::AccessFlags::INDEX_READ
+        | vk::AccessFlags::VERTEX_ATTRIBUTE_READ
 }
 
 pub(super) fn buffer_write_read_barrier_dst_stage_mask() -> vk::PipelineStageFlags {
@@ -642,7 +643,10 @@ pub(super) fn access_mask_for_layout(layout: vk::ImageLayout) -> vk::AccessFlags
     match layout {
         vk::ImageLayout::TRANSFER_DST_OPTIMAL => vk::AccessFlags::TRANSFER_WRITE,
         vk::ImageLayout::TRANSFER_SRC_OPTIMAL => vk::AccessFlags::TRANSFER_READ,
-        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => {
+            // LOAD reads the attachment before blending or stores can write it.
+            vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+        }
         vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => {
             vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
                 | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
@@ -969,8 +973,9 @@ mod tests {
     }
 
     #[test]
-    fn buffer_write_read_barrier_covers_indirect_index_and_copy_source_reads() {
+    fn buffer_write_read_barrier_covers_vertex_indirect_index_and_copy_source_reads() {
         let access = buffer_write_read_barrier_dst_access_mask();
+        assert!(access.contains(vk::AccessFlags::VERTEX_ATTRIBUTE_READ));
         assert!(access.contains(vk::AccessFlags::INDIRECT_COMMAND_READ));
         assert!(access.contains(vk::AccessFlags::INDEX_READ));
         assert!(access.contains(vk::AccessFlags::TRANSFER_READ));
@@ -979,6 +984,44 @@ mod tests {
         assert!(stages.contains(vk::PipelineStageFlags::DRAW_INDIRECT));
         assert!(stages.contains(vk::PipelineStageFlags::VERTEX_INPUT));
         assert!(stages.contains(vk::PipelineStageFlags::TRANSFER));
+    }
+
+    #[test]
+    fn attachment_layout_barriers_cover_load_reads_and_writes() {
+        let runs = [LayoutRun {
+            range: SubresourceRange {
+                base_mip_level: 0,
+                mip_level_count: 1,
+                base_array_layer: 0,
+                array_layer_count: 1,
+            },
+            old_state: IMAGE_LAYOUT_TRANSFER_DST,
+        }];
+        for (layout, aspects, access, stages) in [
+            (
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                vk::ImageAspectFlags::COLOR,
+                vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            ),
+            (
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
+                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+            ),
+        ] {
+            assert_eq!(access_mask_for_layout(layout), access);
+            assert_eq!(stage_mask_for_layout(layout), stages);
+            let (barriers, src_stages) = layout_barriers(vk::Image::null(), aspects, &runs, layout);
+            assert_eq!(src_stages, vk::PipelineStageFlags::TRANSFER);
+            assert_eq!(barriers.len(), 1);
+            assert_eq!(barriers[0].new_layout, layout);
+            assert_eq!(barriers[0].src_access_mask, vk::AccessFlags::TRANSFER_WRITE);
+            assert_eq!(barriers[0].dst_access_mask, access);
+        }
     }
 
     #[test]
@@ -1082,7 +1125,7 @@ mod tests {
             assert_eq!(barriers[0].new_layout, destination);
             assert_eq!(
                 barriers[0].src_access_mask,
-                vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE
             );
             assert_eq!(
                 barriers[0].dst_access_mask,

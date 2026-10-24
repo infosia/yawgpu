@@ -1386,21 +1386,15 @@ pub(super) fn encode_resolve_query_set(
                 vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
             );
         }
-        if query_resolve_needs_shader_barrier(query_set.kind()) {
-            query_resolve_copy_to_shader_barrier(
-                device,
-                command_buffer,
-                destination_buffer,
-                resolve.destination_offset,
-                byte_count,
-            );
-        }
+        query_resolve_copy_to_read_barrier(
+            device,
+            command_buffer,
+            destination_buffer,
+            resolve.destination_offset,
+            byte_count,
+        );
     }
     Ok(())
-}
-
-fn query_resolve_needs_shader_barrier(kind: HalQueryKind) -> bool {
-    kind == HalQueryKind::Timestamp
 }
 
 fn query_resolve_fill_to_copy_barrier(
@@ -1431,25 +1425,20 @@ fn query_resolve_fill_to_copy_barrier(
     }
 }
 
-/// Makes the resolved query results visible to the compute pass that converts
-/// them (Block 102 R3).
-///
-/// `vkCmdCopyQueryPoolResults` is a transfer write, and for a timestamp set
-/// core follows the resolve with the timestamp-to-nanoseconds conversion
-/// dispatch reading the very same range as a storage buffer. The range barrier
-/// pairs the copies with those shader accesses; the compute pass's own global
-/// barrier covers the same hazard more coarsely, so this one keeps the
-/// dependency scoped to the resolved bytes.
-fn query_resolve_copy_to_shader_barrier(
+/// Publishes both the zero fill and copied query results to later buffer uses.
+/// This applies to every query kind, even when no slots were written. Timestamp
+/// conversion is one consumer; copies and draws need the same dependency.
+fn query_resolve_copy_to_read_barrier(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
     buffer: vk::Buffer,
     offset: u64,
     size: u64,
 ) {
+    let scopes = query_resolve_outgoing_barrier_scopes();
     let barrier = vk::BufferMemoryBarrier::default()
-        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-        .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
+        .src_access_mask(scopes.src_access)
+        .dst_access_mask(scopes.dst_access)
         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .buffer(buffer)
@@ -1458,13 +1447,22 @@ fn query_resolve_copy_to_shader_barrier(
     unsafe {
         device.cmd_pipeline_barrier(
             command_buffer,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
+            scopes.src_stages,
+            scopes.dst_stages,
             vk::DependencyFlags::empty(),
             &[],
             &[barrier],
             &[],
         );
+    }
+}
+
+fn query_resolve_outgoing_barrier_scopes() -> MemoryBarrierScopes {
+    MemoryBarrierScopes {
+        src_stages: vk::PipelineStageFlags::TRANSFER,
+        src_access: vk::AccessFlags::TRANSFER_WRITE,
+        dst_stages: buffer_write_read_barrier_dst_stage_mask(),
+        dst_access: buffer_write_read_barrier_dst_access_mask(),
     }
 }
 
@@ -1893,7 +1891,7 @@ pub(super) fn encode_compute_pass(
     })
 }
 
-/// Stage and access scopes of a global (`VkMemoryBarrier`) dependency.
+/// Stage and access scopes of a memory dependency.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MemoryBarrierScopes {
     src_stages: vk::PipelineStageFlags,
@@ -4171,7 +4169,11 @@ fn render_attachment_stage_flags() -> vk::PipelineStageFlags {
 }
 
 fn render_attachment_access_flags() -> vk::AccessFlags {
-    vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
+    // Load operations read both color and depth/stencil attachments.
+    vk::AccessFlags::COLOR_ATTACHMENT_READ
+        | vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+        | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+        | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
 }
 
 fn framebuffer_fetch_self_dependency() -> vk::SubpassDependency {
@@ -4759,6 +4761,7 @@ mod tests {
                 | vk::AccessFlags::TRANSFER_WRITE
                 | vk::AccessFlags::INDIRECT_COMMAND_READ
                 | vk::AccessFlags::INDEX_READ
+                | vk::AccessFlags::VERTEX_ATTRIBUTE_READ
         ));
     }
 
@@ -4767,7 +4770,9 @@ mod tests {
         let stages = vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
             | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
             | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS;
-        let writes = vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+        let accesses = vk::AccessFlags::COLOR_ATTACHMENT_READ
+            | vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+            | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
             | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE;
         for framebuffer_fetch in [false, true] {
             let dependencies = render_pass_dependencies(framebuffer_fetch);
@@ -4776,8 +4781,8 @@ mod tests {
             assert_eq!(dependency_in.dst_subpass, 0);
             assert_eq!(dependency_in.src_stage_mask, stages);
             assert_eq!(dependency_in.dst_stage_mask, stages);
-            assert_eq!(dependency_in.src_access_mask, writes);
-            assert_eq!(dependency_in.dst_access_mask, writes);
+            assert_eq!(dependency_in.src_access_mask, accesses);
+            assert_eq!(dependency_in.dst_access_mask, accesses);
         }
     }
 
@@ -4910,13 +4915,51 @@ mod tests {
     }
 
     #[test]
-    fn query_resolve_shader_barrier_is_timestamp_only() {
-        assert!(super::query_resolve_needs_shader_barrier(
-            crate::HalQueryKind::Timestamp
-        ));
-        assert!(!super::query_resolve_needs_shader_barrier(
-            crate::HalQueryKind::Occlusion
-        ));
+    fn query_resolve_outgoing_barrier_covers_later_buffer_uses() {
+        let scopes = query_resolve_outgoing_barrier_scopes();
+        assert_eq!(scopes.src_stages, vk::PipelineStageFlags::TRANSFER);
+        assert_eq!(scopes.src_access, vk::AccessFlags::TRANSFER_WRITE);
+        assert_eq!(
+            scopes.dst_stages,
+            buffer_write_read_barrier_dst_stage_mask()
+        );
+        assert_eq!(
+            scopes.dst_access,
+            buffer_write_read_barrier_dst_access_mask()
+        );
+        for (stage, access) in [
+            (
+                vk::PipelineStageFlags::TRANSFER,
+                vk::AccessFlags::TRANSFER_READ,
+            ),
+            (
+                vk::PipelineStageFlags::TRANSFER,
+                vk::AccessFlags::TRANSFER_WRITE,
+            ),
+            (
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+            ),
+            (
+                vk::PipelineStageFlags::VERTEX_SHADER,
+                vk::AccessFlags::SHADER_READ,
+            ),
+            (
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::AccessFlags::SHADER_READ,
+            ),
+            (
+                vk::PipelineStageFlags::VERTEX_INPUT,
+                vk::AccessFlags::VERTEX_ATTRIBUTE_READ | vk::AccessFlags::INDEX_READ,
+            ),
+            (
+                vk::PipelineStageFlags::DRAW_INDIRECT,
+                vk::AccessFlags::INDIRECT_COMMAND_READ,
+            ),
+        ] {
+            assert!(scopes.dst_stages.contains(stage));
+            assert!(scopes.dst_access.contains(access));
+        }
     }
 
     #[cfg(feature = "vulkan")]
@@ -6130,6 +6173,22 @@ mod tests {
         };
 
         let dependencies = subpass_dependencies(&pass.layout);
+        let dependency_in = &dependencies[0];
+        assert_eq!(dependency_in.src_subpass, vk::SUBPASS_EXTERNAL);
+        assert_eq!(dependency_in.dst_subpass, 0);
+        assert_eq!(
+            dependency_in.dst_stage_mask,
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS
+        );
+        assert_eq!(
+            dependency_in.dst_access_mask,
+            vk::AccessFlags::COLOR_ATTACHMENT_READ
+                | vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
+        );
         let dependency = dependencies
             .iter()
             .find(|dependency| dependency.src_subpass == 0 && dependency.dst_subpass == 1)
