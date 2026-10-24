@@ -45,6 +45,12 @@ pub(super) fn record_and_submit_copies(
     let mut command_pool_cleanup = Some(command_pool);
     let surface_pending = find_surface_pending(copies);
     let result = (|| {
+        // Serialize layout reads, command recording, submission and layout commit.
+        let _queue_access = queue
+            .queue_access
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut layouts = LayoutOverlay::default();
         let allocate_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
@@ -77,6 +83,7 @@ pub(super) fn record_and_submit_copies(
                 }
                 HalCopy::ClearTexture(clear) => {
                     encode_texture_clear(
+                        &mut layouts,
                         &queue.device.device,
                         command_buffer,
                         clear,
@@ -90,13 +97,24 @@ pub(super) fn record_and_submit_copies(
                     encode_resolve_query_set(&queue.device.device, command_buffer, resolve)?;
                 }
                 HalCopy::BufferToTexture(copy) => {
-                    encode_buffer_to_texture(&queue.device.device, command_buffer, copy)?;
+                    encode_buffer_to_texture(
+                        &mut layouts,
+                        &queue.device.device,
+                        command_buffer,
+                        copy,
+                    )?;
                 }
                 HalCopy::TextureToBuffer(copy) => {
-                    encode_texture_to_buffer(&queue.device.device, command_buffer, copy)?;
+                    encode_texture_to_buffer(
+                        &mut layouts,
+                        &queue.device.device,
+                        command_buffer,
+                        copy,
+                    )?;
                 }
                 HalCopy::TextureToTexture(copy) => {
                     encode_texture_to_texture(
+                        &mut layouts,
                         &queue.device.device,
                         command_buffer,
                         copy,
@@ -104,15 +122,24 @@ pub(super) fn record_and_submit_copies(
                     )?;
                 }
                 HalCopy::ComputePass(pass) => {
-                    let temps = encode_compute_pass(&queue.device.device, command_buffer, pass)?;
+                    let temps = encode_compute_pass(
+                        &mut layouts,
+                        &queue.device.device,
+                        command_buffer,
+                        pass,
+                    )?;
                     if let Some(pool) = temps.descriptor_pool {
                         descriptor_pools.push(pool);
                     }
                     image_views.extend(temps.image_views);
                 }
                 HalCopy::RenderPassCommandStream(pass) => {
-                    let temps =
-                        encode_render_pass_command_stream(&queue.device, command_buffer, pass)?;
+                    let temps = encode_render_pass_command_stream(
+                        &mut layouts,
+                        &queue.device,
+                        command_buffer,
+                        pass,
+                    )?;
                     descriptor_pools.extend(temps.descriptor_pools);
                     framebuffers.push(temps.framebuffer);
                     image_views.extend(temps.image_views);
@@ -122,7 +149,12 @@ pub(super) fn record_and_submit_copies(
                 }
                 #[cfg(feature = "tiled")]
                 HalCopy::SubpassRenderPass(pass) => {
-                    let temps = encode_subpass_render_pass(&queue.device, command_buffer, pass)?;
+                    let temps = encode_subpass_render_pass(
+                        &mut layouts,
+                        &queue.device,
+                        command_buffer,
+                        pass,
+                    )?;
                     descriptor_pools.extend(temps.descriptor_pools);
                     framebuffers.push(temps.framebuffer);
                     image_views.extend(temps.image_views);
@@ -150,7 +182,7 @@ pub(super) fn record_and_submit_copies(
                 if let Some(pending) = state.pending_acquire.as_mut() {
                     if !pending.consumed {
                         wait_semaphores.push(pending.acquired_sem);
-                        wait_stages.push(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT);
+                        wait_stages.push(acquire_wait_stage());
                         signal_semaphores.push(pending.render_finished_sem);
                         pending.consumed = true;
                         surface_retire = Some(Arc::clone(pending_state));
@@ -170,14 +202,8 @@ pub(super) fn record_and_submit_copies(
                 .command_buffers(&command_buffers)
                 .signal_semaphores(&signal_semaphores);
             let (submission_index, tracked_submission) = {
-                // Vulkan queues require externally synchronized submission.
-                // Queue access serializes all host queue operations, while
-                // holding the timeline lock through vkQueueSubmit makes index
-                // order match Vulkan queue order.
-                let _queue_access = queue
-                    .queue_access
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                // Queue access is held from recording through layout commit.
+                // The timeline lock makes index order match Vulkan queue order.
                 let mut submissions = queue
                     .submissions
                     .lock()
@@ -188,6 +214,7 @@ pub(super) fn record_and_submit_copies(
                     .device
                     .queue_submit(queue.queue, &[submit_info], created_fence)
                     .map_err(|error| queue_submission_error("vkQueueSubmit", error))?;
+                layouts.commit();
                 submissions.register_fence(submission_index, created_fence);
                 (
                     submission_index,
@@ -270,6 +297,12 @@ pub(super) fn transition_swapchain_image_to_present(
     fence: vk::Fence,
     submitted: &mut bool,
 ) -> Result<(), HalError> {
+    let _queue_access = queue
+        .inner
+        .queue_access
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut layouts = LayoutOverlay::default();
     let inner = texture.inner()?;
     let command_pool = {
         let mut state = pending_state
@@ -332,6 +365,7 @@ pub(super) fn transition_swapchain_image_to_present(
                 })?;
         }
         transition_image(
+            &mut layouts,
             &queue.inner.device.device,
             command_buffer,
             inner,
@@ -350,7 +384,7 @@ pub(super) fn transition_swapchain_image_to_present(
                 })?;
             let command_buffers = [command_buffer];
             let wait_semaphores = [wait_semaphore];
-            let wait_stages = [vk::PipelineStageFlags::BOTTOM_OF_PIPE];
+            let wait_stages = [acquire_wait_stage()];
             let signal_semaphores = [signal_semaphore];
             let submit_info = vk::SubmitInfo::default()
                 .wait_semaphores(&wait_semaphores)
@@ -358,11 +392,6 @@ pub(super) fn transition_swapchain_image_to_present(
                 .command_buffers(&command_buffers)
                 .signal_semaphores(&signal_semaphores);
             {
-                let _queue_access = queue
-                    .inner
-                    .queue_access
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 queue
                     .inner
                     .device
@@ -373,6 +402,7 @@ pub(super) fn transition_swapchain_image_to_present(
                         message: "queue submit failed",
                     })?;
             }
+            layouts.commit();
             *submitted = true;
             pending_state
                 .lock()
@@ -1012,6 +1042,7 @@ fn texture_clear_write_after_write_barrier(
 /// Layout transitions cover the clear's mip and layers and every image aspect,
 /// even when the clear itself touches only one depth/stencil plane.
 pub(super) fn encode_texture_clear(
+    layouts: &mut LayoutOverlay,
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
     clear: &HalTextureClear,
@@ -1027,6 +1058,7 @@ pub(super) fn encode_texture_clear(
             let range =
                 texture_clear_subresource_range(texture, clear, vk::ImageAspectFlags::COLOR);
             transition_image_range(
+                layouts,
                 device,
                 command_buffer,
                 texture_inner,
@@ -1057,6 +1089,7 @@ pub(super) fn encode_texture_clear(
             }
             let range = texture_clear_subresource_range(texture, clear, aspects);
             transition_image_range(
+                layouts,
                 device,
                 command_buffer,
                 texture_inner,
@@ -1094,11 +1127,11 @@ pub(super) fn encode_texture_clear(
             block_width,
             block_height,
         } => encode_compressed_texture_clear(
+            layouts,
             device,
             command_buffer,
             clear,
             texture,
-            texture_inner,
             (block_bytes, block_width, block_height),
             temporary_resources,
         )?,
@@ -1116,14 +1149,15 @@ pub(super) fn encode_texture_clear(
 /// (per depth slice for a 3D texture) keeps every `bufferOffset` a multiple of
 /// both four and the block size.
 fn encode_compressed_texture_clear(
+    layouts: &mut LayoutOverlay,
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
     clear: &HalTextureClear,
     texture: &VulkanTexture,
-    texture_inner: &VulkanTextureInner,
     block: (u32, u32, u32),
     temporary_resources: &mut Vec<RetainedResource>,
 ) -> Result<(), HalError> {
+    let texture_inner = texture.inner()?;
     let (block_bytes, block_width, block_height) = block;
     let (mip_width, mip_height) = mip_extent(texture.width, texture.height, clear.mip_level);
     let (bytes_per_row, bytes_per_image) = compressed_clear_layout(mip_width, mip_height, block)?;
@@ -1210,6 +1244,7 @@ fn encode_compressed_texture_clear(
         )?);
     }
     transition_image_range(
+        layouts,
         device,
         command_buffer,
         texture_inner,
@@ -1435,6 +1470,7 @@ fn query_resolve_copy_to_shader_barrier(
 
 /// Records encode into the command stream.
 pub(super) fn encode_buffer_to_texture(
+    layouts: &mut LayoutOverlay,
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
     copy: &HalBufferTextureCopy,
@@ -1455,6 +1491,7 @@ pub(super) fn encode_buffer_to_texture(
     // The layout barrier covers the copied mip/layers and both depth/stencil
     // aspects. Only the copy region above may narrow the aspect selection.
     transition_image_range(
+        layouts,
         device,
         command_buffer,
         texture_inner,
@@ -1481,6 +1518,7 @@ pub(super) fn encode_buffer_to_texture(
 
 /// Records encode into the command stream.
 pub(super) fn encode_texture_to_buffer(
+    layouts: &mut LayoutOverlay,
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
     copy: &HalBufferTextureCopy,
@@ -1501,6 +1539,7 @@ pub(super) fn encode_texture_to_buffer(
     // The layout barrier covers the copied mip/layers and both depth/stencil
     // aspects. Only the copy region above may narrow the aspect selection.
     transition_image_range(
+        layouts,
         device,
         command_buffer,
         texture_inner,
@@ -1528,6 +1567,7 @@ pub(super) fn encode_texture_to_buffer(
 
 /// Records encode into the command stream.
 pub(super) fn encode_texture_to_texture(
+    layouts: &mut LayoutOverlay,
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
     copy: &HalTextureCopy,
@@ -1591,6 +1631,7 @@ pub(super) fn encode_texture_to_texture(
         // the caller drops it after destroying the unsubmitted command pool.
         temporary_resources.push(RetainedResource::Buffer { _inner: buffer });
         transition_image_range(
+            layouts,
             device,
             command_buffer,
             source_inner,
@@ -1626,6 +1667,7 @@ pub(super) fn encode_texture_to_texture(
         }
         // Transition the destination after the read, including shared images.
         transition_image_range(
+            layouts,
             device,
             command_buffer,
             destination_inner,
@@ -1678,6 +1720,7 @@ pub(super) fn encode_texture_to_texture(
         texture_copy_layouts(same_image, region.src_subresource, region.dst_subresource);
     if same_image && source_layout == vk::ImageLayout::GENERAL {
         transition_image_range(
+            layouts,
             device,
             command_buffer,
             source_inner,
@@ -1687,6 +1730,7 @@ pub(super) fn encode_texture_to_texture(
         )?;
     } else {
         transition_image_range(
+            layouts,
             device,
             command_buffer,
             source_inner,
@@ -1695,6 +1739,7 @@ pub(super) fn encode_texture_to_texture(
             IMAGE_LAYOUT_TRANSFER_SRC,
         )?;
         transition_image_range(
+            layouts,
             device,
             command_buffer,
             destination_inner,
@@ -1738,6 +1783,7 @@ fn texture_copy_layouts(
 
 /// Records encode into the command stream.
 pub(super) fn encode_compute_pass(
+    layouts: &mut LayoutOverlay,
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
     pass: &HalComputePass,
@@ -1771,8 +1817,8 @@ pub(super) fn encode_compute_pass(
             return Err(error);
         }
     };
-    transition_sampled_textures(device, command_buffer, &pass.bind_textures, &[])?;
-    transition_storage_textures(device, command_buffer, &pass.bind_textures, &[])?;
+    transition_sampled_textures(layouts, device, command_buffer, &pass.bind_textures, &[])?;
+    transition_storage_textures(layouts, device, command_buffer, &pass.bind_textures, &[])?;
     record_memory_barrier(
         device,
         command_buffer,
@@ -1875,6 +1921,21 @@ fn record_memory_barrier(
             &[],
             &[],
         );
+    }
+}
+
+/// The acquire wait must precede even a transition, copy or compute image use.
+fn acquire_wait_stage() -> vk::PipelineStageFlags {
+    vk::PipelineStageFlags::ALL_COMMANDS
+}
+
+/// Publishes vertex/fragment storage writes to subsequent consumers and writers.
+fn render_pass_shader_write_scopes() -> MemoryBarrierScopes {
+    MemoryBarrierScopes {
+        src_stages: vk::PipelineStageFlags::VERTEX_SHADER | vk::PipelineStageFlags::FRAGMENT_SHADER,
+        src_access: vk::AccessFlags::SHADER_WRITE,
+        dst_stages: buffer_write_read_barrier_dst_stage_mask(),
+        dst_access: buffer_write_read_barrier_dst_access_mask(),
     }
 }
 
@@ -2006,6 +2067,7 @@ fn subtract_subresource_ranges(
 /// Transitions storage views to GENERAL outside this pass's attachment subresources.
 /// Attachment intersections stay skipped, preserving Block 105 "Known limitations".
 fn transition_storage_textures(
+    layouts: &mut LayoutOverlay,
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
     textures: &[HalBoundTexture],
@@ -2025,6 +2087,7 @@ fn transition_storage_textures(
             .collect();
         for range in subtract_subresource_ranges(bound_view_subresource_range(bound), &exclusions) {
             transition_image_range(
+                layouts,
                 device,
                 command_buffer,
                 inner,
@@ -2041,6 +2104,7 @@ fn transition_storage_textures(
 /// A read-only depth-stencil attachment sampled in the same pass stays skipped
 /// (Block 105 "Known limitations"); other mips/layers of its image still transition.
 fn transition_sampled_textures(
+    layouts: &mut LayoutOverlay,
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
     textures: &[HalBoundTexture],
@@ -2067,7 +2131,7 @@ fn transition_sampled_textures(
             )
         };
         for range in subtract_subresource_ranges(bound_view_subresource_range(bound), &exclusions) {
-            transition_image_range(device, command_buffer, inner, range, layout, state)?;
+            transition_image_range(layouts, device, command_buffer, inner, range, layout, state)?;
         }
     }
     Ok(())
@@ -2090,6 +2154,7 @@ pub(super) struct RenderPassTemps {
 /// Records a tiled subpass render pass into the command stream.
 #[cfg(feature = "tiled")]
 pub(super) fn encode_subpass_render_pass(
+    layouts: &mut LayoutOverlay,
     device: &VulkanDeviceInner,
     command_buffer: vk::CommandBuffer,
     pass: &HalSubpassRenderPassCommand,
@@ -2117,6 +2182,7 @@ pub(super) fn encode_subpass_render_pass(
             )
         };
         transition_image(
+            layouts,
             &device.device,
             command_buffer,
             texture.inner()?,
@@ -2126,6 +2192,7 @@ pub(super) fn encode_subpass_render_pass(
     }
     if let Some(texture) = depth_stencil_texture {
         transition_image(
+            layouts,
             &device.device,
             command_buffer,
             texture.inner()?,
@@ -2158,9 +2225,21 @@ pub(super) fn encode_subpass_render_pass(
     }
     let bound = subpass_bound_textures(pass);
     // All barriers precede the pass and exclude its whole-image attachment views.
-    transition_sampled_textures(&device.device, command_buffer, &bound, &attachments)?;
+    transition_sampled_textures(
+        layouts,
+        &device.device,
+        command_buffer,
+        &bound,
+        &attachments,
+    )?;
     // Sharing sampled views already use GENERAL across their whole range.
-    transition_storage_textures(&device.device, command_buffer, &bound, &attachments)?;
+    transition_storage_textures(
+        layouts,
+        &device.device,
+        command_buffer,
+        &bound,
+        &attachments,
+    )?;
     let framebuffer_info = vk::FramebufferCreateInfo::default()
         .render_pass(render_pass)
         .attachments(&views)
@@ -2215,9 +2294,15 @@ pub(super) fn encode_subpass_render_pass(
     unsafe {
         device.device.cmd_end_render_pass(command_buffer);
     }
+    record_memory_barrier(
+        &device.device,
+        command_buffer,
+        render_pass_shader_write_scopes(),
+    );
     for (_, texture) in persistent_textures {
         let inner = texture.inner()?;
-        inner.layouts.set(
+        layouts.set(
+            &inner.layouts,
             inner.layouts.whole(),
             color_attachment_final_layout(texture.image_usage).1,
         )?;
@@ -2944,16 +3029,18 @@ fn vk_sample_count(sample_count: u32) -> Result<vk::SampleCountFlags, HalError> 
 }
 
 pub(super) fn encode_render_pass_command_stream(
+    layouts: &mut LayoutOverlay,
     device: &VulkanDeviceInner,
     command_buffer: vk::CommandBuffer,
     pass: &HalRenderPassCommandStream,
 ) -> Result<RenderPassTemps, HalError> {
     let mut bind_textures = Vec::new();
     collect_vulkan_stream_textures(&pass.commands, &mut bind_textures);
-    encode_render_pass_impl(device, command_buffer, pass, &bind_textures)
+    encode_render_pass_impl(layouts, device, command_buffer, pass, &bind_textures)
 }
 
 fn encode_render_pass_impl(
+    layouts: &mut LayoutOverlay,
     device: &VulkanDeviceInner,
     command_buffer: vk::CommandBuffer,
     pass: &HalRenderPassCommandStream,
@@ -3005,6 +3092,7 @@ fn encode_render_pass_impl(
         );
         attachments.push((texture.inner()?.image, range));
         transition_image_range(
+            layouts,
             vk_device,
             command_buffer,
             texture.inner()?,
@@ -3026,6 +3114,7 @@ fn encode_render_pass_impl(
         );
         attachments.push((texture.inner()?.image, range));
         transition_image_range(
+            layouts,
             vk_device,
             command_buffer,
             texture.inner()?,
@@ -3044,6 +3133,7 @@ fn encode_render_pass_impl(
         );
         attachments.push((texture.inner()?.image, range));
         transition_image_range(
+            layouts,
             vk_device,
             command_buffer,
             texture.inner()?,
@@ -3053,9 +3143,21 @@ fn encode_render_pass_impl(
         )?;
     }
     // Barriers precede the pass and exclude only attached subresources.
-    transition_sampled_textures(vk_device, command_buffer, bind_textures, &attachments)?;
+    transition_sampled_textures(
+        layouts,
+        vk_device,
+        command_buffer,
+        bind_textures,
+        &attachments,
+    )?;
     // Sharing sampled views already use GENERAL across their whole range.
-    transition_storage_textures(vk_device, command_buffer, bind_textures, &attachments)?;
+    transition_storage_textures(
+        layouts,
+        vk_device,
+        command_buffer,
+        bind_textures,
+        &attachments,
+    )?;
     let color_formats = render_pass_color_formats(&pass.color_targets);
     let resolve_formats = render_pass_resolve_formats(&pass.color_targets)?;
     let render_pass = create_render_pass_for_targets(
@@ -3123,8 +3225,10 @@ fn encode_render_pass_impl(
     unsafe {
         vk_device.cmd_end_render_pass(command_buffer);
     }
+    record_memory_barrier(vk_device, command_buffer, render_pass_shader_write_scopes());
     for (texture, target) in color_attachments.iter().flatten() {
-        texture.inner()?.layouts.set(
+        layouts.set(
+            &texture.inner()?.layouts,
             attachment_subresource_range_of(
                 texture.dimension,
                 target.mip_level,
@@ -3134,7 +3238,8 @@ fn encode_render_pass_impl(
         )?;
     }
     for (texture, target) in &resolve_attachments {
-        texture.inner()?.layouts.set(
+        layouts.set(
+            &texture.inner()?.layouts,
             attachment_subresource_range_of(
                 texture.dimension,
                 target.resolve_mip_level,
@@ -4618,6 +4723,45 @@ pub(super) fn to_image_extent(extent: HalExtent3d) -> vk::Extent3D {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn acquire_wait_precedes_every_possible_first_image_use() {
+        assert_eq!(acquire_wait_stage(), vk::PipelineStageFlags::ALL_COMMANDS);
+    }
+
+    #[test]
+    fn render_pass_shader_writes_are_visible_to_later_work() {
+        let scopes = render_pass_shader_write_scopes();
+        assert_eq!(
+            scopes.src_stages,
+            vk::PipelineStageFlags::VERTEX_SHADER | vk::PipelineStageFlags::FRAGMENT_SHADER
+        );
+        assert_eq!(scopes.src_access, vk::AccessFlags::SHADER_WRITE);
+        assert_eq!(
+            scopes.dst_stages,
+            buffer_write_read_barrier_dst_stage_mask()
+        );
+        assert_eq!(
+            scopes.dst_access,
+            buffer_write_read_barrier_dst_access_mask()
+        );
+        assert!(scopes.dst_stages.contains(
+            vk::PipelineStageFlags::COMPUTE_SHADER
+                | vk::PipelineStageFlags::VERTEX_SHADER
+                | vk::PipelineStageFlags::FRAGMENT_SHADER
+                | vk::PipelineStageFlags::TRANSFER
+                | vk::PipelineStageFlags::DRAW_INDIRECT
+                | vk::PipelineStageFlags::VERTEX_INPUT
+        ));
+        assert!(scopes.dst_access.contains(
+            vk::AccessFlags::SHADER_READ
+                | vk::AccessFlags::SHADER_WRITE
+                | vk::AccessFlags::TRANSFER_READ
+                | vk::AccessFlags::TRANSFER_WRITE
+                | vk::AccessFlags::INDIRECT_COMMAND_READ
+                | vk::AccessFlags::INDEX_READ
+        ));
+    }
+
     #[test]
     fn render_pass_dependencies_make_previous_attachment_writes_available() {
         let stages = vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT

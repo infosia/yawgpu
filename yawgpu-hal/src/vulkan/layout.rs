@@ -31,11 +31,11 @@ pub(super) struct LayoutRun {
 }
 
 /// Layout state indexed by mip level, then array layer (Block 105 R1).
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct SubresourceLayouts {
     mip_level_count: u32,
     array_layers: u32,
-    states: Mutex<Vec<u8>>,
+    states: Arc<Mutex<Vec<u8>>>,
 }
 
 impl SubresourceLayouts {
@@ -44,11 +44,11 @@ impl SubresourceLayouts {
         Self {
             mip_level_count,
             array_layers,
-            states: Mutex::new(
+            states: Arc::new(Mutex::new(
                 (0..mip_level_count)
                     .flat_map(|_| (0..array_layers).map(|_| IMAGE_LAYOUT_UNDEFINED))
                     .collect(),
-            ),
+            )),
         }
     }
 
@@ -156,6 +156,78 @@ impl SubresourceLayouts {
     }
 }
 
+/// Layout changes for one submission, discarded unless submission succeeds.
+/// The caller holds the queue access lock from before the first read until commit.
+#[derive(Default)]
+pub(super) struct LayoutOverlay {
+    entries: Vec<(SubresourceLayouts, SubresourceLayouts)>,
+}
+
+impl LayoutOverlay {
+    fn staged(&mut self, committed: &SubresourceLayouts) -> Result<&SubresourceLayouts, HalError> {
+        let index = self
+            .entries
+            .iter()
+            .position(|(source, _)| Arc::ptr_eq(&source.states, &committed.states));
+        let index = match index {
+            Some(index) => index,
+            None => {
+                let states = committed
+                    .states
+                    .lock()
+                    .map_err(|_| texture_error("subresource layout lock poisoned"))?
+                    .clone();
+                self.entries.push((
+                    committed.clone(),
+                    SubresourceLayouts {
+                        mip_level_count: committed.mip_level_count,
+                        array_layers: committed.array_layers,
+                        states: Arc::new(Mutex::new(states)),
+                    },
+                ));
+                self.entries.len() - 1
+            }
+        };
+        Ok(&self.entries[index].1)
+    }
+
+    /// Reads the staged state first, initializing untouched images from committed state.
+    pub(super) fn transition(
+        &mut self,
+        committed: &SubresourceLayouts,
+        range: SubresourceRange,
+        new_state: u8,
+    ) -> Result<Vec<LayoutRun>, HalError> {
+        self.staged(committed)?.transition(range, new_state)
+    }
+
+    /// Stages an implicit render-pass final layout.
+    pub(super) fn set(
+        &mut self,
+        committed: &SubresourceLayouts,
+        range: SubresourceRange,
+        state: u8,
+    ) -> Result<(), HalError> {
+        self.staged(committed)?.set(range, state)
+    }
+
+    /// Publishes after a successful queue submit, before releasing the queue lock.
+    /// Publication cannot fail after the GPU has accepted the commands.
+    pub(super) fn commit(self) {
+        for (committed, staged) in self.entries {
+            let mut destination = committed
+                .states
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut source = staged
+                .states
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::swap(&mut *destination, &mut *source);
+        }
+    }
+}
+
 /// Coalesces classified subresources in ascending mip/layer order, excluding `None`.
 /// Adjacent layers merge first, then adjacent mips with identical layer-run lists.
 pub(super) fn coalesce_subresources<T: Copy + PartialEq>(
@@ -220,6 +292,119 @@ pub(super) fn needs_barrier(old_state: u8, new_state: u8) -> bool {
 mod tests {
     use super::*;
     use ash::vk::Handle;
+
+    #[test]
+    fn overlay_reads_committed_then_staged_state_and_commits_all_images() {
+        let first = SubresourceLayouts::new(2, 3);
+        let second = SubresourceLayouts::new(1, 1);
+        first
+            .set(range(1, 1, 1, 1), IMAGE_LAYOUT_SHADER_READ_ONLY)
+            .unwrap();
+        let mut overlay = LayoutOverlay::default();
+        let selected = range(1, 1, 1, 1);
+        assert_eq!(
+            overlay
+                .transition(&first, selected, IMAGE_LAYOUT_TRANSFER_DST)
+                .unwrap(),
+            vec![LayoutRun {
+                range: selected,
+                old_state: IMAGE_LAYOUT_SHADER_READ_ONLY
+            }]
+        );
+        // A cloned handle must refer to the same overlay entry.
+        assert_eq!(
+            overlay
+                .transition(&first.clone(), selected, IMAGE_LAYOUT_TRANSFER_SRC)
+                .unwrap(),
+            vec![LayoutRun {
+                range: selected,
+                old_state: IMAGE_LAYOUT_TRANSFER_DST
+            }]
+        );
+        overlay
+            .set(&second, second.whole(), IMAGE_LAYOUT_PRESENT)
+            .unwrap();
+        assert_eq!(first.state(1, 1).unwrap(), IMAGE_LAYOUT_SHADER_READ_ONLY);
+        assert_eq!(second.state(0, 0).unwrap(), IMAGE_LAYOUT_UNDEFINED);
+        // Simulate successful vkQueueSubmit: this is the only publication point.
+        overlay.commit();
+        assert_eq!(first.state(1, 1).unwrap(), IMAGE_LAYOUT_TRANSFER_SRC);
+        assert_eq!(first.state(0, 0).unwrap(), IMAGE_LAYOUT_UNDEFINED);
+        assert_eq!(second.state(0, 0).unwrap(), IMAGE_LAYOUT_PRESENT);
+        LayoutOverlay::default().commit();
+    }
+
+    #[test]
+    fn overlay_discards_recording_and_submit_failures() {
+        let layouts = SubresourceLayouts::new(2, 2);
+        layouts
+            .set(layouts.whole(), IMAGE_LAYOUT_SHADER_READ_ONLY)
+            .unwrap();
+        for fail_during_recording in [true, false] {
+            let result: Result<(), HalError> = (|| {
+                let mut overlay = LayoutOverlay::default();
+                overlay.transition(&layouts, range(0, 1, 0, 1), IMAGE_LAYOUT_TRANSFER_DST)?;
+                overlay.set(&layouts, range(1, 1, 1, 1), IMAGE_LAYOUT_PRESENT)?;
+                if fail_during_recording {
+                    overlay.transition(&layouts, range(2, 1, 0, 1), IMAGE_LAYOUT_GENERAL)?;
+                }
+                Err(texture_error("simulated vkQueueSubmit failure"))
+            })();
+            assert!(result.is_err());
+            for mip in 0..2 {
+                for layer in 0..2 {
+                    assert_eq!(
+                        layouts.state(mip, layer).unwrap(),
+                        IMAGE_LAYOUT_SHADER_READ_ONLY
+                    );
+                }
+            }
+            // The next recording reads the committed layout, never failed work.
+            let mut retry = LayoutOverlay::default();
+            assert_eq!(
+                retry
+                    .transition(&layouts, layouts.whole(), IMAGE_LAYOUT_GENERAL)
+                    .unwrap(),
+                vec![LayoutRun {
+                    range: layouts.whole(),
+                    old_state: IMAGE_LAYOUT_SHADER_READ_ONLY
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn overlay_serialized_recordings_observe_previous_successful_submit() {
+        let layouts = SubresourceLayouts::new(1, 1);
+        let queue_access = Mutex::new(());
+        std::thread::scope(|scope| {
+            // Match the recording-to-commit lock lifetime in both submission roots.
+            let guard = queue_access.lock().unwrap();
+            let next = scope.spawn(|| {
+                let _guard = queue_access.lock().unwrap();
+                let mut overlay = LayoutOverlay::default();
+                let runs = overlay
+                    .transition(&layouts, layouts.whole(), IMAGE_LAYOUT_PRESENT)
+                    .unwrap();
+                overlay.commit();
+                runs
+            });
+            let mut overlay = LayoutOverlay::default();
+            overlay
+                .set(&layouts, layouts.whole(), IMAGE_LAYOUT_TRANSFER_DST)
+                .unwrap();
+            overlay.commit();
+            drop(guard);
+            assert_eq!(
+                next.join().unwrap(),
+                vec![LayoutRun {
+                    range: layouts.whole(),
+                    old_state: IMAGE_LAYOUT_TRANSFER_DST,
+                }]
+            );
+        });
+        assert_eq!(layouts.state(0, 0).unwrap(), IMAGE_LAYOUT_PRESENT);
+    }
 
     #[test]
     fn image_has_storage_binding_finds_same_image_among_storage_images() {

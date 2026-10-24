@@ -505,6 +505,7 @@ fn check_sample_count_support(
 
 /// Transitions the whole image, covering its own full aspect mask.
 pub(super) fn transition_image(
+    layouts: &mut LayoutOverlay,
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
     texture: &VulkanTextureInner,
@@ -512,6 +513,7 @@ pub(super) fn transition_image(
     new_state: u8,
 ) -> Result<(), HalError> {
     transition_image_range(
+        layouts,
         device,
         command_buffer,
         texture,
@@ -523,6 +525,7 @@ pub(super) fn transition_image(
 
 /// Transitions exactly the requested mip/layer rectangle with full image aspects.
 pub(super) fn transition_image_range(
+    layouts: &mut LayoutOverlay,
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
     texture: &VulkanTextureInner,
@@ -530,7 +533,7 @@ pub(super) fn transition_image_range(
     new_layout: vk::ImageLayout,
     new_state: u8,
 ) -> Result<(), HalError> {
-    let runs = texture.layouts.transition(range, new_state)?;
+    let runs = layouts.transition(&texture.layouts, range, new_state)?;
     if runs.is_empty() {
         return Ok(());
     }
@@ -768,6 +771,7 @@ mod tests {
             vk_device.begin_command_buffer(command_buffer, &vk::CommandBufferBeginInfo::default())
         }
         .unwrap();
+        let mut layouts = LayoutOverlay::default();
         let range = SubresourceRange {
             base_mip_level: 1,
             mip_level_count: 1,
@@ -775,6 +779,7 @@ mod tests {
             array_layer_count: 1,
         };
         assert!(transition_image_range(
+            &mut layouts,
             vk_device,
             command_buffer,
             inner,
@@ -787,6 +792,7 @@ mod tests {
         )
         .is_err());
         transition_image_range(
+            &mut layouts,
             vk_device,
             command_buffer,
             inner,
@@ -795,12 +801,16 @@ mod tests {
             IMAGE_LAYOUT_TRANSFER_DST,
         )
         .unwrap();
+        assert_eq!(inner.layouts.state(1, 1).unwrap(), IMAGE_LAYOUT_UNDEFINED);
+        layouts.commit();
         assert_eq!(
             inner.layouts.state(1, 1).unwrap(),
             IMAGE_LAYOUT_TRANSFER_DST
         );
+        let mut layouts = LayoutOverlay::default();
         assert_eq!(inner.layouts.state(0, 0).unwrap(), IMAGE_LAYOUT_UNDEFINED);
         transition_image(
+            &mut layouts,
             vk_device,
             command_buffer,
             inner,
@@ -810,6 +820,7 @@ mod tests {
         .unwrap();
         // Repeating a read-only layout exercises the no-barrier return path.
         transition_image_range(
+            &mut layouts,
             vk_device,
             command_buffer,
             inner,
@@ -818,6 +829,7 @@ mod tests {
             IMAGE_LAYOUT_TRANSFER_SRC,
         )
         .unwrap();
+        layouts.commit();
         for mip in 0..2 {
             for layer in 0..3 {
                 assert_eq!(
