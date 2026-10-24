@@ -242,7 +242,9 @@ fn command_encoder_resolve_query_set_is_validated() {
 
         finish_resolve_ok(&test, query_set, 0, 4, destination, 0);
         finish_resolve_error(&test, query_set, 1, 4, destination, 0);
-        finish_resolve_error(&test, query_set, 0, 0, destination, 0);
+        finish_resolve_ok(&test, query_set, 0, 0, destination, 0);
+        finish_resolve_ok(&test, query_set, 3, 0, destination, 0);
+        finish_resolve_error(&test, query_set, 4, 0, destination, 0);
 
         let without_query_resolve =
             create_buffer(test.device(), 4 * 8, native::WGPUBufferUsage_CopyDst);

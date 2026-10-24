@@ -3038,6 +3038,111 @@ fn fs() -> @location(0) vec4f {
         Arc::new(device.create_render_pipeline(descriptor))
     }
 
+    #[test]
+    fn attachment_signatures_ignore_trailing_nulls_but_preserve_interior_slots() {
+        let device = noop_device();
+        for pipeline_padding in [false, true] {
+            for pass_padding in [false, true] {
+                let mut pipeline_descriptor =
+                    render_pipeline_descriptor(render_shader_module(&device));
+                if pipeline_padding {
+                    let fragment = pipeline_descriptor.fragment.as_mut().unwrap();
+                    fragment.target_count += 1;
+                    let targets = &mut fragment.targets;
+                    let mut null_target = targets[0];
+                    null_target.format = TextureFormat::from_raw(0);
+                    targets.push(null_target);
+                }
+                let pipeline = Arc::new(device.create_render_pipeline(pipeline_descriptor));
+                assert!(!pipeline.is_error());
+                let mut bundle_descriptor = render_bundle_encoder_descriptor();
+                bundle_descriptor.color_formats.push(None);
+                let (bundle_encoder, error) =
+                    RenderBundleEncoder::new(bundle_descriptor, device.limits(), device.features());
+                assert_eq!(error, None);
+                assert_eq!(bundle_encoder.set_pipeline(pipeline.clone()), None);
+                let (bundle, error) = bundle_encoder.finish();
+                assert_eq!(error, None);
+                let mut descriptor =
+                    noop_render_pass_descriptor(noop_render_attachment(&device), None);
+                if pass_padding {
+                    descriptor.color_attachments.push(None);
+                }
+                let encoder = device.create_command_encoder();
+                let (pass, error) = encoder.begin_render_pass(&descriptor);
+                assert_eq!(error, None);
+                assert_eq!(pass.set_pipeline(pipeline.clone()), None);
+                assert_eq!(pass.execute_bundles(&[Arc::new(bundle)]), None);
+                assert_eq!(pass.end(), None);
+                assert_eq!(encoder.finish().1, None);
+
+                // Moving the attachment to slot 1 changes the signature.
+                descriptor.color_attachments =
+                    vec![None, Some(descriptor.color_attachments[0].clone().unwrap())];
+                let encoder = device.create_command_encoder();
+                let (pass, error) = encoder.begin_render_pass(&descriptor);
+                assert_eq!(error, None);
+                assert_eq!(pass.set_pipeline(pipeline), None);
+                assert_eq!(pass.end(), None);
+                assert!(encoder.finish().1.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn draw_ranges_accept_u32_boundary_with_zero_stride_and_reject_real_oob() {
+        let device = noop_device();
+        for step_mode in [VertexStepMode::Vertex, VertexStepMode::Instance] {
+            for stride in [0, 8] {
+                let mut descriptor = render_pipeline_descriptor(render_shader_module(&device));
+                descriptor.vertex.buffer_count = 1;
+                descriptor.vertex.buffers = vec![VertexBufferLayout {
+                    used: true,
+                    array_stride: stride,
+                    step_mode,
+                    attributes: vec![VertexAttribute {
+                        format: VertexFormat::from_raw(0x0000_001D),
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                }];
+                let pipeline = Arc::new(device.create_render_pipeline(descriptor));
+                assert!(!pipeline.is_error());
+                let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+                    usage: BufferUsage::VERTEX,
+                    size: 8,
+                    mapped_at_creation: false,
+                }));
+                let encoder = device.create_command_encoder();
+                let (pass, error) = encoder.begin_render_pass(&noop_render_pass_descriptor(
+                    noop_render_attachment(&device),
+                    None,
+                ));
+                assert_eq!(error, None);
+                assert_eq!(pass.set_pipeline(pipeline), None);
+                assert_eq!(
+                    pass.set_vertex_buffer(0, Some(buffer), 0, 8, device.limits()),
+                    None
+                );
+                let (first_vertex, first_instance) = match step_mode {
+                    VertexStepMode::Vertex => (u32::MAX, 0),
+                    VertexStepMode::Instance => (0, u32::MAX),
+                };
+                assert_eq!(
+                    pass.draw(1, 1, first_vertex, first_instance, device.limits()),
+                    None
+                );
+                assert_eq!(pass.end(), None);
+                let error = encoder.finish().1;
+                if stride == 0 {
+                    assert_eq!(error, None);
+                } else {
+                    assert!(error.unwrap().contains("range exceeds"));
+                }
+            }
+        }
+    }
+
     fn zero_stride_vertex_render_pipeline(device: &Device) -> Arc<RenderPipeline> {
         let mut descriptor = render_pipeline_descriptor(render_shader_module(device));
         descriptor.vertex.buffer_count = 1;

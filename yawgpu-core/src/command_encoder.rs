@@ -755,7 +755,10 @@ impl CommandEncoder {
         ) {
             self.record_first_error(message);
         } else {
-            let conversion = if query_set.kind() == QueryType::Timestamp && query_count != 0 {
+            if query_count == 0 {
+                return None;
+            }
+            let conversion = if query_set.kind() == QueryType::Timestamp {
                 match self.timestamp_conversion_command(
                     destination.clone(),
                     destination_offset,
@@ -1413,9 +1416,7 @@ pub(crate) fn validate_resolve_query_set(
     destination_offset: u64,
 ) -> Result<(), String> {
     validate_query_set_alive(query_set, "resolve query set")?;
-    if query_count == 0 {
-        return Err("resolve query count must be greater than zero".to_owned());
-    }
+    validate_query_index(query_set, first_query, "resolve first query")?;
     let end_query = first_query
         .checked_add(query_count)
         .ok_or_else(|| "resolve query range overflows".to_owned())?;
@@ -1527,7 +1528,8 @@ pub(crate) fn render_pass_attachment_signature(
         sample_count: sample_count.unwrap_or(1),
         depth_read_only,
         stencil_read_only,
-    })
+    }
+    .normalized())
 }
 
 /// Returns render pass attachment textures.
@@ -1970,7 +1972,7 @@ pub(crate) fn validate_resolve_target(
             "render pass resolveTarget must not use a component-swizzled texture view".to_owned(),
         );
     }
-    if !resolve_texture
+    if !resolve_target
         .usage()
         .contains(TextureUsage::RENDER_ATTACHMENT)
     {
@@ -2586,6 +2588,40 @@ mod tests {
     }
 
     #[test]
+    fn zero_count_query_resolve_still_validates_indices_and_destination() {
+        let (device, set) = timestamp_device_and_set();
+        let destination = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::QUERY_RESOLVE,
+            size: 256,
+            mapped_at_creation: false,
+        }));
+        for (first_query, offset, valid) in [
+            (set.count() - 1, 256, true),
+            (set.count(), 0, false),
+            (u32::MAX, 0, false),
+            (0, 1, false),
+            (0, 512, false),
+        ] {
+            let encoder = device.create_command_encoder();
+            assert_eq!(
+                encoder.resolve_query_set(set.clone(), first_query, 0, destination.clone(), offset),
+                None
+            );
+            let (buffer, error) = encoder.finish();
+            assert_eq!(error.is_none(), valid);
+            assert!(buffer.command_ops().is_empty());
+        }
+        let destination = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 256,
+            mapped_at_creation: false,
+        }));
+        let encoder = device.create_command_encoder();
+        assert_eq!(encoder.resolve_query_set(set, 0, 0, destination, 0), None);
+        assert!(encoder.finish().1.unwrap().contains("QueryResolve"));
+    }
+
+    #[test]
     fn resolve_query_set_with_zero_count_records_no_conversion_pass() {
         let (device, set) = timestamp_device_and_set();
         let destination = Arc::new(device.create_buffer(BufferDescriptor {
@@ -2596,10 +2632,7 @@ mod tests {
         let encoder = device.create_command_encoder();
         assert_eq!(encoder.resolve_query_set(set, 0, 0, destination, 0), None);
         let (buffer, error) = encoder.finish();
-        assert_eq!(
-            error.as_deref(),
-            Some("resolve query count must be greater than zero")
-        );
+        assert_eq!(error, None);
         assert!(buffer.command_ops().is_empty());
         assert!(device.inner.timestamp_pipeline.get().is_none());
     }
@@ -3237,6 +3270,49 @@ mod tests {
                     .to_owned()
             )
         );
+    }
+
+    #[test]
+    fn resolve_target_requires_render_attachment_usage_on_the_view() {
+        let device = noop_device();
+        let color = render_attachment_view_with_format(&device, rgba8_unorm(), 4);
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
+            dimension: TextureDimension::D2,
+            size: color.texture().size(),
+            format: rgba8_unorm(),
+            mip_level_count: 1,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+        for usage in [
+            TextureUsage::TEXTURE_BINDING,
+            TextureUsage::RENDER_ATTACHMENT,
+        ] {
+            let (view, error) = texture.create_view(TextureViewDescriptor {
+                format: None,
+                dimension: None,
+                base_mip_level: 0,
+                mip_level_count: None,
+                base_array_layer: 0,
+                array_layer_count: None,
+                aspect: None,
+                usage: Some(usage),
+                swizzle: None,
+            });
+            assert_eq!(error, None);
+            let mut descriptor = noop_render_pass_descriptor(color.clone(), None);
+            descriptor.color_attachments[0]
+                .as_mut()
+                .unwrap()
+                .resolve_target = Some(Arc::new(view));
+            let encoder = device.create_command_encoder();
+            let (pass, error) = encoder.begin_render_pass(&descriptor);
+            assert_eq!(error, None);
+            assert_eq!(pass.end(), None);
+            let (_, error) = encoder.finish();
+            assert_eq!(error.is_some(), usage == TextureUsage::TEXTURE_BINDING);
+        }
     }
 
     #[test]

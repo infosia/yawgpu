@@ -39,6 +39,14 @@ pub(crate) struct AttachmentSignature {
 }
 
 impl AttachmentSignature {
+    /// Canonicalizes attachment slots while preserving interior empty slots.
+    pub(crate) fn normalized(mut self) -> Self {
+        while self.color_formats.last() == Some(&None) {
+            self.color_formats.pop();
+        }
+        self
+    }
+
     /// Returns whether a render bundle carrying this signature may execute in a
     /// render pass whose signature is `pass`. Color/depth-stencil formats and
     /// sample count must match exactly; for each aspect the pass marks
@@ -789,6 +797,7 @@ impl RenderPipeline {
             depth_read_only: false,
             stencil_read_only: false,
         }
+        .normalized()
     }
 
     /// Returns true when this pipeline can write depth.
@@ -6630,6 +6639,38 @@ fn fs() -> @builtin(frag_depth) f32 {
     fn depth32_float() -> TextureFormat {
         TextureFormat::from_raw(0x30)
     }
+    #[test]
+    fn attachment_signature_normalization_preserves_interior_nulls_and_other_fields() {
+        let color = Some(TextureFormat::from_raw(TextureFormat::RGBA8_UNORM));
+        for (formats, expected) in [
+            (vec![], vec![]),
+            (vec![None, None], vec![]),
+            (vec![color, None, None], vec![color]),
+            (
+                vec![None, color, None, color, None],
+                vec![None, color, None, color],
+            ),
+        ] {
+            let signature = AttachmentSignature {
+                color_formats: formats,
+                depth_stencil_format: Some(TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS)),
+                sample_count: 4,
+                depth_read_only: true,
+                stencil_read_only: false,
+            };
+            let normalized = signature.clone().normalized();
+            assert_eq!(normalized.color_formats, expected);
+            assert_eq!(
+                normalized,
+                AttachmentSignature {
+                    color_formats: expected,
+                    ..signature
+                }
+            );
+            assert_eq!(normalized.clone().normalized(), normalized);
+        }
+    }
+
     #[test]
     fn bundle_attachment_signature_compat_uses_readonly_implication() {
         // F-062: formats/sample-count match exactly, but read-only is an

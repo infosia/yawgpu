@@ -324,10 +324,11 @@ pub(crate) struct BindGroupLayoutInner {
 impl BindGroupLayout {
     /// Creates a new instance.
     pub(crate) fn new(
-        entries: Vec<BindGroupLayoutEntry>,
+        mut entries: Vec<BindGroupLayoutEntry>,
         is_error: bool,
         is_default: bool,
     ) -> Self {
+        entries.sort_by_key(|entry| entry.binding);
         Self {
             inner: Arc::new(BindGroupLayoutInner {
                 entries,
@@ -339,7 +340,11 @@ impl BindGroupLayout {
     }
 
     /// Creates an auto-derived layout that is exclusive to one pipeline.
-    pub(crate) fn new_auto(entries: Vec<BindGroupLayoutEntry>, exclusive_pipeline: u64) -> Self {
+    pub(crate) fn new_auto(
+        mut entries: Vec<BindGroupLayoutEntry>,
+        exclusive_pipeline: u64,
+    ) -> Self {
+        entries.sort_by_key(|entry| entry.binding);
         Self {
             inner: Arc::new(BindGroupLayoutInner {
                 entries,
@@ -368,7 +373,7 @@ impl BindGroupLayout {
         Self::new(Vec::new(), false, false)
     }
 
-    /// Returns the entries.
+    /// Returns the layout entries in increasing binding-number order.
     #[must_use]
     pub fn entries(&self) -> &[BindGroupLayoutEntry] {
         &self.inner.entries
@@ -404,6 +409,27 @@ mod tests {
     use super::*;
     use crate::test_helpers::*;
     use crate::*;
+
+    #[test]
+    fn constructors_sort_entries_by_binding_number() {
+        let entries = vec![
+            uniform_layout_entry(9, 4, 16),
+            uniform_layout_entry(2, 4, 16),
+        ];
+        for layout in [
+            BindGroupLayout::new(entries.clone(), false, false),
+            BindGroupLayout::new_auto(entries, 42),
+        ] {
+            assert_eq!(
+                layout
+                    .entries()
+                    .iter()
+                    .map(|entry| entry.binding)
+                    .collect::<Vec<_>>(),
+                vec![2, 9]
+            );
+        }
+    }
 
     #[test]
     fn bind_group_layout_accessors_pin_entries_error_and_same() {

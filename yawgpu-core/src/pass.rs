@@ -1040,13 +1040,9 @@ pub(crate) fn validate_vertex_buffer_oob(
                 let Some((first_vertex, vertex_count)) = vertex_draw else {
                     continue;
                 };
-                first_vertex
-                    .checked_add(vertex_count)
-                    .ok_or_else(|| "render pass draw vertex count overflows".to_owned())?
+                u64::from(first_vertex) + u64::from(vertex_count)
             }
-            VertexStepMode::Instance => first_instance
-                .checked_add(instance_count)
-                .ok_or_else(|| "render pass draw instance count overflows".to_owned())?,
+            VertexStepMode::Instance => u64::from(first_instance) + u64::from(instance_count),
         };
         if stride_count == 0 {
             continue;
@@ -1063,7 +1059,7 @@ pub(crate) fn validate_vertex_buffer_oob(
             .max()
             .transpose()?
             .unwrap_or(0);
-        let required_size = u64::from(stride_count - 1)
+        let required_size = (stride_count - 1)
             .checked_mul(layout.array_stride)
             .and_then(|size| size.checked_add(last_stride))
             .ok_or_else(|| "render pass vertex buffer required size overflows".to_owned())?;
@@ -1097,10 +1093,8 @@ pub(crate) fn validate_index_buffer_oob(
         .index_buffer
         .as_ref()
         .ok_or_else(|| "render pass indexed draw requires an index buffer".to_owned())?;
-    let required_indices = first_index
-        .checked_add(index_count)
-        .ok_or_else(|| "render pass indexed draw index count overflows".to_owned())?;
-    let required_size = u64::from(required_indices)
+    let required_indices = u64::from(first_index) + u64::from(index_count);
+    let required_size = required_indices
         .checked_mul(index_format_size(index_buffer.format))
         .ok_or_else(|| "render pass indexed draw index buffer size overflows".to_owned())?;
     let required_end = index_buffer
@@ -1885,7 +1879,11 @@ pub(crate) fn validate_dynamic_offsets(
         return Err("bind group dynamic offset count is invalid".to_owned());
     }
 
-    for (layout_entry, dynamic_offset) in dynamic_entries.into_iter().zip(dynamic_offsets.iter()) {
+    for (dynamic_index, (layout_entry, dynamic_offset)) in dynamic_entries
+        .into_iter()
+        .zip(dynamic_offsets.iter())
+        .enumerate()
+    {
         let Some(group_entry) = group
             .entries()
             .iter()
@@ -1905,29 +1903,27 @@ pub(crate) fn validate_dynamic_offsets(
         if *dynamic_offset % alignment != 0 {
             return Err("bind group dynamic offset is not aligned".to_owned());
         }
-        let BindGroupResource::Buffer {
-            buffer,
-            offset,
-            size,
-            ..
-        } = &group_entry.resource
-        else {
+        let BindGroupResource::Buffer { buffer, offset, .. } = &group_entry.resource else {
             return Err("bind group dynamic offset requires a buffer binding".to_owned());
         };
         let dynamic_offset = u64::from(*dynamic_offset);
         let base = offset
             .checked_add(dynamic_offset)
             .ok_or_else(|| "bind group dynamic offset range overflows".to_owned())?;
-        if base > buffer.size() {
+        // Bind-group creation already resolved WHOLE_SIZE in this immutable cache.
+        let effective_size = group
+            .precomputed_usage()
+            .buffer_uses
+            .iter()
+            .find(|usage| usage.dynamic_offset_index == Some(dynamic_index))
+            .ok_or_else(|| "bind group dynamic offset binding is missing".to_owned())?
+            .scope_use
+            .size;
+        let end = base
+            .checked_add(effective_size)
+            .ok_or_else(|| "bind group dynamic offset range overflows".to_owned())?;
+        if end > buffer.size() {
             return Err("bind group dynamic offset exceeds buffer size".to_owned());
-        }
-        if *size != u64::MAX {
-            let end = base
-                .checked_add(*size)
-                .ok_or_else(|| "bind group dynamic offset range overflows".to_owned())?;
-            if end > buffer.size() {
-                return Err("bind group dynamic offset exceeds buffer size".to_owned());
-            }
         }
     }
 
@@ -2502,6 +2498,157 @@ mod tests {
 
         assert_eq!(state.scope_buffer_uses.len(), BIND_COUNT);
         assert_eq!(state.scope_usage_index.buffer_accesses.len(), 1);
+    }
+
+    #[test]
+    fn dynamic_offsets_use_binding_number_for_alignment_bounds_usage_and_hal() {
+        use crate::compute_pipeline::{MetalBindingKind, MetalBufferBinding};
+        let device = noop_device();
+        let layout = Arc::new(
+            device.create_bind_group_layout(BindGroupLayoutDescriptor {
+                entries: vec![
+                    (1, BufferBindingType::Storage),
+                    (0, BufferBindingType::Uniform),
+                ]
+                .into_iter()
+                .map(|(binding, ty)| BindGroupLayoutEntry {
+                    binding,
+                    visibility: 4,
+                    binding_array_size: 0,
+                    kind: Some(BindingLayoutKind::Buffer {
+                        ty,
+                        has_dynamic_offset: true,
+                        min_binding_size: 16,
+                    }),
+                })
+                .collect(),
+                error: None,
+            }),
+        );
+        let group = Arc::new(
+            device.create_bind_group(
+                layout.clone(),
+                [
+                    (1, BufferUsage::STORAGE, 64),
+                    (0, BufferUsage::UNIFORM, 512),
+                ]
+                .into_iter()
+                .map(|(binding, usage, size)| BindGroupEntry {
+                    binding,
+                    resource: BindGroupResource::Buffer {
+                        buffer: Arc::new(device.create_buffer(BufferDescriptor {
+                            usage,
+                            size,
+                            mapped_at_creation: false,
+                        })),
+                        device: Arc::new(device.clone()),
+                        offset: 0,
+                        size: 16,
+                    },
+                })
+                .collect(),
+            ),
+        );
+        assert!(!group.is_error());
+        let mut limits = device.limits();
+        limits.min_uniform_buffer_offset_alignment = 256;
+        limits.min_storage_buffer_offset_alignment = 16;
+        assert_eq!(
+            validate_dynamic_offsets(&layout, &group, &[256, 16], limits),
+            Ok(())
+        );
+        assert!(validate_dynamic_offsets(&layout, &group, &[16, 0], limits)
+            .unwrap_err()
+            .contains("aligned"));
+        assert!(validate_dynamic_offsets(&layout, &group, &[0, 64], limits)
+            .unwrap_err()
+            .contains("exceeds"));
+        let bound = BoundBindGroup {
+            group: group.clone(),
+            dynamic_offsets: vec![256, 16],
+        };
+        let mut buffers = Vec::new();
+        collect_bind_group_usage(&layout, &bound, &mut buffers, &mut Vec::new()).unwrap();
+        // Bind group entries deliberately keep the reverse declaration order.
+        assert_eq!(
+            buffers.iter().map(|use_| use_.offset).collect::<Vec<_>>(),
+            vec![16, 256]
+        );
+        let bindings = [
+            (0, BufferBindingType::Uniform),
+            (1, BufferBindingType::Storage),
+        ]
+        .into_iter()
+        .map(|(binding, ty)| MetalBufferBinding {
+            group: 0,
+            binding,
+            metal_index: binding,
+            vertex_metal_index: None,
+            fragment_metal_index: None,
+            ext_params_buffer_slot: None,
+            ext_params_vertex_buffer_slot: None,
+            ext_params_fragment_buffer_slot: None,
+            kind: MetalBindingKind::Buffer(ty),
+        })
+        .collect::<Vec<_>>();
+        let lowered =
+            crate::queue::hal_bind_resources(&[layout], &bindings, &BTreeMap::from([(0, bound)]))
+                .unwrap();
+        assert_eq!(
+            lowered
+                .buffers
+                .iter()
+                .map(|buffer| (buffer.binding, buffer.offset))
+                .collect::<Vec<_>>(),
+            vec![(0, 256), (1, 16)]
+        );
+    }
+
+    #[test]
+    fn whole_size_dynamic_binding_includes_effective_size_in_bounds() {
+        let device = noop_device();
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: 4,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::Buffer {
+                    ty: BufferBindingType::Storage,
+                    has_dynamic_offset: true,
+                    min_binding_size: 16,
+                }),
+            }],
+            error: None,
+        }));
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE,
+            size: 512,
+            mapped_at_creation: false,
+        }));
+        for offset in [0, 256] {
+            let group = device.create_bind_group(
+                layout.clone(),
+                vec![BindGroupEntry {
+                    binding: 0,
+                    resource: BindGroupResource::Buffer {
+                        buffer: buffer.clone(),
+                        device: Arc::new(device.clone()),
+                        offset,
+                        size: u64::MAX,
+                    },
+                }],
+            );
+            assert!(!group.is_error());
+            assert_eq!(
+                validate_dynamic_offsets(&layout, &group, &[0], device.limits()),
+                Ok(())
+            );
+            assert!(
+                validate_dynamic_offsets(&layout, &group, &[256], device.limits())
+                    .unwrap_err()
+                    .contains("exceeds")
+            );
+        }
     }
 
     #[test]
@@ -3378,6 +3525,26 @@ mod tests {
             record_pipeline_usage_scope(&mut state, &[layout]),
             Err("usage scope buffer offset overflows".to_owned())
         );
+    }
+
+    #[test]
+    fn index_ranges_use_u64_at_the_u32_boundary() {
+        let device = noop_device();
+        let mut state = empty_pass_state(&device);
+        state.index_buffer = Some(BoundIndexBuffer {
+            buffer: Arc::new(device.create_buffer(BufferDescriptor {
+                usage: BufferUsage::INDEX,
+                size: 8,
+                mapped_at_creation: false,
+            })),
+            format: IndexFormat::Uint16,
+            offset: 0,
+            size: 8,
+        });
+        assert_eq!(validate_index_buffer_oob(&state, 0, 4), Ok(()));
+        assert!(validate_index_buffer_oob(&state, u32::MAX, 1)
+            .unwrap_err()
+            .contains("range exceeds"));
     }
 
     #[test]
