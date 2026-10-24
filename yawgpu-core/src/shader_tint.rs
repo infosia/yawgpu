@@ -660,9 +660,9 @@ impl ReflectedModule {
     /// constant during semantic analysis (`sem::Function::WorkgroupSize()`
     /// returns `None` for a dimension that is any override-expression, even
     /// one with a default), so a `Some` here means the size has zero
-    /// override dependence and needs no IR lowering at all — just the
-    /// already-memoized [`Self::raw_entry_points`]. The private helper
-    /// backing [`Self::resolved_compute_workgroup_size`] below (finding F6 in
+    /// override dependence. Dimensions come from the already-memoized
+    /// [`Self::raw_entry_points`]; storage still requires entry-scoped IR.
+    /// The private helper backing [`Self::resolved_compute_workgroup_size`] below (finding F6 in
     /// `specs/tracking/tint-integration-refactor.md`), taken only when the
     /// module declares no overrides at all — see the caller for why.
     fn compute_workgroup_size(
@@ -690,7 +690,7 @@ impl ReflectedModule {
             subgroup_size: None,
             workgroup_storage_size: self
                 .program
-                .workgroup_storage_size(&[])
+                .workgroup_storage_size(entry_point, &[])
                 .map_err(|e| e.to_string())?,
         }))
     }
@@ -753,7 +753,7 @@ impl ReflectedModule {
                 subgroup_size: info.subgroup_size,
                 workgroup_storage_size: self
                     .program
-                    .workgroup_storage_size(&overrides)
+                    .workgroup_storage_size(entry_point, &overrides)
                     .map_err(|e| e.to_string())?,
             })
         })();

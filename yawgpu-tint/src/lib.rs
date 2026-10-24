@@ -1479,6 +1479,7 @@ mod real {
         ) -> bool;
         fn yawgpu_tint_workgroup_storage_size(
             program: *const RawProgram,
+            ep: *const c_char,
             ov: *const RawOverrideValue,
             n_ov: usize,
             out: *mut u64,
@@ -2137,18 +2138,24 @@ mod real {
             Ok(words_guard.as_slice(len).to_vec())
         }
 
-        /// Returns the module's total `var<workgroup>` storage size in bytes.
+        /// Returns `entry_point`'s override-resolved `var<workgroup>` storage
+        /// size in bytes (zero when unused). Fails on an unknown or non-compute
+        /// entry point, invalid overrides, or entry-scoped const-eval failure.
         pub fn workgroup_storage_size(
             &self,
+            entry_point: &str,
             overrides: &[OverrideValue],
         ) -> Result<u64, TintError> {
+            let ep = cstring(entry_point, "entry point").map_err(TintError::Codegen)?;
             let raw_overrides = RawOverrideValues::new(overrides)?;
             let mut out = 0u64;
             let mut err = ptr::null_mut();
-            // SAFETY: `out` and `err` point to valid writable memory.
+            // SAFETY: `ep` and the override array are valid for the call;
+            // `out` and `err` point to valid writable memory.
             let ok = unsafe {
                 yawgpu_tint_workgroup_storage_size(
                     self.raw,
+                    ep.as_ptr(),
                     raw_overrides.as_ptr(),
                     raw_overrides.len(),
                     &mut out,
@@ -2222,9 +2229,7 @@ mod real {
         /// `inspector::EntryPoint::immediate_data_size`. `0` means the entry
         /// point declares/uses no immediates (including modules that merely
         /// declare an unused `var<immediate>`). Fails if `entry_point` does
-        /// not name an entry point in the module -- unlike
-        /// [`Self::workgroup_storage_size`], that failure is never silently
-        /// coerced to `Ok(0)`.
+        /// not name an entry point in the module.
         pub fn immediate_data_size(&self, entry_point: &str) -> Result<u32, TintError> {
             let ep = cstring(entry_point, "entry point").map_err(TintError::Reflection)?;
             let mut out = 0u32;
@@ -2511,12 +2516,15 @@ mod stub {
             Err(TintError::Unavailable)
         }
 
-        /// Returns the module's total `var<workgroup>` storage size in bytes.
+        /// Returns `entry_point`'s override-resolved `var<workgroup>` storage
+        /// size in bytes (zero when unused). Fails on an unknown or non-compute
+        /// entry point, invalid overrides, or entry-scoped const-eval failure.
         pub fn workgroup_storage_size(
             &self,
+            _entry_point: &str,
             _overrides: &[OverrideValue],
         ) -> Result<u64, TintError> {
-            Ok(0)
+            Err(TintError::Unavailable)
         }
 
         /// Returns `entry_point`'s override-resolved `@workgroup_size` as `[x, y, z]`.
@@ -2651,7 +2659,7 @@ fn cs() {
             &[],
         )
         .unwrap();
-        assert_eq!(program.workgroup_storage_size(&[]).unwrap(), 32);
+        assert_eq!(program.workgroup_storage_size("cs", &[]).unwrap(), 32);
 
         let program = Program::parse(
             "@compute @workgroup_size(1) fn cs() {}",
@@ -2664,7 +2672,7 @@ fn cs() {
             &[],
         )
         .unwrap();
-        assert_eq!(program.workgroup_storage_size(&[]).unwrap(), 0);
+        assert_eq!(program.workgroup_storage_size("cs", &[]).unwrap(), 0);
 
         let program = Program::parse(
             "@fragment fn fs() -> @location(0) vec4f { return vec4f(); }",
@@ -2677,7 +2685,7 @@ fn cs() {
             &[],
         )
         .unwrap();
-        assert_eq!(program.workgroup_storage_size(&[]).unwrap(), 0);
+        assert!(program.workgroup_storage_size("fs", &[]).is_err());
 
         let program = Program::parse(
             r#"
@@ -2698,16 +2706,120 @@ fn main() {
             &[],
         )
         .unwrap();
-        assert_eq!(program.workgroup_storage_size(&[]).unwrap(), 16);
+        assert_eq!(program.workgroup_storage_size("main", &[]).unwrap(), 16);
         assert_eq!(
             program
-                .workgroup_storage_size(&[OverrideValue {
-                    name: "n".into(),
-                    value: 8.0,
-                }])
+                .workgroup_storage_size(
+                    "main",
+                    &[OverrideValue {
+                        name: "n".into(),
+                        value: 8.0,
+                    }]
+                )
                 .unwrap(),
             32
         );
+    }
+
+    #[test]
+    fn workgroup_storage_size_is_entry_scoped() {
+        let program = Program::parse(
+            r#"
+var<workgroup> large: array<u32, 8192>;
+var<workgroup> a: array<u32, 3072>;
+var<workgroup> b: array<u32, 3072>;
+@compute @workgroup_size(1) fn large_cs() { large[0] = 1u; }
+@compute @workgroup_size(1) fn first_cs() { a[0] = 1u; }
+@compute @workgroup_size(1) fn second_cs() { b[0] = 1u; }
+@fragment fn fs() -> @location(0) vec4f { return vec4f(); }
+"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            program.workgroup_storage_size("large_cs", &[]).unwrap(),
+            32768
+        );
+        for entry in ["first_cs", "second_cs"] {
+            assert_eq!(program.workgroup_storage_size(entry, &[]).unwrap(), 12288);
+        }
+        for entry in ["missing", "fs", "bad\0name"] {
+            assert!(program.workgroup_storage_size(entry, &[]).is_err());
+        }
+    }
+
+    #[test]
+    fn workgroup_storage_size_does_not_sum_compute_entry_points() {
+        let program = Program::parse(
+            r#"
+var<workgroup> a: array<u32, 3072>;
+var<workgroup> b: array<u32, 3072>;
+@compute @workgroup_size(1) fn first() { a[0] = 1u; }
+@compute @workgroup_size(1) fn second() { b[0] = 1u; }
+"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        for entry in ["first", "second"] {
+            assert_eq!(program.workgroup_storage_size(entry, &[]).unwrap(), 12288);
+        }
+    }
+
+    #[test]
+    fn workgroup_storage_size_reports_override_failures() {
+        let program = Program::parse(
+            r#"
+override zero: u32 = 0u;
+override n: u32 = 1u / zero;
+var<workgroup> data: array<u32, n>;
+@compute @workgroup_size(1) fn bad() { data[0] = 1u; }
+@compute @workgroup_size(1) fn good() {}
+"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let err = program.workgroup_storage_size("bad", &[]).unwrap_err();
+        assert!(!err.to_string().is_empty());
+        assert_eq!(program.workgroup_storage_size("good", &[]).unwrap(), 0);
+        assert_eq!(
+            program
+                .workgroup_storage_size(
+                    "bad",
+                    &[OverrideValue {
+                        name: "zero".into(),
+                        value: 1.0,
+                    }]
+                )
+                .unwrap(),
+            16
+        );
+        assert!(program
+            .workgroup_storage_size(
+                "good",
+                &[OverrideValue {
+                    name: "unknown".into(),
+                    value: 1.0,
+                }]
+            )
+            .is_err());
     }
 
     #[test]
@@ -2744,9 +2856,7 @@ fn no_immediate() {}
             program.immediate_data_used_slots("no_immediate").unwrap(),
             0
         );
-        // A nonexistent entry point is a real error, never silently `Ok(0)`
-        // (the flaw this query deliberately avoids -- see
-        // `workgroup_storage_size`'s doc comment).
+        // A nonexistent entry point is a real error, never silently `Ok(0)`.
         assert!(program.immediate_data_size("does_not_exist").is_err());
         assert!(program.immediate_data_used_slots("does_not_exist").is_err());
     }

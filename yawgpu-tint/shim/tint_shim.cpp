@@ -2343,6 +2343,7 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
 }
 
 bool yawgpu_tint_workgroup_storage_size(const YawgpuTintProgram* program,
+                                        const char* ep,
                                         const YawgpuTintOverrideValue* ov,
                                         size_t n_ov,
                                         uint64_t* out,
@@ -2354,7 +2355,7 @@ bool yawgpu_tint_workgroup_storage_size(const YawgpuTintProgram* program,
         *out = 0;
     }
     try {
-        if (program == nullptr || out == nullptr) {
+        if (program == nullptr || ep == nullptr || out == nullptr) {
             set_error_string(err, "invalid NULL argument");
             return false;
         }
@@ -2363,18 +2364,29 @@ bool yawgpu_tint_workgroup_storage_size(const YawgpuTintProgram* program,
             set_error(err, ir.Failure());
             return false;
         }
+        // Match the writers: discard sibling entry points and their unused
+        // declarations before resolving overrides or measuring storage.
+        auto single = tint::core::ir::transform::SingleEntryPoint(ir.Get(), std::string(ep));
+        if (single != tint::Success) {
+            set_error(err, single.Failure());
+            return false;
+        }
         auto cfg = make_override_config(program, ov, n_ov);
         if (cfg != tint::Success) {
-            *out = 0;
-            return true;
+            set_error(err, cfg.Failure());
+            return false;
         }
         auto sub = tint::core::ir::transform::SubstituteOverrides(ir.Get(), cfg.Get());
         if (sub != tint::Success) {
-            *out = 0;
-            return true;
+            set_error(err, sub.Failure());
+            return false;
         }
         auto wi = tint::core::ir::GetWorkgroupInfo(ir.Get());
-        *out = (wi == tint::Success) ? wi->storage_size : 0;
+        if (wi != tint::Success) {
+            set_error(err, wi.Failure());
+            return false;
+        }
+        *out = wi->storage_size;
         return true;
     } catch (const std::exception& e) {
         set_error_string(err, e.what());

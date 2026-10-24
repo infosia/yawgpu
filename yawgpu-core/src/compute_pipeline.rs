@@ -2046,6 +2046,69 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn compute_pipeline_workgroup_storage_limit_is_entry_scoped() {
+        let device = noop_device();
+        assert_eq!(device.limits().max_compute_workgroup_storage_size, 16384);
+        let shader = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r#"
+var<workgroup> large: array<u32, 8192>;
+var<workgroup> a: array<u32, 3072>;
+var<workgroup> b: array<u32, 3072>;
+@compute @workgroup_size(1) fn large_cs() { large[0] = 1u; }
+@compute @workgroup_size(1) fn first_cs() { a[0] = 1u; }
+@compute @workgroup_size(1) fn second_cs() { b[0] = 1u; }
+@fragment fn fs() -> @location(0) vec4f { return vec4f(); }
+"#
+                .to_owned(),
+            )),
+        );
+        assert!(!shader.is_error());
+        for entry in ["large_cs", "first_cs", "second_cs"] {
+            device.push_error_scope(ErrorFilter::Validation);
+            let pipeline = device.create_compute_pipeline(ComputePipelineDescriptor {
+                layout: ComputePipelineLayout::Auto,
+                shader_module: Arc::clone(&shader),
+                entry_point: Some(entry.to_owned()),
+                constants: Vec::new(),
+                error: None,
+            });
+            let error = device.pop_error_scope().expect("scope exists");
+            if entry == "large_cs" {
+                assert!(pipeline.is_error());
+                assert_eq!(
+                    error.expect("storage limit error").message,
+                    "compute workgroup storage size exceeds the device limit"
+                );
+            } else {
+                assert!(!pipeline.is_error());
+                assert!(error.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_compute_workgroup_does_not_sum_sibling_storage() {
+        let module = frontend::parse_and_validate_wgsl(
+            r#"
+var<workgroup> a: array<u32, 3072>;
+var<workgroup> b: array<u32, 3072>;
+@compute @workgroup_size(1) fn first() { a[0] = 1u; }
+@compute @workgroup_size(1) fn second() { b[0] = 1u; }
+"#,
+        )
+        .unwrap();
+        for entry in ["first", "second"] {
+            let workgroup =
+                resolve_compute_workgroup(&module, entry, &[], Limits::DEFAULT, None).unwrap();
+            assert_eq!(workgroup.storage_size, 12288);
+        }
+        assert!(
+            resolve_compute_workgroup(&module, "missing", &[], Limits::DEFAULT, None,).is_err()
+        );
+    }
+
+    #[test]
     fn compute_pipeline_accessors_and_render_pipeline_accessors() {
         let device = noop_device();
         let compute = noop_compute_pipeline(&device);

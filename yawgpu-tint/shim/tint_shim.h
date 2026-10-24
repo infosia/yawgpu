@@ -140,9 +140,7 @@ YAWGPU_TINT_API bool yawgpu_tint_entry_point_output_get(const YawgpuTintProgram*
    size (0 if the entry point declares/uses no immediates). On failure (NULL
    argument or `ep` not found among the program's entry points) returns
    false and, if `err` is non-NULL, sets `*err` to an owned diagnostic string
-   (caller frees with `yawgpu_tint_string_free`) -- unlike
-   yawgpu_tint_workgroup_storage_size, a lookup failure is never silently
-   coerced to a `0` success. */
+   (caller frees with `yawgpu_tint_string_free`). */
 YAWGPU_TINT_API bool yawgpu_tint_immediate_data_size(const YawgpuTintProgram*,
                                         const char* ep,
                                         uint32_t* out,
@@ -374,9 +372,12 @@ YAWGPU_TINT_API bool yawgpu_tint_generate_spirv(const YawgpuTintProgram*,
                                 size_t* n_words_out,
                                 char** err);
 
-/* Returns the module's total var<workgroup> storage size in bytes (0 if none).
-   Returns false + sets *err on hard failure. */
+/* Returns `ep`'s var<workgroup> storage size in bytes (0 if none).
+   Lowers to IR, applies SingleEntryPoint(ep), then SubstituteOverrides and
+   GetWorkgroupInfo. Returns false + sets *err on any failure, including an
+   unknown/non-compute entry point, invalid overrides or const-eval failure. */
 YAWGPU_TINT_API bool yawgpu_tint_workgroup_storage_size(const YawgpuTintProgram*,
+                                        const char* ep,
                                         const YawgpuTintOverrideValue* ov,
                                         size_t n_ov,
                                         uint64_t* out,
