@@ -171,7 +171,6 @@ impl MetalSurface {
 #[cfg(test)]
 mod tests {
     use super::super::test_helpers::*;
-    use super::super::*;
     use super::*;
 
     #[test]

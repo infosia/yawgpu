@@ -95,7 +95,7 @@ fn next_submission_index(
     backend: &'static str,
 ) -> Result<SubmissionIndex, HalError> {
     last_issued
-        .fetch_update(
+        .try_update(
             std::sync::atomic::Ordering::AcqRel,
             std::sync::atomic::Ordering::Acquire,
             |index| index.checked_add(1),

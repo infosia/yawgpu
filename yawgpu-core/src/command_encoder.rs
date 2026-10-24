@@ -826,7 +826,9 @@ impl CommandEncoder {
             crate::device::timestamp_conversion_params(device.inner.timestamp_period);
         let mut immediate_data = vec![0; MAX_IMMEDIATE_DATA_BYTES];
         for (bytes, value) in immediate_data
-            .chunks_exact_mut(4)
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
             .zip([count, multiplier, shift])
         {
             bytes.copy_from_slice(&value.to_le_bytes());

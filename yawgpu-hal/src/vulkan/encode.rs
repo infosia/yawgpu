@@ -5817,7 +5817,9 @@ mod tests {
             .read(0, count * 8)
             .expect("read resolved query results");
         bytes
-            .chunks_exact(8)
+            .as_chunks::<8>()
+            .0
+            .iter()
             .map(|chunk| {
                 let mut value = [0; 8];
                 value.copy_from_slice(chunk);
@@ -6692,7 +6694,9 @@ mod tests {
         buffer
             .read(0, count * 4)
             .expect("read float texels")
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|chunk| {
                 let mut value = [0; 4];
                 value.copy_from_slice(chunk);
