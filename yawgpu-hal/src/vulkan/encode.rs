@@ -1927,6 +1927,68 @@ fn acquire_wait_stage() -> vk::PipelineStageFlags {
     vk::PipelineStageFlags::ALL_COMMANDS
 }
 
+/// Binding points supplied by a render bind group (samplers cannot write).
+fn render_storage_binding_keys<'a>(
+    buffers: &'a [HalBoundBuffer],
+    textures: &'a [HalBoundTexture],
+) -> impl Iterator<Item = (u32, u32)> + 'a {
+    buffers
+        .iter()
+        .map(|b| (b.group, b.binding))
+        .chain(textures.iter().map(|t| (t.group, t.binding)))
+}
+
+fn writable_storage_is_bound(
+    writable: &[(u32, u32)],
+    mut bound: impl Iterator<Item = (u32, u32)>,
+) -> bool {
+    bound.any(|key| writable.contains(&key))
+}
+
+/// Tracks pipeline and bind-group changes, including bundle replay and its
+/// state invalidation. A binding can precede its pipeline or vice versa.
+fn render_stream_needs_shader_write_barrier(
+    commands: &[HalRenderPassCommand],
+    pipeline_writes: &impl Fn(&crate::HalRenderPipeline) -> Vec<(u32, u32)>,
+) -> bool {
+    fn visit(
+        commands: &[HalRenderPassCommand],
+        pipeline_writes: &impl Fn(&crate::HalRenderPipeline) -> Vec<(u32, u32)>,
+        writable: &mut Vec<(u32, u32)>,
+        bound: &mut Vec<(u32, u32)>,
+    ) -> bool {
+        for command in commands {
+            match command {
+                HalRenderPassCommand::SetPipeline(pipeline) => {
+                    *writable = pipeline_writes(pipeline);
+                }
+                HalRenderPassCommand::SetBindGroup {
+                    index,
+                    buffers,
+                    textures,
+                    ..
+                } => {
+                    bound.retain(|&(group, _)| group != *index);
+                    bound.extend(render_storage_binding_keys(buffers, textures));
+                }
+                HalRenderPassCommand::ExecuteRenderBundle(bundle) => {
+                    if visit(&bundle.commands, pipeline_writes, writable, bound) {
+                        return true;
+                    }
+                    writable.clear();
+                    bound.clear();
+                }
+                _ => continue,
+            }
+            if writable_storage_is_bound(writable, bound.iter().copied()) {
+                return true;
+            }
+        }
+        false
+    }
+    visit(commands, pipeline_writes, &mut Vec::new(), &mut Vec::new())
+}
+
 /// Publishes vertex/fragment storage writes to subsequent consumers and writers.
 fn render_pass_shader_write_scopes() -> MemoryBarrierScopes {
     MemoryBarrierScopes {
@@ -2292,11 +2354,21 @@ pub(super) fn encode_subpass_render_pass(
     unsafe {
         device.device.cmd_end_render_pass(command_buffer);
     }
-    record_memory_barrier(
-        &device.device,
-        command_buffer,
-        render_pass_shader_write_scopes(),
-    );
+    if pass.draws.iter().any(|draw| {
+        let crate::HalRenderPipeline::Vulkan(pipeline) = &draw.pipeline else {
+            return false;
+        };
+        writable_storage_is_bound(
+            &pipeline.inner.writable_storage_bindings,
+            render_storage_binding_keys(&draw.bind_buffers, &draw.bind_textures),
+        )
+    }) {
+        record_memory_barrier(
+            &device.device,
+            command_buffer,
+            render_pass_shader_write_scopes(),
+        );
+    }
     for (_, texture) in persistent_textures {
         let inner = texture.inner()?;
         layouts.set(
@@ -3223,7 +3295,14 @@ fn encode_render_pass_impl(
     unsafe {
         vk_device.cmd_end_render_pass(command_buffer);
     }
-    record_memory_barrier(vk_device, command_buffer, render_pass_shader_write_scopes());
+    if render_stream_needs_shader_write_barrier(&pass.commands, &|pipeline| match pipeline {
+        crate::HalRenderPipeline::Vulkan(pipeline) => {
+            pipeline.inner.writable_storage_bindings.clone()
+        }
+        _ => Vec::new(),
+    }) {
+        record_memory_barrier(vk_device, command_buffer, render_pass_shader_write_scopes());
+    }
     for (texture, target) in color_attachments.iter().flatten() {
         layouts.set(
             &texture.inner()?.layouts,
@@ -4725,6 +4804,117 @@ pub(super) fn to_image_extent(extent: HalExtent3d) -> vk::Extent3D {
 
 #[cfg(test)]
 mod tests {
+    fn storage_bind_command(binding: u32) -> HalRenderPassCommand {
+        let mut texture = bound_texture(dummy_texture(HalTextureFormat::Rgba8Unorm));
+        texture.binding = binding;
+        texture.storage_access = Some(crate::HalStorageTextureAccess::ReadWrite);
+        HalRenderPassCommand::SetBindGroup {
+            index: 0,
+            buffers: Vec::new(),
+            textures: vec![texture],
+            samplers: Vec::new(),
+            external_textures: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn render_barrier_requires_bound_writable_render_storage() {
+        let pipeline = HalRenderPassCommand::SetPipeline(crate::HalRenderPipeline::Noop);
+        let writable = |_: &crate::HalRenderPipeline| vec![(0, 0)];
+        let read_only = |_: &crate::HalRenderPipeline| Vec::new();
+        assert!(!render_stream_needs_shader_write_barrier(&[], &writable));
+        assert!(!render_stream_needs_shader_write_barrier(
+            std::slice::from_ref(&pipeline),
+            &writable
+        ));
+        assert!(!render_stream_needs_shader_write_barrier(
+            &[pipeline.clone(), storage_bind_command(0)],
+            &read_only
+        ));
+        assert!(!render_stream_needs_shader_write_barrier(
+            &[pipeline.clone(), storage_bind_command(1)],
+            &writable
+        ));
+        assert!(render_stream_needs_shader_write_barrier(
+            &[pipeline.clone(), storage_bind_command(0)],
+            &writable
+        ));
+        assert!(render_stream_needs_shader_write_barrier(
+            &[storage_bind_command(0), pipeline],
+            &writable
+        ));
+    }
+
+    #[test]
+    fn render_barrier_tracks_storage_buffers_and_replaced_bind_groups() {
+        let buffer = HalBoundBuffer {
+            group: 0,
+            binding: 0,
+            metal_index: 0,
+            vertex_metal_index: None,
+            fragment_metal_index: Some(0),
+            buffer: HalBuffer::Noop(
+                noop::NoopDevice::new()
+                    .create_buffer(16, HalBufferUsage::default())
+                    .unwrap(),
+            ),
+            offset: 0,
+            size: 16,
+        };
+        let bind = HalRenderPassCommand::SetBindGroup {
+            index: 0,
+            buffers: vec![buffer],
+            textures: Vec::new(),
+            samplers: Vec::new(),
+            external_textures: Vec::new(),
+        };
+        let clear = HalRenderPassCommand::SetBindGroup {
+            index: 0,
+            buffers: Vec::new(),
+            textures: Vec::new(),
+            samplers: Vec::new(),
+            external_textures: Vec::new(),
+        };
+        let pipeline = HalRenderPassCommand::SetPipeline(crate::HalRenderPipeline::Noop);
+        let writable = |_: &crate::HalRenderPipeline| vec![(0, 0)];
+        assert!(render_stream_needs_shader_write_barrier(
+            &[pipeline.clone(), bind.clone()],
+            &writable
+        ));
+        assert!(!render_stream_needs_shader_write_barrier(
+            &[bind, clear, pipeline],
+            &writable
+        ));
+    }
+
+    #[test]
+    fn render_barrier_includes_bundles_and_respects_bundle_state_reset() {
+        let writable = |_: &crate::HalRenderPipeline| vec![(0, 0)];
+        let pipeline = HalRenderPassCommand::SetPipeline(crate::HalRenderPipeline::Noop);
+        let bundle = |commands| {
+            HalRenderPassCommand::ExecuteRenderBundle(crate::HalRenderBundle { commands })
+        };
+        assert!(render_stream_needs_shader_write_barrier(
+            &[
+                bundle(vec![pipeline.clone(), storage_bind_command(0)]),
+                bundle(Vec::new()),
+            ],
+            &writable
+        ));
+        assert!(!render_stream_needs_shader_write_barrier(
+            &[
+                pipeline.clone(),
+                bundle(Vec::new()),
+                storage_bind_command(0),
+            ],
+            &writable
+        ));
+        assert!(!render_stream_needs_shader_write_barrier(
+            &[storage_bind_command(0), bundle(Vec::new()), pipeline,],
+            &writable
+        ));
+    }
+
     #[test]
     fn acquire_wait_precedes_every_possible_first_image_use() {
         assert_eq!(acquire_wait_stage(), vk::PipelineStageFlags::ALL_COMMANDS);

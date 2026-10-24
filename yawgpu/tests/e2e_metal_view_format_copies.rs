@@ -192,6 +192,131 @@ fn metal_2d_array_to_3d_and_back_copies_every_layer() {
     }
 }
 
+/// R1 (Phase Review m2): an MSAA `rgba8unorm` texture cleared through its
+/// `rgba8unorm-srgb` view and resolved into an sRGB view of a single-sample
+/// `rgba8unorm` texture must store the sRGB encoding of linear 0.5 (~188).
+#[test]
+#[ignore = "manual real-backend test"]
+fn metal_msaa_resolve_through_srgb_views_stores_srgb_encoded_bytes() {
+    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+        return;
+    }
+    unsafe {
+        let (instance, adapter, device) = metal_device();
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+
+        let view_formats = [native::WGPUTextureFormat_RGBA8UnormSrgb];
+        let msaa = create_texture_with_samples(
+            device,
+            4,
+            native::WGPUTextureUsage_RenderAttachment,
+            &view_formats,
+        );
+        let resolve = create_texture(
+            device,
+            native::WGPUTextureDimension_2D,
+            1,
+            native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_CopySrc,
+            &view_formats,
+        );
+        let msaa_view = yawgpu::wgpuTextureCreateView(msaa, &srgb_view_descriptor());
+        let resolve_view = yawgpu::wgpuTextureCreateView(resolve, &srgb_view_descriptor());
+        let readback = create_buffer(device, LAYER_BYTES as u64);
+
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        let attachment = native::WGPURenderPassColorAttachment {
+            nextInChain: std::ptr::null_mut(),
+            view: msaa_view,
+            depthSlice: native::WGPU_DEPTH_SLICE_UNDEFINED,
+            resolveTarget: resolve_view,
+            loadOp: native::WGPULoadOp_Clear,
+            storeOp: native::WGPUStoreOp_Discard,
+            clearValue: native::WGPUColor {
+                r: 0.5,
+                g: 0.5,
+                b: 0.5,
+                a: 1.0,
+            },
+        };
+        let pass_descriptor = native::WGPURenderPassDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            colorAttachmentCount: 1,
+            colorAttachments: &attachment,
+            depthStencilAttachment: std::ptr::null(),
+            occlusionQuerySet: std::ptr::null(),
+            timestampWrites: std::ptr::null(),
+        };
+        let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &pass_descriptor);
+        yawgpu::wgpuRenderPassEncoderEnd(pass);
+        yawgpu::wgpuRenderPassEncoderRelease(pass);
+        record_t2b(encoder, resolve, 0, readback, 1);
+        submit(queue, encoder);
+
+        let bytes = read_buffer(instance, readback, LAYER_BYTES);
+        let texel = &bytes[..4];
+        for channel in &texel[..3] {
+            assert!(
+                channel.abs_diff(188) <= 1,
+                "resolved sRGB-encoded 0.5 must be ~188, got texel {texel:?}"
+            );
+        }
+        assert_eq!(texel[3], 255);
+        assert!(
+            errors.lock().expect("error lock").is_empty(),
+            "unexpected errors: {:?}",
+            errors.lock().expect("error lock")
+        );
+
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuTextureViewRelease(resolve_view);
+        yawgpu::wgpuTextureViewRelease(msaa_view);
+        yawgpu::wgpuTextureRelease(resolve);
+        yawgpu::wgpuTextureRelease(msaa);
+        yawgpu::wgpuQueueRelease(queue);
+        release(instance, adapter, device);
+    }
+}
+
+fn srgb_view_descriptor() -> native::WGPUTextureViewDescriptor {
+    native::WGPUTextureViewDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        format: native::WGPUTextureFormat_RGBA8UnormSrgb,
+        dimension: native::WGPUTextureViewDimension_2D,
+        baseMipLevel: 0,
+        mipLevelCount: 1,
+        baseArrayLayer: 0,
+        arrayLayerCount: 1,
+        aspect: native::WGPUTextureAspect_All,
+        usage: native::WGPUTextureUsage_None,
+    }
+}
+
+unsafe fn create_texture_with_samples(
+    device: native::WGPUDevice,
+    sample_count: u32,
+    usage: native::WGPUTextureUsage,
+    view_formats: &[native::WGPUTextureFormat],
+) -> native::WGPUTexture {
+    let descriptor = native::WGPUTextureDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        usage,
+        dimension: native::WGPUTextureDimension_2D,
+        size: extent(1),
+        format: native::WGPUTextureFormat_RGBA8Unorm,
+        mipLevelCount: 1,
+        sampleCount: sample_count,
+        viewFormatCount: view_formats.len(),
+        viewFormats: view_formats.as_ptr(),
+    };
+    let texture = yawgpu::wgpuDeviceCreateTexture(device, &descriptor);
+    assert!(!texture.is_null());
+    texture
+}
+
 unsafe fn record_t2t(
     encoder: native::WGPUCommandEncoder,
     source: native::WGPUTexture,

@@ -117,6 +117,8 @@ pub(super) struct VulkanRenderPipelineInner {
     pub(super) render_pass_owned: bool,
     pub(super) descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
     pub(super) descriptor_bindings: Vec<HalDescriptorBinding>,
+    /// Writable storage bindings present in the vertex or fragment SPIR-V.
+    pub(super) writable_storage_bindings: Vec<(u32, u32)>,
     pub(super) vertex_shader_module: vk::ShaderModule,
     pub(super) fragment_shader_module: Option<vk::ShaderModule>,
     /// Combined immediates push-constant block (Block 94 S3): user
@@ -325,6 +327,102 @@ fn compute_stage_subgroup_flags(
     }
 }
 
+/// Extracts storage access from Tint's per-entry-point render SPIR-V. HAL
+/// descriptor metadata merges read-only and writable storage buffers, so it
+/// cannot by itself decide whether a render pass needs a shader-write barrier.
+fn render_writable_storage_bindings(
+    vertex: &[u32],
+    fragment: Option<&[u32]>,
+    bindings: &[HalDescriptorBinding],
+) -> Vec<(u32, u32)> {
+    let mut writable = spirv_writable_storage_bindings(vertex, bindings);
+    if let Some(fragment) = fragment {
+        writable.extend(spirv_writable_storage_bindings(fragment, bindings));
+    }
+    writable.sort_unstable();
+    writable.dedup();
+    writable
+}
+
+/// Reads binding decorations and NonWritable on variables or block members.
+/// The input is the validated SPIR-V used to create the shader module.
+fn spirv_writable_storage_bindings(
+    words: &[u32],
+    bindings: &[HalDescriptorBinding],
+) -> Vec<(u32, u32)> {
+    use std::collections::{HashMap, HashSet};
+    let mut groups = HashMap::new();
+    let mut slots = HashMap::new();
+    let mut non_writable = HashSet::new();
+    let mut non_writable_members = HashSet::new();
+    let mut structs = HashMap::new();
+    let mut pointers = HashMap::new();
+    let mut variables = Vec::new();
+    let mut remaining = words.get(5..).unwrap_or_default();
+    while let Some(&header) = remaining.first() {
+        let count = (header >> 16) as usize;
+        if count == 0 || count > remaining.len() {
+            break;
+        }
+        let operands = &remaining[1..count];
+        match (header & 0xffff, operands) {
+            // OpDecorate: DescriptorSet, Binding, NonWritable.
+            (71, &[id, 34, group]) => {
+                groups.insert(id, group);
+            }
+            (71, &[id, 33, binding]) => {
+                slots.insert(id, binding);
+            }
+            (71, &[id, 24]) => {
+                non_writable.insert(id);
+            }
+            // OpMemberDecorate NonWritable.
+            (72, &[id, member, 24]) => {
+                non_writable_members.insert((id, member));
+            }
+            // OpTypeStruct / OpTypePointer / OpVariable.
+            (30, &[id, ref members @ ..]) => {
+                structs.insert(id, members.len());
+            }
+            (32, &[id, _, pointee]) => {
+                pointers.insert(id, pointee);
+            }
+            (59, &[pointer, id, _, ..]) => {
+                variables.push((id, pointer));
+            }
+            _ => {}
+        }
+        remaining = &remaining[count..];
+    }
+    variables
+        .into_iter()
+        .filter_map(|(id, pointer)| {
+            let key = (*groups.get(&id)?, *slots.get(&id)?);
+            let descriptor = bindings.iter().find(|b| (b.group, b.binding) == key)?;
+            let writable = match descriptor.kind {
+                HalDescriptorBindingKind::Buffer(crate::HalBufferBindingKind::Storage) => {
+                    let block = pointers.get(&pointer);
+                    !non_writable.contains(&id)
+                        && !block.is_some_and(|block| {
+                            non_writable.contains(block)
+                                || structs.get(block).is_some_and(|&count| {
+                                    (0..count as u32).all(|member| {
+                                        non_writable_members.contains(&(*block, member))
+                                    })
+                                })
+                        })
+                }
+                HalDescriptorBindingKind::StorageTexture { access } => {
+                    access != crate::HalStorageTextureAccess::ReadOnly
+                        && !non_writable.contains(&id)
+                }
+                _ => false,
+            };
+            writable.then_some(key)
+        })
+        .collect()
+}
+
 /// Creates render pipeline and reports validation errors through the owning device.
 pub(super) fn create_render_pipeline(
     device: Arc<VulkanDeviceInner>,
@@ -345,6 +443,8 @@ pub(super) fn create_render_pipeline(
         .map(CString::new)
         .transpose()
         .map_err(|_| shader_error("fragment entry point contains NUL"))?;
+    let writable_storage_bindings =
+        render_writable_storage_bindings(&vertex, fragment.as_deref(), bindings);
     let vertex_shader_module = create_shader_module(&device, &vertex)?;
     let fragment_shader_module = match fragment
         .as_deref()
@@ -492,6 +592,7 @@ pub(super) fn create_render_pipeline(
             render_pass_owned: true,
             descriptor_set_layouts,
             descriptor_bindings: bindings.to_vec(),
+            writable_storage_bindings,
             vertex_shader_module,
             fragment_shader_module,
             immediates,
@@ -523,6 +624,8 @@ pub(super) fn create_subpass_render_pipeline(
         .map(CString::new)
         .transpose()
         .map_err(|_| shader_error("fragment entry point contains NUL"))?;
+    let writable_storage_bindings =
+        render_writable_storage_bindings(&vertex, fragment.as_deref(), bindings);
     let vertex_shader_module = create_shader_module(&device, &vertex)?;
     let fragment_shader_module = match fragment
         .as_deref()
@@ -671,6 +774,7 @@ pub(super) fn create_subpass_render_pipeline(
             render_pass_owned: true,
             descriptor_set_layouts,
             descriptor_bindings: bindings.to_vec(),
+            writable_storage_bindings,
             vertex_shader_module,
             fragment_shader_module,
             immediates,
@@ -2090,6 +2194,92 @@ pub(super) fn descriptor_buffer_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Minimal instruction streams exercise the metadata reader without a GPU.
+    fn storage_spirv(read_only: bool, variable_decoration: bool) -> Vec<u32> {
+        let mut words = vec![0x07230203, 0x00010300, 0, 8, 0];
+        words.extend_from_slice(&[
+            (4 << 16) | 71,
+            4,
+            34,
+            2, // DescriptorSet 2
+            (4 << 16) | 71,
+            4,
+            33,
+            3, // Binding 3
+            (3 << 16) | 30,
+            1,
+            7, // one-member block
+            (4 << 16) | 32,
+            2,
+            12,
+            1, // storage pointer to block
+            (4 << 16) | 59,
+            2,
+            4,
+            12, // storage variable
+        ]);
+        if read_only {
+            if variable_decoration {
+                words.extend_from_slice(&[(3 << 16) | 71, 4, 24]);
+            } else {
+                words.extend_from_slice(&[(4 << 16) | 72, 1, 0, 24]);
+            }
+        }
+        words
+    }
+
+    #[test]
+    fn render_storage_metadata_distinguishes_read_only_and_writable_buffers() {
+        let binding = HalDescriptorBinding {
+            group: 2,
+            binding: 3,
+            kind: HalDescriptorBindingKind::Buffer(crate::HalBufferBindingKind::Storage),
+        };
+        for variable in [false, true] {
+            let read_only = storage_spirv(true, variable);
+            assert!(render_writable_storage_bindings(&read_only, None, &[binding]).is_empty());
+        }
+        let writable = storage_spirv(false, false);
+        let read_only = storage_spirv(true, false);
+        for (vertex, fragment) in [(&writable, &read_only), (&read_only, &writable)] {
+            assert_eq!(
+                render_writable_storage_bindings(vertex, Some(fragment), &[binding]),
+                vec![(2, 3)]
+            );
+        }
+        assert_eq!(
+            render_writable_storage_bindings(&writable, Some(&writable), &[binding]),
+            vec![(2, 3)]
+        );
+        assert!(render_writable_storage_bindings(&writable, None, &[]).is_empty());
+        let uniform = HalDescriptorBinding {
+            kind: HalDescriptorBindingKind::Buffer(crate::HalBufferBindingKind::Uniform),
+            ..binding
+        };
+        assert!(render_writable_storage_bindings(&writable, None, &[uniform]).is_empty());
+    }
+
+    #[test]
+    fn render_storage_metadata_excludes_absent_and_read_only_textures() {
+        for access in [
+            crate::HalStorageTextureAccess::ReadOnly,
+            crate::HalStorageTextureAccess::WriteOnly,
+            crate::HalStorageTextureAccess::ReadWrite,
+        ] {
+            let binding = HalDescriptorBinding {
+                group: 2,
+                binding: 3,
+                kind: HalDescriptorBindingKind::StorageTexture { access },
+            };
+            assert!(render_writable_storage_bindings(&[], None, &[binding]).is_empty());
+            assert_eq!(
+                render_writable_storage_bindings(&storage_spirv(false, false), None, &[binding])
+                    .is_empty(),
+                access == crate::HalStorageTextureAccess::ReadOnly
+            );
+        }
+    }
 
     #[test]
     fn pipeline_color_description_uses_color_layout_without_a_bound_image() {

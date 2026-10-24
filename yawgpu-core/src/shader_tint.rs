@@ -661,10 +661,10 @@ impl ReflectedModule {
     /// returns `None` for a dimension that is any override-expression, even
     /// one with a default), so a `Some` here means the size has zero
     /// override dependence. Dimensions come from the already-memoized
-    /// [`Self::raw_entry_points`]; storage still requires entry-scoped IR.
-    /// The private helper backing [`Self::resolved_compute_workgroup_size`] below (finding F6 in
-    /// `specs/tracking/tint-integration-refactor.md`), taken only when the
-    /// module declares no overrides at all — see the caller for why.
+    /// [`Self::raw_entry_points`]; workgroup storage size still requires an
+    /// entry-scoped IR query. [`Self::resolved_compute_workgroup_size`] uses
+    /// this helper only when the module declares no overrides at all; other
+    /// modules take the override-resolving IR path.
     fn compute_workgroup_size(
         &self,
         entry_point: &str,

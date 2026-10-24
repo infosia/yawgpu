@@ -3366,7 +3366,7 @@ fn validate_buffer_to_texture_aspect(
     {
         return Err(HalError::BufferOperationFailed {
             backend: BACKEND,
-            message: "GLES cannot upload stencil formats",
+            message: "GLES cannot upload the stencil aspect of a combined depth-stencil texture",
         });
     }
     Ok(())
@@ -4347,7 +4347,7 @@ mod tests {
                         result,
                         Err(HalError::BufferOperationFailed {
                             backend: "gles",
-                            message: "GLES cannot upload stencil formats",
+                            message: "GLES cannot upload the stencil aspect of a combined depth-stencil texture",
                         })
                     ));
                 } else {

@@ -1,6 +1,7 @@
 # Block 110 — whole-codebase review: core / FFI validation MAJORs
 
-Status: **PLANNED (2026-10-25)**.
+Status: **COMPLETE (2026-10-25)** — S1 `f2412ac`, S2 `c60989b`, Phase Review
+fixes `339729c` (0 CRITICAL / 0 MAJOR / 5 MINOR; m5 deferred).
 Source: `specs/tracking/code-review-2026-10.md` (core validation + FFI
 MAJOR rows, plus three confirmed core MINORs). Every rule here is
 Noop-testable; the oracle is Dawn (`third_party/dawn/src/dawn/native/`)
