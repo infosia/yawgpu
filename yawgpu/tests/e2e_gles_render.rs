@@ -116,6 +116,220 @@ fn fs() -> @location(0) vec4<f32> {
     }
 }
 
+/// Block 109 (C1): a `Less` + depth-write pipeline must occlude. A near red
+/// triangle is drawn first and a far green one second, both covering the
+/// whole target; with the depth test applied the near colour survives,
+/// without it the last draw (green) would win.
+#[test]
+#[ignore = "manual real-backend test"]
+fn gles_render_depth_test_occludes_later_far_draw() {
+    assert!(
+        real_backend_available(RealBackend::Gles),
+        "GLES backend not available; install an ANGLE build with ES 3.1 support \
+         (Chrome / Edge ANGLE caps at ES 3.0; see specs/blocks/67-gles-backend.md). \
+         Without a real GLES adapter this test cannot verify the GLES execution path."
+    );
+
+    unsafe {
+        let instance = create_gles_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+
+        let shader = r#"
+struct VertexOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+}
+
+@vertex
+fn vs(@location(0) position: vec3<f32>, @location(1) color: vec4<f32>) -> VertexOut {
+    var out: VertexOut;
+    out.position = vec4<f32>(position, 1.0);
+    out.color = color;
+    return out;
+}
+
+@fragment
+fn fs(in: VertexOut) -> @location(0) vec4<f32> {
+    return in.color;
+}
+"#;
+        // Two screen-covering triangles: near red (z = 0.2) then far green (z = 0.8).
+        #[rustfmt::skip]
+        let vertices: [f32; 42] = [
+            -1.0, -1.0, 0.2, 1.0, 0.0, 0.0, 1.0,
+             3.0, -1.0, 0.2, 1.0, 0.0, 0.0, 1.0,
+            -1.0,  3.0, 0.2, 1.0, 0.0, 0.0, 1.0,
+            -1.0, -1.0, 0.8, 0.0, 1.0, 0.0, 1.0,
+             3.0, -1.0, 0.8, 0.0, 1.0, 0.0, 1.0,
+            -1.0,  3.0, 0.8, 0.0, 1.0, 0.0, 1.0,
+        ];
+        let vertex_size = std::mem::size_of_val(&vertices) as u64;
+        let vertex = create_buffer(
+            device,
+            vertex_size,
+            native::WGPUBufferUsage_Vertex | native::WGPUBufferUsage_CopyDst,
+        );
+        write_f32_buffer(queue, vertex, &vertices);
+
+        let color = create_texture(
+            device,
+            native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_CopySrc,
+        );
+        let color_view = yawgpu::wgpuTextureCreateView(color, std::ptr::null());
+        let depth_descriptor = native::WGPUTextureDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            usage: native::WGPUTextureUsage_RenderAttachment,
+            dimension: native::WGPUTextureDimension_2D,
+            size: texture_extent(),
+            format: native::WGPUTextureFormat_Depth32Float,
+            mipLevelCount: 1,
+            sampleCount: 1,
+            viewFormatCount: 0,
+            viewFormats: std::ptr::null(),
+        };
+        let depth = yawgpu::wgpuDeviceCreateTexture(device, &depth_descriptor);
+        assert!(!depth.is_null());
+        let depth_view = yawgpu::wgpuTextureCreateView(depth, std::ptr::null());
+        let readback = create_buffer(
+            device,
+            READBACK_SIZE as u64,
+            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+        );
+
+        let module = create_wgsl_module(device, shader);
+        let attributes = [
+            native::WGPUVertexAttribute {
+                nextInChain: std::ptr::null_mut(),
+                format: native::WGPUVertexFormat_Float32x3,
+                offset: 0,
+                shaderLocation: 0,
+            },
+            native::WGPUVertexAttribute {
+                nextInChain: std::ptr::null_mut(),
+                format: native::WGPUVertexFormat_Float32x4,
+                offset: 12,
+                shaderLocation: 1,
+            },
+        ];
+        let vertex_layout = native::WGPUVertexBufferLayout {
+            nextInChain: std::ptr::null_mut(),
+            arrayStride: 28,
+            stepMode: native::WGPUVertexStepMode_Vertex,
+            attributeCount: attributes.len(),
+            attributes: attributes.as_ptr(),
+        };
+        let color_target = native::WGPUColorTargetState {
+            nextInChain: std::ptr::null_mut(),
+            format: native::WGPUTextureFormat_RGBA8Unorm,
+            blend: std::ptr::null(),
+            writeMask: native::WGPUColorWriteMask_All,
+        };
+        let fragment = native::WGPUFragmentState {
+            nextInChain: std::ptr::null_mut(),
+            module,
+            entryPoint: string_view("fs"),
+            constantCount: 0,
+            constants: std::ptr::null(),
+            targetCount: 1,
+            targets: &color_target,
+        };
+        let keep_always = native::WGPUStencilFaceState {
+            compare: native::WGPUCompareFunction_Always,
+            failOp: native::WGPUStencilOperation_Keep,
+            depthFailOp: native::WGPUStencilOperation_Keep,
+            passOp: native::WGPUStencilOperation_Keep,
+        };
+        let depth_stencil = native::WGPUDepthStencilState {
+            nextInChain: std::ptr::null_mut(),
+            format: native::WGPUTextureFormat_Depth32Float,
+            depthWriteEnabled: native::WGPUOptionalBool_True,
+            depthCompare: native::WGPUCompareFunction_Less,
+            stencilFront: keep_always,
+            stencilBack: keep_always,
+            stencilReadMask: 0xFFFF_FFFF,
+            stencilWriteMask: 0xFFFF_FFFF,
+            depthBias: 0,
+            depthBiasSlopeScale: 0.0,
+            depthBiasClamp: 0.0,
+        };
+        let pipeline_descriptor = native::WGPURenderPipelineDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            layout: std::ptr::null(),
+            vertex: native::WGPUVertexState {
+                nextInChain: std::ptr::null_mut(),
+                module,
+                entryPoint: string_view("vs"),
+                constantCount: 0,
+                constants: std::ptr::null(),
+                bufferCount: 1,
+                buffers: &vertex_layout,
+            },
+            primitive: primitive_state(),
+            depthStencil: &depth_stencil,
+            multisample: multisample_state(),
+            fragment: &fragment,
+        };
+        let pipeline = yawgpu::wgpuDeviceCreateRenderPipeline(device, &pipeline_descriptor);
+        assert!(!pipeline.is_null());
+
+        let color_attachments = [color_attachment(color_view)];
+        let depth_attachment = native::WGPURenderPassDepthStencilAttachment {
+            nextInChain: std::ptr::null_mut(),
+            view: depth_view,
+            depthLoadOp: native::WGPULoadOp_Clear,
+            depthStoreOp: native::WGPUStoreOp_Discard,
+            depthClearValue: 1.0,
+            depthReadOnly: 0,
+            stencilLoadOp: native::WGPULoadOp_Undefined,
+            stencilStoreOp: native::WGPUStoreOp_Undefined,
+            stencilClearValue: 0,
+            stencilReadOnly: 0,
+        };
+        let mut pass_descriptor = render_pass_descriptor(&color_attachments);
+        pass_descriptor.depthStencilAttachment = &depth_attachment;
+
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &pass_descriptor);
+        yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+        yawgpu::wgpuRenderPassEncoderSetVertexBuffer(pass, 0, vertex, 0, vertex_size);
+        yawgpu::wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+        yawgpu::wgpuRenderPassEncoderDraw(pass, 3, 1, 3, 0);
+        yawgpu::wgpuRenderPassEncoderEnd(pass);
+        yawgpu::wgpuRenderPassEncoderRelease(pass);
+        record_t2b(encoder, color, readback);
+        submit_encoder(queue, encoder);
+
+        let pixels = read_unpacked_texture_buffer(instance, readback);
+        assert!(
+            pixels
+                .as_chunks::<BYTES_PER_PIXEL>()
+                .0
+                .iter()
+                .all(|pixel| *pixel == [255, 0, 0, 255]),
+            "the near (red) draw must occlude the later far (green) draw everywhere"
+        );
+        assert!(errors.lock().expect("error lock").is_empty());
+
+        yawgpu::wgpuRenderPipelineRelease(pipeline);
+        yawgpu::wgpuShaderModuleRelease(module);
+        yawgpu::wgpuTextureViewRelease(depth_view);
+        yawgpu::wgpuTextureRelease(depth);
+        yawgpu::wgpuTextureViewRelease(color_view);
+        yawgpu::wgpuTextureRelease(color);
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuBufferRelease(vertex);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
 unsafe fn run_render_submit(
     device: native::WGPUDevice,
     shader: &str,

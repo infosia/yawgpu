@@ -2205,6 +2205,7 @@ fn run_render_draw(
         caps.sample_mask_i,
     )?;
     apply_color_target_state(gl, pipeline.color_target(), state.blend_constant);
+    apply_depth_state(gl, pipeline.depth_stencil());
     apply_stencil_state(gl, pipeline.depth_stencil(), state.stencil_reference)?;
     if let Some(location) = pipeline.first_instance_location() {
         set_first_instance_uniform(gl, location, draw);
@@ -2267,6 +2268,54 @@ fn apply_multisample_state(
         }
     }
     Ok(())
+}
+
+#[derive(Debug, PartialEq)]
+struct GlesDepthState {
+    test_enabled: bool,
+    write_mask: bool,
+    func: u32,
+    polygon_offset: Option<(f32, f32)>,
+}
+
+fn gles_depth_state(depth_stencil: Option<HalDepthStencilState>) -> GlesDepthState {
+    let Some(state) = depth_stencil else {
+        return GlesDepthState {
+            test_enabled: false,
+            write_mask: false,
+            func: glow::ALWAYS,
+            polygon_offset: None,
+        };
+    };
+    GlesDepthState {
+        // GL only writes depth when the depth test is enabled, even for Always.
+        test_enabled: state.depth_write_enabled
+            || !matches!(state.depth_compare, HalCompareFunction::Always),
+        write_mask: state.depth_write_enabled,
+        func: gles_compare_function(state.depth_compare),
+        polygon_offset: (state.depth_bias != 0 || state.depth_bias_slope_scale != 0.0)
+            .then_some((state.depth_bias_slope_scale, state.depth_bias as f32)),
+    }
+}
+
+fn apply_depth_state(gl: &glow::Context, depth_stencil: Option<HalDepthStencilState>) {
+    let state = gles_depth_state(depth_stencil);
+    unsafe {
+        if state.test_enabled {
+            gl.enable(glow::DEPTH_TEST);
+        } else {
+            gl.disable(glow::DEPTH_TEST);
+        }
+        gl.depth_mask(state.write_mask);
+        gl.depth_func(state.func);
+        if let Some((factor, units)) = state.polygon_offset {
+            gl.enable(glow::POLYGON_OFFSET_FILL);
+            // GLES 3.1 has no polygon offset clamp; use Dawn's unclamped fallback.
+            gl.polygon_offset(factor, units);
+        } else {
+            gl.disable(glow::POLYGON_OFFSET_FILL);
+        }
+    }
 }
 
 fn apply_stencil_state(
@@ -4230,6 +4279,134 @@ fn u32_from_u64(value: u64, message: &'static str) -> Result<u32, HalError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn depth_stencil_state(compare: HalCompareFunction, write: bool) -> HalDepthStencilState {
+        let stencil = HalStencilFaceState {
+            compare: HalCompareFunction::Always,
+            fail_op: HalStencilOperation::Keep,
+            depth_fail_op: HalStencilOperation::Keep,
+            pass_op: HalStencilOperation::Keep,
+        };
+        HalDepthStencilState {
+            format: HalTextureFormat::Depth24PlusStencil8,
+            depth_write_enabled: write,
+            depth_compare: compare,
+            stencil_front: stencil,
+            stencil_back: stencil,
+            stencil_read_mask: 0xff,
+            stencil_write_mask: 0xff,
+            depth_bias: 0,
+            depth_bias_slope_scale: 0.0,
+            depth_bias_clamp: 0.0,
+        }
+    }
+
+    #[test]
+    fn gles_depth_state_without_pipeline_state_disables_depth_and_bias() {
+        assert_eq!(
+            gles_depth_state(None),
+            GlesDepthState {
+                test_enabled: false,
+                write_mask: false,
+                func: glow::ALWAYS,
+                polygon_offset: None,
+            }
+        );
+    }
+
+    #[test]
+    fn gles_depth_state_always_without_writes_disables_depth_test() {
+        assert_eq!(
+            gles_depth_state(Some(depth_stencil_state(HalCompareFunction::Always, false))),
+            GlesDepthState {
+                test_enabled: false,
+                write_mask: false,
+                func: glow::ALWAYS,
+                polygon_offset: None,
+            }
+        );
+    }
+
+    #[test]
+    fn gles_depth_state_less_with_writes_enables_depth_test() {
+        assert_eq!(
+            gles_depth_state(Some(depth_stencil_state(HalCompareFunction::Less, true))),
+            GlesDepthState {
+                test_enabled: true,
+                write_mask: true,
+                func: glow::LESS,
+                polygon_offset: None,
+            }
+        );
+    }
+
+    #[test]
+    fn gles_depth_state_always_with_writes_keeps_depth_test_enabled() {
+        let state = gles_depth_state(Some(depth_stencil_state(HalCompareFunction::Always, true)));
+        assert!(state.test_enabled);
+        assert!(state.write_mask);
+        assert_eq!(state.func, glow::ALWAYS);
+    }
+
+    #[test]
+    fn gles_depth_state_maps_all_compare_functions_without_writes() {
+        for (compare, func) in [
+            (HalCompareFunction::Never, glow::NEVER),
+            (HalCompareFunction::Less, glow::LESS),
+            (HalCompareFunction::Equal, glow::EQUAL),
+            (HalCompareFunction::LessEqual, glow::LEQUAL),
+            (HalCompareFunction::Greater, glow::GREATER),
+            (HalCompareFunction::NotEqual, glow::NOTEQUAL),
+            (HalCompareFunction::GreaterEqual, glow::GEQUAL),
+            (HalCompareFunction::Always, glow::ALWAYS),
+        ] {
+            let state = gles_depth_state(Some(depth_stencil_state(compare, false)));
+            assert_eq!(state.func, func);
+            assert_eq!(state.test_enabled, func != glow::ALWAYS);
+            assert!(!state.write_mask);
+        }
+    }
+
+    #[test]
+    fn gles_depth_state_zero_bias_disables_polygon_offset() {
+        let state = depth_stencil_state(HalCompareFunction::Less, true);
+        assert_eq!(gles_depth_state(Some(state)).polygon_offset, None);
+    }
+
+    #[test]
+    fn gles_depth_state_constant_bias_uses_signed_units() {
+        for bias in [-3, 5] {
+            let mut state = depth_stencil_state(HalCompareFunction::Less, true);
+            state.depth_bias = bias;
+            assert_eq!(
+                gles_depth_state(Some(state)).polygon_offset,
+                Some((0.0, bias as f32))
+            );
+        }
+    }
+
+    #[test]
+    fn gles_depth_state_slope_only_bias_enables_polygon_offset() {
+        let mut state = depth_stencil_state(HalCompareFunction::Less, true);
+        state.depth_bias_slope_scale = 1.5;
+        assert_eq!(
+            gles_depth_state(Some(state)).polygon_offset,
+            Some((1.5, 0.0))
+        );
+    }
+
+    #[test]
+    fn gles_depth_state_clamp_uses_unclamped_bias_fallback() {
+        let mut state = depth_stencil_state(HalCompareFunction::Less, true);
+        state.depth_bias_clamp = 2.0;
+        assert_eq!(gles_depth_state(Some(state)).polygon_offset, None);
+        state.depth_bias = -4;
+        state.depth_bias_slope_scale = 1.5;
+        assert_eq!(
+            gles_depth_state(Some(state)).polygon_offset,
+            Some((1.5, -4.0))
+        );
+    }
 
     #[test]
     fn query_resolve_bytes_emit_written_results_and_zero_unwritten_queries() {
