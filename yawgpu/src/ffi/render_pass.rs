@@ -382,7 +382,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetImmediates(
         );
         return;
     }
-    let data = std::slice::from_raw_parts(data.cast::<u8>(), size);
+    let data = ffi_slice(data.cast::<u8>(), size);
     dispatch_optional_error(
         &pass.device,
         pass.core.set_immediates(offset, data, pass.device.limits()),

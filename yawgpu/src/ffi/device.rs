@@ -560,13 +560,28 @@ pub unsafe extern "C" fn wgpuDeviceCreateRenderBundleEncoder(
         .as_ref()
         .expect("WGPURenderBundleEncoderDescriptor must not be null");
     let label = label_from_string_view(descriptor.label);
-    let descriptor = map_render_bundle_encoder_descriptor(
+    let mapped = map_render_bundle_encoder_descriptor(
         descriptor,
         device.core.limits().max_color_attachments,
     );
+    let (descriptor, mapping_error) = match mapped {
+        Ok(descriptor) => (descriptor, None),
+        Err(message) => (
+            // An empty attachment signature creates an error encoder in core.
+            core::RenderBundleEncoderDescriptor {
+                max_color_attachments: device.core.limits().max_color_attachments,
+                color_formats: Vec::new(),
+                depth_stencil_format: None,
+                sample_count: 1,
+                depth_read_only: false,
+                stencil_read_only: false,
+            },
+            Some(message),
+        ),
+    };
     let (encoder, error) =
         core::RenderBundleEncoder::new(descriptor, device.core.limits(), device.core.features());
-    dispatch_optional_error(&device.core, error);
+    dispatch_optional_error(&device.core, mapping_error.or(error));
     arc_to_handle(Arc::new(WGPURenderBundleEncoderImpl {
         core: Arc::new(encoder),
         device: Arc::clone(&device.core),

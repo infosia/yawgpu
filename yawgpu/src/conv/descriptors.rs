@@ -105,16 +105,23 @@ pub fn map_texel_copy_texture_info_parts(
 /// # Safety
 ///
 /// Nested non-null texture view handles must be live yawgpu handles. Null
-/// color attachment views are decoded as sparse holes.
+/// color attachment views are decoded as sparse holes. A non-null attachment
+/// array must be readable for the declared count. Null arrays with a non-zero
+/// count return a validation error before any nested pointers are read.
 pub unsafe fn map_render_pass_descriptor(
     value: &native::WGPURenderPassDescriptor,
     max_color_attachments: u32,
-) -> core::RenderPassDescriptor {
+) -> Result<core::RenderPassDescriptor, String> {
     let color_attachment_count = value
         .colorAttachmentCount
         .min(max_color_attachments as usize + 1);
-    let color_attachments = if color_attachment_count == 0 || value.colorAttachments.is_null() {
-        vec![None; color_attachment_count]
+    if value.colorAttachmentCount > 0 && value.colorAttachments.is_null() {
+        return Err(
+            "render pass colorAttachments must not be null when count is non-zero".to_owned(),
+        );
+    }
+    let color_attachments = if color_attachment_count == 0 {
+        Vec::new()
     } else {
         std::slice::from_raw_parts(value.colorAttachments, color_attachment_count)
             .iter()
@@ -139,14 +146,14 @@ pub unsafe fn map_render_pass_descriptor(
         .map(|timestamp_writes| map_render_pass_timestamp_writes(timestamp_writes));
     let max_draw_count = render_pass_max_draw_count(value.nextInChain);
 
-    core::RenderPassDescriptor {
+    Ok(core::RenderPassDescriptor {
         max_color_attachments,
         color_attachments,
         depth_stencil_attachment,
         occlusion_query_set,
         timestamp_writes,
         max_draw_count,
-    }
+    })
 }
 
 /// Converts a subpass pass layout descriptor to the core representation.
@@ -416,17 +423,22 @@ fn map_texture_component_swizzle(
 ///
 /// # Safety
 ///
-/// `colorFormats` must point to `colorFormatCount` elements when the count is
-/// non-zero.
+/// Non-null `colorFormats` must point to `colorFormatCount` elements when the
+/// count is non-zero. Null with a non-zero count returns a validation error.
 pub unsafe fn map_render_bundle_encoder_descriptor(
     value: &native::WGPURenderBundleEncoderDescriptor,
     max_color_attachments: u32,
-) -> core::RenderBundleEncoderDescriptor {
+) -> Result<core::RenderBundleEncoderDescriptor, String> {
     let color_format_count = value
         .colorFormatCount
         .min(max_color_attachments as usize + 1);
-    let color_formats = if color_format_count == 0 || value.colorFormats.is_null() {
-        vec![None; color_format_count]
+    if value.colorFormatCount > 0 && value.colorFormats.is_null() {
+        return Err(
+            "render bundle colorFormats must not be null when count is non-zero".to_owned(),
+        );
+    }
+    let color_formats = if color_format_count == 0 {
+        Vec::new()
     } else {
         std::slice::from_raw_parts(value.colorFormats, color_format_count)
             .iter()
@@ -437,7 +449,7 @@ pub unsafe fn map_render_bundle_encoder_descriptor(
             })
             .collect()
     };
-    core::RenderBundleEncoderDescriptor {
+    Ok(core::RenderBundleEncoderDescriptor {
         max_color_attachments,
         color_formats,
         depth_stencil_format: (value.depthStencilFormat != native::WGPUTextureFormat_Undefined)
@@ -445,7 +457,7 @@ pub unsafe fn map_render_bundle_encoder_descriptor(
         sample_count: value.sampleCount,
         depth_read_only: value.depthReadOnly != 0,
         stencil_read_only: value.stencilReadOnly != 0,
-    }
+    })
 }
 
 unsafe fn map_render_pass_color_attachment(

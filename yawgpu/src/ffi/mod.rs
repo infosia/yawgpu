@@ -769,16 +769,23 @@ impl WGPUInstanceImpl {
     }
 }
 
-impl Drop for WGPUBufferImpl {
-    fn drop(&mut self) {
-        self.core.abort_pending_map();
-        self.core.destroy();
+/// Borrows an FFI array, accepting a null pointer for an empty array.
+///
+/// # Safety
+/// For a non-zero count, `ptr` must be aligned and readable for `count`
+/// initialized elements, and the allocation must remain live for `'a`.
+/// The total size must not exceed `isize::MAX`.
+unsafe fn ffi_slice<'a, T>(ptr: *const T, count: usize) -> &'a [T] {
+    if count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(ptr, count)
     }
 }
 
-impl Drop for WGPUTextureImpl {
+impl Drop for WGPUBufferImpl {
     fn drop(&mut self) {
-        self.core.destroy();
+        self.core.abort_pending_map();
     }
 }
 
@@ -6100,6 +6107,216 @@ mod tests {
             wgpuTextureRelease(texture);
             wgpuBufferRelease(buffer);
             wgpuQueueRelease(queue);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn ffi_slice_accepts_null_empty_and_borrows_nonempty() {
+        unsafe {
+            assert!(ffi_slice::<u8>(std::ptr::null(), 0).is_empty());
+            let values = [1, 2, 3];
+            assert_eq!(ffi_slice(values.as_ptr(), values.len()), &values);
+        }
+    }
+
+    #[test]
+    fn block109_buffer_release_keeps_encoded_copy_alive_but_destroy_rejects_submit() {
+        unsafe {
+            for destroy in [false, true] {
+                let (instance, adapter, device) = noop_chain();
+                let errors = Arc::new(Mutex::new(Vec::new()));
+                let captured = Arc::clone(&errors);
+                borrow_handle(device, "WGPUDevice").set_uncaptured_error_callback(Some(
+                    move |error| {
+                        captured.lock().unwrap().push(error);
+                    },
+                ));
+                let src = wgpuDeviceCreateBuffer(
+                    device,
+                    &buffer_descriptor(native::WGPUBufferUsage_CopySrc, 16),
+                );
+                let dst = wgpuDeviceCreateBuffer(
+                    device,
+                    &buffer_descriptor(native::WGPUBufferUsage_CopyDst, 16),
+                );
+                let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+                wgpuCommandEncoderCopyBufferToBuffer(encoder, src, 0, dst, 0, 16);
+                let commands = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+                assert!(!borrow_handle(commands, "WGPUCommandBuffer").core.is_error());
+                if destroy {
+                    wgpuBufferDestroy(src);
+                }
+                wgpuBufferRelease(src);
+                let queue = wgpuDeviceGetQueue(device);
+                wgpuQueueSubmit(queue, 1, &commands);
+                let errors = errors.lock().unwrap();
+                assert_eq!(errors.len(), usize::from(destroy));
+                if destroy {
+                    assert!(matches!(errors[0].kind, core::ErrorKind::Validation));
+                    assert!(errors[0].message.contains("destroyed buffer"));
+                }
+                drop(errors);
+                wgpuQueueRelease(queue);
+                wgpuCommandBufferRelease(commands);
+                wgpuCommandEncoderRelease(encoder);
+                wgpuBufferRelease(dst);
+                release_handles(instance, adapter, device);
+            }
+        }
+    }
+
+    #[test]
+    fn block109_texture_release_keeps_view_alive_but_destroy_rejects_submit() {
+        unsafe {
+            for destroy in [false, true] {
+                let (instance, adapter, device) = noop_chain();
+                let errors = Arc::new(Mutex::new(Vec::new()));
+                let captured = Arc::clone(&errors);
+                borrow_handle(device, "WGPUDevice").set_uncaptured_error_callback(Some(
+                    move |error| {
+                        captured.lock().unwrap().push(error);
+                    },
+                ));
+                let (texture, view) = noop_render_attachment(device);
+                if !destroy {
+                    wgpuTextureRelease(texture);
+                }
+                let attachments = [render_pass_color_attachment(view)];
+                let descriptor = noop_render_pass_descriptor(&attachments, std::ptr::null());
+                let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+                let pass = wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
+                wgpuRenderPassEncoderEnd(pass);
+                let commands = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+                assert!(!borrow_handle(commands, "WGPUCommandBuffer").core.is_error());
+                if destroy {
+                    wgpuTextureDestroy(texture);
+                    wgpuTextureRelease(texture);
+                }
+                let queue = wgpuDeviceGetQueue(device);
+                wgpuQueueSubmit(queue, 1, &commands);
+                let errors = errors.lock().unwrap();
+                assert_eq!(errors.len(), usize::from(destroy));
+                if destroy {
+                    assert!(matches!(errors[0].kind, core::ErrorKind::Validation));
+                    assert!(errors[0].message.contains("destroyed texture"));
+                }
+                drop(errors);
+                wgpuQueueRelease(queue);
+                wgpuCommandBufferRelease(commands);
+                wgpuRenderPassEncoderRelease(pass);
+                wgpuCommandEncoderRelease(encoder);
+                wgpuTextureViewRelease(view);
+                release_handles(instance, adapter, device);
+            }
+        }
+    }
+
+    #[test]
+    fn block109_null_empty_data_is_valid_at_all_four_entries() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let errors = Arc::new(Mutex::new(Vec::new()));
+            let captured = Arc::clone(&errors);
+            borrow_handle(device, "WGPUDevice").set_uncaptured_error_callback(Some(move |error| {
+                captured.lock().unwrap().push(error);
+            }));
+            let queue = wgpuDeviceGetQueue(device);
+            let buffer = wgpuDeviceCreateBuffer(
+                device,
+                &buffer_descriptor(native::WGPUBufferUsage_CopyDst, 16),
+            );
+            wgpuQueueWriteBuffer(queue, buffer, 0, std::ptr::null(), 0);
+            assert!(errors.lock().unwrap().is_empty());
+
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let compute = wgpuCommandEncoderBeginComputePass(encoder, std::ptr::null());
+            wgpuComputePassEncoderSetImmediates(compute, 0, std::ptr::null(), 0);
+            wgpuComputePassEncoderEnd(compute);
+            wgpuComputePassEncoderRelease(compute);
+            let (texture, view) = noop_render_attachment(device);
+            let attachments = [render_pass_color_attachment(view)];
+            let descriptor = noop_render_pass_descriptor(&attachments, std::ptr::null());
+            let render = wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
+            wgpuRenderPassEncoderSetImmediates(render, 0, std::ptr::null(), 0);
+            wgpuRenderPassEncoderEnd(render);
+            wgpuRenderPassEncoderRelease(render);
+            let commands = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert!(!borrow_handle(commands, "WGPUCommandBuffer").core.is_error());
+            assert!(errors.lock().unwrap().is_empty());
+
+            let formats = [native::WGPUTextureFormat_RGBA8Unorm];
+            let bundle_encoder = wgpuDeviceCreateRenderBundleEncoder(
+                device,
+                &render_bundle_encoder_descriptor(&formats),
+            );
+            wgpuRenderBundleEncoderSetImmediates(bundle_encoder, 0, std::ptr::null(), 0);
+            let bundle = wgpuRenderBundleEncoderFinish(bundle_encoder, std::ptr::null());
+            assert!(!borrow_handle(bundle, "WGPURenderBundle").core.is_error());
+            assert!(errors.lock().unwrap().is_empty());
+            wgpuRenderBundleRelease(bundle);
+            wgpuRenderBundleEncoderRelease(bundle_encoder);
+            wgpuCommandBufferRelease(commands);
+            wgpuCommandEncoderRelease(encoder);
+            wgpuTextureViewRelease(view);
+            wgpuTextureRelease(texture);
+            wgpuBufferRelease(buffer);
+            wgpuQueueRelease(queue);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn block109_null_nonempty_descriptor_arrays_produce_one_error_and_error_objects() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let errors = Arc::new(Mutex::new(Vec::new()));
+            let captured = Arc::clone(&errors);
+            borrow_handle(device, "WGPUDevice").set_uncaptured_error_callback(Some(move |error| {
+                captured.lock().unwrap().push(error);
+            }));
+            let descriptor = native::WGPURenderPassDescriptor {
+                colorAttachmentCount: 1,
+                colorAttachments: std::ptr::null(),
+                ..noop_render_pass_descriptor(&[], std::ptr::null())
+            };
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let pass = wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
+            assert!(!pass.is_null());
+            wgpuRenderPassEncoderEnd(pass);
+            let commands = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert!(borrow_handle(commands, "WGPUCommandBuffer").core.is_error());
+            {
+                let errors = errors.lock().unwrap();
+                assert_eq!(errors.len(), 1);
+                assert!(matches!(errors[0].kind, core::ErrorKind::Validation));
+                assert!(errors[0]
+                    .message
+                    .contains("colorAttachments must not be null"));
+            }
+            wgpuCommandBufferRelease(commands);
+            wgpuRenderPassEncoderRelease(pass);
+            wgpuCommandEncoderRelease(encoder);
+            errors.lock().unwrap().clear();
+
+            let descriptor = native::WGPURenderBundleEncoderDescriptor {
+                colorFormatCount: 1,
+                colorFormats: std::ptr::null(),
+                ..render_bundle_encoder_descriptor(&[])
+            };
+            let encoder = wgpuDeviceCreateRenderBundleEncoder(device, &descriptor);
+            assert!(!encoder.is_null());
+            assert_eq!(errors.lock().unwrap().len(), 1);
+            let bundle = wgpuRenderBundleEncoderFinish(encoder, std::ptr::null());
+            assert!(borrow_handle(bundle, "WGPURenderBundle").core.is_error());
+            {
+                let errors = errors.lock().unwrap();
+                assert_eq!(errors.len(), 1);
+                assert!(matches!(errors[0].kind, core::ErrorKind::Validation));
+                assert!(errors[0].message.contains("colorFormats must not be null"));
+            }
+            wgpuRenderBundleRelease(bundle);
+            wgpuRenderBundleEncoderRelease(encoder);
             release_handles(instance, adapter, device);
         }
     }

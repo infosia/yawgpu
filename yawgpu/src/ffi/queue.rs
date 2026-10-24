@@ -146,7 +146,7 @@ pub unsafe extern "C" fn wgpuQueueWriteBuffer(
         );
         return;
     }
-    let data = std::slice::from_raw_parts(data.cast::<u8>(), size);
+    let data = ffi_slice(data.cast::<u8>(), size);
     dispatch_optional_device_error(
         &queue.device,
         queue.core.write_buffer(core::QueueBufferWrite {
@@ -223,11 +223,7 @@ pub unsafe extern "C" fn wgpuQueueWriteTexture(
     }
     let aspect = map_texture_aspect(destination.aspect).unwrap_or(core::TextureAspect::All);
 
-    let data = if data_size_usize == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(data.cast::<u8>(), data_size_usize)
-    };
+    let data = ffi_slice(data.cast::<u8>(), data_size_usize);
     dispatch_optional_device_error(
         &queue.device,
         queue.core.write_texture(core::QueueTextureWrite {

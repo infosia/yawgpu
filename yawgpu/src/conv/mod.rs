@@ -1996,7 +1996,8 @@ mod tests {
             occlusionQuerySet: std::ptr::null(),
             timestampWrites: std::ptr::null(),
         };
-        let mapped = unsafe { map_render_pass_descriptor(&descriptor, 4) };
+        let mapped =
+            unsafe { map_render_pass_descriptor(&descriptor, 4).expect("valid descriptor") };
         let color = mapped.color_attachments[0].as_ref().expect("color");
         assert_eq!(color.load_op, core::LoadOp::Clear);
         assert_eq!(color.store_op, core::StoreOp::Store);
@@ -2010,10 +2011,24 @@ mod tests {
             colorAttachments: &null_attachment,
             ..descriptor
         };
-        assert!(
-            unsafe { map_render_pass_descriptor(&null_descriptor, 4) }.color_attachments[0]
-                .is_none()
-        );
+        assert!(unsafe {
+            map_render_pass_descriptor(&null_descriptor, 4).expect("sparse attachment")
+        }
+        .color_attachments[0]
+            .is_none());
+        let invalid_descriptor = native::WGPURenderPassDescriptor {
+            colorAttachments: std::ptr::null(),
+            ..descriptor
+        };
+        assert!(unsafe { map_render_pass_descriptor(&invalid_descriptor, 4) }.is_err());
+        let empty_descriptor = native::WGPURenderPassDescriptor {
+            colorAttachmentCount: 0,
+            ..invalid_descriptor
+        };
+        assert!(unsafe { map_render_pass_descriptor(&empty_descriptor, 4) }
+            .expect("empty array")
+            .color_attachments
+            .is_empty());
         unsafe { release_handle(view, "WGPUTextureView") };
     }
 
@@ -2033,7 +2048,9 @@ mod tests {
             depthReadOnly: 1,
             stencilReadOnly: 0,
         };
-        let mapped = unsafe { map_render_bundle_encoder_descriptor(&descriptor, 4) };
+        let mapped = unsafe {
+            map_render_bundle_encoder_descriptor(&descriptor, 4).expect("valid descriptor")
+        };
         assert_eq!(mapped.color_formats.len(), 2);
         assert_eq!(
             mapped.color_formats[0],
@@ -2051,9 +2068,16 @@ mod tests {
             colorFormats: std::ptr::null(),
             ..descriptor
         };
-        assert_eq!(
-            unsafe { map_render_bundle_encoder_descriptor(&null_descriptor, 4) }.color_formats,
-            vec![None, None]
+        assert!(unsafe { map_render_bundle_encoder_descriptor(&null_descriptor, 4) }.is_err());
+        let empty_descriptor = native::WGPURenderBundleEncoderDescriptor {
+            colorFormatCount: 0,
+            ..null_descriptor
+        };
+        assert!(
+            unsafe { map_render_bundle_encoder_descriptor(&empty_descriptor, 4) }
+                .expect("empty array")
+                .color_formats
+                .is_empty()
         );
     }
 

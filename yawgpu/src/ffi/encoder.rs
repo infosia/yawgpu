@@ -27,17 +27,40 @@ pub unsafe extern "C" fn wgpuCommandEncoderBeginRenderPass(
     let native_descriptor = descriptor
         .as_ref()
         .expect("WGPURenderPassDescriptor must not be null");
-    let descriptor = map_render_pass_descriptor(
+    let mapped = map_render_pass_descriptor(
         native_descriptor,
         encoder.device.limits().max_color_attachments,
     );
+    let descriptor = match mapped {
+        Ok(descriptor) => {
+            if let Some(message) =
+                validate_render_pass_descriptor_devices(native_descriptor, &encoder.device)
+            {
+                dispatch_optional_error(
+                    &encoder.device,
+                    encoder.core.record_validation_error(message),
+                );
+            }
+            descriptor
+        }
+        Err(message) => {
+            // Record this first so the placeholder cannot replace the FFI error.
+            dispatch_optional_error(
+                &encoder.device,
+                encoder.core.record_validation_error(message),
+            );
+            core::RenderPassDescriptor {
+                max_color_attachments: encoder.device.limits().max_color_attachments,
+                color_attachments: Vec::new(),
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                max_draw_count: u64::MAX,
+            }
+        }
+    };
     let (pass, error) = encoder.core.begin_render_pass(&descriptor);
     dispatch_optional_error(&encoder.device, error);
-    if let Some(message) =
-        validate_render_pass_descriptor_devices(native_descriptor, &encoder.device)
-    {
-        dispatch_optional_error(&encoder.device, pass.record_validation_error(message));
-    }
     arc_to_handle(Arc::new(WGPURenderPassEncoderImpl {
         core: Arc::new(pass),
         device: Arc::clone(&encoder.device),
@@ -278,19 +301,14 @@ pub unsafe extern "C" fn wgpuCommandEncoderWriteBuffer(
         );
         return;
     }
-    let data = if size == 0 {
-        &[][..]
-    } else if data.is_null() {
+    if size > 0 && data.is_null() {
         dispatch_optional_error(
             &encoder.device,
             Some("command encoder write buffer data must not be null".to_owned()),
         );
         return;
-    } else {
-        // Safety: the caller guarantees `size` readable bytes at the non-null
-        // `data`; core copies them before returning.
-        std::slice::from_raw_parts(data.cast::<u8>(), size)
-    };
+    }
+    let data = ffi_slice(data.cast::<u8>(), size);
     dispatch_optional_error(
         &encoder.device,
         encoder
@@ -539,7 +557,12 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToTexture(
     );
 }
 
-fn validate_render_pass_descriptor_devices(
+/// Checks device ownership after the descriptor's attachment array is validated.
+///
+/// # Safety
+/// Non-empty arrays must be non-null and readable for their declared counts.
+/// Nested pointers and handles must refer to live objects of the expected type.
+unsafe fn validate_render_pass_descriptor_devices(
     descriptor: &native::WGPURenderPassDescriptor,
     device: &core::Device,
 ) -> Option<String> {
