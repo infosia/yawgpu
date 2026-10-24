@@ -697,6 +697,26 @@ pub(super) fn create_render_pass(
     create_render_pass_for_descriptor(&device.device, descriptor, bindings)
 }
 
+/// Builds the compatibility-only attachment, for which no image is bound.
+fn pipeline_color_attachment_description(
+    format: HalTextureFormat,
+    sample_count: u32,
+    framebuffer_fetch: bool,
+) -> Result<vk::AttachmentDescription, HalError> {
+    let (format, _) = map_texture_format(format)?;
+    Ok(vk::AttachmentDescription::default()
+        .format(format)
+        .samples(vk_sample_count(sample_count)?)
+        .load_op(vk::AttachmentLoadOp::CLEAR)
+        .store_op(vk::AttachmentStoreOp::STORE)
+        .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+        .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+        .initial_layout(super::encode::render_color_attachment_layout(
+            framebuffer_fetch,
+        ))
+        .final_layout(super::encode::color_attachment_final_layout(vk::ImageUsageFlags::empty()).0))
+}
+
 fn create_render_pass_for_descriptor(
     device: &ash::Device,
     descriptor: &HalRenderPipelineDescriptor,
@@ -719,25 +739,16 @@ fn create_render_pass_for_descriptor(
             );
             continue;
         };
-        let (format, _) = map_texture_format(color_target.format)?;
         let color_slot =
             u32::try_from(slot).map_err(|_| shader_error("color attachment slot is too large"))?;
         let framebuffer_fetch = framebuffer_fetch_color_slots.contains(&color_slot);
         let index = u32::try_from(attachments.len())
             .map_err(|_| shader_error("color attachment index is too large"))?;
-        attachments.push(
-            vk::AttachmentDescription::default()
-                .format(format)
-                .samples(vk_sample_count(descriptor.sample_count)?)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-                .initial_layout(super::encode::render_color_attachment_layout(
-                    framebuffer_fetch,
-                ))
-                .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
-        );
+        attachments.push(pipeline_color_attachment_description(
+            color_target.format,
+            descriptor.sample_count,
+            framebuffer_fetch,
+        )?);
         color_references.push(vk::AttachmentReference::default().attachment(index).layout(
             super::encode::render_color_attachment_layout(framebuffer_fetch),
         ));
@@ -2079,6 +2090,27 @@ pub(super) fn descriptor_buffer_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pipeline_color_description_uses_color_layout_without_a_bound_image() {
+        for fetch in [false, true] {
+            let description =
+                pipeline_color_attachment_description(HalTextureFormat::Rgba8Unorm, 1, fetch)
+                    .unwrap();
+            assert_eq!(
+                description.final_layout,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+            );
+            assert_eq!(
+                description.initial_layout,
+                super::super::encode::render_color_attachment_layout(fetch)
+            );
+        }
+        assert!(
+            pipeline_color_attachment_description(HalTextureFormat::Rgba8Unorm, 3, false).is_err()
+        );
+    }
+
     use crate::{noop, HalTextureDescriptor, HalTextureDimension, HalTextureUsage};
     use ash::vk::Handle;
 

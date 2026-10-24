@@ -260,7 +260,7 @@ pub(super) fn record_and_submit_copies(
     result
 }
 
-/// Returns transition swapchain image to present.
+/// Transitions a swapchain image to present and records whether its submit succeeded.
 pub(super) fn transition_swapchain_image_to_present(
     queue: &VulkanQueue,
     texture: &VulkanTexture,
@@ -268,6 +268,7 @@ pub(super) fn transition_swapchain_image_to_present(
     wait_semaphore: vk::Semaphore,
     signal_semaphore: vk::Semaphore,
     fence: vk::Fence,
+    submitted: &mut bool,
 ) -> Result<(), HalError> {
     let inner = texture.inner()?;
     let command_pool = {
@@ -372,6 +373,7 @@ pub(super) fn transition_swapchain_image_to_present(
                         message: "queue submit failed",
                     })?;
             }
+            *submitted = true;
             pending_state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2217,7 +2219,7 @@ pub(super) fn encode_subpass_render_pass(
         let inner = texture.inner()?;
         inner.layouts.set(
             inner.layouts.whole(),
-            subpass_color_tracked_layout(texture.transient),
+            color_attachment_final_layout(texture.image_usage).1,
         )?;
     }
     Ok(RenderPassTemps {
@@ -2563,20 +2565,6 @@ fn subpass_attachment_views(
     Ok((views, persistent_textures, depth_stencil_texture))
 }
 
-/// Returns whether the bound Vulkan texture is transient (memoryless), used to
-/// choose the color attachment's render-pass `finalLayout`. Falls back to
-/// non-transient when the resource is not a Vulkan-backed persistent texture,
-/// matching the pre-existing default rather than erroring here.
-#[cfg(feature = "tiled")]
-fn subpass_binding_transient(resource: &HalSubpassAttachmentResource) -> bool {
-    match resource {
-        HalSubpassAttachmentResource::Persistent { texture, .. } => match texture {
-            crate::HalTexture::Vulkan(texture) => texture.transient,
-            _ => false,
-        },
-    }
-}
-
 #[cfg(feature = "tiled")]
 fn subpass_attachment_view(
     resource: &HalSubpassAttachmentResource,
@@ -2596,6 +2584,14 @@ fn create_subpass_render_pass(
     device: &ash::Device,
     pass: &HalSubpassRenderPassCommand,
 ) -> Result<vk::RenderPass, HalError> {
+    let attachments = subpass_attachment_descriptions(pass)?;
+    create_subpass_render_pass_with_attachments(device, &pass.layout, &attachments)
+}
+
+#[cfg(feature = "tiled")]
+fn subpass_attachment_descriptions(
+    pass: &HalSubpassRenderPassCommand,
+) -> Result<Vec<vk::AttachmentDescription>, HalError> {
     let mut attachments = Vec::new();
     for (index, layout) in pass.layout.color_attachments.iter().enumerate() {
         let binding = pass
@@ -2609,7 +2605,10 @@ fn create_subpass_render_pass(
                 .iter()
                 .any(|input| input.source_attachment as usize == index)
         });
-        let transient = subpass_binding_transient(&binding.resource);
+        let HalSubpassAttachmentResource::Persistent { texture, .. } = &binding.resource;
+        let crate::HalTexture::Vulkan(texture) = texture else {
+            return Err(texture_error("subpass attachment is not Vulkan-backed"));
+        };
         attachments.push(
             vk::AttachmentDescription::default()
                 .format(format)
@@ -2619,7 +2618,7 @@ fn create_subpass_render_pass(
                 .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
                 .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
                 .initial_layout(render_color_attachment_layout(used_as_input))
-                .final_layout(subpass_color_final_layout(transient)),
+                .final_layout(color_attachment_final_layout(texture.image_usage).0),
         );
     }
     if let Some(layout) = pass.layout.depth_stencil_attachment {
@@ -2629,7 +2628,7 @@ fn create_subpass_render_pass(
             .ok_or_else(|| shader_error("subpass depth-stencil attachment binding missing"))?;
         attachments.push(vk_depth_stencil_attachment_description(layout, binding)?);
     }
-    create_subpass_render_pass_with_attachments(device, &pass.layout, &attachments)
+    Ok(attachments)
 }
 
 #[cfg(feature = "tiled")]
@@ -2637,6 +2636,15 @@ pub(super) fn create_subpass_render_pass_for_layout(
     device: &ash::Device,
     layout: &HalSubpassPassLayout,
 ) -> Result<vk::RenderPass, HalError> {
+    let attachments = subpass_layout_attachment_descriptions(layout)?;
+    create_subpass_render_pass_with_attachments(device, layout, &attachments)
+}
+
+/// Pipeline compatibility has no bound image; use a color-capable final layout.
+#[cfg(feature = "tiled")]
+fn subpass_layout_attachment_descriptions(
+    layout: &HalSubpassPassLayout,
+) -> Result<Vec<vk::AttachmentDescription>, HalError> {
     let mut attachments = Vec::new();
     for (index, attachment) in layout.color_attachments.iter().enumerate() {
         let (format, _) = map_texture_format(attachment.format)?;
@@ -2655,7 +2663,7 @@ pub(super) fn create_subpass_render_pass_for_layout(
                 .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
                 .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
                 .initial_layout(render_color_attachment_layout(used_as_input))
-                .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
+                .final_layout(color_attachment_final_layout(vk::ImageUsageFlags::empty()).0),
         );
     }
     if let Some(attachment) = layout.depth_stencil_attachment {
@@ -2690,7 +2698,7 @@ pub(super) fn create_subpass_render_pass_for_layout(
                 .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
         );
     }
-    create_subpass_render_pass_with_attachments(device, layout, &attachments)
+    Ok(attachments)
 }
 
 #[cfg(feature = "tiled")]
@@ -3122,7 +3130,7 @@ fn encode_render_pass_impl(
                 target.mip_level,
                 target.array_layer,
             ),
-            IMAGE_LAYOUT_TRANSFER_SRC,
+            color_attachment_final_layout(texture.image_usage).1,
         )?;
     }
     for (texture, target) in &resolve_attachments {
@@ -3132,7 +3140,7 @@ fn encode_render_pass_impl(
                 target.resolve_mip_level,
                 target.resolve_array_layer,
             ),
-            IMAGE_LAYOUT_TRANSFER_SRC,
+            color_attachment_final_layout(texture.image_usage).1,
         )?;
     }
     Ok(RenderPassTemps {
@@ -3959,7 +3967,7 @@ fn vk_color_attachment_description(
         } else {
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
         })
-        .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL))
+        .final_layout(color_attachment_final_layout(texture.image_usage).0))
 }
 
 pub(super) fn input_attachment_references(
@@ -4010,30 +4018,18 @@ pub(super) fn render_color_attachment_layout(framebuffer_fetch: bool) -> vk::Ima
     }
 }
 
-/// Returns the render-pass `finalLayout` for a subpass color attachment.
-///
-/// Non-transient attachments carry `TRANSFER_SRC` usage and end in
-/// `TRANSFER_SRC_OPTIMAL` so the post-pass copy needs no barrier. Transient
-/// attachments lack `TRANSFER_SRC` usage, so they must end in
-/// `COLOR_ATTACHMENT_OPTIMAL` to satisfy
-/// VUID-vkCmdBeginRenderPass-initialLayout-00898.
-#[cfg(feature = "tiled")]
-fn subpass_color_final_layout(transient: bool) -> vk::ImageLayout {
-    if transient {
-        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+/// Chooses both post-pass layouts from the image's actual transfer capability.
+pub(super) fn color_attachment_final_layout(usage: vk::ImageUsageFlags) -> (vk::ImageLayout, u8) {
+    if usage.contains(vk::ImageUsageFlags::TRANSFER_SRC) {
+        (
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            IMAGE_LAYOUT_TRANSFER_SRC,
+        )
     } else {
-        vk::ImageLayout::TRANSFER_SRC_OPTIMAL
-    }
-}
-
-/// Returns the tracked layout state stored after a subpass render pass for a
-/// color attachment, consistent with [`subpass_color_final_layout`].
-#[cfg(feature = "tiled")]
-fn subpass_color_tracked_layout(transient: bool) -> u8 {
-    if transient {
-        IMAGE_LAYOUT_COLOR_ATTACHMENT
-    } else {
-        IMAGE_LAYOUT_TRANSFER_SRC
+        (
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            IMAGE_LAYOUT_COLOR_ATTACHMENT,
+        )
     }
 }
 
@@ -4089,6 +4085,9 @@ fn vk_resolve_attachment_description(
     target: &HalRenderColorTarget,
 ) -> Result<vk::AttachmentDescription, HalError> {
     let (format, _) = map_texture_format(format)?;
+    let Some(crate::HalTexture::Vulkan(texture)) = &target.resolve_target else {
+        return Err(texture_error("resolve target is not Vulkan-backed"));
+    };
     Ok(vk::AttachmentDescription::default()
         .format(format)
         .samples(vk::SampleCountFlags::TYPE_1)
@@ -4097,7 +4096,7 @@ fn vk_resolve_attachment_description(
         .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
         .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
         .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-        .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL))
+        .final_layout(color_attachment_final_layout(texture.image_usage).0))
 }
 
 fn vk_render_depth_stencil_attachment_description(
@@ -4656,7 +4655,7 @@ mod tests {
             sample_count: 1,
             bytes_per_pixel: 4,
             format: HalTextureFormat::Rgba8Unorm,
-            transient: false,
+            image_usage: vk::ImageUsageFlags::TRANSFER_SRC,
         };
         let clear = HalTextureClear {
             texture: HalTexture::Vulkan(texture),
@@ -5018,30 +5017,129 @@ mod tests {
         assert_eq!(texture_copy_layouts(true, slice(0), slice(2)), general);
     }
 
-    #[cfg(feature = "tiled")]
     #[test]
-    fn subpass_color_final_layout_uses_color_attachment_for_transient() {
-        assert_eq!(
-            subpass_color_final_layout(true),
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
-        );
-        assert_eq!(
-            subpass_color_final_layout(false),
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL
-        );
+    fn color_attachment_final_layout_matches_actual_usage() {
+        for usage in [
+            vk::ImageUsageFlags::COLOR_ATTACHMENT,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT,
+            vk::ImageUsageFlags::TRANSFER_DST,
+        ] {
+            assert_eq!(
+                color_attachment_final_layout(usage),
+                (
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    IMAGE_LAYOUT_COLOR_ATTACHMENT
+                )
+            );
+            assert_eq!(
+                color_attachment_final_layout(usage | vk::ImageUsageFlags::TRANSFER_SRC),
+                (
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    IMAGE_LAYOUT_TRANSFER_SRC
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn color_and_resolve_descriptions_use_each_images_usage() {
+        for color_transfer in [false, true] {
+            for resolve_transfer in [false, true] {
+                let make_texture = |transfer| {
+                    let mut texture =
+                        dummy_vulkan_texture(HalTextureDimension::D2, HalTextureFormat::Rgba8Unorm);
+                    texture.image_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT;
+                    if transfer {
+                        texture.image_usage |= vk::ImageUsageFlags::TRANSFER_SRC;
+                    }
+                    texture
+                };
+                let color_texture = make_texture(color_transfer);
+                let resolve_texture = make_texture(resolve_transfer);
+                let expected_color = color_attachment_final_layout(color_texture.image_usage).0;
+                let expected_resolve = color_attachment_final_layout(resolve_texture.image_usage).0;
+                let mut target = HalRenderColorTarget {
+                    texture: HalTexture::Vulkan(color_texture),
+                    view_format: HalTextureFormat::Rgba8Unorm,
+                    resolve_target: Some(HalTexture::Vulkan(resolve_texture)),
+                    resolve_view_format: Some(HalTextureFormat::Rgba8Unorm),
+                    mip_level: 0,
+                    array_layer: 0,
+                    depth_slice: 0,
+                    resolve_mip_level: 0,
+                    resolve_array_layer: 0,
+                    load_op: HalRenderLoadOp::Load,
+                    store: true,
+                    clear_color: [0.0; 4],
+                };
+                for fetch in [false, true] {
+                    let desc = vk_color_attachment_description(target.view_format, &target, fetch)
+                        .unwrap();
+                    assert_eq!(desc.final_layout, expected_color);
+                    assert_eq!(desc.initial_layout, render_color_attachment_layout(fetch));
+                }
+                let desc = vk_resolve_attachment_description(target.view_format, &target).unwrap();
+                assert_eq!(desc.final_layout, expected_resolve);
+                assert_eq!(
+                    desc.initial_layout,
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+                );
+                target.resolve_target = None;
+                assert!(vk_resolve_attachment_description(target.view_format, &target).is_err());
+                target.resolve_target = Some(dummy_texture(HalTextureFormat::Rgba8Unorm));
+                assert!(vk_resolve_attachment_description(target.view_format, &target).is_err());
+                target.texture = dummy_texture(HalTextureFormat::Rgba8Unorm);
+                assert!(
+                    vk_color_attachment_description(target.view_format, &target, false).is_err()
+                );
+            }
+        }
     }
 
     #[cfg(feature = "tiled")]
     #[test]
-    fn subpass_color_tracked_layout_matches_final_layout_choice() {
-        assert_eq!(
-            subpass_color_tracked_layout(true),
-            IMAGE_LAYOUT_COLOR_ATTACHMENT
-        );
-        assert_eq!(
-            subpass_color_tracked_layout(false),
-            IMAGE_LAYOUT_TRANSFER_SRC
-        );
+    fn subpass_descriptions_use_image_usage_and_compatible_layout_defaults() {
+        let mut pass = bound_texture_subpass_fixture();
+        pass.layout
+            .color_attachments
+            .push(HalSubpassAttachmentLayout {
+                format: HalTextureFormat::Rgba8Unorm,
+                sample_count: 1,
+            });
+        for usage in [
+            vk::ImageUsageFlags::COLOR_ATTACHMENT,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+        ] {
+            let mut texture =
+                dummy_vulkan_texture(HalTextureDimension::D2, HalTextureFormat::Rgba8Unorm);
+            texture.image_usage = usage;
+            pass.color_attachments = vec![HalSubpassColorAttachment {
+                resource: HalSubpassAttachmentResource::Persistent {
+                    texture: HalTexture::Vulkan(texture),
+                    resolve_target: None,
+                },
+                load_op: HalRenderLoadOp::Load,
+                store: true,
+                clear_color: [0.0; 4],
+            }];
+            let descriptions = subpass_attachment_descriptions(&pass).unwrap();
+            assert_eq!(
+                descriptions[0].final_layout,
+                color_attachment_final_layout(usage).0
+            );
+            assert_eq!(
+                descriptions[0].initial_layout,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+            );
+            let compatible = subpass_layout_attachment_descriptions(&pass.layout).unwrap();
+            assert_eq!(
+                compatible[0].final_layout,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+            );
+        }
+        pass.color_attachments.clear();
+        assert!(subpass_attachment_descriptions(&pass).is_err());
     }
 
     /// Builds a pure mip/layer rectangle for exclusion tests.
@@ -5209,7 +5307,7 @@ mod tests {
             sample_count: 1,
             bytes_per_pixel: 4,
             format,
-            transient: false,
+            image_usage: vk::ImageUsageFlags::TRANSFER_SRC,
         }
     }
 

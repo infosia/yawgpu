@@ -31,11 +31,8 @@ pub struct VulkanTexture {
     pub(super) sample_count: u32,
     pub(super) bytes_per_pixel: u32,
     pub(super) format: HalTextureFormat,
-    /// True when the texture was created with `TransientAttachment` usage, so it
-    /// lacks `TRANSFER_SRC` image usage and must not end a render pass in
-    /// `TRANSFER_SRC_OPTIMAL`. Only read by the tiled subpass render-pass path.
-    #[cfg_attr(not(feature = "tiled"), allow(dead_code))]
-    pub(super) transient: bool,
+    /// Actual usage flags supplied when the backing image was created.
+    pub(super) image_usage: vk::ImageUsageFlags,
 }
 
 impl VulkanTexture {
@@ -1041,6 +1038,45 @@ mod tests {
     #[test]
     fn texture_usage_needs_view_returns_true_for_storage_binding() {
         assert!(texture_usage_needs_view(texture_usage(false, true, false)));
+    }
+
+    #[test]
+    fn color_attachment_layout_transitions_to_present_and_copy_source() {
+        let range = SubresourceRange {
+            base_mip_level: 0,
+            mip_level_count: 1,
+            base_array_layer: 0,
+            array_layer_count: 1,
+        };
+        let runs = [LayoutRun {
+            range,
+            old_state: IMAGE_LAYOUT_COLOR_ATTACHMENT,
+        }];
+        for destination in [
+            vk::ImageLayout::PRESENT_SRC_KHR,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+        ] {
+            let (barriers, stages) = layout_barriers(
+                vk::Image::null(),
+                vk::ImageAspectFlags::COLOR,
+                &runs,
+                destination,
+            );
+            assert_eq!(stages, vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT);
+            assert_eq!(
+                barriers[0].old_layout,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+            );
+            assert_eq!(barriers[0].new_layout, destination);
+            assert_eq!(
+                barriers[0].src_access_mask,
+                vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+            );
+            assert_eq!(
+                barriers[0].dst_access_mask,
+                access_mask_for_layout(destination)
+            );
+        }
     }
 
     #[test]

@@ -134,6 +134,7 @@ impl VulkanDevice {
     ) -> Result<VulkanTexture, HalError> {
         self.inner.allocations.fetch_add(1, Ordering::Relaxed);
         let (inner, bytes_per_pixel) = create_texture(Arc::clone(&self.inner), descriptor)?;
+        let image_usage = inner.usage;
         Ok(VulkanTexture {
             inner: Some(Arc::new(inner)),
             swapchain: None,
@@ -145,7 +146,7 @@ impl VulkanDevice {
             sample_count: descriptor.sample_count,
             bytes_per_pixel,
             format: descriptor.format,
-            transient: descriptor.usage.transient,
+            image_usage,
         })
     }
 

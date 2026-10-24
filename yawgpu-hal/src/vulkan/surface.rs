@@ -177,6 +177,28 @@ impl RetireRing {
         }
     }
 
+    /// Releases all work associated with a fence the caller has waited signaled.
+    /// The caller keeps ownership of the fence and may reset it after this call.
+    fn release_signaled_fence(&mut self, device: &ash::Device, fence: vk::Fence) {
+        for slot in &mut self.frames {
+            if slot.as_ref().is_some_and(|frame| frame.fence == fence) {
+                if let Some(mut frame) = slot.take() {
+                    frame.destroy_fence = false;
+                    cleanup_frame(device, frame);
+                }
+            }
+        }
+        let parked = std::mem::take(&mut self.overflow);
+        for mut frame in parked {
+            if frame.fence == fence {
+                frame.destroy_fence = false;
+                cleanup_frame(device, frame);
+            } else {
+                self.overflow.push(frame);
+            }
+        }
+    }
+
     pub(super) fn wait_all(&mut self, device: &ash::Device) -> Result<(), HalError> {
         let mut first_error = None;
         for slot in &mut self.frames {
@@ -439,6 +461,15 @@ impl VulkanSurface {
                 });
             }
         };
+        let mut state = self
+            .pending_state
+            .lock()
+            .map_err(|_| HalError::AcquireFailed {
+                backend: BACKEND,
+                message: "surface pending state lock failed",
+            })?;
+        // Retirement must forget every use of this completed fence before reset.
+        state.retire.release_signaled_fence(device, in_flight_fence);
         unsafe {
             device
                 .reset_fences(&[in_flight_fence])
@@ -452,13 +483,7 @@ impl VulkanSurface {
             self.next_sync_index = (sync_index + 1) % self.image_acquired_semaphores.len();
         }
         self.current_image_index = Some(image_index);
-        self.pending_state
-            .lock()
-            .map_err(|_| HalError::AcquireFailed {
-                backend: BACKEND,
-                message: "surface pending state lock failed",
-            })?
-            .pending_acquire = Some(PendingAcquire {
+        state.pending_acquire = Some(PendingAcquire {
             image_index,
             acquired_sem,
             render_finished_sem,
@@ -487,79 +512,93 @@ impl VulkanSurface {
                 backend: BACKEND,
                 message: "no acquired image to present",
             })?;
-        let swapchain = self.swapchain.as_ref().ok_or(HalError::PresentFailed {
-            backend: BACKEND,
-            message: "surface is not configured",
-        })?;
-        let texture = swapchain
-            .images
-            .get(usize::try_from(image_index).unwrap_or(usize::MAX))
-            .ok_or(HalError::PresentFailed {
-                backend: BACKEND,
-                message: "acquired image index is out of range",
-            })?;
         let pending = self
             .pending_state
             .lock()
-            .map_err(|_| HalError::PresentFailed {
-                backend: BACKEND,
-                message: "surface pending state lock failed",
-            })?
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .pending_acquire
-            .ok_or(HalError::PresentFailed {
+            .take();
+        let mut transition_submitted = false;
+        let result = (|| {
+            let swapchain = self.swapchain.as_ref().ok_or(HalError::PresentFailed {
+                backend: BACKEND,
+                message: "surface is not configured",
+            })?;
+            let texture = swapchain
+                .images
+                .get(usize::try_from(image_index).unwrap_or(usize::MAX))
+                .ok_or(HalError::PresentFailed {
+                    backend: BACKEND,
+                    message: "acquired image index is out of range",
+                })?;
+            let pending = pending.ok_or(HalError::PresentFailed {
                 backend: BACKEND,
                 message: "no acquired image to present",
             })?;
-        if pending.image_index != image_index {
-            return Err(HalError::PresentFailed {
-                backend: BACKEND,
-                message: "pending acquire image mismatch",
-            });
-        }
-        let wait_semaphore = if pending.consumed {
-            pending.render_finished_sem
-        } else {
-            pending.acquired_sem
-        };
-        transition_swapchain_image_to_present(
-            queue,
-            texture,
-            Arc::clone(&self.pending_state),
-            wait_semaphore,
-            pending.present_ready_sem,
-            pending.in_flight_fence,
-        )?;
-        let swapchains = [swapchain.swapchain];
-        let image_indices = [image_index];
-        let wait_semaphores = [pending.present_ready_sem];
-        let present_info = vk::PresentInfoKHR::default()
-            .wait_semaphores(&wait_semaphores)
-            .swapchains(&swapchains)
-            .image_indices(&image_indices);
-        {
-            let _queue_access = queue
-                .inner
-                .queue_access
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            unsafe {
-                swapchain
-                    .loader
-                    .queue_present(queue.inner.queue, &present_info)
+            if pending.image_index != image_index {
+                return Err(HalError::PresentFailed {
+                    backend: BACKEND,
+                    message: "pending acquire image mismatch",
+                });
             }
-        }
-        .map_err(|_| HalError::PresentFailed {
-            backend: BACKEND,
-            message: "vkQueuePresentKHR failed",
-        })?;
-        self.pending_state
-            .lock()
+            let wait_semaphore = if pending.consumed {
+                pending.render_finished_sem
+            } else {
+                pending.acquired_sem
+            };
+            transition_swapchain_image_to_present(
+                queue,
+                texture,
+                Arc::clone(&self.pending_state),
+                wait_semaphore,
+                pending.present_ready_sem,
+                pending.in_flight_fence,
+                &mut transition_submitted,
+            )?;
+            let swapchains = [swapchain.swapchain];
+            let image_indices = [image_index];
+            let wait_semaphores = [pending.present_ready_sem];
+            let present_info = vk::PresentInfoKHR::default()
+                .wait_semaphores(&wait_semaphores)
+                .swapchains(&swapchains)
+                .image_indices(&image_indices);
+            {
+                let _queue_access = queue
+                    .inner
+                    .queue_access
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                unsafe {
+                    swapchain
+                        .loader
+                        .queue_present(queue.inner.queue, &present_info)
+                }
+            }
             .map_err(|_| HalError::PresentFailed {
                 backend: BACKEND,
-                message: "surface pending state lock failed",
-            })?
-            .pending_acquire = None;
-        Ok(())
+                message: "vkQueuePresentKHR failed",
+            })?;
+            Ok(())
+        })();
+        if result.is_err() && !transition_submitted {
+            if let Some(pending) = pending {
+                // Acquire reset this fence, but no transition will signal it.
+                // Preserve the original error even if recovery fails (e.g. device loss).
+                let _queue_access = queue
+                    .inner
+                    .queue_access
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _ = unsafe {
+                    queue.inner.device.device.queue_submit(
+                        queue.inner.queue,
+                        &[],
+                        pending.in_flight_fence,
+                    )
+                };
+            }
+        }
+        result
     }
 
     fn create_sync_objects(&mut self, device: &ash::Device, count: usize) -> Result<(), HalError> {
@@ -908,7 +947,7 @@ pub(super) fn create_swapchain_texture(
         sample_count: 1,
         bytes_per_pixel,
         format: config.format,
-        transient: false,
+        image_usage: usage,
     })
 }
 
@@ -1346,6 +1385,105 @@ mod tests {
             .wait_all(&device.inner.device)
             .expect("wait all retired frames");
         assert!(retire.frames.iter().all(Option::is_none));
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_retire_ring_releases_all_matching_entries_before_fence_reset() {
+        let device = vulkan_device();
+        let raw = &device.inner.device;
+        let fence = signaled_fence(&device);
+        let other_fence = signaled_fence(&device);
+        let buffer = device
+            .create_buffer(16, HalBufferUsage::default())
+            .expect("create retained buffer");
+        let inner = Arc::clone(buffer.inner.as_ref().expect("buffer allocation"));
+        let frame = |fence| InFlightFrame {
+            fence,
+            cleanup: Vec::new(),
+            retained: vec![RetainedResource::Buffer {
+                _inner: Arc::clone(&inner),
+            }],
+            destroy_fence: false,
+            tracked_submission: None,
+        };
+        let mut retire = RetireRing::new(3);
+        // Seed overflow directly: production reaches it on a failed retirement wait.
+        retire.frames = vec![
+            Some(frame(fence)),
+            Some(frame(other_fence)),
+            Some(frame(fence)),
+        ];
+        retire.overflow = vec![frame(fence), frame(other_fence), frame(fence)];
+        retire.next = 2;
+        drop(buffer);
+        assert_eq!(Arc::strong_count(&inner), 7);
+
+        unsafe { raw.wait_for_fences(&[fence], true, 1_000_000_000) }
+            .expect("bounded acquire fence wait");
+        retire.release_signaled_fence(raw, fence);
+        assert!(retire.frames[0].is_none());
+        assert_eq!(retire.frames[1].as_ref().unwrap().fence, other_fence);
+        assert!(retire.frames[2].is_none());
+        assert_eq!(retire.overflow.len(), 1);
+        assert_eq!(retire.overflow[0].fence, other_fence);
+        assert_eq!(retire.next, 2);
+        assert_eq!(Arc::strong_count(&inner), 3);
+        assert!(unsafe { raw.get_fence_status(fence) }.expect("fence remains alive"));
+
+        unsafe { raw.reset_fences(&[fence]) }.expect("reset acquire fence");
+        assert!(!unsafe { raw.get_fence_status(fence) }.expect("fence was reset"));
+        // These calls never wait, even if the reset fence was accidentally retained.
+        retire.release_signaled_fence(raw, other_fence);
+        assert!(retire.frames.iter().all(Option::is_none));
+        assert!(retire.overflow.is_empty());
+        assert_eq!(Arc::strong_count(&inner), 1);
+        retire.release_signaled_fence(raw, other_fence);
+        unsafe {
+            raw.destroy_fence(fence, None);
+            raw.destroy_fence(other_fence, None);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_surface_failed_present_signals_reset_acquire_fence() {
+        let instance = VulkanInstance::new().expect("create Vulkan instance");
+        let device = vulkan_device();
+        let raw = &device.inner.device;
+        let fence = signaled_fence(&device);
+        unsafe { raw.reset_fences(&[fence]) }.expect("reset acquire fence");
+        let mut surface = dummy_surface(&instance);
+        surface.current_image_index = Some(0);
+        surface.pending_state.lock().unwrap().pending_acquire = Some(PendingAcquire {
+            image_index: 0,
+            acquired_sem: vk::Semaphore::null(),
+            render_finished_sem: vk::Semaphore::null(),
+            present_ready_sem: vk::Semaphore::null(),
+            in_flight_fence: fence,
+            consumed: false,
+        });
+        let error = surface.present(device.queue()).expect_err("no swapchain");
+        assert!(matches!(
+            error,
+            HalError::PresentFailed {
+                message: "surface is not configured",
+                ..
+            }
+        ));
+        unsafe { raw.wait_for_fences(&[fence], true, 1_000_000_000) }
+            .expect("recovery signals the fence within a bounded wait");
+        assert!(surface
+            .pending_state
+            .lock()
+            .unwrap()
+            .pending_acquire
+            .is_none());
+        assert!(surface.present(device.queue()).is_err());
+        assert!(unsafe { raw.get_fence_status(fence) }.expect("fence stays signaled"));
+        unsafe { raw.destroy_fence(fence, None) };
     }
 
     #[test]

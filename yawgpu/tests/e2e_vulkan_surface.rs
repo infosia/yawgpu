@@ -314,6 +314,182 @@ fn vulkan_surface_texture_reads_zero_before_first_render_pass() {
     }
 }
 
+/// Block 109 (C2): the per-sync-index in-flight fence is reset at acquire
+/// while an older retire-ring entry may still hold it. Three present-only
+/// frames followed by a rendered frame land the render submit's retire on
+/// the slot holding that reset fence, which used to wait on it forever.
+#[test]
+#[ignore = "manual real-backend test"]
+fn vulkan_surface_present_only_frames_then_render_does_not_hang() {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
+        return;
+    }
+    run_with_timeout("present-only frames then render", || unsafe {
+        let instance = create_vulkan_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+        let (surface, _window) = create_test_surface(instance);
+        let config = frame_loop_config(surface, adapter, device);
+        yawgpu::wgpuSurfaceConfigure(surface, &config);
+
+        // false = acquire + present only, true = acquire + clear pass + present.
+        let pattern = [
+            false, false, false, true, true, false, true, false, false, true, true, true,
+        ];
+        for (frame, render) in pattern.into_iter().enumerate() {
+            present_frame(surface, device, queue, render, frame);
+        }
+        assert!(
+            errors.lock().expect("error lock").is_empty(),
+            "unexpected errors: {:?}",
+            errors.lock().expect("error lock")
+        );
+
+        yawgpu::wgpuSurfaceUnconfigure(surface);
+        yawgpu::wgpuSurfaceRelease(surface);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    });
+}
+
+/// Block 109 (C2): reconfiguring (a resize) between `getCurrentTexture` and
+/// `present` waits for every retire-ring frame; one of them may hold the
+/// in-flight fence the acquire just reset, which used to hang the wait.
+#[test]
+#[ignore = "manual real-backend test"]
+fn vulkan_surface_reconfigure_after_unpresented_acquire_does_not_hang() {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
+        return;
+    }
+    run_with_timeout("reconfigure after unpresented acquire", || unsafe {
+        let instance = create_vulkan_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+        let (surface, _window) = create_test_surface(instance);
+        let mut config = frame_loop_config(surface, adapter, device);
+        yawgpu::wgpuSurfaceConfigure(surface, &config);
+
+        for frame in 0..3 {
+            present_frame(surface, device, queue, false, frame);
+        }
+        let mut surface_texture = native::WGPUSurfaceTexture {
+            nextInChain: std::ptr::null_mut(),
+            texture: std::ptr::null(),
+            status: 0,
+        };
+        yawgpu::wgpuSurfaceGetCurrentTexture(surface, &mut surface_texture);
+        assert!(!surface_texture.texture.is_null());
+        yawgpu::wgpuTextureRelease(surface_texture.texture.cast_mut());
+
+        config.width = 32;
+        config.height = 32;
+        yawgpu::wgpuSurfaceConfigure(surface, &config);
+        // Enough frames to wrap every sync index after the reconfigure, so
+        // an in-flight fence left reset by the unpresented acquire would hang.
+        for frame in 3..12 {
+            present_frame(surface, device, queue, frame % 3 != 0, frame);
+        }
+        assert!(
+            errors.lock().expect("error lock").is_empty(),
+            "unexpected errors: {:?}",
+            errors.lock().expect("error lock")
+        );
+
+        yawgpu::wgpuSurfaceUnconfigure(surface);
+        yawgpu::wgpuSurfaceRelease(surface);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    });
+}
+
+/// Runs `body` on a helper thread and fails the test if it does not finish
+/// within 30 s, so a fence deadlock reports as a failure instead of hanging
+/// the test binary.
+fn run_with_timeout(what: &str, body: impl FnOnce() + Send + 'static) {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        body();
+        let _ = sender.send(());
+    });
+    match receiver.recv_timeout(std::time::Duration::from_secs(30)) {
+        Ok(()) => handle.join().expect("frame loop thread panicked"),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            if let Err(panic) = handle.join() {
+                std::panic::resume_unwind(panic);
+            }
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("{what}: frame loop did not finish within 30 s (fence deadlock)")
+        }
+    }
+}
+
+unsafe fn frame_loop_config(
+    surface: native::WGPUSurface,
+    adapter: native::WGPUAdapter,
+    device: native::WGPUDevice,
+) -> native::WGPUSurfaceConfiguration {
+    let (format, present_mode, alpha_mode) = pick_reported_modes(surface, adapter);
+    native::WGPUSurfaceConfiguration {
+        nextInChain: std::ptr::null_mut(),
+        device,
+        format,
+        usage: native::WGPUTextureUsage_RenderAttachment,
+        width: 64,
+        height: 64,
+        viewFormatCount: 0,
+        viewFormats: std::ptr::null(),
+        alphaMode: alpha_mode,
+        presentMode: present_mode,
+    }
+}
+
+unsafe fn present_frame(
+    surface: native::WGPUSurface,
+    device: native::WGPUDevice,
+    queue: native::WGPUQueue,
+    render: bool,
+    frame: usize,
+) {
+    let mut surface_texture = native::WGPUSurfaceTexture {
+        nextInChain: std::ptr::null_mut(),
+        texture: std::ptr::null(),
+        status: 0,
+    };
+    yawgpu::wgpuSurfaceGetCurrentTexture(surface, &mut surface_texture);
+    assert_eq!(
+        surface_texture.status,
+        native::WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal,
+        "frame {frame}: acquire status"
+    );
+    let texture = surface_texture.texture.cast_mut();
+    assert!(!texture.is_null(), "frame {frame}: null surface texture");
+    if render {
+        let view = yawgpu::wgpuTextureCreateView(texture, std::ptr::null());
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        record_clear_render_pass(encoder, view, [0.0, 0.0, 1.0, 1.0]);
+        let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+        yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+        yawgpu::wgpuCommandBufferRelease(command_buffer);
+        yawgpu::wgpuCommandEncoderRelease(encoder);
+        yawgpu::wgpuTextureViewRelease(view);
+    }
+    assert_eq!(
+        yawgpu::wgpuSurfacePresent(surface),
+        native::WGPUStatus_Success,
+        "frame {frame}: present"
+    );
+    yawgpu::wgpuTextureRelease(texture);
+}
+
 /// Block 103: modes outside the reported capabilities are still rejected
 /// with the Block 70 messages, and a rejected configure leaves the surface
 /// unconfigured.
