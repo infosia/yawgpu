@@ -582,8 +582,17 @@ impl VulkanSurface {
         })();
         if result.is_err() && !transition_submitted {
             if let Some(pending) = pending {
-                // Acquire reset this fence, but no transition will signal it.
+                // Consume the pending signal and restore the fence reset by acquire.
                 // Preserve the original error even if recovery fails (e.g. device loss).
+                let wait_semaphores = [if pending.consumed {
+                    pending.render_finished_sem
+                } else {
+                    pending.acquired_sem
+                }];
+                let wait_stages = [vk::PipelineStageFlags::ALL_COMMANDS];
+                let submit = vk::SubmitInfo::default()
+                    .wait_semaphores(&wait_semaphores)
+                    .wait_dst_stage_mask(&wait_stages);
                 let _queue_access = queue
                     .inner
                     .queue_access
@@ -592,7 +601,7 @@ impl VulkanSurface {
                 let _ = unsafe {
                     queue.inner.device.device.queue_submit(
                         queue.inner.queue,
-                        &[],
+                        &[submit],
                         pending.in_flight_fence,
                     )
                 };
@@ -1453,37 +1462,76 @@ mod tests {
         let instance = VulkanInstance::new().expect("create Vulkan instance");
         let device = vulkan_device();
         let raw = &device.inner.device;
-        let fence = signaled_fence(&device);
-        unsafe { raw.reset_fences(&[fence]) }.expect("reset acquire fence");
-        let mut surface = dummy_surface(&instance);
-        surface.current_image_index = Some(0);
-        surface.pending_state.lock().unwrap().pending_acquire = Some(PendingAcquire {
-            image_index: 0,
-            acquired_sem: vk::Semaphore::null(),
-            render_finished_sem: vk::Semaphore::null(),
-            present_ready_sem: vk::Semaphore::null(),
-            in_flight_fence: fence,
-            consumed: false,
-        });
-        let error = surface.present(device.queue()).expect_err("no swapchain");
-        assert!(matches!(
-            error,
-            HalError::PresentFailed {
-                message: "surface is not configured",
-                ..
+        let queue = device.queue();
+        for consumed in [false, true] {
+            let fence = signaled_fence(&device);
+            let acquired_sem =
+                unsafe { raw.create_semaphore(&vk::SemaphoreCreateInfo::default(), None) }
+                    .expect("create acquired semaphore");
+            let render_finished_sem =
+                unsafe { raw.create_semaphore(&vk::SemaphoreCreateInfo::default(), None) }
+                    .expect("create render-finished semaphore");
+            let pending_semaphores = [if consumed {
+                render_finished_sem
+            } else {
+                acquired_sem
+            }];
+            let wait_stages = [vk::PipelineStageFlags::ALL_COMMANDS];
+            let signal = vk::SubmitInfo::default().signal_semaphores(&pending_semaphores);
+            unsafe { raw.reset_fences(&[fence]) }.expect("reset acquire fence");
+            {
+                let _queue_access = queue.inner.queue_access.lock().unwrap();
+                unsafe { raw.queue_submit(queue.inner.queue, &[signal], vk::Fence::null()) }
+                    .expect("signal the semaphore that present would wait on");
             }
-        ));
-        unsafe { raw.wait_for_fences(&[fence], true, 1_000_000_000) }
-            .expect("recovery signals the fence within a bounded wait");
-        assert!(surface
-            .pending_state
-            .lock()
-            .unwrap()
-            .pending_acquire
-            .is_none());
-        assert!(surface.present(device.queue()).is_err());
-        assert!(unsafe { raw.get_fence_status(fence) }.expect("fence stays signaled"));
-        unsafe { raw.destroy_fence(fence, None) };
+            let mut surface = dummy_surface(&instance);
+            surface.current_image_index = Some(0);
+            surface.pending_state.lock().unwrap().pending_acquire = Some(PendingAcquire {
+                image_index: 0,
+                acquired_sem,
+                render_finished_sem,
+                present_ready_sem: vk::Semaphore::null(),
+                in_flight_fence: fence,
+                consumed,
+            });
+            let error = surface.present(queue).expect_err("no swapchain");
+            assert!(matches!(
+                error,
+                HalError::PresentFailed {
+                    message: "surface is not configured",
+                    ..
+                }
+            ));
+            unsafe { raw.wait_for_fences(&[fence], true, 1_000_000_000) }
+                .expect("recovery consumes the pending semaphore and signals the fence");
+            assert!(surface
+                .pending_state
+                .lock()
+                .unwrap()
+                .pending_acquire
+                .is_none());
+            assert!(surface.present(queue).is_err());
+            assert!(unsafe { raw.get_fence_status(fence) }.expect("fence stays signaled"));
+
+            // Reuse the binary semaphore: recovery must have consumed its signal.
+            // Validation layers diagnose a double signal if recovery left it pending.
+            unsafe { raw.reset_fences(&[fence]) }.expect("reset reuse fence");
+            let wait = vk::SubmitInfo::default()
+                .wait_semaphores(&pending_semaphores)
+                .wait_dst_stage_mask(&wait_stages);
+            {
+                let _queue_access = queue.inner.queue_access.lock().unwrap();
+                unsafe { raw.queue_submit(queue.inner.queue, &[signal, wait], fence) }
+                    .expect("signal and wait on the recovered semaphore again");
+            }
+            unsafe { raw.wait_for_fences(&[fence], true, 1_000_000_000) }
+                .expect("reused semaphore completes within a bounded wait");
+            unsafe {
+                raw.destroy_semaphore(acquired_sem, None);
+                raw.destroy_semaphore(render_finished_sem, None);
+                raw.destroy_fence(fence, None);
+            }
+        }
     }
 
     #[test]

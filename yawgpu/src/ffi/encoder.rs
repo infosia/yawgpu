@@ -31,24 +31,19 @@ pub unsafe extern "C" fn wgpuCommandEncoderBeginRenderPass(
         native_descriptor,
         encoder.device.limits().max_color_attachments,
     );
+    let mut mapping_error = None;
     let descriptor = match mapped {
         Ok(descriptor) => {
             if let Some(message) =
                 validate_render_pass_descriptor_devices(native_descriptor, &encoder.device)
             {
-                dispatch_optional_error(
-                    &encoder.device,
-                    encoder.core.record_validation_error(message),
-                );
+                mapping_error = encoder.core.record_validation_error(message);
             }
             descriptor
         }
         Err(message) => {
             // Record this first so the placeholder cannot replace the FFI error.
-            dispatch_optional_error(
-                &encoder.device,
-                encoder.core.record_validation_error(message),
-            );
+            mapping_error = encoder.core.record_validation_error(message);
             core::RenderPassDescriptor {
                 max_color_attachments: encoder.device.limits().max_color_attachments,
                 color_attachments: Vec::new(),
@@ -60,7 +55,8 @@ pub unsafe extern "C" fn wgpuCommandEncoderBeginRenderPass(
         }
     };
     let (pass, error) = encoder.core.begin_render_pass(&descriptor);
-    dispatch_optional_error(&encoder.device, error);
+    // A failed encoder-state check takes precedence over FFI validation.
+    dispatch_optional_error(&encoder.device, error.or(mapping_error));
     arc_to_handle(Arc::new(WGPURenderPassEncoderImpl {
         core: Arc::new(pass),
         device: Arc::clone(&encoder.device),
@@ -666,6 +662,61 @@ mod tests {
             compute_pipeline_cache: ObjectCache::new(),
             render_pipeline_cache: ObjectCache::new(),
         })
+    }
+
+    #[test]
+    fn wgpuCommandEncoderBeginRenderPass_finished_encoder_reports_one_state_error() {
+        let device = device_impl();
+        let other = device_impl();
+        let handle = arc_to_handle(Arc::clone(&device));
+        let other_handle = arc_to_handle(other);
+        let errors = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&errors);
+        device
+            .core
+            .set_uncaptured_error_callback(Some(move |error| {
+                captured.lock().unwrap().push(error);
+            }));
+        unsafe {
+            let query_descriptor = native::WGPUQuerySetDescriptor {
+                type_: native::WGPUQueryType_Occlusion,
+                count: 1,
+                ..std::mem::zeroed()
+            };
+            let foreign_query = wgpuDeviceCreateQuerySet(other_handle, &query_descriptor);
+            for ownership_failure in [false, true] {
+                let encoder = wgpuDeviceCreateCommandEncoder(handle, std::ptr::null());
+                let commands = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+                let descriptor = native::WGPURenderPassDescriptor {
+                    colorAttachmentCount: usize::from(!ownership_failure),
+                    colorAttachments: std::ptr::null(),
+                    occlusionQuerySet: if ownership_failure {
+                        foreign_query
+                    } else {
+                        std::ptr::null()
+                    },
+                    ..std::mem::zeroed()
+                };
+                let pass = wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
+                assert!(!pass.is_null());
+                {
+                    let errors = errors.lock().unwrap();
+                    assert_eq!(errors.len(), 1, "ownership failure: {ownership_failure}");
+                    assert_eq!(errors[0].kind, core::ErrorKind::Validation);
+                    assert_eq!(
+                        errors[0].message,
+                        "command encoder cannot record after finish"
+                    );
+                }
+                errors.lock().unwrap().clear();
+                wgpuRenderPassEncoderRelease(pass);
+                wgpuCommandBufferRelease(commands);
+                wgpuCommandEncoderRelease(encoder);
+            }
+            wgpuQuerySetRelease(foreign_query);
+            wgpuDeviceRelease(other_handle);
+            wgpuDeviceRelease(handle);
+        }
     }
 
     #[test]

@@ -1,5 +1,11 @@
 use super::*;
 
+// Inject a synthetic Noop swapchain acquisition in FFI unit tests. Ordinary
+// Noop surfaces retain their no-backbuffer contract.
+#[cfg(test)]
+pub(super) type TestSurfaceAcquire =
+    Box<dyn FnMut() -> Result<yawgpu_hal::HalTexture, yawgpu_hal::HalError> + Send>;
+
 /// Returns the HAL surface capabilities for the adapter.
 ///
 /// # Safety
@@ -107,6 +113,11 @@ pub unsafe extern "C" fn wgpuSurfaceConfigure(
             .map(crate::conv::map_texture_format)
             .collect()
     };
+    let mut current_texture = surface
+        .current_texture
+        .lock()
+        .expect("surface current texture lock is not poisoned");
+    *current_texture = None;
     if let Some(hal) = surface
         .hal
         .lock()
@@ -150,6 +161,11 @@ pub unsafe extern "C" fn wgpuSurfaceConfigure(
 #[no_mangle]
 pub unsafe extern "C" fn wgpuSurfaceUnconfigure(surface: native::WGPUSurface) {
     let surface = borrow_handle(surface, "WGPUSurface");
+    let mut current_texture = surface
+        .current_texture
+        .lock()
+        .expect("surface current texture lock is not poisoned");
+    *current_texture = None;
     *surface
         .configured
         .lock()
@@ -182,6 +198,15 @@ pub unsafe extern "C" fn wgpuSurfaceGetCurrentTexture(
     };
     surface_texture.nextInChain = std::ptr::null_mut();
     surface_texture.texture = std::ptr::null();
+    let mut current_texture = surface
+        .current_texture
+        .lock()
+        .expect("surface current texture lock is not poisoned");
+    if let Some(texture) = current_texture.as_ref() {
+        surface_texture.texture = arc_to_handle(Arc::clone(texture));
+        surface_texture.status = native::WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal;
+        return;
+    }
     let config = surface
         .configured
         .lock()
@@ -203,13 +228,25 @@ pub unsafe extern "C" fn wgpuSurfaceGetCurrentTexture(
     }
     let (device, usage, width, height, format, view_formats) =
         config.expect("surface configuration was checked");
-    if let Some(hal) = surface
+    let mut hal = surface
         .hal
         .lock()
-        .expect("surface HAL lock is not poisoned")
+        .expect("surface HAL lock is not poisoned");
+    #[cfg(test)]
+    let acquired = if let Some(acquire) = surface
+        .acquire_texture_override
+        .lock()
+        .expect("surface acquisition override lock is not poisoned")
         .as_mut()
     {
-        match hal.acquire_next_texture() {
+        Some(acquire())
+    } else {
+        hal.as_mut().map(HalSurface::acquire_next_texture)
+    };
+    #[cfg(not(test))]
+    let acquired = hal.as_mut().map(HalSurface::acquire_next_texture);
+    if let Some(acquired) = acquired {
+        match acquired {
             Ok(hal_texture) => {
                 let descriptor = core::TextureDescriptor {
                     usage: map_texture_usage(usage),
@@ -231,6 +268,7 @@ pub unsafe extern "C" fn wgpuSurfaceGetCurrentTexture(
                     label: Mutex::new(None),
                     binding_view_dimension: native::WGPUTextureViewDimension_Undefined,
                 });
+                *current_texture = Some(Arc::clone(&texture));
                 surface_texture.texture = arc_to_handle(texture);
                 surface_texture.status = native::WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal;
                 return;
@@ -255,6 +293,11 @@ pub unsafe extern "C" fn wgpuSurfaceGetCurrentTexture(
 #[no_mangle]
 pub unsafe extern "C" fn wgpuSurfacePresent(surface: native::WGPUSurface) -> native::WGPUStatus {
     let surface = borrow_handle(surface, "WGPUSurface");
+    let mut current_texture = surface
+        .current_texture
+        .lock()
+        .expect("surface current texture lock is not poisoned");
+    *current_texture = None;
     if let Some(hal) = surface
         .hal
         .lock()
@@ -379,6 +422,94 @@ mod tests {
     };
     use super::*;
     use yawgpu_hal::{HalCompositeAlphaMode as A, HalSurfaceCapabilities};
+
+    #[test]
+    fn current_texture_is_reused_until_present_configure_or_unconfigure() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let surface = create_noop_surface(instance);
+            let surface_impl = borrow_handle(surface, "WGPUSurface");
+            let config = valid_surface_config(device);
+            let acquisitions = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&acquisitions);
+            let core_device = Arc::clone(&borrow_handle(device, "WGPUDevice").core);
+            // Noop has no native swapchain; inject its HAL texture allocator at
+            // the acquire boundary so the public FFI path can be exercised.
+            *surface_impl.acquire_texture_override.lock().unwrap() = Some(Box::new(move || {
+                counted.fetch_add(1, Ordering::Relaxed);
+                core_device
+                    .hal()
+                    .create_texture(&yawgpu_hal::HalTextureDescriptor {
+                        dimension: yawgpu_hal::HalTextureDimension::D2,
+                        format: HalTextureFormat::Bgra8Unorm,
+                        width: config.width,
+                        height: config.height,
+                        depth_or_array_layers: 1,
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        usage: hal_surface_usage(config.usage),
+                    })
+            }));
+            wgpuSurfaceConfigure(surface, &config);
+
+            for frame in 1..=3 {
+                let mut first: native::WGPUSurfaceTexture = std::mem::zeroed();
+                let mut second: native::WGPUSurfaceTexture = std::mem::zeroed();
+                wgpuSurfaceGetCurrentTexture(surface, &mut first);
+                wgpuSurfaceGetCurrentTexture(surface, &mut second);
+                assert_eq!(
+                    first.status,
+                    native::WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal
+                );
+                assert_eq!(second.status, first.status);
+                assert_eq!(acquisitions.load(Ordering::Relaxed), frame);
+                assert_eq!(first.texture, second.texture);
+                assert!(Arc::ptr_eq(
+                    &borrow_handle(first.texture, "WGPUTexture").core,
+                    &borrow_handle(second.texture, "WGPUTexture").core,
+                ));
+                let texture = clone_handle(first.texture, "WGPUTexture");
+                // One surface reference, two caller references, and this clone.
+                assert_eq!(Arc::strong_count(&texture), 4);
+                let weak = Arc::downgrade(&texture);
+                drop(texture);
+                wgpuTextureRelease(first.texture);
+                wgpuTextureRelease(second.texture);
+                assert!(weak.upgrade().is_some());
+
+                match frame {
+                    1 => assert_eq!(wgpuSurfacePresent(surface), native::WGPUStatus_Success),
+                    2 => wgpuSurfaceConfigure(surface, &config),
+                    3 => wgpuSurfaceUnconfigure(surface),
+                    _ => unreachable!(),
+                }
+                assert!(weak.upgrade().is_none());
+                assert!(surface_impl.current_texture.lock().unwrap().is_none());
+            }
+            let mut output: native::WGPUSurfaceTexture = std::mem::zeroed();
+            wgpuSurfaceGetCurrentTexture(surface, &mut output);
+            assert_eq!(
+                output.status,
+                native::WGPUSurfaceGetCurrentTextureStatus_Error
+            );
+            assert!(output.texture.is_null());
+            assert_eq!(acquisitions.load(Ordering::Relaxed), 3);
+
+            // Reconfiguring after unconfigure permits a fresh acquisition.
+            wgpuSurfaceConfigure(surface, &config);
+            wgpuSurfaceGetCurrentTexture(surface, &mut output);
+            assert_eq!(acquisitions.load(Ordering::Relaxed), 4);
+            assert_eq!(
+                output.status,
+                native::WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal
+            );
+            wgpuTextureRelease(output.texture);
+            wgpuSurfaceRelease(surface);
+            release_handles(instance, adapter, device);
+        }
+    }
 
     fn varied_caps() -> HalSurfaceCapabilities {
         let mut caps = noop_surface_caps();

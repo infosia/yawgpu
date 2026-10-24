@@ -394,6 +394,9 @@ pub unsafe extern "C" fn wgpuInstanceCreateSurface(
     arc_to_handle(Arc::new(WGPUSurfaceImpl {
         label: Mutex::new(label),
         configured: Mutex::new(None),
+        current_texture: Mutex::new(None),
+        #[cfg(test)]
+        acquire_texture_override: Mutex::new(None),
         hal: Mutex::new(hal),
         is_error,
         _instance: instance,

@@ -4039,7 +4039,7 @@ pub(super) fn render_pass_dependencies(framebuffer_fetch: bool) -> Vec<vk::Subpa
         .dst_subpass(0)
         .src_stage_mask(render_attachment_stage_flags())
         .dst_stage_mask(render_attachment_stage_flags())
-        .src_access_mask(vk::AccessFlags::empty())
+        .src_access_mask(render_attachment_access_flags())
         .dst_access_mask(render_attachment_access_flags());
     let dependency_out = vk::SubpassDependency::default()
         .src_subpass(0)
@@ -4618,6 +4618,25 @@ pub(super) fn to_image_extent(extent: HalExtent3d) -> vk::Extent3D {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn render_pass_dependencies_make_previous_attachment_writes_available() {
+        let stages = vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+            | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+            | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS;
+        let writes = vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+            | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE;
+        for framebuffer_fetch in [false, true] {
+            let dependencies = render_pass_dependencies(framebuffer_fetch);
+            let dependency_in = &dependencies[0];
+            assert_eq!(dependency_in.src_subpass, vk::SUBPASS_EXTERNAL);
+            assert_eq!(dependency_in.dst_subpass, 0);
+            assert_eq!(dependency_in.src_stage_mask, stages);
+            assert_eq!(dependency_in.dst_stage_mask, stages);
+            assert_eq!(dependency_in.src_access_mask, writes);
+            assert_eq!(dependency_in.dst_access_mask, writes);
+        }
+    }
+
     #[test]
     fn copy_ranges_select_array_layers_and_collapse_3d_slices() {
         for dimension in [HalTextureDimension::D1, HalTextureDimension::D2] {

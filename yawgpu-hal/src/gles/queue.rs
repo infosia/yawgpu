@@ -1592,6 +1592,9 @@ impl Drop for RenderPassCleanup<'_> {
             self.gl.active_texture(glow::TEXTURE0);
             self.gl.color_mask(true, true, true, true);
             self.gl.disable(glow::BLEND);
+            self.gl.disable(glow::DEPTH_TEST);
+            self.gl.disable(glow::POLYGON_OFFSET_FILL);
+            self.gl.depth_mask(true);
             self.gl.disable(glow::STENCIL_TEST);
             self.gl.disable(glow::SAMPLE_ALPHA_TO_COVERAGE);
             self.gl.disable(glow::SAMPLE_MASK);

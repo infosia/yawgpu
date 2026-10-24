@@ -410,6 +410,84 @@ fn vulkan_surface_reconfigure_after_unpresented_acquire_does_not_hang() {
     });
 }
 
+/// Block 109 (Phase Review M1 / R8): calling `getCurrentTexture` twice before
+/// `present` returns the same texture; a second HAL acquire used to reset the
+/// next in-flight fence and orphan the first one, hanging a later acquire.
+#[test]
+#[ignore = "manual real-backend test"]
+fn vulkan_surface_double_get_current_texture_returns_same_texture_and_does_not_hang() {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
+        return;
+    }
+    run_with_timeout("double getCurrentTexture per frame", || unsafe {
+        let instance = create_vulkan_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+        let (surface, _window) = create_test_surface(instance);
+        let config = frame_loop_config(surface, adapter, device);
+        yawgpu::wgpuSurfaceConfigure(surface, &config);
+
+        for frame in 0..12 {
+            let mut first = native::WGPUSurfaceTexture {
+                nextInChain: std::ptr::null_mut(),
+                texture: std::ptr::null(),
+                status: 0,
+            };
+            let mut second = native::WGPUSurfaceTexture {
+                nextInChain: std::ptr::null_mut(),
+                texture: std::ptr::null(),
+                status: 0,
+            };
+            yawgpu::wgpuSurfaceGetCurrentTexture(surface, &mut first);
+            yawgpu::wgpuSurfaceGetCurrentTexture(surface, &mut second);
+            assert_eq!(
+                first.status,
+                native::WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal
+            );
+            assert_eq!(
+                second.status,
+                native::WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal
+            );
+            assert_eq!(
+                first.texture, second.texture,
+                "frame {frame}: repeated getCurrentTexture must return the same texture"
+            );
+            let texture = first.texture.cast_mut();
+            if frame % 2 == 0 {
+                let view = yawgpu::wgpuTextureCreateView(texture, std::ptr::null());
+                let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+                record_clear_render_pass(encoder, view, [0.0, 1.0, 0.0, 1.0]);
+                let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+                yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+                yawgpu::wgpuCommandBufferRelease(command_buffer);
+                yawgpu::wgpuCommandEncoderRelease(encoder);
+                yawgpu::wgpuTextureViewRelease(view);
+            }
+            assert_eq!(
+                yawgpu::wgpuSurfacePresent(surface),
+                native::WGPUStatus_Success,
+                "frame {frame}: present"
+            );
+            yawgpu::wgpuTextureRelease(texture);
+            yawgpu::wgpuTextureRelease(second.texture.cast_mut());
+        }
+        assert!(
+            errors.lock().expect("error lock").is_empty(),
+            "unexpected errors: {:?}",
+            errors.lock().expect("error lock")
+        );
+
+        yawgpu::wgpuSurfaceUnconfigure(surface);
+        yawgpu::wgpuSurfaceRelease(surface);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    });
+}
+
 /// Runs `body` on a helper thread and fails the test if it does not finish
 /// within 30 s, so a fence deadlock reports as a failure instead of hanging
 /// the test binary.

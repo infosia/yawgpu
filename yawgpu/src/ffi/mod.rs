@@ -477,6 +477,9 @@ pub(crate) struct MultisampleStateCacheKey {
 pub struct WGPUSurfaceImpl {
     pub(crate) label: Mutex<Option<String>>,
     pub(crate) configured: Mutex<Option<SurfaceConfigurationState>>,
+    pub(crate) current_texture: Mutex<Option<Arc<WGPUTextureImpl>>>,
+    #[cfg(test)]
+    pub(crate) acquire_texture_override: Mutex<Option<surface::TestSurfaceAcquire>>,
     pub(crate) hal: Mutex<Option<HalSurface>>,
     pub(crate) is_error: bool,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
