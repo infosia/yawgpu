@@ -488,12 +488,24 @@ impl Texture {
         &self,
         descriptor: TextureViewDescriptor,
     ) -> (TextureView, Option<&'static str>) {
+        self.create_view_with_error(descriptor, None)
+    }
+
+    /// Creates a texture view, preserving an earlier descriptor conversion error.
+    #[must_use]
+    pub fn create_view_with_error<'a>(
+        &self,
+        descriptor: TextureViewDescriptor,
+        error: Option<&'a str>,
+    ) -> (TextureView, Option<&'a str>) {
         let resolved = self.resolve_view_descriptor(descriptor);
-        let error = if self.is_error() {
-            Some("cannot create a view from an error texture")
-        } else {
-            validate_texture_view_descriptor(self, &resolved)
-        };
+        let error = error.or_else(|| {
+            if self.is_error() {
+                Some("cannot create a view from an error texture")
+            } else {
+                validate_texture_view_descriptor(self, &resolved)
+            }
+        });
         let is_error = error.is_some();
         (
             TextureView::new(self.clone(), resolved, is_error, error.map(str::to_owned)),
@@ -2016,6 +2028,36 @@ mod tests {
             from_hal.format_caps(),
             from_hal.format().caps(&FeatureSet::new())
         );
+    }
+
+    #[test]
+    fn create_view_with_error_preserves_conversion_error_over_validation() {
+        let texture = noop_texture();
+        let mut descriptor = TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+            swizzle: None,
+        };
+        let (view, error) = texture.create_view_with_error(descriptor, None);
+        assert_eq!(error, None);
+        assert!(!view.is_error());
+        assert_eq!(view.error_message(), None);
+        descriptor.mip_level_count = Some(0);
+        let message = String::from("invalid component swizzle");
+        let (view, error) = texture.create_view_with_error(descriptor, Some(&message));
+        assert_eq!(error, Some(message.as_str()));
+        assert!(view.is_error());
+        drop(message);
+        assert_eq!(view.error_message(), Some("invalid component swizzle"));
+        let (view, error) = texture.create_view_with_error(descriptor, None);
+        assert!(error.unwrap().contains("mip"));
+        assert_eq!(view.error_message(), error);
     }
 
     #[test]

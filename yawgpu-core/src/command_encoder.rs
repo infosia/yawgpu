@@ -755,6 +755,11 @@ impl CommandEncoder {
         ) {
             self.record_first_error(message);
         } else {
+            self.record_referenced_query_set((*query_set).clone());
+            {
+                let mut state = self.inner.state.lock();
+                record_referenced_buffer_locked(&mut state, Arc::clone(&destination));
+            }
             if query_count == 0 {
                 return None;
             }
@@ -773,10 +778,8 @@ impl CommandEncoder {
             } else {
                 None
             };
-            self.record_referenced_query_set((*query_set).clone());
             let mut state = self.inner.state.lock();
             state.has_recorded_command = true;
-            record_referenced_buffer_locked(&mut state, Arc::clone(&destination));
             state
                 .command_ops
                 .push(CommandExecution::ResolveQuerySet(ResolveQuerySetCommand {
@@ -2619,6 +2622,40 @@ mod tests {
         let encoder = device.create_command_encoder();
         assert_eq!(encoder.resolve_query_set(set, 0, 0, destination, 0), None);
         assert!(encoder.finish().1.unwrap().contains("QueryResolve"));
+    }
+
+    #[test]
+    fn zero_count_resolve_tracks_resources_until_submit() {
+        for destroy_query_set in [true, false] {
+            let (device, set) = timestamp_device_and_set();
+            let destination = Arc::new(device.create_buffer(BufferDescriptor {
+                usage: BufferUsage::QUERY_RESOLVE,
+                size: 32,
+                mapped_at_creation: false,
+            }));
+            let encoder = device.create_command_encoder();
+            assert_eq!(
+                encoder.resolve_query_set(set.clone(), 0, 0, destination.clone(), 0),
+                None
+            );
+            if destroy_query_set {
+                set.destroy();
+            } else {
+                destination.destroy();
+            }
+            let (buffer, error) = encoder.finish();
+            assert_eq!(error, None);
+            assert!(buffer.command_ops().is_empty());
+            let error = device.queue().submit(&[Arc::new(buffer)]).unwrap();
+            assert_eq!(
+                error.message,
+                if destroy_query_set {
+                    "queue submit cannot use a destroyed query set"
+                } else {
+                    "queue submit cannot use a destroyed buffer"
+                }
+            );
+        }
     }
 
     #[test]

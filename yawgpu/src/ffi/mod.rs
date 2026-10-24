@@ -6417,10 +6417,24 @@ mod tests {
             let mut view_desc =
                 texture_view_descriptor_with_format(native::WGPUTextureFormat_Undefined);
             view_desc.nextInChain = &mut swizzle.chain;
-            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let errors = Arc::new(Mutex::new(Vec::new()));
+            let captured = Arc::clone(&errors);
+            borrow_handle(device, "WGPUDevice").set_uncaptured_error_callback(Some(move |error| {
+                captured.lock().unwrap().push(error);
+            }));
             let view = wgpuTextureCreateView(texture, &view_desc);
-            assert!(borrow_handle(view, "WGPUTextureView")._core.is_error());
-            assert_validation_error_contains(instance, device, "invalid component swizzle");
+            let core_view = &borrow_handle(view, "WGPUTextureView")._core;
+            assert!(core_view.is_error());
+            assert!(core_view
+                .error_message()
+                .unwrap()
+                .contains("invalid component swizzle"));
+            {
+                let errors = errors.lock().unwrap();
+                assert_eq!(errors.len(), 1);
+                assert!(matches!(errors[0].kind, core::ErrorKind::Validation));
+                assert_eq!(core_view.error_message(), Some(errors[0].message.as_str()));
+            }
             wgpuTextureViewRelease(view);
             wgpuTextureRelease(texture);
             release_handles(instance, adapter, device);
