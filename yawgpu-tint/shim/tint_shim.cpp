@@ -2451,6 +2451,7 @@ bool yawgpu_tint_resolved_workgroup_size(const YawgpuTintProgram* program,
                                         uint32_t out[3],
                                         bool* has_subgroup_size,
                                         uint32_t* subgroup_size,
+                                        uint64_t* storage_size,
                                         char** err) {
     if (err != nullptr) {
         *err = nullptr;
@@ -2464,9 +2465,12 @@ bool yawgpu_tint_resolved_workgroup_size(const YawgpuTintProgram* program,
     if (subgroup_size != nullptr) {
         *subgroup_size = 0;
     }
+    if (storage_size != nullptr) {
+        *storage_size = 0;
+    }
     try {
         if (program == nullptr || ep == nullptr || out == nullptr ||
-            has_subgroup_size == nullptr || subgroup_size == nullptr) {
+            has_subgroup_size == nullptr || subgroup_size == nullptr || storage_size == nullptr) {
             set_error_string(err, "invalid NULL argument");
             return false;
         }
@@ -2521,6 +2525,12 @@ bool yawgpu_tint_resolved_workgroup_size(const YawgpuTintProgram* program,
             *has_subgroup_size = true;
             *subgroup_size = *sg_size;
         }
+        auto wi = tint::core::ir::GetWorkgroupInfo(ir.Get());
+        if (wi != tint::Success) {
+            set_error(err, wi.Failure());
+            return false;
+        }
+        *storage_size = wi->storage_size;
         return true;
     } catch (const std::exception& e) {
         set_error_string(err, e.what());

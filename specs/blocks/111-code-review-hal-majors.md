@@ -225,7 +225,7 @@ MoltenVK limit unchanged); webgpu-native-cts on Metal:
 |---|---|---|
 | m1 | R5 shader-write barrier is emitted after every render pass, serialising consecutive passes on tile-based GPUs | fix (R19): emit only when the pass bound a writable storage resource in a vertex / fragment stage (incl. via bundles) |
 | m2 | spec asked for an MSAA-resolve-through-reinterpreted-view e2e; only the descriptor is unit-tested | fix: Claude adds the e2e |
-| m3 | `shader_tint.rs` fast-path doc comment garbled; IR lowered twice for override-bearing modules | fix the comment; the double lowering is **deferred** (compile-time only, results memoised; merging the two shim calls is an ABI change for no correctness gain) |
+| m3 | `shader_tint.rs` fast-path doc comment garbled; IR lowered twice for override-bearing modules | fix the comment; the double lowering was **deferred**, then fixed by Block 116 (compile-time only, results memoised; merging the two shim calls is an ABI change for no correctness gain) |
 | m4 | GLES R11 error text says "stencil formats" though `Stencil8` uploads are allowed | fix wording |
 | m5 | 67-gles matrix lacks the R11 B2T stencil-aspect `HalError`; this spec file untracked | fix (Claude) |
 | m6 | retire-ring waits run while holding `queue_access` | **deferred** — not a deadlock (every waited fence was submitted under the same lock); a throughput issue, logged with the Vulkan per-submit object-churn perf item in the review ledger |

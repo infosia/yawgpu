@@ -408,7 +408,10 @@ YAWGPU_TINT_API bool yawgpu_tint_workgroup_storage_size(const YawgpuTintProgram*
    override-resolved value (Tint's WorkgroupInfo::subgroup_size; 0 when
    absent). The value is reported as-is: Tint does not re-check the
    power-of-two rule for override-driven values here, so callers validate it.
-   Both pointers must be non-NULL. */
+   *storage_size reports workgroup storage in bytes via GetWorkgroupInfo on
+   the same IR; failure of that query fails this call. `out`,
+   `has_subgroup_size`, `subgroup_size`, and `storage_size` must be non-NULL
+   and are zeroed on entry. */
 YAWGPU_TINT_API bool yawgpu_tint_resolved_workgroup_size(const YawgpuTintProgram*,
                                           const char* ep,
                                           const YawgpuTintOverrideValue* ov,
@@ -416,6 +419,7 @@ YAWGPU_TINT_API bool yawgpu_tint_resolved_workgroup_size(const YawgpuTintProgram
                                           uint32_t out[3],
                                           bool* has_subgroup_size,
                                           uint32_t* subgroup_size,
+                                          uint64_t* storage_size,
                                           char** err);
 
 /* Byte offsets into Tint's GLSL immediate data array. */

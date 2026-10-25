@@ -253,6 +253,7 @@ pub struct EntryPoint {
 /// An entry point's override-resolved compute workgroup info (Tint's
 /// `WorkgroupInfo`, restricted to the fields yawgpu consumes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResolvedWorkgroupInfo {
     /// Resolved `@workgroup_size` as `[x, y, z]`.
     pub workgroup_size: [u32; 3],
@@ -260,6 +261,8 @@ pub struct ResolvedWorkgroupInfo {
     /// as resolved by Tint, without re-checking the power-of-two rule for
     /// override-driven values.
     pub subgroup_size: Option<u32>,
+    /// Workgroup storage size in bytes after resolving overrides.
+    pub workgroup_storage_size: u64,
 }
 
 /// A reflected entry point input or output variable.
@@ -1516,6 +1519,7 @@ mod real {
             out: *mut u32,
             has_subgroup_size: *mut bool,
             subgroup_size: *mut u32,
+            storage_size: *mut u64,
             err: *mut *mut c_char,
         ) -> bool;
         fn yawgpu_tint_immediate_data_size(
@@ -2240,8 +2244,8 @@ mod real {
 
         /// Returns `entry_point`'s override-resolved compute workgroup info:
         /// the `@workgroup_size` of [`Self::resolved_workgroup_size`] plus the
-        /// resolved `@subgroup_size` (Tint's `WorkgroupInfo::subgroup_size`),
-        /// both read off the same entry-scoped, override-substituted IR. Fails
+        /// resolved `@subgroup_size` and workgroup storage size in bytes,
+        /// all read off the same entry-scoped, override-substituted IR. Fails
         /// under the same conditions as [`Self::resolved_workgroup_size`].
         pub fn resolved_workgroup_info(
             &self,
@@ -2253,9 +2257,10 @@ mod real {
             let mut out = [0u32; 3];
             let mut has_subgroup_size = false;
             let mut subgroup_size = 0u32;
+            let mut storage_size = 0u64;
             let mut err = ptr::null_mut();
-            // SAFETY: `ep`, `out`, `has_subgroup_size`, `subgroup_size`, and
-            // `err` point to valid memory for the call.
+            // SAFETY: `ep`, `out`, `has_subgroup_size`, `subgroup_size`,
+            // `storage_size` and `err` point to valid memory for the call.
             let ok = unsafe {
                 yawgpu_tint_resolved_workgroup_size(
                     self.raw,
@@ -2265,6 +2270,7 @@ mod real {
                     out.as_mut_ptr(),
                     &mut has_subgroup_size,
                     &mut subgroup_size,
+                    &mut storage_size,
                     &mut err,
                 )
             };
@@ -2274,6 +2280,7 @@ mod real {
             Ok(ResolvedWorkgroupInfo {
                 workgroup_size: out,
                 subgroup_size: has_subgroup_size.then_some(subgroup_size),
+                workgroup_storage_size: storage_size,
             })
         }
 
@@ -2593,7 +2600,8 @@ mod stub {
             Err(TintError::Unavailable)
         }
 
-        /// Returns `entry_point`'s override-resolved compute workgroup info.
+        /// Returns `entry_point`'s override-resolved compute workgroup info,
+        /// including workgroup storage size in bytes.
         pub fn resolved_workgroup_info(
             &self,
             _entry_point: &str,
@@ -5319,6 +5327,90 @@ fn plain() {}
     }
 
     #[test]
+    fn resolved_workgroup_info_reports_literal_storage_size() {
+        let program = Program::parse(
+            r#"
+var<workgroup> data: array<u32, 8>;
+@compute @workgroup_size(4) fn cs() { data[0] = 1u; }
+"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let info = program.resolved_workgroup_info("cs", &[]).unwrap();
+        assert_eq!(info.workgroup_size, [4, 1, 1]);
+        assert_eq!(info.workgroup_storage_size, 32);
+        assert_eq!(
+            info.workgroup_storage_size,
+            program.workgroup_storage_size("cs", &[]).unwrap()
+        );
+    }
+
+    #[test]
+    fn resolved_workgroup_info_reports_override_storage_size() {
+        let program = Program::parse(
+            r#"
+override n: u32 = 4;
+var<workgroup> data: array<u32, n>;
+@compute @workgroup_size(1) fn cs() { data[0] = 1u; }
+"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let values = [OverrideValue {
+            name: "n".into(),
+            value: 8.0,
+        }];
+        for (overrides, expected) in [(&[][..], 16), (&values[..], 32)] {
+            let info = program.resolved_workgroup_info("cs", overrides).unwrap();
+            assert_eq!(info.workgroup_storage_size, expected);
+            assert_eq!(
+                info.workgroup_storage_size,
+                program.workgroup_storage_size("cs", overrides).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn resolved_workgroup_info_storage_size_does_not_sum_compute_entry_points() {
+        let program = Program::parse(
+            r#"
+var<workgroup> a: array<u32, 3072>;
+var<workgroup> b: array<u32, 3072>;
+@compute @workgroup_size(1) fn first() { a[0] = 1u; }
+@compute @workgroup_size(1) fn second() { b[0] = 1u; }
+"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        for entry in ["first", "second"] {
+            let info = program.resolved_workgroup_info(entry, &[]).unwrap();
+            assert_eq!(info.workgroup_storage_size, 12288);
+            assert_eq!(
+                info.workgroup_storage_size,
+                program.workgroup_storage_size(entry, &[]).unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn resolved_workgroup_info_reports_literal_subgroup_size() {
         let program = Program::parse(
             SUBGROUP_SIZE_CONTROL_WGSL,
@@ -5336,6 +5428,7 @@ fn plain() {}
             ResolvedWorkgroupInfo {
                 workgroup_size: [8, 1, 1],
                 subgroup_size: Some(4),
+                workgroup_storage_size: 0,
             }
         );
         // The size-only wrapper keeps its contract.

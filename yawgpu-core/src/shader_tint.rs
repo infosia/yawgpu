@@ -722,9 +722,10 @@ impl ReflectedModule {
     /// Short-circuits to the literal-size fast path
     /// ([`Self::compute_workgroup_size`]) only when the module declares no
     /// overrides at all; any override-bearing module goes through
-    /// [`yawgpu_tint::Program::resolved_workgroup_size`], a direct IR query
-    /// (lower + entry-scoped `SubstituteOverrides` + read the resolved size)
-    /// that replaced generating a full SPIR-V module just to grep
+    /// [`yawgpu_tint::Program::resolved_workgroup_info`], one shim call that
+    /// lowers once, applies entry-scoped `SubstituteOverrides`, and reads the
+    /// resolved workgroup, subgroup, and storage sizes from the same IR. This
+    /// direct IR query replaced generating a full SPIR-V module just to grep
     /// `OpExecutionMode LocalSize` back out of it (finding F6 in
     /// `specs/tracking/tint-integration-refactor.md`).
     ///
@@ -773,10 +774,7 @@ impl ReflectedModule {
                 entry_point: entry_point.to_owned(),
                 literal_size: info.workgroup_size,
                 subgroup_size: info.subgroup_size,
-                workgroup_storage_size: self
-                    .program
-                    .workgroup_storage_size(entry_point, &overrides)
-                    .map_err(|e| e.to_string())?,
+                workgroup_storage_size: info.workgroup_storage_size,
             })
         })();
         cache.insert(key, resolved.clone());

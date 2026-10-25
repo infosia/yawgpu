@@ -15,7 +15,7 @@ Fix blocks: **Block 109** (CRITICAL) — **COMPLETE 2026-10-25** (`eee477b`,
 pre-existing hazard classes (R16–R18). **Block 112** (queue submit serialization + writable-binding aliasing) —
 COMPLETE 2026-10-25. Still open: GLES context release across threads,
 Vulkan per-submit object churn + retire waits under `queue_access` (perf),
-Tint double IR lowering (perf), MINOR list. GLES on a real GLES host
+Tint double IR lowering (perf) — **fixed by Block 116** (2026-10-25), MINOR list. GLES on a real GLES host
 (Linux, NVIDIA EGL device, `5cd8c6a`, 2026-10-25): all 7 `e2e_gles_*`
 binaries, 17 tests pass, including the Block 109 C1 case
 `gles_render_depth_test_occludes_later_far_draw`. Block 111 R8–R11:
