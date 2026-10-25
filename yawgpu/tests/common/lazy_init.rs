@@ -718,8 +718,10 @@ impl Session {
         self.submit(encoder);
         let bytes = read_buffer(self.instance, readback, out_size as usize);
         let floats = bytes
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes(b.try_into().expect("4 bytes")))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
             .collect();
 
         yawgpu::wgpuBindGroupRelease(bind_group);

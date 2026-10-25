@@ -1280,7 +1280,7 @@ fn string_view(value: &str) -> native::WGPUStringView {
 
 /// Returns true when any pixel matches `expected` within `tol` per channel.
 fn approx_contains_pixel(pixels: &[u8], expected: [u8; 4], tol: u8) -> bool {
-    pixels.chunks_exact(BYTES_PER_PIXEL).any(|pixel| {
+    pixels.as_chunks::<BYTES_PER_PIXEL>().0.iter().any(|pixel| {
         pixel
             .iter()
             .zip(expected.iter())
@@ -1290,8 +1290,7 @@ fn approx_contains_pixel(pixels: &[u8], expected: [u8; 4], tol: u8) -> bool {
 
 fn distinct_pixels(pixels: &[u8]) -> Vec<[u8; 4]> {
     let mut seen: Vec<[u8; 4]> = Vec::new();
-    for pixel in pixels.chunks_exact(BYTES_PER_PIXEL) {
-        let rgba = [pixel[0], pixel[1], pixel[2], pixel[3]];
+    for &rgba in pixels.as_chunks::<BYTES_PER_PIXEL>().0 {
         if !seen.contains(&rgba) {
             seen.push(rgba);
         }

@@ -378,7 +378,7 @@ unsafe fn write_pixels(
     let mut padded = vec![0; BYTES_PER_ROW as usize * width as usize];
     for (source, destination) in pixels
         .chunks_exact(width as usize * 4)
-        .zip(padded.chunks_exact_mut(BYTES_PER_ROW as usize))
+        .zip(padded.as_chunks_mut::<{ BYTES_PER_ROW as usize }>().0)
     {
         destination[..source.len()].copy_from_slice(source);
     }
@@ -427,7 +427,9 @@ unsafe fn read_pixels(
     width: u32,
 ) -> Vec<u8> {
     read_buffer(instance, buffer, 0, BYTES_PER_ROW as usize * width as usize)
-        .chunks_exact(BYTES_PER_ROW as usize)
+        .as_chunks::<{ BYTES_PER_ROW as usize }>()
+        .0
+        .iter()
         .flat_map(|row| row[..width as usize * 4].iter().copied())
         .collect()
 }
@@ -797,11 +799,8 @@ fn vulkan_tiled_subpass_samples_texture_written_by_copy() {
         );
         submit_encoder(queue, encoder);
         assert_eq!(read_pixels(instance, readback, 4), color.repeat(16));
-        for pixel in read_pixels(instance, depth_readback, 4).chunks_exact(4) {
-            assert_eq!(
-                f32::from_ne_bytes(pixel.try_into().expect("depth texel")),
-                0.0
-            );
+        for pixel in read_pixels(instance, depth_readback, 4).as_chunks::<4>().0 {
+            assert_eq!(f32::from_ne_bytes(*pixel), 0.0);
         }
         assert!(errors.lock().expect("error lock").is_empty(), "{errors:?}");
         yawgpu::yawgpuSubpassRenderPassEncoderRelease(pass);

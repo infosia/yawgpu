@@ -434,7 +434,7 @@ fn texture_extent() -> native::WGPUExtent3D {
 
 /// Returns true when any pixel matches `expected` within `tol` per channel.
 fn approx_contains_pixel(pixels: &[u8], expected: [u8; 4], tol: u8) -> bool {
-    pixels.chunks_exact(BYTES_PER_PIXEL).any(|pixel| {
+    pixels.as_chunks::<BYTES_PER_PIXEL>().0.iter().any(|pixel| {
         pixel
             .iter()
             .zip(expected.iter())
@@ -444,8 +444,7 @@ fn approx_contains_pixel(pixels: &[u8], expected: [u8; 4], tol: u8) -> bool {
 
 fn distinct_pixels(pixels: &[u8]) -> Vec<[u8; 4]> {
     let mut seen: Vec<[u8; 4]> = Vec::new();
-    for chunk in pixels.chunks_exact(BYTES_PER_PIXEL) {
-        let px = [chunk[0], chunk[1], chunk[2], chunk[3]];
+    for &px in pixels.as_chunks::<BYTES_PER_PIXEL>().0 {
         if !seen.contains(&px) {
             seen.push(px);
         }

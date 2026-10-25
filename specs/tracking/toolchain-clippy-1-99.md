@@ -24,3 +24,16 @@ workspace declares no MSRV.
 Strict clippy (`-D warnings`, no `-A` overrides) clean on default,
 `metal`, `vulkan`, `gles`, `vulkan,tiled`, `metal,tiled`; `cargo fmt
 --check` clean; `yawgpu-hal` / `yawgpu-core` lib tests green.
+
+## Addendum (2026-10-25, Linux host, rustc 1.98.1)
+
+The first fix covered library code only. `--all-targets` with
+`--features vulkan` / `vulkan,tiled` / `vulkan,tiled,shader-passthrough`
+still failed on `clippy::chunks_exact_to_as_chunks` in the real-GPU test
+files: `tests/common/lazy_init.rs`, `e2e_vulkan_{timestamp_query, tiled,
+layouts, framebuffer_fetch, shader_passthrough}.rs` (10 sites). Rewritten to
+`as_chunks::<N>().0` / `as_chunks_mut`; the six affected binaries re-run
+green on the Linux NVIDIA Vulkan host. Strict clippy is now clean on default,
+`vulkan`, `vulkan,tiled`, `vulkan,tiled,shader-passthrough`, `gles`,
+`gles,tiled,shader-passthrough`; `cargo fmt --check` clean. (`metal*`
+combinations not checkable on Linux.)
