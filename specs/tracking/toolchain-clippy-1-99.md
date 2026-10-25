@@ -37,3 +37,15 @@ green on the Linux NVIDIA Vulkan host. Strict clippy is now clean on default,
 `vulkan`, `vulkan,tiled`, `vulkan,tiled,shader-passthrough`, `gles`,
 `gles,tiled,shader-passthrough`; `cargo fmt --check` clean. (`metal*`
 combinations not checkable on Linux.)
+
+## Addendum (2026-10-25, macOS host, rustc 1.99.1)
+
+The same lint remained in eleven sites across ten real-GPU Metal test files
+(`e2e_metal_{compute, f16, framebuffer_fetch, immediates, render,
+shader_passthrough, subgroups, texture_formats_tier2, tiled,
+timestamp_query}.rs`), not reachable from the Linux host. Rewritten the same
+way. Strict clippy `--all-targets` now clean on `metal`, `metal,tiled`,
+`metal,shader-passthrough`, `metal,tiled,shader-passthrough` and `gles` (incl.
+the new `e2e_gles_class_audit.rs`); `cargo fmt --check` clean; the ten
+binaries plus `e2e_metal_lazy_init` (shared `common/lazy_init.rs`) pass on
+the M2, 39/0.

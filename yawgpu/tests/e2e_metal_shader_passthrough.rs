@@ -559,8 +559,10 @@ unsafe fn read_u32_buffer(instance: native::WGPUInstance, buffer: native::WGPUBu
     let bytes = std::slice::from_raw_parts(ptr.cast::<u8>(), BUFFER_SIZE as usize).to_vec();
     yawgpu::wgpuBufferUnmap(buffer);
     bytes
-        .chunks_exact(std::mem::size_of::<u32>())
-        .map(|chunk| u32::from_ne_bytes(chunk.try_into().expect("chunk is four bytes")))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| u32::from_ne_bytes(*chunk))
         .collect()
 }
 

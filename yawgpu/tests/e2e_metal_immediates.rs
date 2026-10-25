@@ -604,8 +604,10 @@ unsafe fn read_u32s(
 ) -> Vec<u32> {
     let bytes = read_bytes(instance, buffer, count * std::mem::size_of::<u32>());
     bytes
-        .chunks_exact(std::mem::size_of::<u32>())
-        .map(|chunk| u32::from_ne_bytes(chunk.try_into().expect("chunk is four bytes")))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| u32::from_ne_bytes(*chunk))
         .collect()
 }
 

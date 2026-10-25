@@ -676,8 +676,10 @@ unsafe fn write_u32_buffer(queue: native::WGPUQueue, buffer: native::WGPUBuffer,
 unsafe fn read_u32_buffer(instance: native::WGPUInstance, buffer: native::WGPUBuffer) -> Vec<u32> {
     let bytes = read_buffer(instance, buffer, 0, BUFFER_SIZE as usize);
     bytes
-        .chunks_exact(std::mem::size_of::<u32>())
-        .map(|chunk| u32::from_ne_bytes(chunk.try_into().expect("chunk is four bytes")))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| u32::from_ne_bytes(*chunk))
         .collect()
 }
 

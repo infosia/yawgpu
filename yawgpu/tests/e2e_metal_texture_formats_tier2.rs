@@ -50,7 +50,9 @@ fn initial_pixels() -> Vec<u8> {
 
 fn expected_pixels() -> Vec<u8> {
     initial_pixels()
-        .chunks_exact(BYTES_PER_PIXEL)
+        .as_chunks::<BYTES_PER_PIXEL>()
+        .0
+        .iter()
         .flat_map(|texel| [texel[1], texel[0], 255, texel[3]])
         .collect()
 }

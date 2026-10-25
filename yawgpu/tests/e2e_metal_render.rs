@@ -531,9 +531,7 @@ fn texture_extent() -> native::WGPUExtent3D {
 
 #[cfg(feature = "metal")]
 fn contains_pixel(pixels: &[u8], rgba: [u8; 4]) -> bool {
-    pixels
-        .chunks_exact(BYTES_PER_PIXEL)
-        .any(|pixel| pixel == rgba)
+    pixels.as_chunks::<BYTES_PER_PIXEL>().0.contains(&rgba)
 }
 
 fn vertex_buffer_size() -> u64 {
