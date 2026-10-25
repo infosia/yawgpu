@@ -6,6 +6,18 @@ auditors, one per class, at `7e82a6d`; each was given the fixing commits as
 worked examples. Claude re-verified the items marked **v** against the
 code. IDs are referenced by Blocks 113–115.
 
+**Status (2026-10-25): every row FIXED** — Block 113 (`76a0714`, `b469aa5`,
+`7488716`, Phase Review `6fd7ac1`), Block 114 (`af83e6f`, `da96e94`, Phase
+Review `782959c`), Block 115 (`960805c`, `2d371e5`, `9476501`, Phase Review
+`fa052c6`). One audit premise was wrong and is recorded in Block 113: D3
+reversed the earlier over-strict audit #3 (wgpu semantics) back to the
+WebGPU spec / Dawn rule. Real-GPU repro-before / pass-after evidence: S1
+(WAR), F1, T5, F2, T1, T2, Block 115 M1 / R-PR4 / R-PR5, and the tiled
+inter-subpass hazard found on the first tiled sync-validation run. Owed:
+GLES rows (F5, F6, F8) on Windows ANGLE. Gate at `fa052c6`: webgpu-native-cts
+Metal `api,validation` 298847/0 (identical to the pre-audit baseline),
+`api,operation` 228851/0 (+3 correct `forceFallbackAdapter` skips).
+
 Classes: **F** validated-but-ignored HAL fields · **S** GPU sync / object
 lifetime · **C** concurrency / TOCTOU / callbacks · **E** spec edge values,
 defaults, ordering · **T** test-masked / CTS-shaped code · **D** over- /
