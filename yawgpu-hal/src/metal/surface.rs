@@ -121,11 +121,14 @@ impl MetalSurface {
             backend: BACKEND,
             message: "surface is not configured",
         })?;
-        let drawable = self.layer.nextDrawable().ok_or(HalError::AcquireFailed {
-            backend: BACKEND,
-            message: "nextDrawable returned null",
+        let (drawable, texture) = acquire_in_pool(|_| {
+            let drawable = self.layer.nextDrawable().ok_or(HalError::AcquireFailed {
+                backend: BACKEND,
+                message: "nextDrawable returned null",
+            })?;
+            let texture = drawable.texture();
+            Ok((drawable, texture))
         })?;
-        let texture = drawable.texture();
         let device = self.device.clone().ok_or(HalError::AcquireFailed {
             backend: BACKEND,
             message: "surface is not configured",
@@ -168,8 +171,34 @@ impl MetalSurface {
     }
 }
 
+// Both the drawable and its texture must be retained before draining the pool.
+fn acquire_in_pool<T>(acquire: impl FnOnce(objc2::rc::AutoreleasePool<'_>) -> T) -> T {
+    autoreleasepool(acquire)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn drawable_acquisition_pool_drains_temporary_objects() {
+        use objc2::rc::Weak;
+        use objc2_foundation::NSObject;
+        let (temporary, retained) = acquire_in_pool(|pool| {
+            let object = NSObject::new();
+            let weak = Weak::from_retained(&object);
+            // SAFETY: pool is the innermost pool for this acquisition.
+            unsafe {
+                let _ = Retained::autorelease(object, pool);
+            }
+            assert!(weak.load().is_some());
+            (weak, NSObject::new())
+        });
+        assert!(temporary.load().is_none());
+        let weak = Weak::from_retained(&retained);
+        assert!(weak.load().is_some());
+        drop(retained);
+        assert!(weak.load().is_none());
+    }
+
     use super::super::test_helpers::*;
     use super::*;
 

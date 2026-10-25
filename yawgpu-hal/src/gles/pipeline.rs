@@ -161,6 +161,7 @@ struct GlesRenderPipelineInner {
     binding_remaps: Vec<HalGlesBindingRemap>,
     texture_metadata_ubo_binding: Option<u32>,
     first_instance_location: Option<glow::UniformLocation>,
+    frag_depth_range_location: Option<glow::UniformLocation>,
 }
 
 impl Drop for GlesRenderPipelineInner {
@@ -211,8 +212,20 @@ impl GlesRenderPipeline {
             device.color_render_caps(),
             device.max_samples(),
         )?;
+        let (fragment_source, depth_range_uniform) = match fragment_source {
+            Some(source) => {
+                let (source, uniform) = clamp_fragment_depth_source(&source, &vertex_source);
+                (Some(source), uniform)
+            }
+            None => (None, None),
+        };
         let (program, first_instance_location) =
             build_render_program(&device, &vertex_source, fragment_source.as_deref())?;
+        let frag_depth_range_location = device.with_current_context(|gl| unsafe {
+            depth_range_uniform
+                .as_ref()
+                .and_then(|name| gl.get_uniform_location(program, name))
+        })?;
         let combined_samplers =
             resolve_combined_samplers(&device, program, &resource_bindings.combined_samplers)?;
         Ok(Self {
@@ -237,6 +250,7 @@ impl GlesRenderPipeline {
                 binding_remaps: resource_bindings.binding_remaps,
                 texture_metadata_ubo_binding: resource_bindings.texture_metadata_ubo_binding,
                 first_instance_location,
+                frag_depth_range_location,
             }),
         })
     }
@@ -296,6 +310,11 @@ impl GlesRenderPipeline {
     #[must_use]
     pub(super) fn bindings(&self) -> &[HalDescriptorBinding] {
         &self.inner.bindings
+    }
+
+    #[must_use]
+    pub(super) fn frag_depth_range_location(&self) -> Option<&glow::UniformLocation> {
+        self.inner.frag_depth_range_location.as_ref()
     }
 
     #[must_use]
@@ -507,6 +526,26 @@ fn gles_blend_factor_is_dual_source(factor: crate::HalBlendFactor) -> bool {
 /// (depth/stencil-only) pipelines link on every driver.
 const FRAGMENTLESS_STUB_FS: &str = "#version 310 es\nvoid main() {}\n";
 
+// Dawn supplies Tint depth_range_offsets via clampFragDepth immediates. The
+// GLES HAL receives already translated GLSL, so wrap its entry point with the
+// same clamp and deliver the viewport range through a private uniform.
+fn clamp_fragment_depth_source(source: &str, vertex_source: &str) -> (String, Option<String>) {
+    if !source.contains("gl_FragDepth") {
+        return (source.to_owned(), None);
+    }
+    // WGSL identifiers may survive Tint translation. Avoid collisions in either
+    // linked stage, including with user helper functions and uniforms.
+    let mut prefix = "yawgpu".to_owned();
+    while source.contains(&prefix) || vertex_source.contains(&prefix) {
+        prefix.push('x');
+    }
+    let uniform = format!("{prefix}_depth_range");
+    let main = format!("{prefix}_unclamped_main");
+    let version_end = source.find('\n').map_or(source.len(), |index| index + 1);
+    let wrapped = format!("{}\n#define main {main}\n{}\n#undef main\nuniform highp vec2 {uniform};\nvoid main() {{\n  {main}();\n  gl_FragDepth = clamp(gl_FragDepth, {uniform}.x, {uniform}.y);\n}}\n", &source[..version_end], &source[version_end..]);
+    (wrapped, Some(uniform))
+}
+
 fn build_render_program(
     device: &Arc<GlesDeviceInner>,
     vertex_source: &str,
@@ -619,6 +658,26 @@ fn compile_shader(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fragment_depth_is_clamped_after_translated_main_returns() {
+        let source = "#version 310 es\nprecision highp float;\nvoid main() { gl_FragDepth = 1.0; return; }\n";
+        let (translated, uniform) = clamp_fragment_depth_source(source, "");
+        assert_eq!(uniform.as_deref(), Some("yawgpu_depth_range"));
+        assert!(translated.starts_with("#version 310 es\n"));
+        assert!(translated.contains("#define main yawgpu_unclamped_main"));
+        assert!(translated.contains("uniform highp vec2 yawgpu_depth_range;"));
+        assert!(translated.ends_with("yawgpu_unclamped_main();\n  gl_FragDepth = clamp(gl_FragDepth, yawgpu_depth_range.x, yawgpu_depth_range.y);\n}\n"));
+        let no_depth = "#version 310 es\nvoid main() {}\n";
+        assert_eq!(
+            clamp_fragment_depth_source(no_depth, ""),
+            (no_depth.to_owned(), None)
+        );
+        let (translated, uniform) =
+            clamp_fragment_depth_source(source, "float yawgpu_depth_range;");
+        assert_eq!(uniform.as_deref(), Some("yawgpux_depth_range"));
+        assert!(translated.contains("#define main yawgpux_unclamped_main"));
+    }
+
     use super::*;
     use crate::HalTextureFormat;
     const TEST_MAX_SAMPLES: i32 = 4;

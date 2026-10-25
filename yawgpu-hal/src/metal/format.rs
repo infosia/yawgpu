@@ -42,16 +42,6 @@ pub(super) fn texture_bytes_per_pixel(copy: &HalBufferTextureCopy) -> Result<u32
     )
 }
 
-/// Returns buffer texture bytes per image.
-pub(super) fn buffer_texture_bytes_per_image(
-    copy: &HalBufferTextureCopy,
-) -> Result<usize, HalError> {
-    let bytes = u64::from(copy.buffer_layout.bytes_per_row)
-        .checked_mul(u64::from(copy.buffer_layout.rows_per_image))
-        .ok_or_else(|| buffer_error("buffer texture bytes per image overflows"))?;
-    to_ns(bytes)
-}
-
 /// Converts this value into mtl origin.
 pub(super) fn to_mtl_origin(x: u32, y: u32, z: u32) -> Result<MTLOrigin, HalError> {
     Ok(MTLOrigin {

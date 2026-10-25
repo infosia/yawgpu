@@ -697,6 +697,15 @@ fn requires_texture_view(
     )
 }
 
+// WebGPU counts a 3D view as one array layer, independently of its depth.
+fn texture_view_full_layer_count(target: u32, depth_or_array_layers: u32) -> u32 {
+    if target == glow::TEXTURE_3D {
+        1
+    } else {
+        depth_or_array_layers
+    }
+}
+
 fn requires_texture_view_for(
     meta: &GlesTextureMeta,
     view_target: u32,
@@ -707,7 +716,8 @@ fn requires_texture_view_for(
 ) -> bool {
     view_target != meta.target
         || base_array_layer != 0
-        || array_layer_count < meta.depth_or_array_layers
+        || array_layer_count
+            != texture_view_full_layer_count(meta.target, meta.depth_or_array_layers)
         || (view_format != meta.hal_format && !is_depth_or_stencil_hal_format(meta.hal_format))
         || (matches!(aspect, HalTextureAspect::StencilOnly)
             && is_packed_depth_stencil_format(meta.format.internal))
@@ -861,7 +871,11 @@ fn bind_storage_textures(
             });
         }
         let meta = gles_texture.meta();
-        match storage_image_layer_binding(texture, meta.target, meta.depth_or_array_layers)? {
+        match storage_image_layer_binding(
+            texture,
+            meta.target,
+            texture_view_full_layer_count(meta.target, meta.depth_or_array_layers),
+        )? {
             StorageImageBinding::Base { layered, layer } => unsafe {
                 gl.bind_image_texture(
                     flat_binding,
@@ -1189,6 +1203,7 @@ struct GlesRenderStreamState {
     blend_constant: [f32; 4],
     stencil_reference: u32,
     immediate_data: Vec<u8>,
+    frag_depth_range: Option<[f32; 2]>,
 }
 
 struct GlesRenderQueryState<'a> {
@@ -1338,7 +1353,11 @@ fn submit_render_pass_command_stream_gles(
             message: "GLES render-pass framebuffer fetch is unsupported",
         });
     }
-    let fbo = create_render_fbo(gl, stream)?;
+    let mut attachment_views = AttachmentViews {
+        gl,
+        textures: Vec::new(),
+    };
+    let fbo = create_render_fbo(gl, stream, texture_view_caps, &mut attachment_views)?;
     let vao = unsafe {
         gl.create_vertex_array()
             .map_err(|_| HalError::BufferOperationFailed {
@@ -1374,7 +1393,7 @@ fn submit_render_pass_command_stream_gles(
         texture_view_caps,
     )?;
     queries.finish()?;
-    resolve_render_pass(gl, stream, fbo)?;
+    resolve_render_pass(gl, stream, fbo, texture_view_caps, &mut attachment_views)?;
     discard_render_pass_attachments(gl, stream);
     Ok(())
 }
@@ -1438,6 +1457,7 @@ fn replay_gles_render_stream(
                     viewport.height as i32,
                 );
                 gl.depth_range_f32(viewport.min_depth, viewport.max_depth);
+                state.frag_depth_range = Some([viewport.min_depth, viewport.max_depth]);
             },
             HalRenderPassCommand::SetScissorRect(rect) => unsafe {
                 gl.enable(glow::SCISSOR_TEST);
@@ -1604,9 +1624,91 @@ impl Drop for RenderPassCleanup<'_> {
     }
 }
 
+fn attachment_format_view_required(
+    format: HalTextureFormat,
+    view_format: HalTextureFormat,
+    caps: TextureViewCaps,
+) -> Result<bool, HalError> {
+    if format == view_format {
+        return Ok(false);
+    }
+    if !caps.supports_texture_view || caps.texture_view.is_none() {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES attachment format reinterpretation requires glTextureView",
+        });
+    }
+    Ok(true)
+}
+
+struct AttachmentViews<'a> {
+    gl: &'a glow::Context,
+    textures: Vec<glow::Texture>,
+}
+
+impl Drop for AttachmentViews<'_> {
+    fn drop(&mut self) {
+        for texture in &self.textures {
+            unsafe {
+                self.gl.delete_texture(*texture);
+            }
+        }
+    }
+}
+
+impl AttachmentViews<'_> {
+    fn format_view(
+        &mut self,
+        texture: &super::texture::GlesTexture,
+        format: HalTextureFormat,
+        caps: TextureViewCaps,
+    ) -> Result<glow::Texture, HalError> {
+        let meta = texture.meta();
+        let raw = texture.raw_or_err()?;
+        if !attachment_format_view_required(meta.hal_format, format, caps)? {
+            return Ok(raw);
+        }
+        let view_fn = caps.texture_view.ok_or(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES attachment format reinterpretation requires glTextureView",
+        })?;
+        let internal = super::format::map_texture_format(format)?.internal;
+        unsafe {
+            let view = self
+                .gl
+                .create_texture()
+                .map_err(|_| HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "glCreateTexture failed for attachment view",
+                })?;
+            view_fn(
+                gl_texture_name(view),
+                meta.target,
+                gl_texture_name(raw),
+                internal,
+                0,
+                meta.mip_level_count,
+                0,
+                texture_view_full_layer_count(meta.target, meta.depth_or_array_layers),
+            );
+            if self.gl.get_error() != glow::NO_ERROR {
+                self.gl.delete_texture(view);
+                return Err(HalError::BufferOperationFailed {
+                    backend: BACKEND,
+                    message: "glTextureView failed for attachment view",
+                });
+            }
+            self.textures.push(view);
+            Ok(view)
+        }
+    }
+}
+
 fn create_render_fbo(
     gl: &glow::Context,
     pass: &HalRenderPassCommandStream,
+    caps: TextureViewCaps,
+    views: &mut AttachmentViews<'_>,
 ) -> Result<glow::Framebuffer, HalError> {
     // T-G8 (MRT): resolve every color slot up front -- `Some` slots must be
     // 2D GLES textures with a live GL name; `None` slots stay sparse and get
@@ -1645,7 +1747,18 @@ fn create_render_fbo(
                               (only 2D, 2D-array, and 3D)",
                 });
             }
-            Ok(Some((target, texture, texture.raw_or_err()?)))
+            let raw = views.format_view(texture, target.view_format, caps)?;
+            if let Some(HalTexture::Gles(resolve)) = &target.resolve_target {
+                // Validate resolve reinterpretation before creating the render FBO.
+                attachment_format_view_required(
+                    resolve.meta().hal_format,
+                    target
+                        .resolve_view_format
+                        .unwrap_or(resolve.meta().hal_format),
+                    caps,
+                )?;
+            }
+            Ok(Some((target, texture, raw)))
         })
         .collect::<Result<Vec<_>, HalError>>()?;
     // Trailing `None` slots need no glDrawBuffers entry; truncating to the
@@ -2016,6 +2129,8 @@ fn resolve_render_pass(
     gl: &glow::Context,
     pass: &HalRenderPassCommandStream,
     render_fbo: glow::Framebuffer,
+    caps: TextureViewCaps,
+    views: &mut AttachmentViews<'_>,
 ) -> Result<(), HalError> {
     let resolves = pass
         .color_targets
@@ -2068,13 +2183,26 @@ fn resolve_render_pass(
                 });
                 break;
             }
+            let resolve_raw = match views.format_view(
+                resolve,
+                target
+                    .resolve_view_format
+                    .unwrap_or(resolve.meta().hal_format),
+                caps,
+            ) {
+                Ok(raw) => raw,
+                Err(error) => {
+                    result = Err(error);
+                    break;
+                }
+            };
             let attachment = glow::COLOR_ATTACHMENT0 + index as u32;
             gl.read_buffer(attachment);
             attach_resolve_texture_to_framebuffer(
                 gl,
                 glow::COLOR_ATTACHMENT0,
                 resolve.meta(),
-                resolve.raw_or_err()?,
+                resolve_raw,
                 target.resolve_mip_level,
                 target.resolve_array_layer,
             )?;
@@ -2168,6 +2296,8 @@ fn run_render_draw(
     let program = pipeline.raw_or_err()?;
     unsafe {
         gl.use_program(Some(program));
+        let [min, max] = state.frag_depth_range.unwrap_or([0.0, 1.0]);
+        gl.uniform_2_f32(pipeline.frag_depth_range_location(), min, max);
     }
     bind_render_buffers(gl, &state.bind_buffers, pipeline)?;
     let texture_units = bind_combined_samplers(
@@ -4308,6 +4438,108 @@ fn u32_from_u64(value: u64, message: &'static str) -> Result<u32, HalError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[cfg(feature = "noop")]
+    fn volume_views_use_one_array_layer_and_bind_all_depth_slices() {
+        let meta = GlesTextureMeta {
+            hal_format: HalTextureFormat::Rgba8Unorm,
+            format: super::super::format::map_texture_format(HalTextureFormat::Rgba8Unorm).unwrap(),
+            dimension: crate::HalTextureDimension::D3,
+            target: glow::TEXTURE_3D,
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 8,
+            mip_level_count: 3,
+            sample_count: 1,
+        };
+        assert!(!requires_texture_view_for(
+            &meta,
+            glow::TEXTURE_3D,
+            HalTextureFormat::Rgba8Unorm,
+            HalTextureAspect::All,
+            0,
+            1
+        ));
+        let mut view = HalBoundTexture {
+            group: 0,
+            binding: 0,
+            metal_index: 0,
+            vertex_metal_index: None,
+            fragment_metal_index: None,
+            texture: row_span_copy(0, 16, 4, 4, 4, 8).texture,
+            format: HalTextureFormat::Rgba8Unorm,
+            dimension: HalTextureViewDimension::D3,
+            base_mip_level: 1,
+            mip_level_count: 1,
+            base_array_layer: 0,
+            array_layer_count: 1,
+            aspect: HalTextureAspect::All,
+            swizzle: crate::HalTextureComponentSwizzle::default(),
+            storage_access: Some(HalStorageTextureAccess::WriteOnly),
+        };
+        assert!(matches!(
+            storage_image_layer_binding(
+                &view,
+                meta.target,
+                texture_view_full_layer_count(meta.target, meta.depth_or_array_layers)
+            )
+            .unwrap(),
+            StorageImageBinding::Base {
+                layered: true,
+                layer: 0
+            }
+        ));
+        view.dimension = HalTextureViewDimension::D2Array;
+        view.array_layer_count = 8;
+        assert!(matches!(
+            storage_image_layer_binding(&view, glow::TEXTURE_2D_ARRAY, 8).unwrap(),
+            StorageImageBinding::Base { layered: true, .. }
+        ));
+        view.array_layer_count = 2;
+        assert!(matches!(
+            storage_image_layer_binding(&view, glow::TEXTURE_2D_ARRAY, 8).unwrap(),
+            StorageImageBinding::Subrange
+        ));
+    }
+
+    #[test]
+    fn attachment_format_views_require_extension_for_color_and_resolve() {
+        unsafe extern "system" fn view_stub(
+            _: u32,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: u32,
+        ) {
+        }
+        let mut caps = TextureViewCaps {
+            supports_texture_view: false,
+            supports_cube_map_array: false,
+            texture_view: None,
+        };
+        let unorm = HalTextureFormat::Rgba8Unorm;
+        let srgb = HalTextureFormat::Rgba8UnormSrgb;
+        assert!(!attachment_format_view_required(unorm, unorm, caps).unwrap());
+        assert!(attachment_format_view_required(unorm, srgb, caps).is_err());
+        caps.supports_texture_view = true;
+        assert!(attachment_format_view_required(unorm, srgb, caps).is_err());
+        caps.texture_view = Some(view_stub);
+        assert!(attachment_format_view_required(unorm, srgb, caps).unwrap());
+        assert!(attachment_format_view_required(srgb, unorm, caps).unwrap());
+    }
+
+    #[test]
+    fn fragment_depth_range_defaults_and_survives_bundle_invalidation() {
+        let mut state = GlesRenderStreamState::default();
+        assert_eq!(state.frag_depth_range.unwrap_or([0.0, 1.0]), [0.0, 1.0]);
+        state.frag_depth_range = Some([0.25, 0.75]);
+        invalidate_gles_render_bundle_state(&mut state);
+        assert_eq!(state.frag_depth_range, Some([0.25, 0.75]));
+    }
+
     use super::*;
 
     #[test]

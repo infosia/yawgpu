@@ -423,63 +423,16 @@ pub(super) fn encode_buffer_to_texture(
     };
     texture.validate_origin_extent(copy.origin, copy.extent)?;
     validate_buffer_texture_range(buffer, copy)?;
+    let parts = buffer_texture_copy_parts(texture, buffer.size(), copy)?;
     unsafe {
-        let bytes_per_image = buffer_texture_bytes_per_image(copy)?;
-        match texture.dimension {
-            HalTextureDimension::D3 => {
-                blit.copyFromBuffer_sourceOffset_sourceBytesPerRow_sourceBytesPerImage_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
-                    buffer.inner()?,
-                    to_ns(copy.buffer_layout.offset)?,
-                    to_ns(u64::from(copy.buffer_layout.bytes_per_row))?,
-                    bytes_per_image,
-                    to_mtl_size(copy.extent)?,
-                    texture.inner()?,
-                    0,
-                    to_ns(u64::from(copy.mip_level))?,
-                    to_mtl_origin(copy.origin.x, copy.origin.y, copy.origin.z)?,
-                );
-            }
-            HalTextureDimension::D1 | HalTextureDimension::D2 => {
-                let size = to_mtl_size(HalExtent3d {
-                    depth_or_array_layers: 1,
-                    ..copy.extent
-                })?;
-                let option = packed_depth_stencil_blit_option(copy.format, copy.aspect);
-                let bytes_per_row = to_ns(u64::from(copy.buffer_layout.bytes_per_row))?;
-                let level = to_ns(u64::from(copy.mip_level))?;
-                let origin = to_mtl_origin(copy.origin.x, copy.origin.y, 0)?;
-                for layer in 0..copy.extent.depth_or_array_layers {
-                    let source_offset =
-                        layer_buffer_offset(copy.buffer_layout.offset, bytes_per_image, layer)?;
-                    let dst_slice = to_ns(u64::from(copy.origin.z + layer))?;
-                    if option == MTLBlitOption::empty() {
-                        blit.copyFromBuffer_sourceOffset_sourceBytesPerRow_sourceBytesPerImage_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
-                            buffer.inner()?,
-                            source_offset,
-                            bytes_per_row,
-                            bytes_per_image,
-                            size,
-                            texture.inner()?,
-                            dst_slice,
-                            level,
-                            origin,
-                        );
-                    } else {
-                        blit.copyFromBuffer_sourceOffset_sourceBytesPerRow_sourceBytesPerImage_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin_options(
-                            buffer.inner()?,
-                            source_offset,
-                            bytes_per_row,
-                            bytes_per_image,
-                            size,
-                            texture.inner()?,
-                            dst_slice,
-                            level,
-                            origin,
-                            option,
-                        );
-                    }
-                }
-            }
+        for part in parts {
+            let (slice, origin) = texture_copy_location(texture.dimension, part.origin, 0)?;
+            let option = packed_depth_stencil_blit_option(copy.format, copy.aspect);
+            blit.copyFromBuffer_sourceOffset_sourceBytesPerRow_sourceBytesPerImage_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin_options(
+                buffer.inner()?, to_ns(part.offset)?, to_ns(part.bytes_per_row)?, 0,
+                to_mtl_size(part.extent)?, texture.inner()?, slice,
+                to_ns(u64::from(copy.mip_level))?, origin, option,
+            );
         }
     }
     Ok(())
@@ -498,63 +451,16 @@ pub(super) fn encode_texture_to_buffer(
     };
     texture.validate_origin_extent(copy.origin, copy.extent)?;
     validate_buffer_texture_range(buffer, copy)?;
+    let parts = buffer_texture_copy_parts(texture, buffer.size(), copy)?;
     unsafe {
-        let bytes_per_image = buffer_texture_bytes_per_image(copy)?;
-        match texture.dimension {
-            HalTextureDimension::D3 => {
-                blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toBuffer_destinationOffset_destinationBytesPerRow_destinationBytesPerImage(
-                    texture.inner()?,
-                    0,
-                    to_ns(u64::from(copy.mip_level))?,
-                    to_mtl_origin(copy.origin.x, copy.origin.y, copy.origin.z)?,
-                    to_mtl_size(copy.extent)?,
-                    buffer.inner()?,
-                    to_ns(copy.buffer_layout.offset)?,
-                    to_ns(u64::from(copy.buffer_layout.bytes_per_row))?,
-                    bytes_per_image,
-                );
-            }
-            HalTextureDimension::D1 | HalTextureDimension::D2 => {
-                let size = to_mtl_size(HalExtent3d {
-                    depth_or_array_layers: 1,
-                    ..copy.extent
-                })?;
-                let option = packed_depth_stencil_blit_option(copy.format, copy.aspect);
-                let bytes_per_row = to_ns(u64::from(copy.buffer_layout.bytes_per_row))?;
-                let level = to_ns(u64::from(copy.mip_level))?;
-                let origin = to_mtl_origin(copy.origin.x, copy.origin.y, 0)?;
-                for layer in 0..copy.extent.depth_or_array_layers {
-                    let dst_offset =
-                        layer_buffer_offset(copy.buffer_layout.offset, bytes_per_image, layer)?;
-                    let src_slice = to_ns(u64::from(copy.origin.z + layer))?;
-                    if option == MTLBlitOption::empty() {
-                        blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toBuffer_destinationOffset_destinationBytesPerRow_destinationBytesPerImage(
-                            texture.inner()?,
-                            src_slice,
-                            level,
-                            origin,
-                            size,
-                            buffer.inner()?,
-                            dst_offset,
-                            bytes_per_row,
-                            bytes_per_image,
-                        );
-                    } else {
-                        blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toBuffer_destinationOffset_destinationBytesPerRow_destinationBytesPerImage_options(
-                            texture.inner()?,
-                            src_slice,
-                            level,
-                            origin,
-                            size,
-                            buffer.inner()?,
-                            dst_offset,
-                            bytes_per_row,
-                            bytes_per_image,
-                            option,
-                        );
-                    }
-                }
-            }
+        for part in parts {
+            let (slice, origin) = texture_copy_location(texture.dimension, part.origin, 0)?;
+            let option = packed_depth_stencil_blit_option(copy.format, copy.aspect);
+            blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toBuffer_destinationOffset_destinationBytesPerRow_destinationBytesPerImage_options(
+                texture.inner()?, slice, to_ns(u64::from(copy.mip_level))?, origin,
+                to_mtl_size(part.extent)?, buffer.inner()?, to_ns(part.offset)?,
+                to_ns(part.bytes_per_row)?, 0, option,
+            );
         }
     }
     Ok(())
@@ -573,6 +479,18 @@ pub(super) fn encode_texture_to_texture(
     };
     source.validate_origin_extent(copy.source_origin, copy.extent)?;
     destination.validate_origin_extent(copy.destination_origin, copy.extent)?;
+    let extent = clamp_copy_extent(
+        source,
+        copy.source_mip_level,
+        copy.source_origin,
+        copy.extent,
+    );
+    let extent = clamp_copy_extent(
+        destination,
+        copy.destination_mip_level,
+        copy.destination_origin,
+        extent,
+    );
     unsafe {
         if source.dimension == HalTextureDimension::D3
             && destination.dimension == HalTextureDimension::D3
@@ -582,7 +500,7 @@ pub(super) fn encode_texture_to_texture(
                 0,
                 to_ns(u64::from(copy.source_mip_level))?,
                 to_mtl_origin(copy.source_origin.x, copy.source_origin.y, copy.source_origin.z)?,
-                to_mtl_size(copy.extent)?,
+                to_mtl_size(extent)?,
                 destination.inner()?,
                 0,
                 to_ns(u64::from(copy.destination_mip_level))?,
@@ -595,9 +513,9 @@ pub(super) fn encode_texture_to_texture(
         } else {
             let size = to_mtl_size(HalExtent3d {
                 depth_or_array_layers: 1,
-                ..copy.extent
+                ..extent
             })?;
-            for layer in 0..copy.extent.depth_or_array_layers {
+            for layer in 0..extent.depth_or_array_layers {
                 let (source_slice, source_origin) =
                     texture_copy_location(source.dimension, copy.source_origin, layer)?;
                 let (destination_slice, destination_origin) =
@@ -617,6 +535,145 @@ pub(super) fn encode_texture_to_texture(
         }
     }
     Ok(())
+}
+
+// Clamp padded compressed blocks to the actual mip edge (Dawn UtilsMetal.mm).
+fn clamp_copy_extent(
+    texture: &MetalTexture,
+    mip: u32,
+    origin: crate::HalOrigin3d,
+    extent: HalExtent3d,
+) -> HalExtent3d {
+    clamp_compressed_copy_extent(
+        texture.format,
+        [texture.width, texture.height],
+        mip,
+        origin,
+        extent,
+    )
+}
+
+fn clamp_compressed_copy_extent(
+    format: HalTextureFormat,
+    size: [u32; 2],
+    mip: u32,
+    origin: crate::HalOrigin3d,
+    mut extent: HalExtent3d,
+) -> HalExtent3d {
+    if format.compressed_block_info().is_some() {
+        extent.width = extent.width.min(
+            size[0]
+                .checked_shr(mip)
+                .unwrap_or(0)
+                .max(1)
+                .saturating_sub(origin.x),
+        );
+        extent.height = extent.height.min(
+            size[1]
+                .checked_shr(mip)
+                .unwrap_or(0)
+                .max(1)
+                .saturating_sub(origin.y),
+        );
+    }
+    extent
+}
+
+#[derive(Debug)]
+struct BufferTextureCopyPart {
+    offset: u64,
+    bytes_per_row: u64,
+    origin: crate::HalOrigin3d,
+    extent: HalExtent3d,
+}
+
+// Each part copies one image, so Metal's bytesPerImage is zero. Split wide
+// strides and tightly sized final images as in ComputeTextureBufferCopySplit.
+fn buffer_texture_copy_parts(
+    texture: &MetalTexture,
+    buffer_size: u64,
+    copy: &HalBufferTextureCopy,
+) -> Result<Vec<BufferTextureCopyPart>, HalError> {
+    let extent = clamp_copy_extent(texture, copy.mip_level, copy.origin, copy.extent);
+    let block =
+        copy.format
+            .compressed_block_info()
+            .unwrap_or((texture_bytes_per_pixel(copy)?, 1, 1));
+    compute_buffer_texture_copy_parts(
+        texture.dimension,
+        extent,
+        copy.origin,
+        copy.buffer_layout,
+        block,
+        buffer_size,
+    )
+}
+
+fn compute_buffer_texture_copy_parts(
+    dimension: HalTextureDimension,
+    extent: HalExtent3d,
+    origin: crate::HalOrigin3d,
+    layout: crate::HalBufferTextureLayout,
+    (block_bytes, block_width, block_height): (u32, u32, u32),
+    buffer_size: u64,
+) -> Result<Vec<BufferTextureCopyPart>, HalError> {
+    let row_bytes = u64::from(extent.width.div_ceil(block_width)) * u64::from(block_bytes);
+    let row_stride = u64::from(layout.bytes_per_row);
+    let image_stride = row_stride * u64::from(layout.rows_per_image);
+    let rows = extent.height.div_ceil(block_height);
+    let max_row = u64::from(if dimension == HalTextureDimension::D3 {
+        2048u32
+    } else {
+        16384u32
+    }) * u64::from(block_bytes);
+    let mut parts = Vec::new();
+    for image in 0..extent.depth_or_array_layers {
+        let offset = layout
+            .offset
+            .checked_add(
+                u64::from(image)
+                    .checked_mul(image_stride)
+                    .ok_or_else(|| buffer_error("image offset overflows"))?,
+            )
+            .ok_or_else(|| buffer_error("image offset overflows"))?;
+        let remaining = buffer_size.saturating_sub(offset);
+        let split_last = remaining < row_stride * u64::from(rows);
+        let mut row = 0;
+        while row < rows {
+            let count = if row_stride > max_row || (split_last && row == rows - 1) {
+                1
+            } else if split_last {
+                rows - row - 1
+            } else {
+                rows - row
+            };
+            let y = row * block_height;
+            parts.push(BufferTextureCopyPart {
+                offset: offset
+                    .checked_add(u64::from(row) * row_stride)
+                    .ok_or_else(|| buffer_error("row offset overflows"))?,
+                bytes_per_row: if row_stride > max_row {
+                    max_row
+                } else if split_last && row == rows - 1 {
+                    row_bytes
+                } else {
+                    row_stride
+                },
+                origin: crate::HalOrigin3d {
+                    x: origin.x,
+                    y: origin.y + y,
+                    z: origin.z + image,
+                },
+                extent: HalExtent3d {
+                    width: extent.width,
+                    height: (count * block_height).min(extent.height - y),
+                    depth_or_array_layers: 1,
+                },
+            });
+            row += count;
+        }
+    }
+    Ok(parts)
 }
 
 // Metal addresses array layers with source/destinationSlice, but volume planes
@@ -2175,6 +2232,154 @@ fn metal_index_type(format: HalIndexFormat) -> MTLIndexType {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn compressed_copy_clamps_both_mip_edges() {
+        let origin = crate::HalOrigin3d { x: 0, y: 0, z: 0 };
+        let padded = HalExtent3d {
+            width: 8,
+            height: 8,
+            depth_or_array_layers: 1,
+        };
+        let source = clamp_compressed_copy_extent(
+            HalTextureFormat::Bc1RgbaUnorm,
+            [12, 12],
+            1,
+            origin,
+            padded,
+        );
+        assert_eq!((source.width, source.height), (6, 6));
+        let destination = clamp_compressed_copy_extent(
+            HalTextureFormat::Bc1RgbaUnorm,
+            [10, 10],
+            1,
+            origin,
+            source,
+        );
+        assert_eq!((destination.width, destination.height), (5, 5));
+        let edge = clamp_compressed_copy_extent(
+            HalTextureFormat::Bc1RgbaUnorm,
+            [12, 12],
+            1,
+            crate::HalOrigin3d { x: 4, y: 4, z: 0 },
+            padded,
+        );
+        assert_eq!((edge.width, edge.height), (2, 2));
+        let parts = compute_buffer_texture_copy_parts(
+            HalTextureDimension::D2,
+            source,
+            origin,
+            crate::HalBufferTextureLayout {
+                offset: 0,
+                bytes_per_row: 256,
+                rows_per_image: 2,
+            },
+            (8, 4, 4),
+            272,
+        )
+        .unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(
+            (
+                parts[1].extent.height,
+                parts[1].offset,
+                parts[1].bytes_per_row
+            ),
+            (2, 256, 16)
+        );
+    }
+
+    #[test]
+    fn buffer_texture_splits_wide_rows_and_tight_last_image() {
+        let origin = crate::HalOrigin3d { x: 2, y: 3, z: 4 };
+        let extent = HalExtent3d {
+            width: 2,
+            height: 3,
+            depth_or_array_layers: 2,
+        };
+        for (dimension, limit) in [
+            (HalTextureDimension::D2, 16384 * 4),
+            (HalTextureDimension::D3, 2048 * 4),
+        ] {
+            let stride = limit + 256;
+            let parts = compute_buffer_texture_copy_parts(
+                dimension,
+                extent,
+                origin,
+                crate::HalBufferTextureLayout {
+                    offset: 16,
+                    bytes_per_row: stride,
+                    rows_per_image: 5,
+                },
+                (4, 1, 1),
+                16 + u64::from(stride) * 7 + 8,
+            )
+            .unwrap();
+            assert_eq!(parts.len(), 6);
+            assert_eq!(
+                (parts[5].offset, parts[5].bytes_per_row),
+                (16 + u64::from(stride) * 7, u64::from(limit))
+            );
+            assert_eq!((parts[5].origin.y, parts[5].origin.z), (5, 5));
+            assert_eq!(
+                (
+                    parts[5].extent.height,
+                    parts[5].extent.depth_or_array_layers
+                ),
+                (1, 1)
+            );
+        }
+        let layout = crate::HalBufferTextureLayout {
+            offset: 16,
+            bytes_per_row: 256,
+            rows_per_image: 5,
+        };
+        let parts = compute_buffer_texture_copy_parts(
+            HalTextureDimension::D3,
+            extent,
+            origin,
+            layout,
+            (4, 1, 1),
+            16 + 5 * 256 + 2 * 256 + 8,
+        )
+        .unwrap();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(
+            (
+                parts[0].extent.height,
+                parts[1].extent.height,
+                parts[2].extent.height
+            ),
+            (3, 2, 1)
+        );
+        assert_eq!((parts[2].offset, parts[2].bytes_per_row), (16 + 7 * 256, 8));
+        let parts = compute_buffer_texture_copy_parts(
+            HalTextureDimension::D2,
+            HalExtent3d {
+                depth_or_array_layers: 1,
+                ..extent
+            },
+            origin,
+            layout,
+            (4, 1, 1),
+            4096,
+        )
+        .unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].bytes_per_row, 256);
+        assert!(compute_buffer_texture_copy_parts(
+            HalTextureDimension::D2,
+            extent,
+            origin,
+            crate::HalBufferTextureLayout {
+                offset: u64::MAX,
+                ..layout
+            },
+            (4, 1, 1),
+            u64::MAX
+        )
+        .is_err());
+    }
+
     use super::super::test_helpers::*;
     use super::*;
     #[cfg(feature = "tiled")]
