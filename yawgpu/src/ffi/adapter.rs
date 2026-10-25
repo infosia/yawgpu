@@ -126,6 +126,9 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
     descriptor: *const native::WGPUDeviceDescriptor,
     callback_info: native::WGPURequestDeviceCallbackInfo,
 ) -> native::WGPUFuture {
+    if !valid_callback_mode(callback_info.mode) {
+        return native::WGPUFuture { id: 0 };
+    }
     let adapter = borrow_handle(adapter, "WGPUAdapter");
     let required_limits = descriptor.as_ref().and_then(|descriptor| {
         descriptor.requiredLimits.as_ref().map(|wgpu_limits| {
@@ -189,6 +192,9 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
                 adapter: Arc::clone(&adapter.core),
                 device_lost_callback,
                 device_lost_futures: Mutex::new(Vec::new()),
+                #[cfg(test)]
+                lost_future_test_hook: Mutex::new(None),
+                external_refs: std::sync::atomic::AtomicUsize::new(1),
                 default_queue: Mutex::new(None),
                 shader_module_cache: ObjectCache::new(),
                 pipeline_layout_cache: ObjectCache::new(),
@@ -196,11 +202,21 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
                 render_pipeline_cache: ObjectCache::new(),
             });
             if let Some(callback) = uncaptured_error_callback.callback {
-                let device_handle = Arc::as_ptr(&device_impl) as usize;
+                let device_weak = Arc::downgrade(&device_impl);
                 let userdata1 = uncaptured_error_callback.userdata1;
                 let userdata2 = uncaptured_error_callback.userdata2;
                 device_impl.set_uncaptured_error_callback(Some(move |error: core::DeviceError| {
-                    let device = device_handle as native::WGPUDevice;
+                    let Some(retained) = device_weak.upgrade() else {
+                        return;
+                    };
+                    if retained
+                        .external_refs
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        == 0
+                    {
+                        return;
+                    }
+                    let device = Arc::as_ptr(&retained);
                     callback(
                         &device,
                         map_error_type(error.kind),
@@ -209,6 +225,25 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
                         userdata2 as *mut c_void,
                     );
                 }));
+            }
+            let device_lost_callback = device_impl.device_lost_callback;
+            if device_lost_callback.has_callback() {
+                let future =
+                    adapter
+                        .instance
+                        .register_pending_callback(PendingCallback::DeviceLost {
+                            mode: device_lost_callback.mode,
+                            callback: device_lost_callback.callback,
+                            device: Arc::downgrade(&device_impl),
+                            reason: core::DeviceLostReason::Unknown,
+                            userdata1: device_lost_callback.userdata1,
+                            userdata2: device_lost_callback.userdata2,
+                        });
+                device_impl
+                    .device_lost_futures
+                    .lock()
+                    .expect("device lost future lock is not poisoned")
+                    .push(future.id);
             }
             device_impl
         });
@@ -230,7 +265,7 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
             .register_callback(PendingCallback::DeviceLost {
                 mode: device_lost_callback.mode,
                 callback: device_lost_callback.callback,
-                device: 0,
+                device: std::sync::Weak::new(),
                 reason: core::DeviceLostReason::FailedCreation,
                 userdata1: device_lost_callback.userdata1,
                 userdata2: device_lost_callback.userdata2,

@@ -107,7 +107,8 @@ pub(crate) type UncapturedErrorCallback = Arc<dyn Fn(DeviceError) + Send + Sync>
 #[derive(Default)]
 pub(crate) struct ErrorSink {
     pub(crate) uncaptured_error_callback: Option<UncapturedErrorCallback>,
-    pub(crate) scopes: Vec<ErrorScope>,
+    pub(crate) scopes: std::collections::HashMap<std::thread::ThreadId, Vec<ErrorScope>>,
+    pub(crate) active_callbacks: std::collections::HashMap<std::thread::ThreadId, usize>,
 }
 
 /// Stores error scope data used by validation and backend submission.

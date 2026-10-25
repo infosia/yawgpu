@@ -178,6 +178,9 @@ pub struct Buffer {
     pub(crate) inner: Arc<BufferInner>,
 }
 
+#[cfg(test)]
+type WritebackTestHook = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
+
 /// Holds shared state for the buffer handle.
 #[derive(Debug)]
 pub(crate) struct BufferInner {
@@ -186,6 +189,8 @@ pub(crate) struct BufferInner {
     pub(crate) size: u64,
     pub(crate) host: HostBuffer,
     pub(crate) state: Mutex<BufferState>,
+    #[cfg(test)]
+    writeback_test_hook: Mutex<Option<WritebackTestHook>>,
 }
 
 /// Tracks the lifecycle state for buffer.
@@ -201,7 +206,7 @@ pub(crate) struct BufferState {
 }
 
 /// Stores pending map data used by validation and backend submission.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct PendingMap {
     pub(crate) serial: u64,
     pub(crate) mode: MapMode,
@@ -362,6 +367,8 @@ impl Buffer {
                 usage: descriptor.usage,
                 size: descriptor.size,
                 host,
+                #[cfg(test)]
+                writeback_test_hook: Mutex::new(None),
                 state: Mutex::new(BufferState {
                     map_state,
                     is_error: true,
@@ -416,6 +423,8 @@ impl Buffer {
                 usage: descriptor.usage,
                 size: descriptor.size,
                 host,
+                #[cfg(test)]
+                writeback_test_hook: Mutex::new(None),
                 state: Mutex::new(BufferState {
                     map_state,
                     is_error: false,
@@ -480,13 +489,13 @@ impl Buffer {
     pub fn unmap(&self) -> Option<DeviceError> {
         let mut state = self.inner.state.lock();
         let active_map = state.active_map;
+        // Keep the state locked through host write-back before publishing Unmapped.
+        let result = self.flush_host_map(active_map);
         state.pending_map = None;
         state.map_state = BufferMapState::Unmapped;
         state.active_map = None;
         state.mapped_ranges.clear();
         drop(state);
-
-        let result = self.flush_host_map(active_map);
         if !self.usage().contains(BufferUsage::MAP_READ)
             && !self.usage().contains(BufferUsage::MAP_WRITE)
         {
@@ -505,6 +514,11 @@ impl Buffer {
         };
         if hal.mapped_ptr().is_some() {
             return None;
+        }
+        #[cfg(test)]
+        if let Some((reached, resume)) = self.inner.writeback_test_hook.lock().take() {
+            reached.send(()).unwrap();
+            resume.recv().unwrap();
         }
         let data = match self.inner.host.read(active_map.offset, active_map.size) {
             Ok(data) => data,
@@ -585,6 +599,17 @@ impl Buffer {
         serial: u64,
         ensure_gpu_complete: impl FnOnce() -> bool,
     ) -> MapAsyncStatus {
+        let pending = {
+            let state = self.inner.state.lock();
+            match state.pending_map {
+                Some(pending) if pending.serial == serial => pending,
+                _ => return MapAsyncStatus::Aborted,
+            }
+        };
+        // GPU completion may take the submission lock or reenter buffer APIs.
+        // Never call it while holding buffer state.
+        let complete =
+            pending.mode != MapMode::Read || self.inner.hal.is_none() || ensure_gpu_complete();
         let mut state = self.inner.state.lock();
         if state
             .pending_map
@@ -594,24 +619,25 @@ impl Buffer {
             return MapAsyncStatus::Aborted;
         }
         let pending = state.pending_map.take();
-        let mut outcome = MapAsyncStatus::Success;
+        let mut outcome = if complete {
+            MapAsyncStatus::Success
+        } else {
+            MapAsyncStatus::Error
+        };
         if let Some(pending) = pending.as_ref() {
-            if pending.mode == MapMode::Read {
-                if let Some(hal) = &self.inner.hal {
-                    if should_wait_for_read_map(outcome, pending, true) {
-                        if !ensure_gpu_complete() {
-                            outcome = MapAsyncStatus::Error;
-                        } else if hal.mapped_ptr().is_none() {
-                            outcome = match hal.read(pending.offset, pending.size) {
-                                Ok(bytes)
-                                    if self.inner.host.write(pending.offset, &bytes).is_ok() =>
-                                {
-                                    MapAsyncStatus::Success
-                                }
-                                _ => MapAsyncStatus::Error,
-                            };
+            if should_wait_for_read_map(outcome, pending, self.inner.hal.is_some()) {
+                if let Some(hal) = self
+                    .inner
+                    .hal
+                    .as_ref()
+                    .filter(|hal| hal.mapped_ptr().is_none())
+                {
+                    outcome = match hal.read(pending.offset, pending.size) {
+                        Ok(bytes) if self.inner.host.write(pending.offset, &bytes).is_ok() => {
+                            MapAsyncStatus::Success
                         }
-                    }
+                        _ => MapAsyncStatus::Error,
+                    };
                 }
             }
         }
@@ -895,6 +921,49 @@ pub(crate) fn validate_buffer_descriptor(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audit_map_completion_wait_runs_without_buffer_state_lock() {
+        let device = noop_device();
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::MAP_READ | BufferUsage::COPY_DST,
+            size: 4,
+            mapped_at_creation: false,
+        });
+        let serial = buffer.begin_map(MapMode::Read, 0, 4).unwrap();
+        assert_eq!(
+            buffer.resolve_pending_map_with_gpu_completion(serial, || buffer
+                .inner
+                .state
+                .try_lock()
+                .is_some()),
+            MapAsyncStatus::Success
+        );
+    }
+
+    #[test]
+    fn audit_c8_unmap_holds_state_until_host_writeback_finishes() {
+        let device = noop_device();
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_SRC,
+            size: 4,
+            mapped_at_creation: true,
+        });
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        *buffer.inner.writeback_test_hook.lock() = Some((reached_tx, resume_rx));
+        let other = buffer.clone();
+        let worker = std::thread::spawn(move || other.unmap());
+        reached_rx.recv().unwrap();
+        let held = buffer.inner.state.try_lock().is_none();
+        resume_tx.send(()).unwrap();
+        assert_eq!(worker.join().unwrap(), None);
+        assert!(
+            held,
+            "Unmapped was published while host writeback was blocked"
+        );
+        assert_eq!(buffer.map_state(), BufferMapState::Unmapped);
+    }
+
     use super::*;
     use crate::test_helpers::*;
     use std::sync::atomic::{AtomicUsize, Ordering};

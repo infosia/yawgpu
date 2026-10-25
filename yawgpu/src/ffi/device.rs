@@ -13,7 +13,11 @@ pub unsafe extern "C" fn wgpuDeviceRelease(device: native::WGPUDevice) {
         .map(|_| device)
         .unwrap_or_else(|| panic!("WGPUDevice must not be null"));
     let owned = Arc::from_raw(device);
-    if Arc::strong_count(&owned) == 1 {
+    if owned
+        .external_refs
+        .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
+        == 1
+    {
         owned.implicit_destroy_on_last_release();
     }
 }
@@ -26,6 +30,9 @@ pub unsafe extern "C" fn wgpuDeviceRelease(device: native::WGPUDevice) {
 /// Returns WGPU device add ref.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceAddRef(device: native::WGPUDevice) {
+    borrow_handle(device, "WGPUDevice")
+        .external_refs
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     add_ref_handle(device, "WGPUDevice");
 }
 
@@ -38,7 +45,7 @@ pub unsafe extern "C" fn wgpuDeviceAddRef(device: native::WGPUDevice) {
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceDestroy(device: native::WGPUDevice) {
     let device_impl = borrow_handle(device, "WGPUDevice");
-    device_impl.schedule_device_lost(device, core::DeviceLostReason::Destroyed);
+    device_impl.schedule_device_lost(core::DeviceLostReason::Destroyed);
 }
 
 /// Returns a future that completes when the device is lost.
@@ -64,7 +71,7 @@ pub unsafe extern "C" fn wgpuDevicePushErrorScope(
     device: native::WGPUDevice,
     filter: native::WGPUErrorFilter,
 ) {
-    let device = borrow_handle(device, "WGPUDevice");
+    let device = clone_handle(device, "WGPUDevice");
     let Some(filter) = map_error_filter(filter) else {
         device.dispatch_error(core::ErrorKind::Validation, "error scope filter is invalid");
         return;
@@ -84,7 +91,10 @@ pub unsafe extern "C" fn wgpuDevicePopErrorScope(
     device: native::WGPUDevice,
     callback_info: native::WGPUPopErrorScopeCallbackInfo,
 ) -> native::WGPUFuture {
-    let device = borrow_handle(device, "WGPUDevice");
+    if !valid_callback_mode(callback_info.mode) {
+        return native::WGPUFuture { id: 0 };
+    }
+    let device = clone_handle(device, "WGPUDevice");
     let (status, error, message) = if device.core.is_lost() {
         (map_pop_error_scope_status_success(), None, String::new())
     } else {
@@ -127,7 +137,7 @@ pub unsafe extern "C" fn wgpuDeviceSetLabel(
     device: native::WGPUDevice,
     label: native::WGPUStringView,
 ) {
-    let device = borrow_handle(device, "WGPUDevice");
+    let device = clone_handle(device, "WGPUDevice");
     let label = string_view_to_str(label).unwrap_or_default();
     device.core.set_label(label);
 }
@@ -145,7 +155,7 @@ pub unsafe extern "C" fn wgpuDeviceGetAdapterInfo(
     device: native::WGPUDevice,
     adapter_info: *mut native::WGPUAdapterInfo,
 ) -> native::WGPUStatus {
-    let device = borrow_handle(device, "WGPUDevice");
+    let device = clone_handle(device, "WGPUDevice");
     let Some(adapter_info) = adapter_info.as_mut() else {
         return native::WGPUStatus_Error;
     };
@@ -165,7 +175,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateBuffer(
     device: native::WGPUDevice,
     descriptor: *const native::WGPUBufferDescriptor,
 ) -> native::WGPUBuffer {
-    let device = borrow_handle(device, "WGPUDevice");
+    let device = clone_handle(device, "WGPUDevice");
     let descriptor = descriptor
         .as_ref()
         .expect("WGPUBufferDescriptor must not be null");
@@ -190,7 +200,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateTexture(
     device: native::WGPUDevice,
     descriptor: *const native::WGPUTextureDescriptor,
 ) -> native::WGPUTexture {
-    let device = borrow_handle(device, "WGPUDevice");
+    let device = clone_handle(device, "WGPUDevice");
     let descriptor = descriptor
         .as_ref()
         .expect("WGPUTextureDescriptor must not be null");
@@ -274,7 +284,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateSampler(
     device: native::WGPUDevice,
     descriptor: *const native::WGPUSamplerDescriptor,
 ) -> native::WGPUSampler {
-    let device = borrow_handle(device, "WGPUDevice");
+    let device = clone_handle(device, "WGPUDevice");
     let mut error = None;
     let mapped = map_sampler_descriptor(descriptor.as_ref(), &mut error);
     let sampler = device.core.create_sampler_with_error(mapped, error);
@@ -302,7 +312,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateQuerySet(
     device: native::WGPUDevice,
     descriptor: *const native::WGPUQuerySetDescriptor,
 ) -> native::WGPUQuerySet {
-    let device = borrow_handle(device, "WGPUDevice");
+    let device = clone_handle(device, "WGPUDevice");
     let descriptor = descriptor
         .as_ref()
         .expect("WGPUQuerySetDescriptor must not be null");
@@ -332,7 +342,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateShaderModule(
     device: native::WGPUDevice,
     descriptor: *const native::WGPUShaderModuleDescriptor,
 ) -> native::WGPUShaderModule {
-    let device = borrow_handle(device, "WGPUDevice");
+    let device = clone_handle(device, "WGPUDevice");
     let descriptor = descriptor
         .as_ref()
         .expect("WGPUShaderModuleDescriptor must not be null");
@@ -370,7 +380,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateBindGroupLayout(
     device: native::WGPUDevice,
     descriptor: *const native::WGPUBindGroupLayoutDescriptor,
 ) -> native::WGPUBindGroupLayout {
-    let device = borrow_handle(device, "WGPUDevice");
+    let device = clone_handle(device, "WGPUDevice");
     let descriptor = descriptor
         .as_ref()
         .expect("WGPUBindGroupLayoutDescriptor must not be null");
@@ -399,7 +409,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateBindGroup(
     device: native::WGPUDevice,
     descriptor: *const native::WGPUBindGroupDescriptor,
 ) -> native::WGPUBindGroup {
-    let device = borrow_handle(device, "WGPUDevice");
+    let device = clone_handle(device, "WGPUDevice");
     let descriptor = descriptor
         .as_ref()
         .expect("WGPUBindGroupDescriptor must not be null");
@@ -438,13 +448,13 @@ pub unsafe extern "C" fn wgpuDeviceCreatePipelineLayout(
     device: native::WGPUDevice,
     descriptor: *const native::WGPUPipelineLayoutDescriptor,
 ) -> native::WGPUPipelineLayout {
-    let device = borrow_handle(device, "WGPUDevice");
+    let device = clone_handle(device, "WGPUDevice");
     let descriptor = descriptor
         .as_ref()
         .expect("WGPUPipelineLayoutDescriptor must not be null");
     let key = pipeline_layout_cache_key(descriptor);
     let label = label_from_string_view(descriptor.label);
-    let device_error = validate_pipeline_layout_devices(device, descriptor);
+    let device_error = validate_pipeline_layout_devices(&device, descriptor);
     let mut descriptor = map_pipeline_layout_descriptor(descriptor);
     if descriptor.error.is_none() {
         descriptor.error = device_error;
@@ -474,11 +484,11 @@ pub unsafe extern "C" fn wgpuDeviceCreateComputePipeline(
     device: native::WGPUDevice,
     descriptor: *const native::WGPUComputePipelineDescriptor,
 ) -> native::WGPUComputePipeline {
-    let device = borrow_handle(device, "WGPUDevice");
+    let device = clone_handle(device, "WGPUDevice");
     let descriptor = descriptor
         .as_ref()
         .expect("WGPUComputePipelineDescriptor must not be null");
-    arc_to_handle(create_compute_pipeline_handle(device, descriptor, true))
+    arc_to_handle(create_compute_pipeline_handle(&device, descriptor, true))
 }
 
 /// Creates a compute pipeline asynchronously on a device.
@@ -495,11 +505,14 @@ pub unsafe extern "C" fn wgpuDeviceCreateComputePipelineAsync(
     descriptor: *const native::WGPUComputePipelineDescriptor,
     callback_info: native::WGPUCreateComputePipelineAsyncCallbackInfo,
 ) -> native::WGPUFuture {
-    let device = borrow_handle(device, "WGPUDevice");
+    if !valid_callback_mode(callback_info.mode) {
+        return native::WGPUFuture { id: 0 };
+    }
+    let device = clone_handle(device, "WGPUDevice");
     let descriptor = descriptor
         .as_ref()
         .expect("WGPUComputePipelineDescriptor must not be null");
-    let pipeline = create_compute_pipeline_handle(device, descriptor, false);
+    let pipeline = create_compute_pipeline_handle(&device, descriptor, false);
     device
         .instance
         .register_callback(PendingCallback::CreateComputePipelineAsync {
@@ -526,11 +539,11 @@ pub unsafe extern "C" fn wgpuDeviceCreateRenderPipeline(
     device: native::WGPUDevice,
     descriptor: *const native::WGPURenderPipelineDescriptor,
 ) -> native::WGPURenderPipeline {
-    let device = borrow_handle(device, "WGPUDevice");
+    let device = clone_handle(device, "WGPUDevice");
     let descriptor = descriptor
         .as_ref()
         .expect("WGPURenderPipelineDescriptor must not be null");
-    arc_to_handle(create_render_pipeline_handle(device, descriptor, true))
+    arc_to_handle(create_render_pipeline_handle(&device, descriptor, true))
 }
 
 /// Creates a render pipeline asynchronously on a device.
@@ -547,11 +560,14 @@ pub unsafe extern "C" fn wgpuDeviceCreateRenderPipelineAsync(
     descriptor: *const native::WGPURenderPipelineDescriptor,
     callback_info: native::WGPUCreateRenderPipelineAsyncCallbackInfo,
 ) -> native::WGPUFuture {
-    let device = borrow_handle(device, "WGPUDevice");
+    if !valid_callback_mode(callback_info.mode) {
+        return native::WGPUFuture { id: 0 };
+    }
+    let device = clone_handle(device, "WGPUDevice");
     let descriptor = descriptor
         .as_ref()
         .expect("WGPURenderPipelineDescriptor must not be null");
-    let pipeline = create_render_pipeline_handle(device, descriptor, false);
+    let pipeline = create_render_pipeline_handle(&device, descriptor, false);
     device
         .instance
         .register_callback(PendingCallback::CreateRenderPipelineAsync {
@@ -575,7 +591,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateCommandEncoder(
     device: native::WGPUDevice,
     descriptor: *const native::WGPUCommandEncoderDescriptor,
 ) -> native::WGPUCommandEncoder {
-    let device = borrow_handle(device, "WGPUDevice");
+    let device = clone_handle(device, "WGPUDevice");
     arc_to_handle(Arc::new(WGPUCommandEncoderImpl {
         core: Arc::new(device.core.create_command_encoder()),
         device: Arc::clone(&device.core),
@@ -599,7 +615,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateRenderBundleEncoder(
     device: native::WGPUDevice,
     descriptor: *const native::WGPURenderBundleEncoderDescriptor,
 ) -> native::WGPURenderBundleEncoder {
-    let device = borrow_handle(device, "WGPUDevice");
+    let device = clone_handle(device, "WGPUDevice");
     let descriptor = descriptor
         .as_ref()
         .expect("WGPURenderBundleEncoderDescriptor must not be null");
@@ -652,7 +668,7 @@ pub unsafe extern "C" fn wgpuDeviceGetLimits(
     device: native::WGPUDevice,
     limits: *mut native::WGPULimits,
 ) -> native::WGPUStatus {
-    let device = borrow_handle(device, "WGPUDevice");
+    let device = clone_handle(device, "WGPUDevice");
     let Some(limits) = limits.as_mut() else {
         return native::WGPUStatus_Error;
     };
@@ -681,7 +697,7 @@ pub unsafe extern "C" fn wgpuDeviceGetFeatures(
     device: native::WGPUDevice,
     features: *mut native::WGPUSupportedFeatures,
 ) {
-    let device = borrow_handle(device, "WGPUDevice");
+    let device = clone_handle(device, "WGPUDevice");
     let features = features
         .as_mut()
         .expect("WGPUSupportedFeatures must not be null");
@@ -699,7 +715,7 @@ pub unsafe extern "C" fn wgpuDeviceHasFeature(
     device: native::WGPUDevice,
     feature: native::WGPUFeatureName,
 ) -> native::WGPUBool {
-    let device = borrow_handle(device, "WGPUDevice");
+    let device = clone_handle(device, "WGPUDevice");
     native::WGPUBool::from(device.core.has_feature(map_feature(feature)))
 }
 
@@ -711,6 +727,6 @@ pub unsafe extern "C" fn wgpuDeviceHasFeature(
 /// Returns WGPU device get queue.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceGetQueue(device: native::WGPUDevice) -> native::WGPUQueue {
-    let device = borrow_handle(device, "WGPUDevice");
+    let device = clone_handle(device, "WGPUDevice");
     arc_to_handle(device.default_queue())
 }

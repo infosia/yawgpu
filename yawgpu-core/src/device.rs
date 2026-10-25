@@ -41,6 +41,7 @@ pub(crate) struct DeviceInner {
     pub(crate) queue: Queue,
     pub(crate) error_sink: Mutex<ErrorSink>,
     pub(crate) lost: Mutex<DeviceLostState>,
+    callbacks_idle: parking_lot::Condvar,
     // Dawn's `GetLabel()` collapses the null label into "" (the `label_validation.rs`
     // Dawn port depends on this), so core keeps `String`. The FFI handles store
     // `Option<String>` instead so their unit tests can prove `label_from_string_view`
@@ -95,6 +96,7 @@ impl Device {
                 queue,
                 error_sink: Mutex::new(ErrorSink::default()),
                 lost: Mutex::new(DeviceLostState::default()),
+                callbacks_idle: parking_lot::Condvar::new(),
                 label: Mutex::new(label.into()),
                 limits,
                 features,
@@ -238,6 +240,7 @@ impl Device {
         if lost.reason.is_some() {
             return None;
         }
+        self.inner.queue.mark_lost();
         lost.reason = Some(reason);
         Some(reason)
     }
@@ -264,15 +267,31 @@ impl Device {
 
     /// Clears the uncaptured error callback.
     pub fn clear_uncaptured_error_callback(&self) {
-        self.inner.error_sink.lock().uncaptured_error_callback = None;
+        let thread = std::thread::current().id();
+        let mut sink = self.inner.error_sink.lock();
+        sink.uncaptured_error_callback = None;
+        // Reentrant release from the callback itself cannot wait for itself.
+        while sink
+            .active_callbacks
+            .iter()
+            .any(|(id, count)| *id != thread && *count != 0)
+        {
+            self.inner.callbacks_idle.wait(&mut sink);
+        }
     }
 
     /// Pushes an error scope with the given filter onto the device's error-scope stack.
     pub fn push_error_scope(&self, filter: ErrorFilter) {
-        self.inner.error_sink.lock().scopes.push(ErrorScope {
-            filter,
-            error: None,
-        });
+        self.inner
+            .error_sink
+            .lock()
+            .scopes
+            .entry(std::thread::current().id())
+            .or_default()
+            .push(ErrorScope {
+                filter,
+                error: None,
+            });
     }
 
     /// Pops the innermost error scope, returning the first matching error it captured.
@@ -281,17 +300,29 @@ impl Device {
             .error_sink
             .lock()
             .scopes
-            .pop()
+            .get_mut(&std::thread::current().id())
+            .and_then(Vec::pop)
             .map(|scope| scope.error)
             .ok_or(PopErrorScopeError::EmptyStack)
     }
 
     /// Routes an error to the active error scope, or to the uncaptured-error callback if none is active.
     pub fn dispatch_error(&self, kind: ErrorKind, msg: impl Into<String>) {
+        if self.is_lost() {
+            return;
+        }
+        // A reentrant FFI callback may release the final device handle.
+        let inner = Arc::clone(&self.inner);
         let error = DeviceError::new(kind, msg);
         let callback = {
             let mut sink = self.inner.error_sink.lock();
-            for scope in sink.scopes.iter_mut().rev() {
+            for scope in sink
+                .scopes
+                .entry(std::thread::current().id())
+                .or_default()
+                .iter_mut()
+                .rev()
+            {
                 if scope.filter.matches(error.kind) {
                     if scope.error.is_none() {
                         scope.error = Some(error);
@@ -299,10 +330,29 @@ impl Device {
                     return;
                 }
             }
-            sink.uncaptured_error_callback.clone()
+            let callback = sink.uncaptured_error_callback.clone();
+            if callback.is_some() {
+                *sink
+                    .active_callbacks
+                    .entry(std::thread::current().id())
+                    .or_default() += 1;
+            }
+            callback
         };
 
         if let Some(callback) = callback {
+            struct ActiveCallback<'a>(&'a DeviceInner);
+            impl Drop for ActiveCallback<'_> {
+                fn drop(&mut self) {
+                    let mut sink = self.0.error_sink.lock();
+                    if let Some(count) = sink.active_callbacks.get_mut(&std::thread::current().id())
+                    {
+                        *count -= 1;
+                    }
+                    self.0.callbacks_idle.notify_all();
+                }
+            }
+            let _active = ActiveCallback(&inner);
             callback(error);
         }
     }
@@ -909,6 +959,53 @@ impl Device {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audit_c5_error_scopes_belong_to_the_current_thread() {
+        let device = noop_device();
+        device.push_error_scope(ErrorFilter::Validation);
+        let other = device.clone();
+        std::thread::spawn(move || {
+            assert_eq!(other.pop_error_scope(), Err(PopErrorScopeError::EmptyStack));
+            other.push_error_scope(ErrorFilter::Validation);
+            other.dispatch_error(ErrorKind::Validation, "worker");
+            assert_eq!(other.pop_error_scope().unwrap().unwrap().message, "worker");
+        })
+        .join()
+        .unwrap();
+        assert_eq!(device.pop_error_scope(), Ok(None));
+    }
+
+    #[test]
+    fn audit_c11_clear_waits_for_active_uncaptured_callbacks() {
+        let device = noop_device();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let resume_rx = std::sync::Mutex::new(resume_rx);
+        device.set_uncaptured_error_callback(Some(move |_| {
+            entered_tx.send(()).unwrap();
+            resume_rx.lock().unwrap().recv().unwrap();
+        }));
+        let dispatch = device.clone();
+        let worker =
+            std::thread::spawn(move || dispatch.dispatch_error(ErrorKind::Validation, "active"));
+        entered_rx.recv().unwrap();
+        let clear = device.clone();
+        let (cleared_tx, cleared_rx) = std::sync::mpsc::channel();
+        let clearer = std::thread::spawn(move || {
+            clear.clear_uncaptured_error_callback();
+            cleared_tx.send(()).unwrap();
+        });
+        let early = cleared_rx.recv_timeout(std::time::Duration::from_millis(50));
+        resume_tx.send(()).unwrap();
+        worker.join().unwrap();
+        clearer.join().unwrap();
+        assert!(
+            early.is_err(),
+            "clear returned before the callback finished"
+        );
+        device.dispatch_error(ErrorKind::Validation, "must not call again");
+    }
+
     #[test]
     fn timestamp_conversion_params_unit_period() {
         assert_eq!(timestamp_conversion_params(1.0), (65536, 16));

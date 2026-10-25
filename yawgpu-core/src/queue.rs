@@ -58,9 +58,12 @@ pub(crate) struct QueueInner {
     // This also serializes mapAsync flushes and write_texture with a possibly
     // blocking HAL submit; these callers may wait for the whole submit.
     submission: Mutex<()>,
+    lost: std::sync::atomic::AtomicBool,
     pending_writes: Mutex<PendingWriteBatch>,
     #[cfg(test)]
     submit_test_hook: Mutex<Option<SubmitTestHook>>,
+    #[cfg(test)]
+    wait_idle_test_hook: Mutex<Option<SubmitTestHook>>,
 }
 
 // A one-shot seam around validation, the HAL call and commit, scoped to one queue.
@@ -334,6 +337,15 @@ pub struct QueueTextureWrite<'a> {
 }
 
 impl Queue {
+    pub(crate) fn mark_lost(&self) {
+        let _submission = self.inner.submission.lock();
+        self.inner
+            .lost
+            .store(true, std::sync::atomic::Ordering::Release);
+        // Drop unsubmitted writes so queue destruction cannot submit them after loss.
+        let _discarded = self.inner.pending_writes.lock().take_submission();
+    }
+
     /// Constructs this object from the backend HAL object.
     #[must_use]
     pub fn from_hal(hal: HalQueue, label: impl Into<String>) -> Self {
@@ -342,10 +354,13 @@ impl Queue {
                 hal,
                 label: Mutex::new(label.into()),
                 latest_submission_index: Mutex::new(SubmissionIndex::NONE),
+                lost: std::sync::atomic::AtomicBool::new(false),
                 submission: Mutex::new(()),
                 pending_writes: Mutex::new(PendingWriteBatch::default()),
                 #[cfg(test)]
                 submit_test_hook: Mutex::new(None),
+                #[cfg(test)]
+                wait_idle_test_hook: Mutex::new(None),
             }),
         }
     }
@@ -437,7 +452,12 @@ impl Queue {
             data,
         } = write;
 
-        // Validate size fits in u64 first (mirrors write_texture).
+        let _submission = self.inner.submission.lock();
+        if self.inner.lost.load(std::sync::atomic::Ordering::Acquire) {
+            return None;
+        }
+
+        // Validate map state while serialized with mapAsync flushes.
         let size = match u64::try_from(data.len()) {
             Ok(s) => s,
             Err(_) => {
@@ -485,14 +505,18 @@ impl Queue {
     /// Waits until all submitted queue work has completed.
     pub fn wait_idle(&self) -> Option<DeviceError> {
         let flush_error = self.flush_pending_writes();
+        let completed = self.latest_submission_index();
         let wait_error = self
             .inner
             .hal
             .wait_idle()
             .err()
             .map(|error| DeviceError::internal(error.to_string()));
+        #[cfg(test)]
+        if let Some(hook) = self.inner.wait_idle_test_hook.lock().take() {
+            hook.pause("waited");
+        }
         if wait_error.is_none() {
-            let completed = self.latest_submission_index();
             self.inner
                 .pending_writes
                 .lock()
@@ -503,6 +527,10 @@ impl Queue {
 
     /// Writes `data` into the texture through the backend copy path.
     pub fn write_texture(&self, write: QueueTextureWrite<'_>) -> Option<DeviceError> {
+        let _submission = self.inner.submission.lock();
+        if self.inner.lost.load(std::sync::atomic::Ordering::Acquire) {
+            return None;
+        }
         let QueueTextureWrite {
             device,
             texture,
@@ -560,7 +588,9 @@ impl Queue {
         let needs_repack = layout
             .bytes_per_row
             .is_some_and(|bpr| u64::from(bpr) % block_size != 0)
-            || (block_size > 1 && layout.offset % block_size != 0);
+            || (block_size > 1 && layout.offset % block_size != 0)
+            || ((format_caps.aspects.depth || format_caps.aspects.stencil)
+                && !layout.offset.is_multiple_of(4));
 
         if needs_repack {
             // src_bytes_per_row is guaranteed Some by validation (multi-row implies
@@ -617,7 +647,7 @@ impl Queue {
                     "queue write texture has no HAL texture",
                 ));
             };
-            let _submission = self.inner.submission.lock();
+
             self.recycle_completed_staging();
             let mut pending = self.inner.pending_writes.lock();
             let (staging, staging_offset) =
@@ -672,7 +702,7 @@ impl Queue {
                 "queue write texture has no HAL texture",
             ));
         };
-        let _submission = self.inner.submission.lock();
+
         self.recycle_completed_staging();
         let mut pending = self.inner.pending_writes.lock();
         let (staging, staging_offset) =
@@ -724,6 +754,9 @@ impl Queue {
         // the latest index: either validation sees Pending or that flush waits
         // until this submit has recorded the index the map must gate on.
         let _submission = self.inner.submission.lock();
+        if self.inner.lost.load(std::sync::atomic::Ordering::Acquire) {
+            return None;
+        }
         #[cfg(test)]
         let test_hook = self.inner.submit_test_hook.lock().take();
         #[cfg(test)]
@@ -936,6 +969,9 @@ impl Queue {
     /// submission and leaves the latest index unchanged.
     pub fn flush_pending_writes(&self) -> Option<DeviceError> {
         let _submission = self.inner.submission.lock();
+        if self.inner.lost.load(std::sync::atomic::Ordering::Acquire) {
+            return None;
+        }
         self.flush_pending_writes_locked()
     }
 
@@ -2985,6 +3021,162 @@ pub(crate) fn dynamic_offset_for_binding(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audit_c1_write_buffer_waits_for_submission_lock() {
+        let device = noop_device();
+        let queue = device.queue();
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 4,
+            mapped_at_creation: false,
+        });
+        let guard = queue.inner.submission.lock();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let writer_queue = queue.clone();
+        let writer = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = writer_queue.write_buffer(QueueBufferWrite {
+                device: device.hal(),
+                buffer: &buffer,
+                offset: 0,
+                data: &[1; 4],
+            });
+            done_tx.send(result).unwrap();
+        });
+        started_rx.recv().unwrap();
+        let early = done_rx.recv_timeout(std::time::Duration::from_millis(50));
+        drop(guard);
+        writer.join().unwrap();
+        assert!(
+            early.is_err(),
+            "writeBuffer must serialize validation and staging with mapAsync flushes"
+        );
+        assert_eq!(done_rx.recv().unwrap(), None);
+    }
+
+    #[test]
+    fn audit_c7_wait_idle_recycles_only_the_snapshot() {
+        let device = noop_device();
+        let queue = device.queue();
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 4,
+            mapped_at_creation: false,
+        });
+        let (reached, reached_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume) = std::sync::mpsc::channel();
+        *queue.inner.wait_idle_test_hook.lock() = Some(SubmitTestHook { reached, resume });
+        let waiting_queue = queue.clone();
+        let waiter = std::thread::spawn(move || waiting_queue.wait_idle());
+        assert_eq!(reached_rx.recv().unwrap(), "waited");
+        assert_eq!(
+            queue.write_buffer(QueueBufferWrite {
+                device: device.hal(),
+                buffer: &buffer,
+                offset: 0,
+                data: &[2; 4]
+            }),
+            None
+        );
+        assert_eq!(queue.submit(&[]), None);
+        resume_tx.send(()).unwrap();
+        assert_eq!(waiter.join().unwrap(), None);
+        assert_eq!(
+            queue.inner.pending_writes.lock().in_flight.len(),
+            1,
+            "a later submission was not covered by wait_idle"
+        );
+    }
+
+    #[test]
+    fn audit_c6_lost_queue_rejects_no_work_and_dispatches_no_validation() {
+        let device = noop_device();
+        let queue = device.queue();
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 4,
+            mapped_at_creation: false,
+        });
+        assert_eq!(
+            queue.write_buffer(QueueBufferWrite {
+                device: device.hal(),
+                buffer: &buffer,
+                offset: 0,
+                data: &[8; 4]
+            }),
+            None
+        );
+        device.lose(crate::DeviceLostReason::Unknown);
+        assert_eq!(
+            queue.write_buffer(QueueBufferWrite {
+                device: device.hal(),
+                buffer: &buffer,
+                offset: 999,
+                data: &[1]
+            }),
+            None
+        );
+        assert_eq!(queue.submit(&[]), None);
+        assert_eq!(queue.latest_submission_index(), SubmissionIndex::NONE);
+        assert!(queue.inner.pending_writes.lock().copies.is_empty());
+    }
+
+    #[test]
+    fn audit_t6_depth_stencil_source_offset_is_repacked_to_four_bytes() {
+        let device = noop_device();
+        let queue = device.queue();
+        for (format, offset, block_size) in [
+            (TextureFormat::DEPTH16_UNORM, 2, 2),
+            (TextureFormat::STENCIL8, 1, 1),
+        ] {
+            let size = Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            };
+            let texture = device.create_texture(TextureDescriptor {
+                usage: TextureUsage::COPY_DST,
+                dimension: TextureDimension::D2,
+                size,
+                format: TextureFormat::from_raw(format),
+                mip_level_count: 1,
+                sample_count: 1,
+                view_formats: vec![],
+            });
+            assert!(!texture.is_error());
+            let data = vec![0x73; (offset + block_size) as usize];
+            assert_eq!(
+                queue.write_texture(QueueTextureWrite {
+                    device: device.hal(),
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: Origin3d { x: 0, y: 0, z: 0 },
+                    write_size: size,
+                    aspect: TextureAspect::All,
+                    layout: TexelCopyBufferLayout {
+                        offset,
+                        bytes_per_row: None,
+                        rows_per_image: None
+                    },
+                    data: &data
+                }),
+                None
+            );
+            let pending = queue.inner.pending_writes.lock();
+            let Some(HalCopy::BufferToTexture(copy)) = pending.copies.last() else {
+                panic!("missing write");
+            };
+            assert_eq!(copy.buffer_layout.offset % 4, 0);
+            assert_eq!(
+                copy.buffer
+                    .read(copy.buffer_layout.offset, block_size)
+                    .unwrap(),
+                vec![0x73; block_size as usize]
+            );
+        }
+    }
+
     #[test]
     fn timestamp_resolve_ignores_writes_in_other_command_buffers_and_query_sets() {
         let device = noop_adapter()

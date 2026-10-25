@@ -219,7 +219,11 @@ fn pending_map_queue_and_pop_error_scope_callbacks_resolve_on_device_loss() {
 
         let events = events.lock().expect("events lock").clone();
         assert!(events.contains(&Event::MapAsync(native::WGPUMapAsyncStatus_Aborted)));
-        assert!(events.contains(&Event::QueueWorkDone(native::WGPUQueueWorkDoneStatus_Error)));
+        // Block 113 C9: work-done completes with Success on device loss
+        // (Dawn `Queue.cpp` `WorkDoneEvent` has no loss status).
+        assert!(events.contains(&Event::QueueWorkDone(
+            native::WGPUQueueWorkDoneStatus_Success
+        )));
         assert!(events.contains(&Event::PopErrorScope(
             native::WGPUPopErrorScopeStatus_Success,
             native::WGPUErrorType_NoError

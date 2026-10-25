@@ -243,7 +243,14 @@ pub unsafe extern "C" fn wgpuSupportedInstanceFeaturesFreeMembers(
 /// Returns WGPU instance release.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuInstanceRelease(instance: native::WGPUInstance) {
-    release_handle(instance, "WGPUInstance");
+    let owned = Arc::from_raw(instance);
+    if owned
+        .external_refs
+        .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
+        == 1
+    {
+        owned.cancel_callbacks();
+    }
 }
 
 /// Adds one owned reference to an instance handle.
@@ -254,6 +261,9 @@ pub unsafe extern "C" fn wgpuInstanceRelease(instance: native::WGPUInstance) {
 /// Returns WGPU instance add ref.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuInstanceAddRef(instance: native::WGPUInstance) {
+    borrow_handle(instance, "WGPUInstance")
+        .external_refs
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     add_ref_handle(instance, "WGPUInstance");
 }
 
@@ -402,6 +412,8 @@ pub unsafe extern "C" fn wgpuInstanceCreateSurface(
         current_texture: Mutex::new(None),
         #[cfg(test)]
         acquire_texture_override: Mutex::new(None),
+        #[cfg(test)]
+        configure_error_override: Mutex::new(None),
         hal: Mutex::new(hal),
         is_error,
         _instance: instance,
@@ -427,6 +439,9 @@ pub unsafe extern "C" fn wgpuInstanceRequestAdapter(
     options: *const native::WGPURequestAdapterOptions,
     callback_info: native::WGPURequestAdapterCallbackInfo,
 ) -> native::WGPUFuture {
+    if !valid_callback_mode(callback_info.mode) {
+        return native::WGPUFuture { id: 0 };
+    }
     let instance = borrow_handle(instance_handle, "WGPUInstance");
     let mut options_error = None;
     let feature_level = options
@@ -443,13 +458,14 @@ pub unsafe extern "C" fn wgpuInstanceRequestAdapter(
         .is_some_and(|options| options.forceFallbackAdapter != 0);
     let result = if invalid_feature_level {
         Err("invalid featureLevel".to_owned())
-    } else if force_fallback {
-        Err("no fallback adapter available".to_owned())
     } else {
         select_request_adapter(
             instance
                 .core
-                .enumerate_adapters_with_feature_level(feature_level),
+                .enumerate_adapters_with_feature_level(feature_level)
+                .into_iter()
+                .filter(|adapter| !force_fallback || adapter.hal().is_fallback())
+                .collect(),
             requested_backend_type,
             |adapter| backend_type_from_hal(adapter.backend()),
         )

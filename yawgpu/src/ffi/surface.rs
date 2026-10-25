@@ -118,7 +118,7 @@ pub unsafe extern "C" fn wgpuSurfaceConfigure(
         .lock()
         .expect("surface current texture lock is not poisoned");
     *current_texture = None;
-    if let Some(hal) = surface
+    let configure_error = if let Some(hal) = surface
         .hal
         .lock()
         .expect("surface HAL lock is not poisoned")
@@ -132,10 +132,33 @@ pub unsafe extern "C" fn wgpuSurfaceConfigure(
             hal_present_mode(present_mode),
             hal_alpha_mode(alpha_mode),
         );
-        if let Err(error) = hal.configure(device.core.hal(), hal_config) {
-            device.dispatch_error(core::ErrorKind::Internal, error.to_string());
-            return;
+        hal.configure(device.core.hal(), hal_config).err()
+    } else {
+        None
+    };
+    #[cfg(test)]
+    let configure_error = surface
+        .configure_error_override
+        .lock()
+        .unwrap()
+        .take()
+        .or(configure_error);
+    if let Some(error) = configure_error {
+        if let Some(hal) = surface
+            .hal
+            .lock()
+            .expect("surface HAL lock is not poisoned")
+            .as_mut()
+        {
+            hal.unconfigure();
         }
+        *surface
+            .configured
+            .lock()
+            .expect("surface configuration lock is not poisoned") = None;
+        drop(current_texture);
+        device.dispatch_error(core::ErrorKind::Internal, error.to_string());
+        return;
     }
     *surface
         .configured
@@ -298,6 +321,19 @@ pub unsafe extern "C" fn wgpuSurfacePresent(surface: native::WGPUSurface) -> nat
         .lock()
         .expect("surface current texture lock is not poisoned");
     *current_texture = None;
+    let device = surface
+        .configured
+        .lock()
+        .expect("surface configuration lock is not poisoned")
+        .as_ref()
+        .map(|config| Arc::clone(&config.device));
+    if let Some(device) = device.as_ref() {
+        if let Some(error) = device.queue().flush_pending_writes() {
+            drop(current_texture);
+            device.dispatch_error(error.kind, error.message);
+            return native::WGPUStatus_Error;
+        }
+    }
     if let Some(hal) = surface
         .hal
         .lock()
@@ -417,6 +453,73 @@ fn fill_surface_capabilities(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audit_c10_configure_failure_clears_state_before_reentrant_error_callback() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let surface = create_noop_surface(instance);
+            let config = valid_surface_config(device);
+            wgpuSurfaceConfigure(surface, &config);
+            let surface_impl = borrow_handle(surface, "WGPUSurface");
+            *surface_impl.configure_error_override.lock().unwrap() =
+                Some(yawgpu_hal::HalError::BufferOperationFailed {
+                    backend: "Noop",
+                    message: "injected configure failure",
+                });
+            let calls = Arc::new(AtomicUsize::new(0));
+            let count = calls.clone();
+            let surface_address = surface as usize;
+            borrow_handle(device, "WGPUDevice")
+                .core
+                .set_uncaptured_error_callback(Some(move |_| {
+                    let surface = surface_address as native::WGPUSurface;
+                    let surface_impl = borrow_handle(surface, "WGPUSurface");
+                    assert!(surface_impl.current_texture.try_lock().unwrap().is_none());
+                    assert!(surface_impl.configured.try_lock().unwrap().is_none());
+                    assert!(surface_impl.hal.try_lock().is_ok());
+                    wgpuSurfaceUnconfigure(surface);
+                    count.fetch_add(1, Ordering::SeqCst);
+                }));
+            wgpuSurfaceConfigure(surface, &config);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert!(surface_impl.configured.lock().unwrap().is_none());
+            wgpuSurfaceRelease(surface);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn audit_s5_present_flushes_queued_writes() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let surface = create_noop_surface(instance);
+            wgpuSurfaceConfigure(surface, &valid_surface_config(device));
+            let device_impl = borrow_handle(device, "WGPUDevice");
+            let buffer = device_impl.core.create_buffer(core::BufferDescriptor {
+                usage: core::BufferUsage::COPY_DST,
+                size: 4,
+                mapped_at_creation: false,
+            });
+            let queue = device_impl.core.queue();
+            assert_eq!(
+                queue.write_buffer(core::QueueBufferWrite {
+                    device: device_impl.core.hal(),
+                    buffer: &buffer,
+                    offset: 0,
+                    data: &[5; 4]
+                }),
+                None
+            );
+            let before = queue.latest_submission_index();
+            assert_eq!(wgpuSurfacePresent(surface), native::WGPUStatus_Success);
+            assert_ne!(queue.latest_submission_index(), before);
+            assert_eq!(buffer.hal().unwrap().read(0, 4).unwrap(), vec![5; 4]);
+            wgpuSurfaceRelease(surface);
+            release_handles(instance, adapter, device);
+        }
+    }
+
     use super::super::tests::{
         create_noop_surface, noop_chain, noop_surface_caps, release_handles, valid_surface_config,
     };

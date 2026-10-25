@@ -671,6 +671,7 @@ mod tests {
             core: Arc::new(core::Instance::new_noop()),
             timed_wait_any_enabled: false,
             pending_callbacks: Mutex::new(BTreeMap::new()),
+            external_refs: std::sync::atomic::AtomicUsize::new(1),
         });
         let adapter = instance
             .core
@@ -692,6 +693,9 @@ mod tests {
                 userdata2: 0,
             },
             device_lost_futures: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            lost_future_test_hook: Mutex::new(None),
+            external_refs: std::sync::atomic::AtomicUsize::new(1),
             default_queue: Mutex::new(None),
             shader_module_cache: ObjectCache::new(),
             pipeline_layout_cache: ObjectCache::new(),

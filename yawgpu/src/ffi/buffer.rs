@@ -48,7 +48,25 @@ pub unsafe extern "C" fn wgpuBufferMapAsync(
     size: usize,
     callback_info: native::WGPUBufferMapCallbackInfo,
 ) -> native::WGPUFuture {
+    if !valid_callback_mode(callback_info.mode) {
+        return native::WGPUFuture { id: 0 };
+    }
     let buffer = borrow_handle(buffer, "WGPUBuffer");
+    if buffer.device.is_lost() {
+        return buffer
+            .instance
+            .register_callback(PendingCallback::BufferMap {
+                mode: callback_info.mode,
+                callback: callback_info.callback,
+                device: Arc::clone(&buffer.device),
+                buffer: None,
+                serial: 0,
+                status: core::MapAsyncStatus::Aborted,
+                gate: None,
+                userdata1: callback_info.userdata1 as usize,
+                userdata2: callback_info.userdata2 as usize,
+            });
+    }
     match validate_map_async(buffer, mode, offset, size) {
         Ok((mode, offset, size)) => match buffer.core.begin_map(mode, offset, size) {
             Ok(serial) => {

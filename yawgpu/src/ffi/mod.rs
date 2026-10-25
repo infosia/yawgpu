@@ -206,13 +206,19 @@ pub struct WGPUBindGroupImpl {
     pub(crate) label: Mutex<Option<String>>,
 }
 
+#[cfg(test)]
+type LostFutureTestHook = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
+
 /// Owns the core object and retained handles for the WGPU Device handle.
 pub struct WGPUDeviceImpl {
+    pub(crate) external_refs: std::sync::atomic::AtomicUsize,
     pub(crate) core: Arc<core::Device>,
     pub(crate) instance: Arc<WGPUInstanceImpl>,
     pub(crate) adapter: Arc<core::Adapter>,
     pub(crate) device_lost_callback: DeviceLostCallbackInfo,
     pub(crate) device_lost_futures: Mutex<Vec<u64>>,
+    #[cfg(test)]
+    pub(crate) lost_future_test_hook: Mutex<Option<LostFutureTestHook>>,
     pub(crate) default_queue: Mutex<Option<Arc<WGPUQueueImpl>>>,
     // These descriptor caches deliberately omit labels, matching Dawn cached-object behavior.
     pub(crate) shader_module_cache: ObjectCache<ShaderModuleCacheKey>,
@@ -223,6 +229,7 @@ pub struct WGPUDeviceImpl {
 
 /// Owns the core object and retained handles for the WGPU Instance handle.
 pub struct WGPUInstanceImpl {
+    pub(crate) external_refs: std::sync::atomic::AtomicUsize,
     pub(crate) core: Arc<core::Instance>,
     pub(crate) timed_wait_any_enabled: bool,
     pub(crate) pending_callbacks: Mutex<BTreeMap<u64, PendingCallback>>,
@@ -480,6 +487,8 @@ pub struct WGPUSurfaceImpl {
     pub(crate) current_texture: Mutex<Option<Arc<WGPUTextureImpl>>>,
     #[cfg(test)]
     pub(crate) acquire_texture_override: Mutex<Option<surface::TestSurfaceAcquire>>,
+    #[cfg(test)]
+    pub(crate) configure_error_override: Mutex<Option<yawgpu_hal::HalError>>,
     pub(crate) hal: Mutex<Option<HalSurface>>,
     pub(crate) is_error: bool,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
@@ -599,7 +608,23 @@ impl WGPUInstanceImpl {
             core: Arc::new(core),
             timed_wait_any_enabled,
             pending_callbacks: Mutex::new(BTreeMap::new()),
+            external_refs: std::sync::atomic::AtomicUsize::new(1),
         })
+    }
+
+    fn cancel_callbacks(&self) {
+        let callbacks = std::mem::take(
+            &mut *self
+                .pending_callbacks
+                .lock()
+                .expect("pending callback lock is not poisoned"),
+        );
+        for (id, callback) in callbacks {
+            self.complete_future(native::WGPUFuture { id });
+            unsafe {
+                callback.cancel();
+            }
+        }
     }
 
     fn register_callback(&self, callback: PendingCallback) -> native::WGPUFuture {
@@ -619,10 +644,23 @@ impl WGPUInstanceImpl {
             return native::WGPUFuture { id: 0 };
         };
         let future = self.core.future_registry().register(mode);
-        self.pending_callbacks
+        let mut callbacks = self
+            .pending_callbacks
             .lock()
-            .expect("pending callback lock is not poisoned")
-            .insert(future.get(), callback);
+            .expect("pending callback lock is not poisoned");
+        if self
+            .external_refs
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
+        {
+            drop(callbacks);
+            self.core.future_registry().complete(future);
+            unsafe {
+                callback.cancel();
+            }
+        } else {
+            callbacks.insert(future.get(), callback);
+        }
         native::WGPUFuture { id: future.get() }
     }
 
@@ -662,7 +700,7 @@ impl WGPUInstanceImpl {
                     status,
                     ..
                 } if callback_device.same(device) => {
-                    *status = core::QueueWorkDoneStatus::Error;
+                    *status = core::QueueWorkDoneStatus::Success;
                     callback.clear_submission_gate();
                     completed.push(*future_id);
                 }
@@ -690,6 +728,38 @@ impl WGPUInstanceImpl {
         // gates for that queue in this poll prevents a completion race between
         // two HAL queries from reversing callback order (Block 96 Q21).
         for (future_id, callback) in callbacks.iter_mut() {
+            let lost = match callback {
+                PendingCallback::BufferMap {
+                    device,
+                    buffer,
+                    serial,
+                    status,
+                    gate,
+                    ..
+                } if device.is_lost() => {
+                    if let Some(buffer) = buffer.take() {
+                        buffer.abort_pending_map_with_serial(*serial);
+                    }
+                    *status = core::MapAsyncStatus::Aborted;
+                    *gate = None;
+                    true
+                }
+                PendingCallback::QueueWorkDone {
+                    device,
+                    status,
+                    gate,
+                    ..
+                } if device.is_lost() => {
+                    *status = core::QueueWorkDoneStatus::Success;
+                    *gate = None;
+                    true
+                }
+                _ => false,
+            };
+            if lost {
+                completed.push(*future_id);
+                continue;
+            }
             let Some(gate) = callback.submission_gate() else {
                 continue;
             };
@@ -804,40 +874,37 @@ impl Drop for WGPUDeviceImpl {
 
 impl WGPUDeviceImpl {
     fn implicit_destroy_on_last_release(&self) {
-        self.schedule_device_lost(std::ptr::null(), core::DeviceLostReason::Destroyed);
+        self.schedule_device_lost(core::DeviceLostReason::Destroyed);
         self.core.clear_uncaptured_error_callback();
     }
 
-    fn schedule_device_lost(
-        &self,
-        device: native::WGPUDevice,
-        reason: core::DeviceLostReason,
-    ) -> Option<native::WGPUFuture> {
-        let reason = self.core.lose(reason)?;
+    fn schedule_device_lost(&self, reason: core::DeviceLostReason) {
+        let Some(reason) = self.core.lose(reason) else {
+            return;
+        };
         self.instance.abort_pending_device_callbacks(&self.core);
-        for future_id in self
-            .device_lost_futures
-            .lock()
-            .expect("device lost future lock is not poisoned")
-            .drain(..)
-        {
+        let futures = std::mem::take(
+            &mut *self
+                .device_lost_futures
+                .lock()
+                .expect("device lost future lock is not poisoned"),
+        );
+        for future_id in futures {
+            {
+                let mut callbacks = self
+                    .instance
+                    .pending_callbacks
+                    .lock()
+                    .expect("pending callback lock is not poisoned");
+                if let Some(PendingCallback::DeviceLost { reason: stored, .. }) =
+                    callbacks.get_mut(&future_id)
+                {
+                    *stored = reason;
+                }
+            }
             self.instance
                 .complete_future(native::WGPUFuture { id: future_id });
         }
-        if !self.device_lost_callback.has_callback() {
-            return None;
-        }
-        Some(
-            self.instance
-                .register_callback(PendingCallback::DeviceLost {
-                    mode: self.device_lost_callback.mode,
-                    callback: self.device_lost_callback.callback,
-                    device: device as usize,
-                    reason,
-                    userdata1: self.device_lost_callback.userdata1,
-                    userdata2: self.device_lost_callback.userdata2,
-                }),
-        )
     }
 
     fn get_lost_future(&self, device: native::WGPUDevice) -> native::WGPUFuture {
@@ -850,18 +917,29 @@ impl WGPUDeviceImpl {
             .register_pending_callback(PendingCallback::DeviceLost {
                 mode: native::WGPUCallbackMode_WaitAnyOnly,
                 callback: None,
-                device: device as usize,
+                device: if device.is_null() {
+                    std::sync::Weak::new()
+                } else {
+                    unsafe { Arc::downgrade(&clone_handle(device, "WGPUDevice")) }
+                },
                 reason,
                 userdata1: 0,
                 userdata2: 0,
             });
-        if self.core.is_lost() {
+        let mut lost_futures = self
+            .device_lost_futures
+            .lock()
+            .expect("device lost future lock is not poisoned");
+        let is_lost = self.core.is_lost();
+        #[cfg(test)]
+        if let Some((reached, resume)) = self.lost_future_test_hook.lock().unwrap().take() {
+            reached.send(()).unwrap();
+            resume.recv().unwrap();
+        }
+        if is_lost {
             self.instance.complete_future(future);
         } else {
-            self.device_lost_futures
-                .lock()
-                .expect("device lost future lock is not poisoned")
-                .push(future.id);
+            lost_futures.push(future.id);
         }
         future
     }
@@ -1744,7 +1822,7 @@ pub(crate) enum PendingCallback {
         /// Callback variant.
         callback: native::WGPUDeviceLostCallback,
         /// Device variant.
-        device: usize,
+        device: std::sync::Weak<WGPUDeviceImpl>,
         /// Reason variant.
         reason: core::DeviceLostReason,
         /// Userdata1 variant.
@@ -1848,7 +1926,172 @@ pub(crate) enum PendingCallback {
     },
 }
 
+fn valid_callback_mode(mode: native::WGPUCallbackMode) -> bool {
+    matches!(
+        mode,
+        native::WGPUCallbackMode_WaitAnyOnly
+            | native::WGPUCallbackMode_AllowProcessEvents
+            | native::WGPUCallbackMode_AllowSpontaneous
+    )
+}
+
 impl PendingCallback {
+    unsafe fn cancel(self) {
+        let message = string_view(b"Instance released");
+        match self {
+            Self::RequestAdapter {
+                callback,
+                userdata1,
+                userdata2,
+                ..
+            } => {
+                if let Some(cb) = callback {
+                    cb(
+                        native::WGPURequestAdapterStatus_CallbackCancelled,
+                        std::ptr::null(),
+                        message,
+                        userdata1 as _,
+                        userdata2 as _,
+                    );
+                }
+            }
+            Self::RequestDevice {
+                callback,
+                userdata1,
+                userdata2,
+                ..
+            } => {
+                if let Some(cb) = callback {
+                    cb(
+                        native::WGPURequestDeviceStatus_CallbackCancelled,
+                        std::ptr::null(),
+                        message,
+                        userdata1 as _,
+                        userdata2 as _,
+                    );
+                }
+            }
+            Self::DeviceLost {
+                callback,
+                device,
+                userdata1,
+                userdata2,
+                ..
+            } => {
+                if let Some(device) = device.upgrade() {
+                    device.core.clear_uncaptured_error_callback();
+                }
+                if let Some(cb) = callback {
+                    cb(
+                        &std::ptr::null(),
+                        native::WGPUDeviceLostReason_CallbackCancelled,
+                        message,
+                        userdata1 as _,
+                        userdata2 as _,
+                    );
+                }
+            }
+            Self::BufferMap {
+                callback,
+                buffer,
+                serial,
+                userdata1,
+                userdata2,
+                ..
+            } => {
+                if let Some(buffer) = buffer {
+                    buffer.abort_pending_map_with_serial(serial);
+                }
+                if let Some(cb) = callback {
+                    cb(
+                        native::WGPUMapAsyncStatus_CallbackCancelled,
+                        message,
+                        userdata1 as _,
+                        userdata2 as _,
+                    );
+                }
+            }
+            Self::QueueWorkDone {
+                callback,
+                userdata1,
+                userdata2,
+                ..
+            } => {
+                if let Some(cb) = callback {
+                    cb(
+                        native::WGPUQueueWorkDoneStatus_CallbackCancelled,
+                        message,
+                        userdata1 as _,
+                        userdata2 as _,
+                    );
+                }
+            }
+            Self::CompilationInfo {
+                callback,
+                userdata1,
+                userdata2,
+                ..
+            } => {
+                if let Some(cb) = callback {
+                    cb(
+                        native::WGPUCompilationInfoRequestStatus_CallbackCancelled,
+                        std::ptr::null(),
+                        userdata1 as _,
+                        userdata2 as _,
+                    );
+                }
+            }
+            Self::CreateComputePipelineAsync {
+                callback,
+                userdata1,
+                userdata2,
+                ..
+            } => {
+                if let Some(cb) = callback {
+                    cb(
+                        native::WGPUCreatePipelineAsyncStatus_CallbackCancelled,
+                        std::ptr::null(),
+                        message,
+                        userdata1 as _,
+                        userdata2 as _,
+                    );
+                }
+            }
+            Self::CreateRenderPipelineAsync {
+                callback,
+                userdata1,
+                userdata2,
+                ..
+            } => {
+                if let Some(cb) = callback {
+                    cb(
+                        native::WGPUCreatePipelineAsyncStatus_CallbackCancelled,
+                        std::ptr::null(),
+                        message,
+                        userdata1 as _,
+                        userdata2 as _,
+                    );
+                }
+            }
+            Self::PopErrorScope {
+                callback,
+                userdata1,
+                userdata2,
+                ..
+            } => {
+                if let Some(cb) = callback {
+                    cb(
+                        native::WGPUPopErrorScopeStatus_CallbackCancelled,
+                        native::WGPUErrorType_NoError,
+                        message,
+                        userdata1 as _,
+                        userdata2 as _,
+                    );
+                }
+            }
+        }
+    }
+
     fn submission_gate(&self) -> Option<SubmissionGate> {
         match self {
             Self::BufferMap { gate, .. } | Self::QueueWorkDone { gate, .. } => gate.clone(),
@@ -1982,7 +2225,16 @@ impl PendingCallback {
                 ..
             } => {
                 if let Some(callback) = callback {
-                    let device = device as native::WGPUDevice;
+                    let retained = device.upgrade().filter(|device| {
+                        device
+                            .external_refs
+                            .load(std::sync::atomic::Ordering::Acquire)
+                            != 0
+                    });
+                    if let Some(device) = retained.as_ref() {
+                        device.core.clear_uncaptured_error_callback();
+                    }
+                    let device = retained.as_ref().map_or(std::ptr::null(), Arc::as_ptr);
                     callback(
                         &device,
                         map_device_lost_reason(reason),
@@ -1994,7 +2246,7 @@ impl PendingCallback {
             }
             Self::BufferMap {
                 callback,
-                device: _,
+                device,
                 buffer,
                 serial,
                 status,
@@ -2002,14 +2254,21 @@ impl PendingCallback {
                 userdata2,
                 ..
             } => {
-                let status = buffer.as_ref().map_or(status, |buffer| {
-                    let resolved = buffer.resolve_pending_map(serial);
-                    if status == core::MapAsyncStatus::Success {
-                        resolved
-                    } else {
-                        status
+                let status = if device.is_lost() {
+                    if let Some(buffer) = buffer.as_ref() {
+                        buffer.abort_pending_map_with_serial(serial);
                     }
-                });
+                    core::MapAsyncStatus::Aborted
+                } else {
+                    buffer.as_ref().map_or(status, |buffer| {
+                        let resolved = buffer.resolve_pending_map(serial);
+                        if status == core::MapAsyncStatus::Success {
+                            resolved
+                        } else {
+                            status
+                        }
+                    })
+                };
                 if let Some(callback) = callback {
                     callback(
                         map_map_async_status(status),
@@ -2335,9 +2594,13 @@ fn backend_type_from_hal(backend: yawgpu_hal::HalBackend) -> native::WGPUBackend
 fn adapter_info_from_core(adapter: &core::Adapter) -> native::WGPUAdapterInfo {
     let backend = adapter.backend();
     let backend_type = backend_type_from_hal(backend);
-    let adapter_type = match backend {
-        yawgpu_hal::HalBackend::Noop => native::WGPUAdapterType_CPU,
-        _ => native::WGPUAdapterType_Unknown,
+    let adapter_type = if adapter.hal().is_fallback() {
+        native::WGPUAdapterType_CPU
+    } else {
+        match backend {
+            yawgpu_hal::HalBackend::Noop => native::WGPUAdapterType_CPU,
+            _ => native::WGPUAdapterType_Unknown,
+        }
     };
     native::WGPUAdapterInfo {
         nextInChain: std::ptr::null_mut(),
@@ -2674,6 +2937,489 @@ pub unsafe fn testing_get_queue_label(queue: native::WGPUQueue) -> String {
 #[cfg(test)]
 mod tests {
     #![allow(non_snake_case)]
+    #[test]
+    fn audit_c11_uncaptured_callback_can_release_its_device_reentrantly() {
+        unsafe extern "C" fn release(
+            device: *const native::WGPUDevice,
+            _: native::WGPUErrorType,
+            _: native::WGPUStringView,
+            data: *mut c_void,
+            _: *mut c_void,
+        ) {
+            let state = &mut *(data as *mut UncapturedErrorState);
+            state.fired += 1;
+            wgpuDeviceRelease(*device);
+        }
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+            let mut errors = UncapturedErrorState::default();
+            let mut descriptor = device_descriptor_with_uncaptured_error_callback(&mut errors, 0);
+            descriptor.uncapturedErrorCallbackInfo.callback = Some(release);
+            let device = request_noop_device_with_descriptor(instance, adapter, &descriptor);
+            let weak = Arc::downgrade(&clone_handle(device, "WGPUDevice"));
+            let buffer = wgpuDeviceCreateBuffer(device, &buffer_descriptor(0, 4));
+            assert_eq!(errors.fired, 1);
+            assert!(borrow_handle(buffer, "WGPUBuffer").core.is_error());
+            assert!(weak.upgrade().is_none());
+            wgpuBufferRelease(buffer);
+            wgpuAdapterRelease(adapter);
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    #[test]
+    fn audit_c4_shutdown_cancels_every_callback_kind_once() {
+        unsafe extern "C" fn compilation_cancelled(
+            status: native::WGPUCompilationInfoRequestStatus,
+            _: *const native::WGPUCompilationInfo,
+            data: *mut c_void,
+            _: *mut c_void,
+        ) {
+            let state = &mut *(data as *mut CompilationInfoState);
+            state.fired += 1;
+            state.status = status;
+        }
+        unsafe extern "C" fn lost(
+            _: *const native::WGPUDevice,
+            reason: native::WGPUDeviceLostReason,
+            _: native::WGPUStringView,
+            data: *mut c_void,
+            _: *mut c_void,
+        ) {
+            let state = &mut *(data as *mut (usize, native::WGPUDeviceLostReason));
+            state.0 += 1;
+            state.1 = reason;
+        }
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+            let mut errors = UncapturedErrorState::default();
+            let mut descriptor = device_descriptor_with_uncaptured_error_callback(&mut errors, 0);
+            let mut lost_state = (0usize, 0);
+            descriptor.deviceLostCallbackInfo = native::WGPUDeviceLostCallbackInfo {
+                mode: native::WGPUCallbackMode_WaitAnyOnly,
+                callback: Some(lost),
+                userdata1: (&mut lost_state as *mut (usize, native::WGPUDeviceLostReason)).cast(),
+                ..std::mem::zeroed()
+            };
+            let device = request_noop_device_with_descriptor(instance, adapter, &descriptor);
+            let queue = wgpuDeviceGetQueue(device);
+            let buffer = wgpuDeviceCreateBuffer(
+                device,
+                &buffer_descriptor(
+                    native::WGPUBufferUsage_MapRead | native::WGPUBufferUsage_CopyDst,
+                    4,
+                ),
+            );
+            let module = create_wgsl_module(device, "@compute @workgroup_size(1) fn cs() {} @vertex fn vs() -> @builtin(position) vec4f { return vec4f(0); } @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }");
+            let mut requested = RequestDeviceState::default();
+            wgpuAdapterRequestDevice(
+                adapter,
+                std::ptr::null(),
+                native::WGPURequestDeviceCallbackInfo {
+                    mode: native::WGPUCallbackMode_WaitAnyOnly,
+                    callback: Some(request_device_callback),
+                    userdata1: (&mut requested as *mut RequestDeviceState).cast(),
+                    ..std::mem::zeroed()
+                },
+            );
+            let mut mapped = BufferMapAsyncState::default();
+            wgpuBufferMapAsync(
+                buffer,
+                native::WGPUMapMode_Read,
+                0,
+                4,
+                native::WGPUBufferMapCallbackInfo {
+                    mode: native::WGPUCallbackMode_WaitAnyOnly,
+                    callback: Some(buffer_map_async_callback),
+                    userdata1: (&mut mapped as *mut BufferMapAsyncState).cast(),
+                    ..std::mem::zeroed()
+                },
+            );
+            let mut work = QueueWorkDoneState::default();
+            wgpuQueueOnSubmittedWorkDone(
+                queue,
+                native::WGPUQueueWorkDoneCallbackInfo {
+                    mode: native::WGPUCallbackMode_WaitAnyOnly,
+                    callback: Some(queue_work_done_callback),
+                    userdata1: (&mut work as *mut QueueWorkDoneState).cast(),
+                    ..std::mem::zeroed()
+                },
+            );
+            let mut compilation = CompilationInfoState::default();
+            wgpuShaderModuleGetCompilationInfo(
+                module,
+                native::WGPUCompilationInfoCallbackInfo {
+                    mode: native::WGPUCallbackMode_WaitAnyOnly,
+                    callback: Some(compilation_cancelled),
+                    userdata1: (&mut compilation as *mut CompilationInfoState).cast(),
+                    ..std::mem::zeroed()
+                },
+            );
+            let mut compute = ComputePipelineAsyncState::default();
+            wgpuDeviceCreateComputePipelineAsync(
+                device,
+                &compute_pipeline_descriptor(module, std::ptr::null()),
+                native::WGPUCreateComputePipelineAsyncCallbackInfo {
+                    mode: native::WGPUCallbackMode_WaitAnyOnly,
+                    callback: Some(compute_pipeline_async_callback),
+                    userdata1: (&mut compute as *mut ComputePipelineAsyncState).cast(),
+                    ..std::mem::zeroed()
+                },
+            );
+            let mut render = RenderPipelineAsyncState::default();
+            wgpuDeviceCreateRenderPipelineAsync(
+                device,
+                &render_pipeline_descriptor(module, module, std::ptr::null()),
+                native::WGPUCreateRenderPipelineAsyncCallbackInfo {
+                    mode: native::WGPUCallbackMode_WaitAnyOnly,
+                    callback: Some(render_pipeline_async_callback),
+                    userdata1: (&mut render as *mut RenderPipelineAsyncState).cast(),
+                    ..std::mem::zeroed()
+                },
+            );
+            let mut scope = PopErrorScopeState::default();
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            wgpuDevicePopErrorScope(
+                device,
+                native::WGPUPopErrorScopeCallbackInfo {
+                    mode: native::WGPUCallbackMode_WaitAnyOnly,
+                    callback: Some(pop_error_scope_callback),
+                    userdata1: (&mut scope as *mut PopErrorScopeState).cast(),
+                    ..std::mem::zeroed()
+                },
+            );
+            let pin = clone_handle(instance, "WGPUInstance");
+            wgpuInstanceRelease(instance);
+            assert_eq!(requested.fired, 1);
+            assert_eq!(
+                requested.status,
+                native::WGPURequestDeviceStatus_CallbackCancelled
+            );
+            assert!(requested.device.is_null());
+            assert_eq!(
+                lost_state,
+                (1, native::WGPUDeviceLostReason_CallbackCancelled)
+            );
+            assert_eq!(mapped.fired, 1);
+            assert_eq!(mapped.status, native::WGPUMapAsyncStatus_CallbackCancelled);
+            assert_eq!(work.fired, 1);
+            assert_eq!(
+                work.status,
+                native::WGPUQueueWorkDoneStatus_CallbackCancelled
+            );
+            assert_eq!(compilation.fired, 1);
+            assert_eq!(
+                compilation.status,
+                native::WGPUCompilationInfoRequestStatus_CallbackCancelled
+            );
+            assert_eq!(compute.fired, 1);
+            assert_eq!(
+                compute.status,
+                native::WGPUCreatePipelineAsyncStatus_CallbackCancelled
+            );
+            assert!(compute.pipeline.is_null());
+            assert_eq!(render.fired, 1);
+            assert_eq!(
+                render.status,
+                native::WGPUCreatePipelineAsyncStatus_CallbackCancelled
+            );
+            assert!(render.pipeline.is_null());
+            assert_eq!(scope.fired, 1);
+            assert_eq!(
+                scope.status,
+                native::WGPUPopErrorScopeStatus_CallbackCancelled
+            );
+            assert_eq!(pin.process_callbacks(), 0);
+            wgpuShaderModuleRelease(module);
+            wgpuBufferRelease(buffer);
+            wgpuQueueRelease(queue);
+            wgpuDeviceRelease(device);
+            wgpuAdapterRelease(adapter);
+            assert_eq!(pin.process_callbacks(), 0);
+        }
+    }
+
+    #[test]
+    fn audit_c11_last_device_release_waits_and_disables_uncaptured_callback() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let core = borrow_handle(device, "WGPUDevice").core.clone();
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+            let resume_rx = Mutex::new(resume_rx);
+            core.set_uncaptured_error_callback(Some(move |_| {
+                entered_tx.send(()).unwrap();
+                resume_rx.lock().unwrap().recv().unwrap();
+            }));
+            let dispatch = core.clone();
+            let worker = std::thread::spawn(move || {
+                dispatch.dispatch_error(core::ErrorKind::Validation, "active")
+            });
+            entered_rx.recv().unwrap();
+            let address = device as usize;
+            let (released_tx, released_rx) = std::sync::mpsc::channel();
+            let releaser = std::thread::spawn(move || {
+                wgpuDeviceRelease(address as native::WGPUDevice);
+                released_tx.send(()).unwrap();
+            });
+            let early = released_rx.recv_timeout(std::time::Duration::from_millis(50));
+            resume_tx.send(()).unwrap();
+            worker.join().unwrap();
+            releaser.join().unwrap();
+            assert!(
+                early.is_err(),
+                "device release returned during the callback"
+            );
+            core.dispatch_error(core::ErrorKind::Validation, "after release");
+            wgpuAdapterRelease(adapter);
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    #[test]
+    fn audit_c2_get_lost_future_races_device_loss_without_stranding() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let pin = clone_handle(device, "WGPUDevice");
+            let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+            let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+            *pin.lost_future_test_hook.lock().unwrap() = Some((reached_tx, resume_rx));
+            let getter_pin = pin.clone();
+            let getter =
+                std::thread::spawn(move || getter_pin.get_lost_future(Arc::as_ptr(&getter_pin)));
+            reached_rx.recv().unwrap();
+            let loss_pin = pin.clone();
+            let loss = std::thread::spawn(move || {
+                loss_pin.schedule_device_lost(core::DeviceLostReason::Destroyed)
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !pin.core.is_lost() && std::time::Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            let lost = pin.core.is_lost();
+            resume_tx.send(()).unwrap();
+            let future = getter.join().unwrap();
+            loss.join().unwrap();
+            assert!(lost);
+            let mut info = native::WGPUFutureWaitInfo {
+                future,
+                completed: 0,
+            };
+            assert_eq!(
+                wgpuInstanceWaitAny(instance, 1, &mut info, 0),
+                native::WGPUWaitStatus_Success
+            );
+            assert_eq!(info.completed, 1);
+            drop(pin);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn audit_c3_device_lost_delivers_null_after_external_device_release() {
+        unsafe extern "C" fn lost(
+            device: *const native::WGPUDevice,
+            reason: native::WGPUDeviceLostReason,
+            _: native::WGPUStringView,
+            data: *mut c_void,
+            _: *mut c_void,
+        ) {
+            let state = &mut *(data as *mut (usize, bool, native::WGPUDeviceLostReason));
+            state.0 += 1;
+            state.1 = (*device).is_null();
+            state.2 = reason;
+        }
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+            let mut errors = UncapturedErrorState::default();
+            let mut descriptor = device_descriptor_with_uncaptured_error_callback(&mut errors, 0);
+            let mut state = (0usize, false, 0);
+            descriptor.deviceLostCallbackInfo = native::WGPUDeviceLostCallbackInfo {
+                mode: native::WGPUCallbackMode_AllowProcessEvents,
+                callback: Some(lost),
+                userdata1: (&mut state as *mut (usize, bool, native::WGPUDeviceLostReason)).cast(),
+                ..std::mem::zeroed()
+            };
+            let device = request_noop_device_with_descriptor(instance, adapter, &descriptor);
+            // Keep an internal reference alive to prove that it is external refs that matter.
+            let pin = clone_handle(device, "WGPUDevice");
+            wgpuDeviceDestroy(device);
+            wgpuDeviceRelease(device);
+            wgpuInstanceProcessEvents(instance);
+            assert_eq!(state, (1, true, native::WGPUDeviceLostReason_Destroyed));
+            assert!(pin.core.is_lost());
+            drop(pin);
+            wgpuAdapterRelease(adapter);
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    #[test]
+    fn audit_c4_last_instance_release_cancels_pending_results_and_breaks_cycles() {
+        unsafe {
+            let instance = make_noop_instance();
+            let weak = Arc::downgrade(&clone_handle(instance, "WGPUInstance"));
+            let mut state = RequestAdapterState::default();
+            wgpuInstanceRequestAdapter(
+                instance,
+                std::ptr::null(),
+                native::WGPURequestAdapterCallbackInfo {
+                    mode: native::WGPUCallbackMode_WaitAnyOnly,
+                    callback: Some(request_adapter_callback),
+                    userdata1: (&mut state as *mut RequestAdapterState).cast(),
+                    ..std::mem::zeroed()
+                },
+            );
+            wgpuInstanceRelease(instance);
+            assert_eq!(state.fired, 1);
+            assert_eq!(
+                state.status,
+                native::WGPURequestAdapterStatus_CallbackCancelled
+            );
+            assert!(state.adapter.is_null());
+            assert!(
+                weak.upgrade().is_none(),
+                "pending adapter result retained its instance"
+            );
+        }
+    }
+
+    #[test]
+    fn audit_c6_after_loss_maps_abort_and_queue_calls_do_no_work() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let queue = wgpuDeviceGetQueue(device);
+            let buffer = wgpuDeviceCreateBuffer(
+                device,
+                &buffer_descriptor(
+                    native::WGPUBufferUsage_MapRead | native::WGPUBufferUsage_CopyDst,
+                    4,
+                ),
+            );
+            let core = &borrow_handle(device, "WGPUDevice").core;
+            let errors = Arc::new(AtomicUsize::new(0));
+            let captured = errors.clone();
+            core.set_uncaptured_error_callback(Some(move |_| {
+                captured.fetch_add(1, Ordering::SeqCst);
+            }));
+            wgpuDeviceDestroy(device);
+            let before = borrow_handle(queue, "WGPUQueue")
+                .core
+                .latest_submission_index();
+            wgpuQueueSubmit(queue, 0, std::ptr::null());
+            wgpuQueueWriteBuffer(queue, buffer, 0, [1u8; 4].as_ptr().cast(), 4);
+            wgpuQueueWriteTexture(
+                queue,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+            );
+            core.dispatch_error(core::ErrorKind::Validation, "after loss");
+            let mut state = BufferMapAsyncState::default();
+            wgpuBufferMapAsync(
+                buffer,
+                native::WGPUMapMode_Read,
+                0,
+                4,
+                native::WGPUBufferMapCallbackInfo {
+                    mode: native::WGPUCallbackMode_AllowProcessEvents,
+                    callback: Some(buffer_map_async_callback),
+                    userdata1: (&mut state as *mut BufferMapAsyncState).cast(),
+                    ..std::mem::zeroed()
+                },
+            );
+            wgpuInstanceProcessEvents(instance);
+            assert_eq!(state.status, native::WGPUMapAsyncStatus_Aborted);
+            assert_eq!(errors.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                borrow_handle(queue, "WGPUQueue")
+                    .core
+                    .latest_submission_index(),
+                before
+            );
+            wgpuBufferRelease(buffer);
+            wgpuQueueRelease(queue);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn audit_c9_work_done_succeeds_when_device_is_lost() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let queue = wgpuDeviceGetQueue(device);
+            let mut state = QueueWorkDoneState::default();
+            wgpuQueueOnSubmittedWorkDone(
+                queue,
+                native::WGPUQueueWorkDoneCallbackInfo {
+                    mode: native::WGPUCallbackMode_WaitAnyOnly,
+                    callback: Some(queue_work_done_callback),
+                    userdata1: (&mut state as *mut QueueWorkDoneState).cast(),
+                    ..std::mem::zeroed()
+                },
+            );
+            wgpuDeviceDestroy(device);
+            // ProcessEvents excludes WaitAnyOnly; wait on the pending id directly.
+            let ids = borrow_handle(instance, "WGPUInstance")
+                .pending_callbacks
+                .lock()
+                .unwrap()
+                .keys()
+                .copied()
+                .collect::<Vec<_>>();
+            for id in ids {
+                let mut info = native::WGPUFutureWaitInfo {
+                    future: native::WGPUFuture { id },
+                    completed: 0,
+                };
+                wgpuInstanceWaitAny(instance, 1, &mut info, 0);
+            }
+            assert_eq!(state.fired, 1);
+            assert_eq!(state.status, native::WGPUQueueWorkDoneStatus_Success);
+            wgpuQueueRelease(queue);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn audit_s10_work_done_flushes_queued_buffer_writes() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let queue = wgpuDeviceGetQueue(device);
+            let buffer = wgpuDeviceCreateBuffer(
+                device,
+                &buffer_descriptor(native::WGPUBufferUsage_CopyDst, 4),
+            );
+            wgpuQueueWriteBuffer(queue, buffer, 0, [7u8; 4].as_ptr().cast(), 4);
+            let core = &borrow_handle(queue, "WGPUQueue").core;
+            let before = core.latest_submission_index();
+            wgpuQueueOnSubmittedWorkDone(
+                queue,
+                native::WGPUQueueWorkDoneCallbackInfo {
+                    mode: native::WGPUCallbackMode_AllowProcessEvents,
+                    ..std::mem::zeroed()
+                },
+            );
+            assert_ne!(core.latest_submission_index(), before);
+            assert_eq!(
+                borrow_handle(buffer, "WGPUBuffer")
+                    .core
+                    .hal()
+                    .unwrap()
+                    .read(0, 4)
+                    .unwrap(),
+                vec![7; 4]
+            );
+            wgpuBufferRelease(buffer);
+            wgpuQueueRelease(queue);
+            release_handles(instance, adapter, device);
+        }
+    }
 
     use std::sync::atomic::{AtomicUsize, Ordering};
 

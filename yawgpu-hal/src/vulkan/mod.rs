@@ -270,7 +270,20 @@ pub struct VulkanAdapter {
     subgroup_query: Arc<OnceLock<SubgroupQuery>>,
 }
 
+fn is_fallback_device_type(device_type: vk::PhysicalDeviceType) -> bool {
+    device_type == vk::PhysicalDeviceType::CPU
+}
+
 impl VulkanAdapter {
+    pub(crate) fn is_fallback(&self) -> bool {
+        let properties = unsafe {
+            self.instance
+                .instance
+                .get_physical_device_properties(self.physical_device)
+        };
+        is_fallback_device_type(properties.device_type)
+    }
+
     fn new(
         instance: Arc<VulkanInstanceInner>,
         physical_device: vk::PhysicalDevice,
@@ -1680,6 +1693,19 @@ pub use texture::{VulkanSampler, VulkanTexture};
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audit_e11_only_cpu_physical_devices_are_fallback_adapters() {
+        assert!(is_fallback_device_type(vk::PhysicalDeviceType::CPU));
+        for kind in [
+            vk::PhysicalDeviceType::INTEGRATED_GPU,
+            vk::PhysicalDeviceType::DISCRETE_GPU,
+            vk::PhysicalDeviceType::VIRTUAL_GPU,
+            vk::PhysicalDeviceType::OTHER,
+        ] {
+            assert!(!is_fallback_device_type(kind));
+        }
+    }
+
     use super::*;
 
     fn extension_names_from_pointers(extension_names: &[*const c_char]) -> Vec<&CStr> {

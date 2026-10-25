@@ -51,7 +51,11 @@ pub unsafe extern "C" fn wgpuQueueOnSubmittedWorkDone(
     queue: native::WGPUQueue,
     callback_info: native::WGPUQueueWorkDoneCallbackInfo,
 ) -> native::WGPUFuture {
-    let queue = borrow_handle(queue, "WGPUQueue");
+    if !valid_callback_mode(callback_info.mode) {
+        return native::WGPUFuture { id: 0 };
+    }
+    let queue = clone_handle(queue, "WGPUQueue");
+    dispatch_optional_device_error(&queue.device, queue.core.flush_pending_writes());
     let submission_index = queue.core.latest_submission_index();
     queue
         .instance
@@ -83,6 +87,9 @@ pub unsafe extern "C" fn wgpuQueueSubmit(
     commands: *const native::WGPUCommandBuffer,
 ) {
     let queue = borrow_handle(queue, "WGPUQueue");
+    if queue.device.is_lost() {
+        return;
+    }
     if command_count > 0 && commands.is_null() {
         queue.device.dispatch_error(
             core::ErrorKind::Validation,
@@ -131,6 +138,9 @@ pub unsafe extern "C" fn wgpuQueueWriteBuffer(
     size: usize,
 ) {
     let queue = borrow_handle(queue, "WGPUQueue");
+    if queue.device.is_lost() {
+        return;
+    }
     let buffer = borrow_handle(buffer, "WGPUBuffer");
     if !buffer.device.same(&queue.device) {
         queue.device.dispatch_error(
@@ -177,6 +187,9 @@ pub unsafe extern "C" fn wgpuQueueWriteTexture(
     write_size: *const native::WGPUExtent3D,
 ) {
     let queue = borrow_handle(queue, "WGPUQueue");
+    if queue.device.is_lost() {
+        return;
+    }
     let data_size_usize = data_size;
     if data_size > 0 && data.is_null() {
         queue.device.dispatch_error(

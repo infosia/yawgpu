@@ -468,6 +468,18 @@ pub enum HalAdapter {
 }
 
 impl HalAdapter {
+    /// Returns whether the backend reports a software CPU adapter.
+    #[must_use]
+    pub fn is_fallback(&self) -> bool {
+        match self {
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.is_fallback(),
+            // Noop is a test backend, not an executable software adapter.
+            #[allow(unreachable_patterns)]
+            _ => false,
+        }
+    }
+
     /// Returns the name.
     #[must_use]
     pub fn name(&self) -> String {
@@ -1423,6 +1435,12 @@ pub enum HalRenderPipeline {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audit_e11_noop_is_not_a_real_fallback_adapter() {
+        let adapter = HalInstance::new_noop().enumerate_adapters().remove(0);
+        assert!(!adapter.is_fallback());
+    }
+
     #[test]
     fn timestamp_period_on_noop_is_one() {
         let adapter = HalInstance::new_noop().enumerate_adapters().remove(0);
