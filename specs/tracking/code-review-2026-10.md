@@ -18,8 +18,14 @@ Vulkan per-submit object churn + retire waits under `queue_access` (perf),
 Tint double IR lowering (perf), MINOR list. GLES on a real GLES host
 (Linux, NVIDIA EGL device, `5cd8c6a`, 2026-10-25): all 7 `e2e_gles_*`
 binaries, 17 tests pass, including the Block 109 C1 case
-`gles_render_depth_test_occludes_later_far_draw`. Still owed: Block 111
-R8–R11 have unit tests only — no `e2e_gles_*` case exercises them yet.
+`gles_render_depth_test_occludes_later_far_draw`. Block 111 R8–R11:
+`e2e_gles_class_audit.rs` (Linux NVIDIA EGL, 2026-10-25): R8 (mip-1
+viewport, MSAA resolve into mip 1), R9 (resolve under a draw scissor; next-pass
+clear), R10 (uint16 strip restart at `0xFFFF`), R11 (combined-DS stencil
+upload → Internal error; `Stencil8` upload drives the stencil test) all pass,
+and each goes red with its fix reverted — except the R9 `RenderPassCleanup`
+reset, which no path observes (pass begin, resolve, lazy-init clears and
+present each disable the scissor themselves).
 Native-Vulkan re-confirmation (Windows 11, NVIDIA, Vulkan SDK 1.3.296 Khronos
 validation layer, `decfd69`): all 30 `e2e_vulkan_*` binaries, 131 tests pass
 (`--features vulkan,tiled -- --ignored`), with zero `VUID-*` output, and again

@@ -20,7 +20,7 @@ Full detail: `specs/reference/workflow.md`.
 | Tier | Backends | Meaning |
 |---|---|---|
 | **Tier 1 — Supported** | Vulkan, Metal | webgpu.h semantics fully mapped. Phase Review-clean implies "conformant on real GPU" within the slices brought up so far. API and behaviour changes follow normal SemVer discipline. |
-| **Tier 2 — Experimental (best-effort)** | GLES (Android + Windows ANGLE) | Behind opt-in `gles` cargo feature; never in `default`. webgpu.h paths that cannot be cleanly mapped to GLES 3.1 may be **rejected at the HAL layer with `HalError`**, which `yawgpu-core` surfaces as a device error. Feature set and behaviour may change without SemVer guarantees. Real-GPU verification is manual on Windows ANGLE only. |
+| **Tier 2 — Experimental (best-effort)** | GLES (Android + Windows ANGLE) | Behind opt-in `gles` cargo feature; never in `default`. webgpu.h paths that cannot be cleanly mapped to GLES 3.1 may be **rejected at the HAL layer with `HalError`**, which `yawgpu-core` surfaces as a device error. Feature set and behaviour may change without SemVer guarantees. Real-GPU verification is manual: a native Linux GLES host (EGL device, e.g. the NVIDIA dev host) is sufficient on its own; Windows ANGLE is not required. |
 
 **Operational rule (Tier-independent core validation).** `yawgpu-core`
 validation is identical regardless of the backend tier — a rule that

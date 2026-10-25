@@ -13,10 +13,14 @@ Review `782959c`), Block 115 (`960805c`, `2d371e5`, `9476501`, Phase Review
 reversed the earlier over-strict audit #3 (wgpu semantics) back to the
 WebGPU spec / Dawn rule. Real-GPU repro-before / pass-after evidence: S1
 (WAR), F1, T5, F2, T1, T2, Block 115 M1 / R-PR4 / R-PR5, and the tiled
-inter-subpass hazard found on the first tiled sync-validation run. Owed:
-GLES rows (F5, F6, F8) — unit tests only; no `e2e_gles_*` case exercises
-them yet (the existing 17 GLES e2e tests pass on the Linux NVIDIA EGL host
-at `5cd8c6a`). Native-Vulkan re-confirmation (Windows 11, NVIDIA, Vulkan SDK 1.3.296 Khronos
+inter-subpass hazard found on the first tiled sync-validation run. GLES rows (F5, F6, F8):
+`e2e_gles_class_audit.rs` (Linux NVIDIA EGL, 2026-10-25): F5 (3D storage
+texture, every z slice), F6 (sRGB view of a unorm texture: clear + draw, MSAA
+resolve), F8 (`frag_depth` clamped to the viewport depth range) all pass; F6
+and F8 go red with their fix reverted. F5 does not: the pre-fix
+`layered = FALSE` binding of an `image3D` is undefined per GL and NVIDIA still
+writes every slice, so red-before is not observable on this host; accepted
+(the fix is covered by its HAL unit test). Native-Vulkan re-confirmation (Windows 11, NVIDIA, Vulkan SDK 1.3.296 Khronos
 validation layer, `decfd69`): all 30 `e2e_vulkan_*` binaries, 131 tests pass
 (`--features vulkan,tiled -- --ignored`), with zero `VUID-*` output, and again
 with synchronization validation (`VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true`)
