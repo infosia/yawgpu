@@ -16,7 +16,12 @@ pre-existing hazard classes (R16–R18). **Block 112** (queue submit serializati
 COMPLETE 2026-10-25. Still open: GLES context release across threads,
 Vulkan per-submit object churn + retire waits under `queue_access` (perf),
 Tint double IR lowering (perf), MINOR list; owed: GLES Block 109/111 e2e
-on Windows ANGLE.
+on a real GLES host (Linux).
+Native-Vulkan re-confirmation (Windows 11, NVIDIA, Vulkan SDK 1.3.296 Khronos
+validation layer, `decfd69`): all 30 `e2e_vulkan_*` binaries, 131 tests pass
+(`--features vulkan,tiled -- --ignored`), with zero `VUID-*` output, and again
+with synchronization validation (`VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true`)
+with zero `SYNC-HAZARD-*` output.
 Block 109 also closed the Vulkan MAJOR "transient attachments end in
 `TRANSFER_SRC_OPTIMAL`" (R7) and added a surface double-acquire fix (R8).
 

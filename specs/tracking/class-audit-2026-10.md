@@ -14,7 +14,11 @@ reversed the earlier over-strict audit #3 (wgpu semantics) back to the
 WebGPU spec / Dawn rule. Real-GPU repro-before / pass-after evidence: S1
 (WAR), F1, T5, F2, T1, T2, Block 115 M1 / R-PR4 / R-PR5, and the tiled
 inter-subpass hazard found on the first tiled sync-validation run. Owed:
-GLES rows (F5, F6, F8) on Windows ANGLE. Gate at `fa052c6`: webgpu-native-cts
+GLES rows (F5, F6, F8) on a real GLES host (Linux). Native-Vulkan re-confirmation (Windows 11, NVIDIA, Vulkan SDK 1.3.296 Khronos
+validation layer, `decfd69`): all 30 `e2e_vulkan_*` binaries, 131 tests pass
+(`--features vulkan,tiled -- --ignored`), with zero `VUID-*` output, and again
+with synchronization validation (`VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true`)
+with zero `SYNC-HAZARD-*` output. Gate at `fa052c6`: webgpu-native-cts
 Metal `api,validation` 298847/0 (identical to the pre-audit baseline),
 `api,operation` 228851/0 (+3 correct `forceFallbackAdapter` skips).
 
