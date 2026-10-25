@@ -704,10 +704,15 @@ unsafe fn present_frame(
         status: 0,
     };
     yawgpu::wgpuSurfaceGetCurrentTexture(surface, &mut surface_texture);
-    assert_eq!(
-        surface_texture.status,
-        native::WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal,
-        "frame {frame}: acquire status"
+    // Block 114 T3 / R-PR1: a configured size that differs from the window's
+    // `currentExtent` is used as-is, and the driver may report the swapchain
+    // as suboptimal (Dawn maps VK_SUBOPTIMAL_KHR to SuccessSuboptimal).
+    assert!(
+        surface_texture.status == native::WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal
+            || surface_texture.status
+                == native::WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal,
+        "frame {frame}: acquire status {}",
+        surface_texture.status
     );
     let texture = surface_texture.texture.cast_mut();
     assert!(!texture.is_null(), "frame {frame}: null surface texture");

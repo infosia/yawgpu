@@ -76,6 +76,8 @@ pub(super) struct VulkanComputePipelineInner {
     pub(super) pipeline_layout: vk::PipelineLayout,
     pub(super) descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
     pub(super) descriptor_bindings: Vec<HalDescriptorBinding>,
+    /// Writable storage buffers used by the compute entry point.
+    pub(super) writable_storage_buffer_bindings: Vec<(u32, u32)>,
     pub(super) shader_module: vk::ShaderModule,
     /// Combined immediates push-constant block (Block 94 S3). `None` when
     /// the pipeline layout reserves no user immediates.
@@ -334,6 +336,10 @@ pub(super) fn create_compute_pipeline(
             pipeline_layout,
             descriptor_set_layouts,
             descriptor_bindings: bindings.to_vec(),
+            writable_storage_buffer_bindings: writable_buffer_bindings(
+                &spirv_writable_storage_bindings(&code, bindings),
+                bindings,
+            ),
             shader_module,
             immediates,
         }),
@@ -403,6 +409,26 @@ fn render_writable_storage_bindings(
     writable.sort_unstable();
     writable.dedup();
     writable
+}
+
+/// Keeps only buffer bindings; image writes do not need the buffer WAR dependency.
+pub(super) fn writable_buffer_bindings(
+    writable: &[(u32, u32)],
+    bindings: &[HalDescriptorBinding],
+) -> Vec<(u32, u32)> {
+    writable
+        .iter()
+        .copied()
+        .filter(|key| {
+            bindings.iter().any(|binding| {
+                (binding.group, binding.binding) == *key
+                    && matches!(
+                        binding.kind,
+                        HalDescriptorBindingKind::Buffer(crate::HalBufferBindingKind::Storage)
+                    )
+            })
+        })
+        .collect()
 }
 
 /// Reads binding decorations and NonWritable on variables or block members.
@@ -2297,6 +2323,33 @@ mod tests {
             }
         }
         words
+    }
+
+    #[test]
+    fn phase_review_buffer_writers_exclude_uniforms_and_storage_images() {
+        let storage = HalDescriptorBinding {
+            group: 2,
+            binding: 3,
+            kind: HalDescriptorBindingKind::Buffer(crate::HalBufferBindingKind::Storage),
+        };
+        for read_only in [false, true] {
+            let writes =
+                spirv_writable_storage_bindings(&storage_spirv(read_only, false), &[storage]);
+            assert_eq!(
+                writable_buffer_bindings(&writes, &[storage]).is_empty(),
+                read_only
+            );
+        }
+        for kind in [
+            HalDescriptorBindingKind::Buffer(crate::HalBufferBindingKind::Uniform),
+            HalDescriptorBindingKind::StorageTexture {
+                access: crate::HalStorageTextureAccess::ReadWrite,
+            },
+        ] {
+            let descriptor = HalDescriptorBinding { kind, ..storage };
+            assert!(writable_buffer_bindings(&[(2, 3)], &[descriptor]).is_empty());
+        }
+        assert!(writable_buffer_bindings(&[(2, 4)], &[storage]).is_empty());
     }
 
     #[test]

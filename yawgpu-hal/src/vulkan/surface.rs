@@ -836,7 +836,8 @@ pub(super) fn create_swapchain(
         swapchain_image_usage(config.usage, capabilities.supported_usage_flags)?
     };
     let view_formats = super::texture::texture_view_formats(config.format, &config.view_formats)?;
-    let mutable = mutable_swapchain_flags(&view_formats, device.swapchain_mutable_format)?;
+    let mutable =
+        mutable_swapchain_flags(&view_formats, device.swapchain_mutable_format, needs_blit)?;
     let alpha = hal_alpha_to_vk(config.alpha_mode);
     if !capabilities.supported_composite_alpha.contains(alpha) {
         return Err(surface_query_error());
@@ -1022,9 +1023,24 @@ fn swapchain_texture_plan(
     config: &HalSurfaceConfiguration,
     caps: &vk::SurfaceCapabilitiesKHR,
 ) -> Result<(vk::Extent2D, Option<HalTextureDescriptor>), HalError> {
-    let extent = swapchain_extent(config.width, config.height, caps)?;
-    let blit = (extent.width != config.width || extent.height != config.height)
-        .then(|| blit_texture_descriptor(config));
+    let configured = vk::Extent2D {
+        width: config.width,
+        height: config.height,
+    };
+    let in_range = config.width >= caps.min_image_extent.width
+        && config.width <= caps.max_image_extent.width
+        && config.height >= caps.min_image_extent.height
+        && config.height <= caps.max_image_extent.height;
+    let needs_blit = !in_range
+        || !caps
+            .supported_usage_flags
+            .contains(hal_usage_to_vk_image_usage(config.usage));
+    let extent = if needs_blit {
+        swapchain_extent(config.width, config.height, caps)?
+    } else {
+        configured
+    };
+    let blit = needs_blit.then(|| blit_texture_descriptor(config));
     Ok((extent, blit))
 }
 
@@ -1047,8 +1063,9 @@ fn blit_texture_descriptor(config: &HalSurfaceConfiguration) -> HalTextureDescri
 fn mutable_swapchain_flags(
     formats: &[vk::Format],
     supported: bool,
+    needs_blit: bool,
 ) -> Result<vk::SwapchainCreateFlagsKHR, HalError> {
-    if formats.len() <= 1 {
+    if needs_blit || formats.len() <= 1 {
         return Ok(vk::SwapchainCreateFlagsKHR::empty());
     }
     if !supported {
@@ -1263,6 +1280,71 @@ fn hal_usage_to_vk_image_usage(usage: HalTextureUsage) -> vk::ImageUsageFlags {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn phase_review_configured_extent_wins_inside_wide_fixed_surface_range() {
+        let mut config = surface_config();
+        let caps = vk::SurfaceCapabilitiesKHR::default()
+            .current_extent(vk::Extent2D {
+                width: 64,
+                height: 64,
+            })
+            .min_image_extent(vk::Extent2D {
+                width: 32,
+                height: 32,
+            })
+            .max_image_extent(vk::Extent2D {
+                width: 256,
+                height: 256,
+            })
+            .supported_usage_flags(hal_usage_to_vk_image_usage(config.usage));
+        for (width, height) in [(128, 96), (32, 32), (256, 256)] {
+            config.width = width;
+            config.height = height;
+            let (extent, blit) = swapchain_texture_plan(&config, &caps).unwrap();
+            assert_eq!(extent, vk::Extent2D { width, height });
+            assert!(blit.is_none());
+        }
+    }
+
+    #[test]
+    fn phase_review_unsupported_usage_blits_even_at_the_native_extent() {
+        let mut config = surface_config();
+        config.width = 64;
+        config.height = 64;
+        config.usage.texture_binding = true;
+        let caps = vk::SurfaceCapabilitiesKHR::default()
+            .current_extent(vk::Extent2D {
+                width: 64,
+                height: 64,
+            })
+            .min_image_extent(vk::Extent2D {
+                width: 32,
+                height: 32,
+            })
+            .max_image_extent(vk::Extent2D {
+                width: 256,
+                height: 256,
+            })
+            .supported_usage_flags(vk::ImageUsageFlags::TRANSFER_DST);
+        let (extent, blit) = swapchain_texture_plan(&config, &caps).unwrap();
+        assert_eq!(extent, caps.current_extent);
+        let blit = blit.expect("unsupported usage requires an intermediate");
+        assert!(blit.usage.texture_binding && blit.usage.copy_src);
+    }
+
+    #[test]
+    fn phase_review_blit_view_formats_do_not_require_mutable_swapchain() {
+        let formats = [vk::Format::B8G8R8A8_UNORM, vk::Format::B8G8R8A8_SRGB];
+        assert!(mutable_swapchain_flags(&formats, false, true)
+            .unwrap()
+            .is_empty());
+        assert!(mutable_swapchain_flags(&formats, false, false).is_err());
+        assert_eq!(
+            mutable_swapchain_flags(&formats, true, false).unwrap(),
+            vk::SwapchainCreateFlagsKHR::MUTABLE_FORMAT
+        );
+    }
+
+    #[test]
     fn audit_t1_blit_texture_preserves_configured_extent_and_views() {
         let mut config = surface_config();
         config.width = 128;
@@ -1279,6 +1361,7 @@ mod tests {
         assert!(descriptor.usage.copy_src);
         assert_eq!(descriptor.view_formats, config.view_formats);
         let flexible = vk::SurfaceCapabilitiesKHR::default()
+            .supported_usage_flags(hal_usage_to_vk_image_usage(config.usage))
             .current_extent(vk::Extent2D {
                 width: u32::MAX,
                 height: u32::MAX,
@@ -1314,11 +1397,11 @@ mod tests {
             [vk::Format::B8G8R8A8_UNORM, vk::Format::B8G8R8A8_SRGB]
         );
         assert_eq!(
-            mutable_swapchain_flags(&formats, true).unwrap(),
+            mutable_swapchain_flags(&formats, true, false).unwrap(),
             vk::SwapchainCreateFlagsKHR::MUTABLE_FORMAT
         );
-        assert!(mutable_swapchain_flags(&formats, false).is_err());
-        assert!(mutable_swapchain_flags(&formats[..1], false)
+        assert!(mutable_swapchain_flags(&formats, false, false).is_err());
+        assert!(mutable_swapchain_flags(&formats[..1], false, false)
             .unwrap()
             .is_empty());
     }

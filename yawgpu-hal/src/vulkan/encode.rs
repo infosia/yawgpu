@@ -74,11 +74,13 @@ pub(super) fn record_and_submit_copies(
         }
         for copy in copies {
             // Covers earlier submissions as well as previous commands in this one.
-            record_memory_barrier(
-                &queue.device.device,
-                command_buffer,
-                buffer_read_to_write_scopes(),
-            );
+            if command_writes_buffer(copy) {
+                record_memory_barrier(
+                    &queue.device.device,
+                    command_buffer,
+                    buffer_read_to_write_scopes(),
+                );
+            }
             match copy {
                 HalCopy::Buffer(copy) => {
                     encode_buffer_copy(&queue.device.device, command_buffer, copy)?;
@@ -1962,6 +1964,55 @@ struct MemoryBarrierScopes {
     dst_access: vk::AccessFlags,
 }
 
+/// Only buffer writers need to wait for preceding buffer reads. This includes
+/// queue.writeBuffer staging copies, which reach submission as HalCopy::Buffer.
+fn command_writes_buffer(command: &HalCopy) -> bool {
+    match command {
+        HalCopy::Buffer(_)
+        | HalCopy::BufferClear(_)
+        | HalCopy::TextureToBuffer(_)
+        | HalCopy::ResolveQuerySet(_) => true,
+        HalCopy::ComputePass(pass) => {
+            let crate::HalComputePipeline::Vulkan(pipeline) = &pass.pipeline else {
+                return false;
+            };
+            writable_storage_is_bound(
+                &pipeline.inner.writable_storage_buffer_bindings,
+                pass.bind_buffers
+                    .iter()
+                    .map(|buffer| (buffer.group, buffer.binding)),
+            )
+        }
+        HalCopy::RenderPassCommandStream(pass) => render_stream_needs_shader_write_barrier(
+            &pass.commands,
+            &render_writable_buffer_bindings,
+        ),
+        #[cfg(feature = "tiled")]
+        HalCopy::SubpassRenderPass(pass) => pass.draws.iter().any(|draw| {
+            writable_storage_is_bound(
+                &render_writable_buffer_bindings(&draw.pipeline),
+                draw.bind_buffers
+                    .iter()
+                    .map(|buffer| (buffer.group, buffer.binding)),
+            )
+        }),
+        HalCopy::ClearTexture(_)
+        | HalCopy::WriteTimestamp(_)
+        | HalCopy::BufferToTexture(_)
+        | HalCopy::TextureToTexture(_) => false,
+    }
+}
+
+fn render_writable_buffer_bindings(pipeline: &crate::HalRenderPipeline) -> Vec<(u32, u32)> {
+    match pipeline {
+        crate::HalRenderPipeline::Vulkan(pipeline) => super::pipeline::writable_buffer_bindings(
+            &pipeline.inner.writable_storage_bindings,
+            &pipeline.inner.descriptor_bindings,
+        ),
+        _ => Vec::new(),
+    }
+}
+
 // Conservative WAR execution dependency for vertex/index/indirect, shader and copy reads.
 fn buffer_read_to_write_scopes() -> MemoryBarrierScopes {
     MemoryBarrierScopes {
@@ -3290,9 +3341,9 @@ fn subpass_dependencies(layout: &HalSubpassPassLayout) -> Vec<vk::SubpassDepende
             .src_subpass(dependency.src_subpass)
             .dst_subpass(dependency.dst_subpass)
             .src_stage_mask(src_stage)
-            .dst_stage_mask(dst_stage)
+            .dst_stage_mask(dst_stage | render_attachment_stage_flags())
             .src_access_mask(src_access)
-            .dst_access_mask(dst_access)
+            .dst_access_mask(dst_access | render_attachment_access_flags())
             .dependency_flags(if dependency.by_region {
                 vk::DependencyFlags::BY_REGION
             } else {
@@ -5141,6 +5192,101 @@ mod tests {
             textures: vec![texture],
             samplers: Vec::new(),
             external_textures: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn phase_review_buffer_war_barrier_only_precedes_buffer_writers() {
+        let buffer = noop::NoopDevice::new()
+            .create_buffer(64, HalBufferUsage::default())
+            .unwrap();
+        let buffer = HalBuffer::Noop(buffer);
+        let texture = dummy_texture(HalTextureFormat::Rgba8Unorm);
+        let transfer = crate::HalBufferTextureCopy {
+            buffer: buffer.clone(),
+            buffer_layout: crate::HalBufferTextureLayout {
+                offset: 0,
+                bytes_per_row: 16,
+                rows_per_image: 4,
+            },
+            texture: texture.clone(),
+            format: HalTextureFormat::Rgba8Unorm,
+            mip_level: 0,
+            origin: crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+            aspect: crate::HalTextureAspect::All,
+            extent: crate::HalExtent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+        };
+        let read = HalCopy::BufferToTexture(transfer.clone());
+        let write = HalCopy::Buffer(crate::HalBufferCopy {
+            source: buffer.clone(),
+            source_offset: 0,
+            destination: buffer.clone(),
+            destination_offset: 16,
+            size: 16,
+        });
+        // Copy reads followed by an overwrite still receive the WAR dependency.
+        assert!(!command_writes_buffer(&read));
+        assert!(command_writes_buffer(&write));
+        assert!(command_writes_buffer(&HalCopy::TextureToBuffer(transfer)));
+        assert!(command_writes_buffer(&HalCopy::BufferClear(
+            crate::HalBufferClear {
+                buffer,
+                offset: 0,
+                size: 16,
+            }
+        )));
+        assert!(!command_writes_buffer(&HalCopy::ClearTexture(
+            crate::HalTextureClear {
+                texture,
+                format: HalTextureFormat::Rgba8Unorm,
+                aspect: crate::HalTextureAspect::All,
+                mip_level: 0,
+                base_array_layer: 0,
+                array_layer_count: 1,
+            }
+        )));
+        assert!(!command_writes_buffer(&HalCopy::RenderPassCommandStream(
+            crate::HalRenderPassCommandStream {
+                color_targets: Vec::new(),
+                framebuffer_fetch_color_slots: Vec::new(),
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                commands: Vec::new(),
+            }
+        )));
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn phase_review_inter_subpass_dependencies_cover_attachment_stores() {
+        for dependency_type in [
+            HalSubpassDependencyType::ColorToInput,
+            HalSubpassDependencyType::DepthToInput,
+            HalSubpassDependencyType::ColorDepthToInput,
+        ] {
+            let layout = HalSubpassPassLayout {
+                color_attachments: Vec::new(),
+                depth_stencil_attachment: None,
+                subpasses: Vec::new(),
+                dependencies: vec![HalSubpassDependency {
+                    src_subpass: 0,
+                    dst_subpass: 1,
+                    dependency_type,
+                    by_region: true,
+                }],
+            };
+            let dependency = subpass_dependencies(&layout)[1];
+            assert!(dependency.dst_stage_mask.contains(
+                vk::PipelineStageFlags::FRAGMENT_SHADER | render_attachment_stage_flags()
+            ));
+            assert!(dependency.dst_access_mask.contains(
+                vk::AccessFlags::INPUT_ATTACHMENT_READ | render_attachment_access_flags()
+            ));
+            assert_eq!(dependency.dependency_flags, vk::DependencyFlags::BY_REGION);
         }
     }
 
@@ -6998,7 +7144,7 @@ mod tests {
         );
         assert_eq!(
             dependency.dst_stage_mask,
-            vk::PipelineStageFlags::FRAGMENT_SHADER
+            vk::PipelineStageFlags::FRAGMENT_SHADER | render_attachment_stage_flags()
         );
         assert_eq!(
             dependency.src_access_mask,
@@ -7006,7 +7152,7 @@ mod tests {
         );
         assert_eq!(
             dependency.dst_access_mask,
-            vk::AccessFlags::INPUT_ATTACHMENT_READ
+            vk::AccessFlags::INPUT_ATTACHMENT_READ | render_attachment_access_flags()
         );
         assert_eq!(dependency.dependency_flags, vk::DependencyFlags::BY_REGION);
     }

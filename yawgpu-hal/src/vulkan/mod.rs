@@ -588,11 +588,20 @@ impl VulkanAdapter {
         }
 
         let mut features = vk::PhysicalDeviceShaderFloat16Int8Features::default();
-        // 16-bit storage is core in Vulkan 1.1, the minimum instance version.
+        let properties = unsafe {
+            self.instance
+                .instance
+                .get_physical_device_properties(self.physical_device)
+        };
+        let storage_available = storage_16bit_available(
+            YAWGPU_VULKAN_API_VERSION.min(properties.api_version),
+            self.has_device_extension(vk::KHR_16BIT_STORAGE_NAME),
+        );
         let mut storage = vk::PhysicalDevice16BitStorageFeatures::default();
-        let mut features2 = vk::PhysicalDeviceFeatures2::default()
-            .push_next(&mut features)
-            .push_next(&mut storage);
+        let mut features2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut features);
+        if storage_available {
+            features2 = features2.push_next(&mut storage);
+        }
         unsafe {
             self.instance
                 .instance
@@ -604,6 +613,7 @@ impl VulkanAdapter {
             features.shader_float16,
             shader_int16,
             storage.storage_buffer16_bit_access,
+            storage.uniform_and_storage_buffer16_bit_access,
         )
     }
 
@@ -889,10 +899,12 @@ impl VulkanAdapter {
             vk::PhysicalDeviceShaderFloat16Int8Features::default();
         let mut storage_16bit_supported_features =
             vk::PhysicalDevice16BitStorageFeatures::default();
-        // VK_KHR_16bit_storage is core in Vulkan 1.1, even when the driver
-        // omits its extension name. Query and enable those core feature bits.
-        let mut features2 =
-            vk::PhysicalDeviceFeatures2::default().push_next(&mut storage_16bit_supported_features);
+        let storage_available =
+            storage_16bit_available(effective_api_version, storage_16bit_extension);
+        let mut features2 = vk::PhysicalDeviceFeatures2::default();
+        if storage_available {
+            features2 = features2.push_next(&mut storage_16bit_supported_features);
+        }
         if shader_float16_int8_extension {
             features2 = features2.push_next(&mut shader_float16_int8_features);
         }
@@ -907,9 +919,10 @@ impl VulkanAdapter {
             shader_float16_int8_features.shader_float16,
             supported_features.shader_int16,
             storage_16bit_supported_features.storage_buffer16_bit_access,
+            storage_16bit_supported_features.uniform_and_storage_buffer16_bit_access,
         );
         let storage_16bit_features =
-            enabled_16bit_storage_features(true, storage_16bit_supported_features);
+            enabled_16bit_storage_features(storage_available, storage_16bit_supported_features);
         let occlusion_query_precise = supported_features.occlusion_query_precise == vk::TRUE;
         // Enable samplerAnisotropy when the physical device supports it.
         // Setting anisotropyEnable = true without this feature enabled is a VUID
@@ -1269,16 +1282,22 @@ fn enabled_texture_compression_features(
     enabled
 }
 
+fn storage_16bit_available(api_version: u32, extension_present: bool) -> bool {
+    api_version >= vk::API_VERSION_1_1 || extension_present
+}
+
 fn shader_float16_supported(
     extension_present: bool,
     shader_float16: vk::Bool32,
     shader_int16: vk::Bool32,
     storage_buffer16: vk::Bool32,
+    uniform_and_storage_buffer16: vk::Bool32,
 ) -> bool {
     extension_present
         && shader_float16 == vk::TRUE
         && shader_int16 == vk::TRUE
         && storage_buffer16 == vk::TRUE
+        && uniform_and_storage_buffer16 == vk::TRUE
 }
 
 /// Block 106: WebGPU `texture-component-swizzle` needs a non-identity
@@ -2375,11 +2394,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn phase_review_storage16_requires_core_version_or_extension() {
+        for (api, extension, expected) in [
+            (vk::API_VERSION_1_0, false, false),
+            (vk::API_VERSION_1_0, true, true),
+            (vk::API_VERSION_1_1, false, true),
+            (vk::API_VERSION_1_1, true, true),
+        ] {
+            assert_eq!(storage_16bit_available(api, extension), expected);
+            let supported = vk::PhysicalDevice16BitStorageFeatures::default()
+                .storage_buffer16_bit_access(true)
+                .uniform_and_storage_buffer16_bit_access(true);
+            let enabled =
+                enabled_16bit_storage_features(storage_16bit_available(api, extension), supported);
+            assert_eq!(enabled.enabled, expected);
+        }
+    }
+
+    #[test]
+    fn phase_review_f16_requires_uniform_storage16_access() {
+        assert!(!shader_float16_supported(
+            true,
+            vk::TRUE,
+            vk::TRUE,
+            vk::TRUE,
+            vk::FALSE
+        ));
+        assert!(shader_float16_supported(
+            true,
+            vk::TRUE,
+            vk::TRUE,
+            vk::TRUE,
+            vk::TRUE
+        ));
+    }
+
     /// Shader f16 requires float arithmetic, integer decomposition and buffer storage.
     /// Pure logic test; no real GPU required.
     #[test]
     fn audit_t4_f16_requires_float_int_and_storage_features() {
-        for mask in 0..16 {
+        for mask in 0..32 {
             let bit = |n| {
                 if mask & (1 << n) != 0 {
                     vk::TRUE
@@ -2388,8 +2443,8 @@ mod tests {
                 }
             };
             assert_eq!(
-                shader_float16_supported(mask & 1 != 0, bit(1), bit(2), bit(3)),
-                mask == 15
+                shader_float16_supported(mask & 1 != 0, bit(1), bit(2), bit(3), bit(4)),
+                mask == 31
             );
         }
     }
@@ -2403,7 +2458,13 @@ mod tests {
             (false, vk::FALSE, false),
         ] {
             assert_eq!(
-                shader_float16_supported(extension_present, shader_float16, vk::TRUE, vk::TRUE),
+                shader_float16_supported(
+                    extension_present,
+                    shader_float16,
+                    vk::TRUE,
+                    vk::TRUE,
+                    vk::TRUE
+                ),
                 expected
             );
         }
