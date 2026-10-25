@@ -17,16 +17,11 @@ pub(super) fn submit_copies(
     queue: &VulkanQueueInner,
     copies: &[HalCopy],
 ) -> Result<SubmissionIndex, HalError> {
-    let command_pool_info = vk::CommandPoolCreateInfo::default()
-        .flags(vk::CommandPoolCreateFlags::TRANSIENT)
-        .queue_family_index(queue.device.queue_family_index);
-    let command_pool = unsafe {
-        queue
-            .device
-            .device
-            .create_command_pool(&command_pool_info, None)
-    }
-    .map_err(|error| queue_submission_error("vkCreateCommandPool", error))?;
+    let command_pool = queue
+        .recycler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take_pool(&queue.device)?;
     record_and_submit_copies(queue, command_pool, copies)
 }
 
@@ -43,6 +38,7 @@ pub(super) fn record_and_submit_copies(
     let mut render_passes = Vec::new();
     let mut fence = None;
     let mut command_pool_cleanup = Some(command_pool);
+    let mut allocated_command_buffer = None;
     let result = (|| {
         // Serialize layout reads, command recording, submission and layout commit.
         let _queue_access = queue
@@ -63,6 +59,7 @@ pub(super) fn record_and_submit_copies(
                 message: "command buffer allocation returned no buffers".to_string(),
             });
         };
+        allocated_command_buffer = Some(command_buffer);
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         unsafe {
@@ -203,12 +200,11 @@ pub(super) fn record_and_submit_copies(
                     signal_semaphores.push(pending.render_finished_sem);
                 }
             }
-            let fence_info = vk::FenceCreateInfo::default();
             let created_fence = queue
-                .device
-                .device
-                .create_fence(&fence_info, None)
-                .map_err(|error| queue_submission_error("vkCreateFence", error))?;
+                .recycler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take_fence(&queue.device.device)?;
             fence = Some(created_fence);
             let submit_info = vk::SubmitInfo::default()
                 .wait_semaphores(&wait_semaphores)
@@ -237,6 +233,7 @@ pub(super) fn record_and_submit_copies(
                     TrackedSubmission {
                         index: submission_index,
                         tracker: Arc::clone(&queue.submissions),
+                        recycler: Arc::clone(&queue.recycler),
                     },
                 )
             };
@@ -246,13 +243,19 @@ pub(super) fn record_and_submit_copies(
             let mut retained = collect_retained_resources(copies);
             retained.append(&mut temporary_resources);
             let cleanup = retire_ops(
+                queue,
                 command_pool,
+                allocated_command_buffer.take(),
                 std::mem::take(&mut descriptor_pools),
                 std::mem::take(&mut framebuffers),
                 std::mem::take(&mut image_views),
                 std::mem::take(&mut render_passes),
             );
             command_pool_cleanup = None;
+            // Lock order: queue_access -> surface states -> submissions/recycler.
+            // Release queue_access and surface states before retire; retirement
+            // may take submissions/recycler, but never takes queue_access.
+            drop(_queue_access);
             let mut retire = queue
                 .retire
                 .lock()
@@ -271,13 +274,19 @@ pub(super) fn record_and_submit_copies(
     if result.is_err() {
         unsafe {
             if let Some(fence) = fence.take() {
-                queue.device.device.destroy_fence(fence, None);
+                queue
+                    .recycler
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .recycle_fence(&queue.device.device, fence);
             }
             if let Some(command_pool) = command_pool_cleanup.take() {
                 cleanup_retire_ops(
                     &queue.device.device,
                     retire_ops(
+                        queue,
                         command_pool,
+                        allocated_command_buffer.take(),
                         descriptor_pools,
                         framebuffers,
                         image_views,
@@ -504,14 +513,25 @@ pub(super) fn transition_swapchain_image_to_present(
 }
 
 fn retire_ops(
+    queue: &VulkanQueueInner,
     command_pool: vk::CommandPool,
+    command_buffer: Option<vk::CommandBuffer>,
     descriptor_pools: Vec<vk::DescriptorPool>,
     framebuffers: Vec<vk::Framebuffer>,
     image_views: Vec<vk::ImageView>,
     render_passes: Vec<vk::RenderPass>,
 ) -> Vec<RetireOp> {
     let mut cleanup = Vec::new();
-    cleanup.push(RetireOp::CommandPool(command_pool));
+    if let Some(buffer) = command_buffer {
+        cleanup.push(RetireOp::CommandBuffer {
+            pool: command_pool,
+            buffer,
+        });
+    }
+    cleanup.push(RetireOp::RecycledCommandPool(
+        command_pool,
+        Arc::clone(&queue.recycler),
+    ));
     cleanup.extend(descriptor_pools.into_iter().map(RetireOp::DescriptorPool));
     cleanup.extend(framebuffers.into_iter().map(RetireOp::Framebuffer));
     cleanup.extend(image_views.into_iter().map(RetireOp::ImageView));

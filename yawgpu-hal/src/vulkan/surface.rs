@@ -62,7 +62,7 @@ pub(super) enum RetireOp {
     RenderPass(vk::RenderPass),
     Framebuffer(vk::Framebuffer),
     ImageView(vk::ImageView),
-    CommandPool(vk::CommandPool),
+    RecycledCommandPool(vk::CommandPool, Arc<Mutex<SubmitRecycler>>),
     CommandBuffer {
         pool: vk::CommandPool,
         buffer: vk::CommandBuffer,
@@ -98,6 +98,105 @@ pub(super) struct InFlightFrame {
     retained: Vec<RetainedResource>,
     destroy_fence: bool,
     tracked_submission: Option<TrackedSubmission>,
+}
+
+pub(super) const MAX_IN_FLIGHT_SUBMISSIONS: usize = 64;
+
+#[derive(Debug, Default)]
+pub(super) struct SubmissionRetireQueue {
+    frames: VecDeque<InFlightFrame>,
+}
+
+impl SubmissionRetireQueue {
+    pub(super) fn retire_tracked(
+        &mut self,
+        device: &ash::Device,
+        fence: vk::Fence,
+        cleanup: Vec<RetireOp>,
+        retained: Vec<RetainedResource>,
+        destroy_fence: bool,
+        tracked_submission: Option<TrackedSubmission>,
+    ) -> Result<(), HalError> {
+        let harvest_result = self.harvest(device);
+        let frame = InFlightFrame {
+            fence,
+            cleanup,
+            retained,
+            destroy_fence,
+            tracked_submission,
+        };
+        // A submit can be descheduled after dropping queue_access. Keep the
+        // retirement FIFO in submission order even if handoffs arrive out of order.
+        let index = frame
+            .tracked_submission
+            .as_ref()
+            .map(|tracked| tracked.index);
+        let position = self
+            .frames
+            .iter()
+            .position(|pending| {
+                pending
+                    .tracked_submission
+                    .as_ref()
+                    .map(|tracked| tracked.index)
+                    > index
+            })
+            .unwrap_or(self.frames.len());
+        // Keep ownership of the new frame even if the harvest failed.
+        self.frames.insert(position, frame);
+        harvest_result?;
+        self.enforce_limit(device)
+    }
+
+    fn enforce_limit(&mut self, device: &ash::Device) -> Result<(), HalError> {
+        while self.frames.len() > MAX_IN_FLIGHT_SUBMISSIONS {
+            self.wait_oldest(device)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn harvest(&mut self, device: &ash::Device) -> Result<(), HalError> {
+        while let Some(frame) = self.frames.front() {
+            match unsafe { device.get_fence_status(frame.fence) } {
+                Ok(true) => {
+                    if let Some(frame) = self.frames.pop_front() {
+                        cleanup_frame(device, frame);
+                    }
+                }
+                Ok(false) => break,
+                Err(error) => return Err(queue_submission_error("vkGetFenceStatus", error)),
+            }
+        }
+        Ok(())
+    }
+
+    fn wait_oldest(&mut self, device: &ash::Device) -> Result<(), HalError> {
+        if let Some(frame) = self.frames.front() {
+            wait_for_frame(device, frame)
+                .map_err(|error| queue_submission_error("vkWaitForFences", error))?;
+            if let Some(frame) = self.frames.pop_front() {
+                cleanup_frame(device, frame);
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn wait_all(&mut self, device: &ash::Device) -> Result<(), HalError> {
+        let mut first_error = None;
+        for frame in std::mem::take(&mut self.frames) {
+            match wait_for_frame(device, &frame) {
+                Ok(()) => cleanup_frame(device, frame),
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    self.frames.push_back(frame);
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(queue_submission_error("vkWaitForFences", error)),
+            None => Ok(()),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -261,11 +360,15 @@ fn cleanup_frame(device: &ash::Device, frame: InFlightFrame) {
             tracker.mark_completed(tracked_submission.index);
             let removed_fence = tracker.remove_fence(tracked_submission.index);
             debug_assert_eq!(removed_fence, Some(fence));
-            // If every waiter unpinned first, retirement owns and destroys the
-            // fence here. If retirement wins the race, it defers destruction;
-            // the last waiter owns destruction after dropping its final pin.
+            // Pinned fences must stay signalled until the last waiter unpins.
+            // Keep the mapping removal and pin check atomic under the tracker.
             if destroy_fence && !tracker.defer_destroy_if_pinned(fence) {
-                device.destroy_fence(fence, None);
+                drop(tracker);
+                tracked_submission
+                    .recycler
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .recycle_fence(device, fence);
             }
         } else if destroy_fence {
             device.destroy_fence(fence, None);
@@ -280,7 +383,10 @@ pub(super) unsafe fn cleanup_retire_ops(device: &ash::Device, cleanup: Vec<Retir
             RetireOp::RenderPass(render_pass) => device.destroy_render_pass(render_pass, None),
             RetireOp::Framebuffer(framebuffer) => device.destroy_framebuffer(framebuffer, None),
             RetireOp::ImageView(view) => device.destroy_image_view(view, None),
-            RetireOp::CommandPool(command_pool) => device.destroy_command_pool(command_pool, None),
+            RetireOp::RecycledCommandPool(pool, recycler) => recycler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .recycle_pool(device, pool),
             RetireOp::CommandBuffer { pool, buffer } => {
                 device.free_command_buffers(pool, &[buffer]);
             }
@@ -2098,6 +2204,87 @@ mod tests {
     }
 
     #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    fn vulkan_submission_retire_queue_does_not_wait_at_ring_size() {
+        let device = vulkan_device();
+        let raw = &device.inner.device;
+        let mut retire = SubmissionRetireQueue::default();
+        for _ in 0..RETIRE_RING_SIZE + 2 {
+            let fence = unsafe { raw.create_fence(&vk::FenceCreateInfo::default(), None) }
+                .expect("create unsignalled fence");
+            retire
+                .retire_tracked(raw, fence, vec![], vec![], true, None)
+                .expect("push must not wait on an unsignalled fence");
+        }
+        assert_eq!(retire.frames.len(), RETIRE_RING_SIZE + 2);
+        // These fences were never submitted; destroy them without waiting.
+        for frame in retire.frames.drain(..) {
+            cleanup_frame(raw, frame);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    fn vulkan_submission_retire_queue_harvests_front_on_push() {
+        let device = vulkan_device();
+        let raw = &device.inner.device;
+        let mut retire = SubmissionRetireQueue::default();
+        let buffer = device.create_buffer(4, HalBufferUsage::default()).unwrap();
+        let inner = Arc::clone(buffer.inner.as_ref().unwrap());
+        let baseline = Arc::strong_count(&inner);
+        retire
+            .retire_tracked(
+                raw,
+                signaled_fence(&device),
+                vec![],
+                vec![RetainedResource::Buffer {
+                    _inner: Arc::clone(&inner),
+                }],
+                true,
+                None,
+            )
+            .unwrap();
+        assert_eq!(Arc::strong_count(&inner), baseline + 1);
+        let fence = unsafe { raw.create_fence(&vk::FenceCreateInfo::default(), None) }.unwrap();
+        retire
+            .retire_tracked(raw, fence, vec![], vec![], true, None)
+            .unwrap();
+        assert_eq!(Arc::strong_count(&inner), baseline);
+        assert_eq!(retire.frames.len(), 1);
+        assert_eq!(retire.frames.front().unwrap().fence, fence);
+        for frame in retire.frames.drain(..) {
+            cleanup_frame(raw, frame);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    fn vulkan_submission_retire_queue_high_water_waits_oldest() {
+        let device = vulkan_device();
+        let raw = &device.inner.device;
+        let mut retire = SubmissionRetireQueue::default();
+        // Seed completed frames to exercise back-pressure deterministically,
+        // without racing vkGetFenceStatus against real GPU completion.
+        for _ in 0..MAX_IN_FLIGHT_SUBMISSIONS + 2 {
+            retire.frames.push_back(InFlightFrame {
+                fence: signaled_fence(&device),
+                cleanup: vec![],
+                retained: vec![],
+                destroy_fence: true,
+                tracked_submission: None,
+            });
+        }
+        let third = retire.frames[2].fence;
+        retire
+            .enforce_limit(raw)
+            .expect("wait above high-water mark");
+        assert_eq!(retire.frames.len(), MAX_IN_FLIGHT_SUBMISSIONS);
+        assert_eq!(retire.frames.front().unwrap().fence, third);
+        retire.wait_all(raw).unwrap();
+        assert!(retire.frames.is_empty());
+    }
+
     fn signaled_fence(device: &VulkanDevice) -> vk::Fence {
         let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
         unsafe {
