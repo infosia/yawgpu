@@ -2398,21 +2398,8 @@ pub(super) fn encode_subpass_render_pass(
     let (views, persistent_textures, depth_stencil_texture) =
         subpass_attachment_views(&device.device, pass)?;
     guard.temps.image_views = views.clone();
-    for (slot, texture, range) in persistent_textures.iter() {
-        let is_input_source = pass.layout.subpasses.iter().any(|subpass| {
-            subpass
-                .input_attachments
-                .iter()
-                .any(|input| input.source_attachment == *slot)
-        });
-        let (layout, layout_id) = if is_input_source {
-            (vk::ImageLayout::GENERAL, IMAGE_LAYOUT_GENERAL)
-        } else {
-            (
-                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                IMAGE_LAYOUT_COLOR_ATTACHMENT,
-            )
-        };
+    for (slot, resolve, texture, range) in persistent_textures.iter() {
+        let (layout, layout_id) = subpass_color_initial_layout(&pass.layout, *slot, *resolve);
         transition_image_range(
             layouts,
             &device.device,
@@ -2435,7 +2422,7 @@ pub(super) fn encode_subpass_render_pass(
         )?;
     }
     let mut attachments = Vec::new();
-    for (_, texture, range) in &persistent_textures {
+    for (_, _, texture, range) in &persistent_textures {
         attachments.push((texture.inner()?.image, *range));
     }
     if let Some((texture, range)) = &depth_stencil_texture {
@@ -2534,7 +2521,7 @@ pub(super) fn encode_subpass_render_pass(
             render_pass_shader_write_scopes(),
         );
     }
-    for (_, texture, range) in persistent_textures {
+    for (_, _, texture, range) in persistent_textures {
         let inner = texture.inner()?;
         layouts.set(
             &inner.layouts,
@@ -2573,7 +2560,7 @@ struct SubpassDrawTemps {
 #[cfg(feature = "tiled")]
 type SubpassAttachmentViews = (
     Vec<vk::ImageView>,
-    Vec<(u32, VulkanTexture, SubresourceRange)>,
+    Vec<(u32, bool, VulkanTexture, SubresourceRange)>,
     Option<(VulkanTexture, SubresourceRange)>,
 );
 
@@ -2884,6 +2871,50 @@ fn encode_subpass_draw_call(
     }
 }
 
+// Resolve targets have their own role, not a synthetic input-attachment slot.
+#[cfg(feature = "tiled")]
+fn subpass_color_initial_layout(
+    layout: &HalSubpassPassLayout,
+    slot: u32,
+    resolve: bool,
+) -> (vk::ImageLayout, u8) {
+    if !resolve && subpass_attachment_is_input(layout, slot) {
+        (vk::ImageLayout::GENERAL, IMAGE_LAYOUT_GENERAL)
+    } else {
+        (
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            IMAGE_LAYOUT_COLOR_ATTACHMENT,
+        )
+    }
+}
+
+#[cfg(feature = "tiled")]
+fn subpass_attachment_is_input(layout: &HalSubpassPassLayout, slot: u32) -> bool {
+    layout.subpasses.iter().any(|subpass| {
+        subpass
+            .input_attachments
+            .iter()
+            .any(|input| input.source_attachment == slot)
+    })
+}
+
+#[cfg(feature = "tiled")]
+fn subpass_attachment_image_view_usage(
+    aspects: vk::ImageAspectFlags,
+    used_as_input: bool,
+) -> vk::ImageUsageFlags {
+    if aspects == vk::ImageAspectFlags::COLOR {
+        color_attachment_image_view_usage()
+    } else {
+        let usage = depth_stencil_attachment_image_view_usage();
+        if used_as_input {
+            usage | vk::ImageUsageFlags::INPUT_ATTACHMENT
+        } else {
+            usage
+        }
+    }
+}
+
 /// Collects attachment views while keeping depth-stencil out of the color layout path.
 #[cfg(feature = "tiled")]
 fn subpass_attachment_views(
@@ -2894,18 +2925,29 @@ fn subpass_attachment_views(
     let mut persistent_textures = Vec::new();
     let result = (|| {
         for (slot, attachment) in pass.color_attachments.iter().enumerate() {
-            let (view, texture) = subpass_attachment_view(device, &attachment.resource, false)?;
-            views.push(view);
             let slot = u32::try_from(slot)
                 .map_err(|_| texture_error("subpass color slot is too large"))?;
+            let (view, texture) = subpass_attachment_view(
+                device,
+                &attachment.resource,
+                false,
+                subpass_attachment_is_input(&pass.layout, slot),
+            )?;
+            views.push(view);
             persistent_textures.push((
                 slot,
+                false,
                 texture,
                 subpass_attachment_range(&attachment.resource, false),
             ));
         }
         let depth_stencil_texture = if let Some(depth) = &pass.depth_stencil_attachment {
-            let (view, texture) = subpass_attachment_view(device, &depth.resource, false)?;
+            let (view, texture) = subpass_attachment_view(
+                device,
+                &depth.resource,
+                false,
+                subpass_attachment_is_input(&pass.layout, u32::MAX),
+            )?;
             views.push(view);
             Some((texture, subpass_attachment_range(&depth.resource, false)))
         } else {
@@ -2915,11 +2957,14 @@ fn subpass_attachment_views(
             let HalSubpassAttachmentResource::Persistent { resolve_target, .. } =
                 &attachment.resource;
             if resolve_target.is_some() {
-                let (view, texture) = subpass_attachment_view(device, &attachment.resource, true)?;
+                let (view, texture) =
+                    subpass_attachment_view(device, &attachment.resource, true, false)?;
                 views.push(view);
                 // Resolve destinations never serve as pass-local inputs.
                 persistent_textures.push((
-                    u32::MAX - slot as u32,
+                    u32::try_from(slot)
+                        .map_err(|_| texture_error("subpass resolve slot is too large"))?,
+                    true,
                     texture,
                     subpass_attachment_range(&attachment.resource, true),
                 ));
@@ -2966,6 +3011,7 @@ fn subpass_attachment_view(
     device: &ash::Device,
     resource: &HalSubpassAttachmentResource,
     resolve: bool,
+    used_as_input: bool,
 ) -> Result<(vk::ImageView, VulkanTexture), HalError> {
     let HalSubpassAttachmentResource::Persistent {
         texture,
@@ -2996,11 +3042,7 @@ fn subpass_attachment_view(
         .level_count(1)
         .base_array_layer(selected.base_array_layer)
         .layer_count(1);
-    let usage = if aspects == vk::ImageAspectFlags::COLOR {
-        color_attachment_image_view_usage()
-    } else {
-        depth_stencil_attachment_image_view_usage()
-    };
+    let usage = subpass_attachment_image_view_usage(aspects, used_as_input);
     let view = create_attachment_image_view(device, texture.inner()?, format, range, usage)?;
     Ok((view, texture.clone()))
 }
@@ -3350,14 +3392,10 @@ fn subpass_dependencies(layout: &HalSubpassPassLayout) -> Vec<vk::SubpassDepende
                 vk::DependencyFlags::empty()
             })
     }));
-    dependencies.push(
-        vk::SubpassDependency::default()
-            .src_subpass(layout.subpasses.len().saturating_sub(1) as u32)
-            .dst_subpass(vk::SUBPASS_EXTERNAL)
-            .src_stage_mask(render_attachment_stage_flags())
-            .dst_stage_mask(vk::PipelineStageFlags::TRANSFER)
-            .src_access_mask(render_attachment_access_flags())
-            .dst_access_mask(vk::AccessFlags::TRANSFER_READ),
+    // Resolves and attachment stores can occur before the last subpass. Each
+    // producer needs an external dependency for its final layout transition.
+    dependencies.extend(
+        (0..layout.subpasses.len()).map(|index| render_pass_outgoing_dependency(index as u32)),
     );
     dependencies
 }
@@ -4570,13 +4608,7 @@ pub(super) fn render_pass_dependencies(framebuffer_fetch: bool) -> Vec<vk::Subpa
         .dst_stage_mask(render_attachment_stage_flags())
         .src_access_mask(render_attachment_access_flags())
         .dst_access_mask(render_attachment_access_flags());
-    let dependency_out = vk::SubpassDependency::default()
-        .src_subpass(0)
-        .dst_subpass(vk::SUBPASS_EXTERNAL)
-        .src_stage_mask(render_attachment_stage_flags())
-        .dst_stage_mask(vk::PipelineStageFlags::TRANSFER)
-        .src_access_mask(render_attachment_access_flags())
-        .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
+    let dependency_out = render_pass_outgoing_dependency(0);
     if framebuffer_fetch {
         vec![
             dependency_in,
@@ -4586,6 +4618,16 @@ pub(super) fn render_pass_dependencies(framebuffer_fetch: bool) -> Vec<vk::Subpa
     } else {
         vec![dependency_in, dependency_out]
     }
+}
+
+fn render_pass_outgoing_dependency(subpass: u32) -> vk::SubpassDependency {
+    vk::SubpassDependency::default()
+        .src_subpass(subpass)
+        .dst_subpass(vk::SUBPASS_EXTERNAL)
+        .src_stage_mask(render_attachment_stage_flags())
+        .dst_stage_mask(vk::PipelineStageFlags::TRANSFER)
+        .src_access_mask(render_attachment_access_flags())
+        .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
 }
 
 fn render_attachment_stage_flags() -> vk::PipelineStageFlags {
@@ -6153,6 +6195,74 @@ mod tests {
 
     #[cfg(feature = "tiled")]
     #[test]
+    fn subpass_resolves_match_regular_final_layouts_and_outgoing_dependencies() {
+        let mut pass = bound_texture_subpass_fixture();
+        pass.layout.color_attachments = vec![HalSubpassAttachmentLayout {
+            format: HalTextureFormat::Rgba8Unorm,
+            sample_count: 4,
+        }];
+        let subpass = pass.layout.subpasses[0].clone();
+        pass.layout.subpasses = vec![subpass.clone(), subpass.clone(), subpass];
+        // The resolve producer is deliberately earlier than the final subpass.
+        pass.layout.subpasses[0].color_attachment_indices = vec![0];
+        for transfer in [false, true] {
+            let mut texture =
+                dummy_vulkan_texture(HalTextureDimension::D2, HalTextureFormat::Rgba8Unorm);
+            texture.image_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT;
+            if transfer {
+                texture.image_usage |= vk::ImageUsageFlags::TRANSFER_SRC;
+            }
+            let expected = if transfer {
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL
+            } else {
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+            };
+            assert_eq!(
+                color_attachment_final_layout(texture.image_usage).0,
+                expected
+            );
+            pass.color_attachments = vec![HalSubpassColorAttachment {
+                resource: HalSubpassAttachmentResource::Persistent {
+                    texture: HalTexture::Vulkan(texture.clone()),
+                    view_format: HalTextureFormat::Rgba8Unorm,
+                    mip_level: 0,
+                    array_layer: 0,
+                    resolve_target: Some(HalTexture::Vulkan(texture)),
+                    resolve_view_format: Some(HalTextureFormat::Rgba8Unorm),
+                    resolve_mip_level: 1,
+                    resolve_array_layer: 2,
+                },
+                load_op: HalRenderLoadOp::Clear,
+                store: true,
+                clear_color: [0.0; 4],
+            }];
+            let descriptions = subpass_attachment_descriptions(&pass).unwrap();
+            assert_eq!(
+                descriptions[1].initial_layout,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+            );
+            assert_eq!(descriptions[1].final_layout, expected);
+            let range = subpass_attachment_range(&pass.color_attachments[0].resource, true);
+            assert_eq!((range.base_mip_level, range.base_array_layer), (1, 2));
+        }
+        let regular = render_pass_dependencies(false);
+        let outgoing: Vec<_> = subpass_dependencies(&pass.layout)
+            .into_iter()
+            .filter(|dependency| dependency.dst_subpass == vk::SUBPASS_EXTERNAL)
+            .collect();
+        assert_eq!(outgoing.len(), 3);
+        for (index, dependency) in outgoing.iter().enumerate() {
+            assert_eq!(dependency.src_subpass, index as u32);
+            assert_eq!(dependency.src_stage_mask, regular[1].src_stage_mask);
+            assert_eq!(dependency.src_access_mask, regular[1].src_access_mask);
+            assert_eq!(dependency.dst_stage_mask, regular[1].dst_stage_mask);
+            assert_eq!(dependency.dst_access_mask, regular[1].dst_access_mask);
+            assert_eq!(dependency.dependency_flags, regular[1].dependency_flags);
+        }
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
     fn audit_f4_subpass_resolves_have_descriptions_and_sparse_references() {
         let mut pass = bound_texture_subpass_fixture();
         pass.layout
@@ -7005,6 +7115,87 @@ mod tests {
             depth_stencil_attachment: None,
             draws: Vec::new(),
         }
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn subpass_resolve_slot_zero_cannot_alias_depth_input() {
+        let mut pass = bound_texture_subpass_fixture();
+        pass.layout.subpasses[1].input_attachments = vec![HalSubpassInputAttachment {
+            group: 0,
+            binding: 0,
+            source_subpass: 0,
+            source_attachment: u32::MAX,
+        }];
+        let color_layout = (
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            IMAGE_LAYOUT_COLOR_ATTACHMENT,
+        );
+        // Previously resolve slot zero was encoded as u32::MAX, matching depth.
+        assert_eq!(
+            subpass_color_initial_layout(&pass.layout, 0, true),
+            color_layout
+        );
+        assert_eq!(
+            subpass_color_initial_layout(&pass.layout, 0, false),
+            color_layout
+        );
+        pass.layout.subpasses[1]
+            .input_attachments
+            .push(HalSubpassInputAttachment {
+                group: 0,
+                binding: 1,
+                source_subpass: 0,
+                source_attachment: 0,
+            });
+        assert_eq!(
+            subpass_color_initial_layout(&pass.layout, 0, true),
+            color_layout
+        );
+        assert_eq!(
+            subpass_color_initial_layout(&pass.layout, 0, false),
+            (vk::ImageLayout::GENERAL, IMAGE_LAYOUT_GENERAL)
+        );
+        assert_eq!(
+            subpass_color_initial_layout(&pass.layout, 1, false),
+            color_layout
+        );
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn subpass_depth_input_view_retains_input_attachment_usage() {
+        let mut pass = bound_texture_subpass_fixture();
+        pass.layout.subpasses[1].input_attachments = vec![HalSubpassInputAttachment {
+            group: 0,
+            binding: 0,
+            source_subpass: 0,
+            source_attachment: u32::MAX,
+        }];
+        for aspects in [
+            vk::ImageAspectFlags::DEPTH,
+            vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
+            vk::ImageAspectFlags::STENCIL,
+        ] {
+            assert_eq!(
+                subpass_attachment_image_view_usage(
+                    aspects,
+                    subpass_attachment_is_input(&pass.layout, u32::MAX)
+                ),
+                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+                    | vk::ImageUsageFlags::INPUT_ATTACHMENT
+            );
+            assert_eq!(
+                subpass_attachment_image_view_usage(aspects, false),
+                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+            );
+        }
+        pass.layout.subpasses[1].input_attachments[0].source_attachment = 0;
+        assert!(!subpass_attachment_is_input(&pass.layout, u32::MAX));
+        assert_eq!(
+            subpass_attachment_image_view_usage(vk::ImageAspectFlags::COLOR, true),
+            color_attachment_image_view_usage()
+        );
     }
 
     /// Every subpass and draw contributes its bindings in execution order.

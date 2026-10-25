@@ -114,6 +114,94 @@ fn vulkan_tiled_deferred_reads_input_attachment() {
     }
 }
 
+/// Block 115 F7: subpass 1 draws with `setIndexBuffer` + `drawIndexed`; the
+/// index buffer must reach the HAL and produce the same result as a plain draw.
+#[test]
+#[ignore = "requires a real Vulkan device"]
+fn vulkan_tiled_deferred_indexed_draw_reads_input_attachment() {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
+        return;
+    }
+    unsafe {
+        let instance = create_vulkan_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = std::sync::Arc::clone(&errors);
+        yawgpu::testing_set_uncaptured_error_callback(
+            device,
+            Some(move |error| captured.lock().expect("lock").push(format!("{error:?}"))),
+        );
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+        let readback = run_deferred_with(
+            device,
+            queue,
+            native::WGPUTextureUsage_RenderAttachment,
+            true,
+        );
+        let pixels = read_unpacked_texture_buffer(instance, readback);
+        assert!(
+            errors.lock().expect("lock").is_empty(),
+            "device errors: {:?}",
+            errors.lock().expect("lock")
+        );
+        let expected = [128u8, 64, 0, 255];
+        assert!(
+            approx_contains_pixel(&pixels, expected, 1),
+            "expected {:?} (±1) from the indexed subpass draw; distinct = {:?}",
+            expected,
+            distinct_pixels(&pixels)
+        );
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+/// Block 115 F4: the 4x MSAA `hdr` attachment written by subpass 1 has a
+/// single-sample `resolveTarget`; the resolve target must receive the
+/// subpass-1 value (g-buffer + 0.25 green) at the end of the pass.
+#[test]
+#[ignore = "requires a real Vulkan device"]
+fn vulkan_tiled_msaa_subpass_resolve_target_is_written() {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
+        return;
+    }
+    unsafe {
+        let instance = create_vulkan_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = std::sync::Arc::clone(&errors);
+        yawgpu::testing_set_uncaptured_error_callback(
+            device,
+            Some(move |error| captured.lock().expect("lock").push(format!("{error:?}"))),
+        );
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+        let readback = run_msaa_deferred_with(device, queue, true);
+        let pixels = read_unpacked_texture_buffer(instance, readback);
+        assert!(
+            errors.lock().expect("lock").is_empty(),
+            "device errors: {:?}",
+            errors.lock().expect("lock")
+        );
+        let expected = [128u8, 64, 0, 255];
+        assert!(
+            approx_contains_pixel(&pixels, expected, 2),
+            "expected {:?} (±2) in the subpass resolve target; distinct = {:?}",
+            expected,
+            distinct_pixels(&pixels)
+        );
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
 /// Slice 3a: the g-buffer subpass intermediate is a **transient** attachment. On
 /// Vulkan the image is created with `TRANSIENT_ATTACHMENT` usage (no transfer bits)
 /// backed by `LAZILY_ALLOCATED` memory — the TBDR bandwidth payoff — and subpass 1
@@ -296,6 +384,16 @@ unsafe fn run_msaa_deferred(
     device: native::WGPUDevice,
     queue: native::WGPUQueue,
 ) -> native::WGPUBuffer {
+    run_msaa_deferred_with(device, queue, false)
+}
+
+/// `resolve_hdr`: give the 4x `hdr` attachment a single-sample resolve target
+/// and read that back instead of the final attachment (Block 115 F4).
+unsafe fn run_msaa_deferred_with(
+    device: native::WGPUDevice,
+    queue: native::WGPUQueue,
+    resolve_hdr: bool,
+) -> native::WGPUBuffer {
     let layout = create_three_subpass_msaa_layout(device);
 
     // Subpass 0 has no input attachment → auto layout is fine.
@@ -335,9 +433,19 @@ unsafe fn run_msaa_deferred(
     let hdr_view = yawgpu::wgpuTextureCreateView(hdr, std::ptr::null());
     let final_view = yawgpu::wgpuTextureCreateView(final_tex, std::ptr::null());
 
+    let resolve_tex = create_texture_ms(
+        device,
+        native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_CopySrc,
+        1,
+    );
+    let resolve_view = yawgpu::wgpuTextureCreateView(resolve_tex, std::ptr::null());
+    let mut hdr_attachment = subpass_color_attachment(hdr_view);
+    if resolve_hdr {
+        hdr_attachment.resolveTarget = resolve_view;
+    }
     let attachments = [
         subpass_color_attachment(gbuffer_view),
-        subpass_color_attachment(hdr_view),
+        hdr_attachment,
         subpass_color_attachment(final_view),
     ];
     let pass_descriptor = YaWGPUSubpassRenderPassDescriptor {
@@ -370,12 +478,18 @@ unsafe fn run_msaa_deferred(
     yawgpu::yawgpuSubpassRenderPassEncoderEnd(pass);
     yawgpu::yawgpuSubpassRenderPassEncoderRelease(pass);
 
-    record_t2b(encoder, final_tex, readback);
+    record_t2b(
+        encoder,
+        if resolve_hdr { resolve_tex } else { final_tex },
+        readback,
+    );
     let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
     yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
 
     yawgpu::wgpuCommandBufferRelease(command_buffer);
     yawgpu::wgpuCommandEncoderRelease(encoder);
+    yawgpu::wgpuTextureViewRelease(resolve_view);
+    yawgpu::wgpuTextureRelease(resolve_tex);
     yawgpu::wgpuTextureViewRelease(final_view);
     yawgpu::wgpuTextureViewRelease(hdr_view);
     yawgpu::wgpuTextureViewRelease(gbuffer_view);
@@ -724,6 +838,17 @@ unsafe fn run_deferred(
     queue: native::WGPUQueue,
     gbuffer_usage: native::WGPUTextureUsage,
 ) -> native::WGPUBuffer {
+    run_deferred_with(device, queue, gbuffer_usage, false)
+}
+
+/// `indexed`: subpass 1 draws through `setIndexBuffer` + `drawIndexed`
+/// (Block 115 F7) instead of a plain draw.
+unsafe fn run_deferred_with(
+    device: native::WGPUDevice,
+    queue: native::WGPUQueue,
+    gbuffer_usage: native::WGPUTextureUsage,
+    indexed: bool,
+) -> native::WGPUBuffer {
     let layout = create_two_subpass_input_layout(device);
     let pipeline0 = create_subpass_pipeline(device, layout, 0, WRITE_SHADER, 0, None);
     let pipeline1 = create_subpass_pipeline(device, layout, 1, LOAD_SHADER, 1, None);
@@ -768,7 +893,27 @@ unsafe fn run_deferred(
     yawgpu::yawgpuSubpassRenderPassEncoderSetPipeline(pass, pipeline1);
     // The input attachment is bound implicitly by the pass — no bind group needed
     // (draw validation skips input-attachment-only groups).
-    yawgpu::yawgpuSubpassRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+    let index_buffer = if indexed {
+        let indices: [u16; 4] = [0, 1, 2, 0];
+        let buffer = create_buffer(
+            device,
+            8,
+            native::WGPUBufferUsage_Index | native::WGPUBufferUsage_CopyDst,
+        );
+        yawgpu::wgpuQueueWriteBuffer(queue, buffer, 0, indices.as_ptr().cast(), 8);
+        yawgpu::yawgpuSubpassRenderPassEncoderSetIndexBuffer(
+            pass,
+            buffer,
+            native::WGPUIndexFormat_Uint16,
+            0,
+            8,
+        );
+        yawgpu::yawgpuSubpassRenderPassEncoderDrawIndexed(pass, 3, 1, 0, 0, 0);
+        Some(buffer)
+    } else {
+        yawgpu::yawgpuSubpassRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+        None
+    };
     yawgpu::yawgpuSubpassRenderPassEncoderEnd(pass);
     yawgpu::yawgpuSubpassRenderPassEncoderRelease(pass);
 
@@ -778,6 +923,9 @@ unsafe fn run_deferred(
 
     yawgpu::wgpuCommandBufferRelease(command_buffer);
     yawgpu::wgpuCommandEncoderRelease(encoder);
+    if let Some(buffer) = index_buffer {
+        yawgpu::wgpuBufferRelease(buffer);
+    }
     yawgpu::wgpuTextureViewRelease(final_view);
     yawgpu::wgpuTextureViewRelease(gbuffer_view);
     yawgpu::wgpuTextureRelease(final_tex);

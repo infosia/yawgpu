@@ -408,6 +408,107 @@ fn vulkan_srgb_view_of_unorm_texture_clears_srgb_encoded() {
     });
 }
 
+/// Cross-backend probe for Block 115 R-PR4: BC1 texture->texture copy
+/// between mips whose real sizes differ (12x12 mip 1 -> 20x20 mip 2, copy
+/// size 8x8). Isolates whether a failure is Metal-specific or core.
+#[test]
+#[ignore = "manual real-backend test"]
+fn vulkan_bc1_texture_to_texture_mismatched_mips_round_trip() {
+    with_device(
+        &[(
+            native::WGPUFeatureName_TextureCompressionBC,
+            "texture-compression-bc",
+        )],
+        |ctx| unsafe {
+            let make = |size: u32| {
+                let descriptor = native::WGPUTextureDescriptor {
+                    usage: native::WGPUTextureUsage_CopySrc | native::WGPUTextureUsage_CopyDst,
+                    dimension: native::WGPUTextureDimension_2D,
+                    size: native::WGPUExtent3D {
+                        width: size,
+                        height: size,
+                        depthOrArrayLayers: 1,
+                    },
+                    format: native::WGPUTextureFormat_BC1RGBAUnorm,
+                    mipLevelCount: 3,
+                    sampleCount: 1,
+                    ..std::mem::zeroed()
+                };
+                let texture = yawgpu::wgpuDeviceCreateTexture(ctx.device, &descriptor);
+                assert!(!texture.is_null());
+                texture
+            };
+            let source = make(12);
+            let destination = make(20);
+            let mut data = vec![0u8; 512];
+            for row in 0..2usize {
+                for byte in 0..16usize {
+                    data[row * 256 + byte] =
+                        u8::try_from((row * 16 + byte) * 7 % 251 + 3).expect("byte");
+                }
+            }
+            let info = |texture, mip_level| native::WGPUTexelCopyTextureInfo {
+                texture,
+                mipLevel: mip_level,
+                origin: native::WGPUOrigin3D { x: 0, y: 0, z: 0 },
+                aspect: native::WGPUTextureAspect_All,
+            };
+            let layout = native::WGPUTexelCopyBufferLayout {
+                offset: 0,
+                bytesPerRow: 256,
+                rowsPerImage: 2,
+            };
+            let size = native::WGPUExtent3D {
+                width: 8,
+                height: 8,
+                depthOrArrayLayers: 1,
+            };
+            yawgpu::wgpuQueueWriteTexture(
+                ctx.queue,
+                &info(source, 1),
+                data.as_ptr().cast(),
+                data.len(),
+                &layout,
+                &size,
+            );
+            let readback = create_buffer(
+                ctx.device,
+                512,
+                native::WGPUBufferUsage_MapRead | native::WGPUBufferUsage_CopyDst,
+            );
+            let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(ctx.device, std::ptr::null());
+            yawgpu::wgpuCommandEncoderCopyTextureToTexture(
+                encoder,
+                &info(source, 1),
+                &info(destination, 2),
+                &size,
+            );
+            let target = native::WGPUTexelCopyBufferInfo {
+                layout,
+                buffer: readback,
+            };
+            yawgpu::wgpuCommandEncoderCopyTextureToBuffer(
+                encoder,
+                &info(destination, 2),
+                &target,
+                &size,
+            );
+            ctx.submit(encoder);
+            let bytes = read_buffer(ctx.instance, readback, 512);
+            for row in 0..2usize {
+                assert_eq!(
+                    &bytes[row * 256..row * 256 + 16],
+                    &data[row * 256..row * 256 + 16],
+                    "block row {row}"
+                );
+            }
+            yawgpu::wgpuBufferRelease(readback);
+            yawgpu::wgpuTextureRelease(destination);
+            yawgpu::wgpuTextureRelease(source);
+        },
+    );
+}
+
 unsafe fn compute_pipeline(
     device: native::WGPUDevice,
     module: native::WGPUShaderModule,

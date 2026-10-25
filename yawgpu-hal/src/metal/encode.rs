@@ -479,18 +479,58 @@ pub(super) fn encode_texture_to_texture(
     };
     source.validate_origin_extent(copy.source_origin, copy.extent)?;
     destination.validate_origin_extent(copy.destination_origin, copy.extent)?;
-    let extent = clamp_copy_extent(
+    let source_extent = clamp_copy_extent(
         source,
         copy.source_mip_level,
         copy.source_origin,
         copy.extent,
     );
-    let extent = clamp_copy_extent(
+    let destination_extent = clamp_copy_extent(
         destination,
         copy.destination_mip_level,
         copy.destination_origin,
-        extent,
+        copy.extent,
     );
+    if let Some((buffer_layout, size)) =
+        texture_copy_staging_layout(source.format, source_extent, destination_extent)?
+    {
+        let buffer = source
+            .device
+            .newBufferWithLength_options(to_ns(size)?, MTLResourceOptions::StorageModePrivate)
+            .ok_or(HalError::OutOfMemory {
+                backend: BACKEND,
+                resource: "texture copy staging buffer",
+            })?;
+        // The command buffer retains resources referenced by its blit encoder.
+        let buffer = HalBuffer::Metal(MetalBuffer {
+            inner: Some(buffer),
+            mapped_ptr: None,
+            size,
+        });
+        let leg = HalBufferTextureCopy {
+            buffer,
+            buffer_layout,
+            texture: copy.source.clone(),
+            format: source.format,
+            aspect: HalTextureAspect::All,
+            mip_level: copy.source_mip_level,
+            origin: copy.source_origin,
+            extent: source_extent,
+        };
+        encode_texture_to_buffer(blit, &leg)?;
+        return encode_buffer_to_texture(
+            blit,
+            &HalBufferTextureCopy {
+                texture: copy.destination.clone(),
+                format: destination.format,
+                mip_level: copy.destination_mip_level,
+                origin: copy.destination_origin,
+                extent: destination_extent,
+                ..leg
+            },
+        );
+    }
+    let extent = copy.extent;
     unsafe {
         if source.dimension == HalTextureDimension::D3
             && destination.dimension == HalTextureDimension::D3
@@ -537,30 +577,66 @@ pub(super) fn encode_texture_to_texture(
     Ok(())
 }
 
-// Clamp padded compressed blocks to the actual mip edge (Dawn UtilsMetal.mm).
+// Both legs use the same physical block layout, but their logical sizes must
+// independently reach the mip edge. A single texture blit cannot express that.
+fn texture_copy_staging_layout(
+    format: HalTextureFormat,
+    source: HalExtent3d,
+    destination: HalExtent3d,
+) -> Result<Option<(crate::HalBufferTextureLayout, u64)>, HalError> {
+    let Some((block_bytes, block_width, block_height)) = format.compressed_block_info() else {
+        return Ok(None);
+    };
+    if source.width == destination.width && source.height == destination.height {
+        return Ok(None);
+    }
+    let bytes_per_row = source
+        .width
+        .max(destination.width)
+        .div_ceil(block_width)
+        .checked_mul(block_bytes)
+        .ok_or_else(|| buffer_error("staging row size overflows"))?;
+    let rows_per_image = source.height.max(destination.height).div_ceil(block_height);
+    let size = u64::from(bytes_per_row)
+        .checked_mul(u64::from(rows_per_image))
+        .and_then(|size| size.checked_mul(u64::from(source.depth_or_array_layers)))
+        .ok_or_else(|| buffer_error("staging buffer size overflows"))?;
+    Ok(Some((
+        crate::HalBufferTextureLayout {
+            offset: 0,
+            bytes_per_row,
+            rows_per_image,
+        },
+        size,
+    )))
+}
+
+// Only buffer copies clamp padded compressed blocks (Dawn UtilsMetal.mm).
 fn clamp_copy_extent(
     texture: &MetalTexture,
     mip: u32,
     origin: crate::HalOrigin3d,
     extent: HalExtent3d,
 ) -> HalExtent3d {
-    clamp_compressed_copy_extent(
+    metal_copy_extent(
         texture.format,
         [texture.width, texture.height],
         mip,
         origin,
         extent,
+        true,
     )
 }
 
-fn clamp_compressed_copy_extent(
+fn metal_copy_extent(
     format: HalTextureFormat,
     size: [u32; 2],
     mip: u32,
     origin: crate::HalOrigin3d,
     mut extent: HalExtent3d,
+    buffer_copy: bool,
 ) -> HalExtent3d {
-    if format.compressed_block_info().is_some() {
+    if buffer_copy && format.compressed_block_info().is_some() {
         extent.width = extent.width.min(
             size[0]
                 .checked_shr(mip)
@@ -652,13 +728,9 @@ fn compute_buffer_texture_copy_parts(
                 offset: offset
                     .checked_add(u64::from(row) * row_stride)
                     .ok_or_else(|| buffer_error("row offset overflows"))?,
-                bytes_per_row: if row_stride > max_row {
-                    max_row
-                } else if split_last && row == rows - 1 {
-                    row_bytes
-                } else {
-                    row_stride
-                },
+                // A single-row part needs only its data bytes, including when
+                // a wide stride and a tightly sized last row occur together.
+                bytes_per_row: if count == 1 { row_bytes } else { row_stride },
                 origin: crate::HalOrigin3d {
                     x: origin.x,
                     y: origin.y + y,
@@ -2237,37 +2309,141 @@ fn metal_index_type(format: HalIndexFormat) -> MTLIndexType {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn compressed_copy_clamps_both_mip_edges() {
+    fn mismatched_compressed_mip_edges_stage_both_copy_directions() {
+        let format = HalTextureFormat::Bc1RgbaUnorm;
+        let padded = HalExtent3d {
+            width: 8,
+            height: 8,
+            depth_or_array_layers: 3,
+        };
+        for (source_size, destination_size, origin, expected) in [
+            (
+                [12, 12],
+                [10, 10],
+                crate::HalOrigin3d { x: 0, y: 0, z: 2 },
+                (6, 6, 5, 5),
+            ),
+            (
+                [10, 10],
+                [12, 12],
+                crate::HalOrigin3d { x: 0, y: 0, z: 2 },
+                (5, 5, 6, 6),
+            ),
+            (
+                [12, 12],
+                [10, 10],
+                crate::HalOrigin3d { x: 4, y: 4, z: 2 },
+                (2, 2, 1, 1),
+            ),
+            (
+                [12, 10],
+                [10, 12],
+                crate::HalOrigin3d { x: 0, y: 0, z: 2 },
+                (6, 5, 5, 6),
+            ),
+        ] {
+            let source = metal_copy_extent(format, source_size, 1, origin, padded, true);
+            let destination = metal_copy_extent(format, destination_size, 1, origin, padded, true);
+            let (layout, size) = texture_copy_staging_layout(format, source, destination)
+                .unwrap()
+                .expect("different edges need staging");
+            let row_bytes = u64::from(source.width.div_ceil(4)) * 8;
+            let rows = source.height.div_ceil(4);
+            assert_eq!(u64::from(layout.bytes_per_row), row_bytes);
+            assert_eq!(layout.rows_per_image, rows);
+            assert_eq!(size, row_bytes * u64::from(rows) * 3);
+            let mut legs = Vec::new();
+            for extent in [source, destination] {
+                let parts = compute_buffer_texture_copy_parts(
+                    HalTextureDimension::D2,
+                    extent,
+                    origin,
+                    layout,
+                    (8, 4, 4),
+                    size,
+                )
+                .unwrap();
+                assert_eq!(parts.len(), 3);
+                for (layer, part) in parts.iter().enumerate() {
+                    assert_eq!(part.offset, layer as u64 * row_bytes * u64::from(rows));
+                    assert_eq!(part.origin.z, 2 + layer as u32);
+                    assert_eq!(part.bytes_per_row, row_bytes);
+                    assert_eq!(part.extent.depth_or_array_layers, 1);
+                }
+                legs.push((parts[0].extent.width, parts[0].extent.height));
+            }
+            assert_eq!(
+                legs,
+                vec![(expected.0, expected.1), (expected.2, expected.3)]
+            );
+            assert!(texture_copy_staging_layout(format, source, source)
+                .unwrap()
+                .is_none());
+            assert!(
+                texture_copy_staging_layout(HalTextureFormat::Rgba8Unorm, source, destination)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn compressed_copy_clamps_only_buffer_copies() {
         let origin = crate::HalOrigin3d { x: 0, y: 0, z: 0 };
         let padded = HalExtent3d {
             width: 8,
             height: 8,
             depth_or_array_layers: 1,
         };
-        let source = clamp_compressed_copy_extent(
+        let source = metal_copy_extent(
             HalTextureFormat::Bc1RgbaUnorm,
             [12, 12],
             1,
             origin,
             padded,
+            true,
         );
         assert_eq!((source.width, source.height), (6, 6));
-        let destination = clamp_compressed_copy_extent(
+        let destination = metal_copy_extent(
             HalTextureFormat::Bc1RgbaUnorm,
             [10, 10],
             1,
             origin,
-            source,
+            padded,
+            true,
         );
         assert_eq!((destination.width, destination.height), (5, 5));
-        let edge = clamp_compressed_copy_extent(
+        let edge = metal_copy_extent(
             HalTextureFormat::Bc1RgbaUnorm,
             [12, 12],
             1,
             crate::HalOrigin3d { x: 4, y: 4, z: 0 },
             padded,
+            true,
         );
         assert_eq!((edge.width, edge.height), (2, 2));
+        // Different logical mip edges share an 8x8 physical block extent.
+        // Neither edge may reduce a texture-to-texture blit's sourceSize.
+        for (size, copy_origin, width) in [
+            ([12, 12], origin, 8),
+            ([10, 10], origin, 8),
+            ([12, 12], crate::HalOrigin3d { x: 4, y: 4, z: 0 }, 4),
+        ] {
+            let extent = metal_copy_extent(
+                HalTextureFormat::Bc1RgbaUnorm,
+                size,
+                1,
+                copy_origin,
+                HalExtent3d {
+                    width,
+                    height: width,
+                    ..padded
+                },
+                false,
+            );
+            assert_eq!((extent.width, extent.height), (width, width));
+            assert_eq!(extent.depth_or_array_layers, 1);
+        }
         let parts = compute_buffer_texture_copy_parts(
             HalTextureDimension::D2,
             source,
@@ -2321,8 +2497,12 @@ mod tests {
             assert_eq!(parts.len(), 6);
             assert_eq!(
                 (parts[5].offset, parts[5].bytes_per_row),
-                (16 + u64::from(stride) * 7, u64::from(limit))
+                (16 + u64::from(stride) * 7, 8)
             );
+            for part in &parts {
+                assert_eq!(part.bytes_per_row, 8);
+                assert!(part.offset + part.bytes_per_row <= 16 + u64::from(stride) * 7 + 8);
+            }
             assert_eq!((parts[5].origin.y, parts[5].origin.z), (5, 5));
             assert_eq!(
                 (
