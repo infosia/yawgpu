@@ -14,11 +14,24 @@ reversed the earlier over-strict audit #3 (wgpu semantics) back to the
 WebGPU spec / Dawn rule. Real-GPU repro-before / pass-after evidence: S1
 (WAR), F1, T5, F2, T1, T2, Block 115 M1 / R-PR4 / R-PR5, and the tiled
 inter-subpass hazard found on the first tiled sync-validation run. Owed:
-GLES rows (F5, F6, F8) on a real GLES host (Linux). Native-Vulkan re-confirmation (Windows 11, NVIDIA, Vulkan SDK 1.3.296 Khronos
+GLES rows (F5, F6, F8) — unit tests only; no `e2e_gles_*` case exercises
+them yet (the existing 17 GLES e2e tests pass on the Linux NVIDIA EGL host
+at `5cd8c6a`). Native-Vulkan re-confirmation (Windows 11, NVIDIA, Vulkan SDK 1.3.296 Khronos
 validation layer, `decfd69`): all 30 `e2e_vulkan_*` binaries, 131 tests pass
 (`--features vulkan,tiled -- --ignored`), with zero `VUID-*` output, and again
 with synchronization validation (`VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true`)
-with zero `SYNC-HAZARD-*` output. Gate at `fa052c6`: webgpu-native-cts
+with zero `SYNC-HAZARD-*` output.
+Native-Vulkan re-confirmation (Linux, NVIDIA GeForce RTX 5060 Ti, driver
+615.71.09, no validation layer, `5cd8c6a`, 2026-10-25): all 29 Linux-built
+`e2e_vulkan_*` binaries, 122 tests pass (`--features vulkan` 114 +
+`--features vulkan,tiled,shader-passthrough` 8 for `tiled` /
+`framebuffer_fetch` / `shader_passthrough`; `e2e_vulkan_surface` is
+macOS / Windows only), **with `--test-threads=1`**. Run in parallel, the
+first binary (`e2e_vulkan_basic`) SIGSEGVs deterministically inside
+`libvulkan.so.1`: one test thread's `vkCreateInstance` is still loading the
+NVIDIA ICD while another thread's `vkEnumerateInstanceExtensionProperties`
+calls a NULL entry point. It reproduces identically at `bead72b`, so it is a
+loader / ICD race on this host, not a regression from Blocks 109–115. Gate at `fa052c6`: webgpu-native-cts
 Metal `api,validation` 298847/0 (identical to the pre-audit baseline),
 `api,operation` 228851/0 (+3 correct `forceFallbackAdapter` skips).
 

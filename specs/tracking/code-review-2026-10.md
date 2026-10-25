@@ -15,13 +15,27 @@ Fix blocks: **Block 109** (CRITICAL) — **COMPLETE 2026-10-25** (`eee477b`,
 pre-existing hazard classes (R16–R18). **Block 112** (queue submit serialization + writable-binding aliasing) —
 COMPLETE 2026-10-25. Still open: GLES context release across threads,
 Vulkan per-submit object churn + retire waits under `queue_access` (perf),
-Tint double IR lowering (perf), MINOR list; owed: GLES Block 109/111 e2e
-on a real GLES host (Linux).
+Tint double IR lowering (perf), MINOR list. GLES on a real GLES host
+(Linux, NVIDIA EGL device, `5cd8c6a`, 2026-10-25): all 7 `e2e_gles_*`
+binaries, 17 tests pass, including the Block 109 C1 case
+`gles_render_depth_test_occludes_later_far_draw`. Still owed: Block 111
+R8–R11 have unit tests only — no `e2e_gles_*` case exercises them yet.
 Native-Vulkan re-confirmation (Windows 11, NVIDIA, Vulkan SDK 1.3.296 Khronos
 validation layer, `decfd69`): all 30 `e2e_vulkan_*` binaries, 131 tests pass
 (`--features vulkan,tiled -- --ignored`), with zero `VUID-*` output, and again
 with synchronization validation (`VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true`)
 with zero `SYNC-HAZARD-*` output.
+Native-Vulkan re-confirmation (Linux, NVIDIA GeForce RTX 5060 Ti, driver
+615.71.09, no validation layer, `5cd8c6a`, 2026-10-25): all 29 Linux-built
+`e2e_vulkan_*` binaries, 122 tests pass (`--features vulkan` 114 +
+`--features vulkan,tiled,shader-passthrough` 8 for `tiled` /
+`framebuffer_fetch` / `shader_passthrough`; `e2e_vulkan_surface` is
+macOS / Windows only), **with `--test-threads=1`**. Run in parallel, the
+first binary (`e2e_vulkan_basic`) SIGSEGVs deterministically inside
+`libvulkan.so.1`: one test thread's `vkCreateInstance` is still loading the
+NVIDIA ICD while another thread's `vkEnumerateInstanceExtensionProperties`
+calls a NULL entry point. It reproduces identically at `bead72b`, so it is a
+loader / ICD race on this host, not a regression from Blocks 109–115.
 Block 109 also closed the Vulkan MAJOR "transient attachments end in
 `TRANSFER_SRC_OPTIMAL`" (R7) and added a surface double-acquire fix (R8).
 

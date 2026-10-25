@@ -3,7 +3,9 @@
 Status: **COMPLETE (2026-10-25)** — S1 `34c89e8`, S2 `77e3197`, S3 `b2ecf46`,
 S4 `553776f`, S2b (R16–R18) `45cd4fd`, Phase Review fixes in the closing
 commit (0 CRITICAL / 0 MAJOR / 6 MINOR; m3 double-lowering and m6 deferred).
-Owed: GLES R8–R11 on Windows ANGLE.
+Owed: GLES R8–R11 real-GPU e2e — no `e2e_gles_*` case exercises them yet
+(the existing 17 GLES e2e tests pass on the Linux NVIDIA EGL host at
+`5cd8c6a`, 2026-10-25).
 Source: `specs/tracking/code-review-2026-10.md` (Metal, Vulkan, Tint, GLES
 MAJOR rows). Claude re-verified each item against the code at `c60989b`
 unless marked *(reviewer claim)*.
@@ -15,7 +17,7 @@ Four slices with disjoint files, then a Phase Review:
 | S1 Metal | R1–R3 | `yawgpu-hal/src/metal/**` | new `e2e_metal_*` cases on the M2 |
 | S2 Vulkan | R4–R6 | `yawgpu-hal/src/vulkan/**` | all `e2e_vulkan_*` on MoltenVK under the layer, incl. sync validation |
 | S3 Tint | R7 | `yawgpu-tint/**`, `yawgpu-core/src/shader_tint.rs`, `compute_pipeline.rs` call site | Noop + Metal compute e2e |
-| S4 GLES | R8–R11 | `yawgpu-hal/src/gles/**` | Windows ANGLE (owed) |
+| S4 GLES | R8–R11 | `yawgpu-hal/src/gles/**` | real-GPU e2e (owed; no case yet) |
 
 ## S1 — Metal
 

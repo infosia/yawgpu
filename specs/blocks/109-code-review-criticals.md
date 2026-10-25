@@ -18,8 +18,8 @@ Status: **COMPLETE (2026-10-25).** Phase Review 0 CRITICAL / 2 MAJOR /
   they are pre-existing MoltenVK 3D-attachment limits, not a regression.
   Metal e2e (35 binaries) 124/0.
 - **S3 DONE** (`f759bbd`) — R6 with 9 pure-fn unit tests; mapping-matrix
-  row added; `e2e_gles_render` depth-occlusion case compiled, **Windows
-  ANGLE run owed**.
+  row added; `e2e_gles_render` depth-occlusion case **passes on the Linux NVIDIA
+  EGL host** (`5cd8c6a`, 2026-10-25); Windows ANGLE run still open.
 - Gates: `cargo test --workspace` green; clippy clean on default / vulkan /
   gles / vulkan+tiled except the pre-existing rustc 1.99.1 lints
   (`deprecated` `fetch_update`, `chunks_exact_to_as_chunks`, metal-test
@@ -33,7 +33,7 @@ Five CRITICAL findings, in three independent slices (disjoint files):
 |---|---|---|---|
 | S1 | C3, C4, C5 | `yawgpu` (FFI) | Noop unit tests |
 | S2 | C2 | `yawgpu-hal` Vulkan | HAL unit tests + `e2e_vulkan_surface` on MoltenVK (Claude) |
-| S3 | C1 | `yawgpu-hal` GLES | pure-fn unit tests; `e2e_gles_render` on Windows ANGLE (owed) |
+| S3 | C1 | `yawgpu-hal` GLES | pure-fn unit tests; `e2e_gles_render` on real GLES (Linux NVIDIA EGL ☑ 2026-10-25; Windows ANGLE open) |
 | S4 | — | — | Phase Review |
 
 ## S1 — FFI handle lifetime and null slices
@@ -307,7 +307,8 @@ Vulkan HAL ignored tests 58/58 with 0 VUID; `e2e_metal_surface` 6/6.
 
 ### Owed
 
-- `e2e_gles_render::gles_render_depth_test_occludes_later_far_draw` on
-  Windows ANGLE.
+- ~~`e2e_gles_render::gles_render_depth_test_occludes_later_far_draw` on
+  real GLES~~ — passes on the Linux NVIDIA EGL host (`5cd8c6a`,
+  2026-10-25). Windows ANGLE run still open.
 - The default Khronos layer does not run synchronization validation; a
   sync-validation pass over the Vulkan e2e set would confirm R9 directly.

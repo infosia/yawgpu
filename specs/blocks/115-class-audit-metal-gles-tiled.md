@@ -2,7 +2,9 @@
 
 Status: **COMPLETE (2026-10-25)** — wave A `960805c`, F8 rework `2d371e5`,
 tiled S3 `9476501`, Phase Review fixes (M1, m1–m5, R-PR4, R-PR5) in the
-closing commit. Owed: GLES F5 / F6 / F8 on Windows ANGLE.
+closing commit. Owed: GLES F5 / F6 / F8 real-GPU e2e — no `e2e_gles_*` case exercises them
+yet (the existing 17 GLES e2e tests pass on the Linux NVIDIA EGL host at
+`5cd8c6a`, 2026-10-25).
 Source: `specs/tracking/class-audit-2026-10.md` (Metal / GLES / tiled
 rows). Oracle: Dawn `third_party/dawn/src/dawn/native/{metal,opengl}/`.
 
@@ -51,7 +53,7 @@ rows). Oracle: Dawn `third_party/dawn/src/dawn/native/{metal,opengl}/`.
 T5 / T8: new `e2e_metal_*` cases (12×12 BC1 mip-1 round trip; wide
 `bytesPerRow` sub-rectangle) fail on the pre-fix code under
 `MTL_DEBUG_LAYER` and pass after. F3 / F4 / F7: tiled e2e on Metal and
-MoltenVK. GLES rows: owed to the Windows ANGLE run.
+MoltenVK. GLES rows: owed — need new `e2e_gles_*` cases (Linux NVIDIA EGL or Windows ANGLE).
 
 ## S4 — Phase Review (2026-10-25)
 
