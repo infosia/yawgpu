@@ -652,6 +652,12 @@ static_assert(offsetof(YawgpuTintTextureMetadataSlot, group) == 4,
               "YawgpuTintTextureMetadataSlot layout changed");
 static_assert(offsetof(YawgpuTintTextureMetadataSlot, binding) == 8,
               "YawgpuTintTextureMetadataSlot layout changed");
+static_assert(sizeof(YawgpuTintDepthRangeOffsets) == 8,
+              "YawgpuTintDepthRangeOffsets layout changed");
+static_assert(offsetof(YawgpuTintDepthRangeOffsets, min) == 0,
+              "YawgpuTintDepthRangeOffsets layout changed");
+static_assert(offsetof(YawgpuTintDepthRangeOffsets, max) == 4,
+              "YawgpuTintDepthRangeOffsets layout changed");
 static_assert(sizeof(YawgpuTintGlslOutput) == 48, "YawgpuTintGlslOutput layout changed");
 static_assert(offsetof(YawgpuTintGlslOutput, glsl) == 0,
               "YawgpuTintGlslOutput layout changed");
@@ -2530,6 +2536,7 @@ bool yawgpu_tint_generate_glsl(const YawgpuTintProgram* program,
                                size_t n_ov,
                                bool has_first_instance_offset,
                                uint32_t first_instance_offset,
+                               const YawgpuTintDepthRangeOffsets* depth_range_offsets,
                                YawgpuTintGlslOutput* out,
                                char** err) {
     if (err != nullptr) {
@@ -2568,6 +2575,15 @@ bool yawgpu_tint_generate_glsl(const YawgpuTintProgram* program,
                               : tint::glsl::writer::Version();
         if (has_first_instance_offset) {
             options.first_instance_offset = first_instance_offset;
+        }
+        if (depth_range_offsets != nullptr) {
+            options.depth_range_offsets = tint::glsl::writer::Options::RangeOffsets{
+                depth_range_offsets->min, depth_range_offsets->max};
+        }
+        // Match the linked stages' uniform array declarations (Dawn rounds
+        // the pipeline immediate size up to four words as well).
+        if (has_first_instance_offset || depth_range_offsets != nullptr) {
+            options.minimum_immediate_size = 16;
         }
         auto generated_bindings = tint::glsl::writer::GenerateBindings(ir.Get(), entry_point);
         tint::Bindings resolved_bindings;

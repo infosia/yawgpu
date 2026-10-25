@@ -2275,6 +2275,21 @@ fn discard_render_pass_attachments(gl: &glow::Context, pass: &HalRenderPassComma
     }
 }
 
+// Uniforms are uint even though the depth values are f32. Tint bitcasts
+// these words back to float in the fragment shader. No active clamp means
+// no upload, including when switching to a pipeline without frag_depth.
+fn frag_depth_range_upload<T>(
+    locations: Option<&[T; 2]>,
+    viewport_range: Option<[f32; 2]>,
+) -> Option<(&[T; 2], [u32; 2])> {
+    locations.map(|locations| {
+        (
+            locations,
+            viewport_range.unwrap_or([0.0, 1.0]).map(f32::to_bits),
+        )
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_render_draw(
     gl: &glow::Context,
@@ -2296,8 +2311,13 @@ fn run_render_draw(
     let program = pipeline.raw_or_err()?;
     unsafe {
         gl.use_program(Some(program));
-        let [min, max] = state.frag_depth_range.unwrap_or([0.0, 1.0]);
-        gl.uniform_2_f32(pipeline.frag_depth_range_location(), min, max);
+        if let Some((locations, words)) = frag_depth_range_upload(
+            pipeline.frag_depth_range_locations(),
+            state.frag_depth_range,
+        ) {
+            gl.uniform_1_u32(Some(&locations[0]), words[0]);
+            gl.uniform_1_u32(Some(&locations[1]), words[1]);
+        }
     }
     bind_render_buffers(gl, &state.bind_buffers, pipeline)?;
     let texture_units = bind_combined_samplers(
@@ -4529,6 +4549,29 @@ mod tests {
         caps.texture_view = Some(view_stub);
         assert!(attachment_format_view_required(unorm, srgb, caps).unwrap());
         assert!(attachment_format_view_required(srgb, unorm, caps).unwrap());
+    }
+
+    #[test]
+    fn fragment_depth_immediates_upload_only_for_active_clamp() {
+        let locations = [11, 12];
+        assert_eq!(frag_depth_range_upload::<i32>(None, None), None);
+        assert_eq!(
+            frag_depth_range_upload::<i32>(None, Some([0.25, 0.75])),
+            None
+        );
+        assert_eq!(
+            frag_depth_range_upload(Some(&locations), None),
+            Some((&locations, [0.0_f32.to_bits(), 1.0_f32.to_bits()]))
+        );
+        assert_eq!(
+            frag_depth_range_upload(Some(&locations), Some([0.25, 0.75])),
+            Some((&locations, [0.25_f32.to_bits(), 0.75_f32.to_bits()]))
+        );
+        // A subsequent draw/pipeline switch always uses the current range.
+        assert_eq!(
+            frag_depth_range_upload(Some(&locations), Some([0.5, 0.5])),
+            Some((&locations, [0.5_f32.to_bits(); 2]))
+        );
     }
 
     #[test]

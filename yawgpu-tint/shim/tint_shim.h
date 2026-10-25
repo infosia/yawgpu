@@ -415,33 +415,19 @@ YAWGPU_TINT_API bool yawgpu_tint_resolved_workgroup_size(const YawgpuTintProgram
                                           uint32_t* subgroup_size,
                                           char** err);
 
-/* Generates GLSL ES 3.1 for `ep`. `has_first_instance_offset` follows the
-   `has_polyfill_pixel_center` sentinel-flag convention above: when true,
-   `first_instance_offset` is passed through as
-   `tint::glsl::writer::Options::first_instance_offset`, which makes Tint's
-   raise pipeline (glsl/writer/raise/offset_first_index.cc) rewrite
-   `@builtin(instance_index)` to add a value read back from Tint's GLSL
-   "immediate data" emulation -- a single plain array-typed uniform,
-   `layout(location = 0) uniform uint tint_immediates[1]`
-   (glsl/writer/printer/printer.cc EmitImmediateVar). This is NOT a named
-   struct with a `tint_first_instance` member: Tint's internal immediate
-   symbol name never reaches the printed GLSL text, and the raise pass
-   indexes the immediate block by word offset only, so the HAL must query
-   `glGetUniformLocation(program, "tint_immediates[0]")` (an indexed array
-   element, not a dotted struct-member name) and write with `glUniform1ui`.
-   See the `generate_glsl_first_instance_offset_only_applied_when_requested`
-   pin in yawgpu-tint's lib.rs for the exact GLSL text this is verified
-   against. This mirrors Dawn's own OpenGL backend
-   (dawn/native/opengl/ShaderModuleGL.cpp), which sets
-   `first_instance_offset` for vertex stages that read
-   `@builtin(instance_index)` under a non-zero firstInstance draw and
-   uploads the value at draw time (see
-   dawn/native/opengl/CommandBufferGL.cpp). When false, no offset is applied
-   and `gl_InstanceID` is used directly with no immediate-data array
-   emitted -- `first_instance_offset` is then ignored.
-   `first_instance_offset` is a byte offset into Tint's internal immediate
-   data map; yawgpu-core always passes 0 since GLES has no other internal
-   immediates sharing that array today. */
+/* Byte offsets into Tint's GLSL immediate data array. */
+typedef struct {
+    uint32_t min;
+    uint32_t max;
+} YawgpuTintDepthRangeOffsets;
+
+/* Generates GLSL ES 3.1. Optional first-instance and fragment-depth range
+   offsets are byte offsets into the plain uint tint_immediates[] uniform.
+   A NULL depth_range_offsets disables the fragment-depth clamp. Upload f32
+   min/max as their uint bit patterns using glUniform1ui at the respective
+   array elements. When either option is enabled, minimum_immediate_size is
+   16 bytes so vertex and fragment declarations match at link time. Core
+   reserves byte 0 for firstInstance and bytes 4/8 for min/max depth. */
 YAWGPU_TINT_API bool yawgpu_tint_generate_glsl(const YawgpuTintProgram*,
                                const char* ep,
                                const YawgpuTintBindings*,
@@ -449,6 +435,7 @@ YAWGPU_TINT_API bool yawgpu_tint_generate_glsl(const YawgpuTintProgram*,
                                size_t n_ov,
                                bool has_first_instance_offset,
                                uint32_t first_instance_offset,
+                               const YawgpuTintDepthRangeOffsets* depth_range_offsets,
                                YawgpuTintGlslOutput* out,
                                char** err);
 

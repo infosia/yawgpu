@@ -12,16 +12,11 @@ use crate::{
     HalRenderPipelineDescriptor, HalTextureMetadataSlot, HalVertexBufferLayout,
 };
 
-/// The GLSL uniform name Tint's GLSL writer emits for the first element of
-/// its "immediate data" emulation array when `first_instance_offset` is
-/// requested (`yawgpu-core`'s `tint_bindings_for_glsl`/`generate_glsl`
-/// request offset `0`, and GLES has no other internal immediate sharing the
-/// struct, so element `0` is always `tint_first_instance`). See
-/// `tint_shim.h`'s `yawgpu_tint_generate_glsl` docs and the
-/// `generate_glsl_first_instance_offset_only_applied_when_requested` pin in
-/// `yawgpu-tint` for the exact GLSL text this name is queried against (F2,
-/// specs/tracking/tint-integration-refactor.md slice R6).
+// Shared GLSL immediate layout: firstInstance at byte 0, depth min/max at
+// bytes 4/8. Keep in sync with shader_tint.rs and the Tint shim.
 const FIRST_INSTANCE_UNIFORM_NAME: &str = "tint_immediates[0]";
+const FRAG_DEPTH_MIN_UNIFORM_NAME: &str = "tint_immediates[1]";
+const FRAG_DEPTH_MAX_UNIFORM_NAME: &str = "tint_immediates[2]";
 
 #[derive(Debug, Clone)]
 pub(super) struct GlesResolvedCombinedSampler {
@@ -161,7 +156,7 @@ struct GlesRenderPipelineInner {
     binding_remaps: Vec<HalGlesBindingRemap>,
     texture_metadata_ubo_binding: Option<u32>,
     first_instance_location: Option<glow::UniformLocation>,
-    frag_depth_range_location: Option<glow::UniformLocation>,
+    frag_depth_range_locations: Option<[glow::UniformLocation; 2]>,
 }
 
 impl Drop for GlesRenderPipelineInner {
@@ -212,19 +207,12 @@ impl GlesRenderPipeline {
             device.color_render_caps(),
             device.max_samples(),
         )?;
-        let (fragment_source, depth_range_uniform) = match fragment_source {
-            Some(source) => {
-                let (source, uniform) = clamp_fragment_depth_source(&source, &vertex_source);
-                (Some(source), uniform)
-            }
-            None => (None, None),
-        };
         let (program, first_instance_location) =
             build_render_program(&device, &vertex_source, fragment_source.as_deref())?;
-        let frag_depth_range_location = device.with_current_context(|gl| unsafe {
-            depth_range_uniform
-                .as_ref()
-                .and_then(|name| gl.get_uniform_location(program, name))
+        let frag_depth_range_locations = device.with_current_context(|gl| unsafe {
+            gl.get_uniform_location(program, FRAG_DEPTH_MIN_UNIFORM_NAME)
+                .zip(gl.get_uniform_location(program, FRAG_DEPTH_MAX_UNIFORM_NAME))
+                .map(|(min, max)| [min, max])
         })?;
         let combined_samplers =
             resolve_combined_samplers(&device, program, &resource_bindings.combined_samplers)?;
@@ -250,7 +238,7 @@ impl GlesRenderPipeline {
                 binding_remaps: resource_bindings.binding_remaps,
                 texture_metadata_ubo_binding: resource_bindings.texture_metadata_ubo_binding,
                 first_instance_location,
-                frag_depth_range_location,
+                frag_depth_range_locations,
             }),
         })
     }
@@ -313,8 +301,8 @@ impl GlesRenderPipeline {
     }
 
     #[must_use]
-    pub(super) fn frag_depth_range_location(&self) -> Option<&glow::UniformLocation> {
-        self.inner.frag_depth_range_location.as_ref()
+    pub(super) fn frag_depth_range_locations(&self) -> Option<&[glow::UniformLocation; 2]> {
+        self.inner.frag_depth_range_locations.as_ref()
     }
 
     #[must_use]
@@ -526,26 +514,6 @@ fn gles_blend_factor_is_dual_source(factor: crate::HalBlendFactor) -> bool {
 /// (depth/stencil-only) pipelines link on every driver.
 const FRAGMENTLESS_STUB_FS: &str = "#version 310 es\nvoid main() {}\n";
 
-// Dawn supplies Tint depth_range_offsets via clampFragDepth immediates. The
-// GLES HAL receives already translated GLSL, so wrap its entry point with the
-// same clamp and deliver the viewport range through a private uniform.
-fn clamp_fragment_depth_source(source: &str, vertex_source: &str) -> (String, Option<String>) {
-    if !source.contains("gl_FragDepth") {
-        return (source.to_owned(), None);
-    }
-    // WGSL identifiers may survive Tint translation. Avoid collisions in either
-    // linked stage, including with user helper functions and uniforms.
-    let mut prefix = "yawgpu".to_owned();
-    while source.contains(&prefix) || vertex_source.contains(&prefix) {
-        prefix.push('x');
-    }
-    let uniform = format!("{prefix}_depth_range");
-    let main = format!("{prefix}_unclamped_main");
-    let version_end = source.find('\n').map_or(source.len(), |index| index + 1);
-    let wrapped = format!("{}\n#define main {main}\n{}\n#undef main\nuniform highp vec2 {uniform};\nvoid main() {{\n  {main}();\n  gl_FragDepth = clamp(gl_FragDepth, {uniform}.x, {uniform}.y);\n}}\n", &source[..version_end], &source[version_end..]);
-    (wrapped, Some(uniform))
-}
-
 fn build_render_program(
     device: &Arc<GlesDeviceInner>,
     vertex_source: &str,
@@ -617,7 +585,7 @@ fn build_render_program(
             // First-instance offset: when the vertex stage reads
             // `@builtin(instance_index)`, `yawgpu-core` requests Tint's
             // `first_instance_offset`, which emits a single
-            // `layout(location = 0) uniform uint tint_immediates[1]` array
+            // `layout(location = 0) uniform uint tint_immediates[4]` array
             // (see `tint_shim.h`'s `yawgpu_tint_generate_glsl` docs). Query
             // its location by the GLSL array-element name; `queue.rs`
             // writes the WebGPU `firstInstance` draw parameter there before
@@ -658,26 +626,6 @@ fn compile_shader(
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn fragment_depth_is_clamped_after_translated_main_returns() {
-        let source = "#version 310 es\nprecision highp float;\nvoid main() { gl_FragDepth = 1.0; return; }\n";
-        let (translated, uniform) = clamp_fragment_depth_source(source, "");
-        assert_eq!(uniform.as_deref(), Some("yawgpu_depth_range"));
-        assert!(translated.starts_with("#version 310 es\n"));
-        assert!(translated.contains("#define main yawgpu_unclamped_main"));
-        assert!(translated.contains("uniform highp vec2 yawgpu_depth_range;"));
-        assert!(translated.ends_with("yawgpu_unclamped_main();\n  gl_FragDepth = clamp(gl_FragDepth, yawgpu_depth_range.x, yawgpu_depth_range.y);\n}\n"));
-        let no_depth = "#version 310 es\nvoid main() {}\n";
-        assert_eq!(
-            clamp_fragment_depth_source(no_depth, ""),
-            (no_depth.to_owned(), None)
-        );
-        let (translated, uniform) =
-            clamp_fragment_depth_source(source, "float yawgpu_depth_range;");
-        assert_eq!(uniform.as_deref(), Some("yawgpux_depth_range"));
-        assert!(translated.contains("#define main yawgpux_unclamped_main"));
-    }
-
     use super::*;
     use crate::HalTextureFormat;
     const TEST_MAX_SAMPLES: i32 = 4;
@@ -932,7 +880,7 @@ mod tests {
     /// syntax Tint's GLSL writer emits (see
     /// `yawgpu-tint`'s `generate_glsl_first_instance_offset_only_applied_when_requested`,
     /// which pins the shim side of this same contract: `layout(location = 0)
-    /// uniform uint tint_immediates[1];`).
+    /// uniform uint tint_immediates[4];`).
     #[test]
     fn first_instance_uniform_name_matches_tint_immediate_array_element_zero() {
         assert_eq!(FIRST_INSTANCE_UNIFORM_NAME, "tint_immediates[0]");

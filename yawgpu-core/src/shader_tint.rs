@@ -394,6 +394,11 @@ impl ReflectedModule {
         self.codegen_misses.fetch_add(1, Ordering::Relaxed);
         let generated = (|| {
             let first_instance_offset = matches!(stage, ShaderStage::Vertex).then_some(0);
+            let depth_range_offsets = (matches!(stage, ShaderStage::Fragment)
+                && self
+                    .fragment_builtins(entry_name)
+                    .is_some_and(|b| b.frag_depth))
+            .then_some([4, 8]);
             let source = self
                 .program
                 .generate_glsl(
@@ -401,6 +406,7 @@ impl ReflectedModule {
                     &bindings.tint,
                     &override_values(pipeline_constants),
                     first_instance_offset,
+                    depth_range_offsets,
                 )
                 .map_err(|e| e.to_string())?;
             Ok(GeneratedGlsl {
@@ -3148,6 +3154,61 @@ fn fs() -> @location(0) vec4f {
             !fragment_glsl.source.contains("tint_immediates"),
             "GLSL:\n{}",
             fragment_glsl.source
+        );
+    }
+
+    #[cfg(feature = "gles")]
+    #[test]
+    fn generate_glsl_clamps_only_selected_fragment_depth_entry() {
+        let module = parse_and_validate_wgsl(
+            r#"
+@fragment fn depth() -> @builtin(frag_depth) f32 { return 1.5; }
+@fragment fn color() -> @location(0) vec4f { return vec4f(1.0); }
+@vertex fn vertex(@builtin(instance_index) i: u32) -> @builtin(position) vec4f {
+    return vec4f(f32(i), 0.0, 0.0, 1.0);
+}
+"#,
+        )
+        .unwrap();
+        let constants = PipelineConstants::default();
+        let depth = module
+            .generate_glsl("depth", ShaderStage::Fragment, &constants)
+            .unwrap();
+        assert!(depth.source.contains("clamp("), "{}", depth.source);
+        assert!(
+            depth.source.contains("uintBitsToFloat(tint_immediates[1"),
+            "{}",
+            depth.source
+        );
+        assert!(
+            depth.source.contains("uintBitsToFloat(tint_immediates[2"),
+            "{}",
+            depth.source
+        );
+        let color = module
+            .generate_glsl("color", ShaderStage::Fragment, &constants)
+            .unwrap();
+        assert!(!color.source.contains("clamp("), "{}", color.source);
+        assert!(
+            !color.source.contains("tint_immediates"),
+            "{}",
+            color.source
+        );
+        let vertex = module
+            .generate_glsl("vertex", ShaderStage::Vertex, &constants)
+            .unwrap();
+        for source in [&depth.source, &vertex.source] {
+            assert!(
+                source.contains("uniform uint tint_immediates[4]"),
+                "{source}"
+            );
+        }
+        assert_eq!(
+            depth.source,
+            module
+                .generate_glsl("depth", ShaderStage::Fragment, &constants)
+                .unwrap()
+                .source
         );
     }
 

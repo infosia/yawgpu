@@ -1357,6 +1357,18 @@ mod real {
     };
 
     #[repr(C)]
+    struct RawDepthRangeOffsets {
+        min: u32,
+        max: u32,
+    }
+
+    const _: () = {
+        assert!(core::mem::size_of::<RawDepthRangeOffsets>() == 8);
+        assert!(core::mem::offset_of!(RawDepthRangeOffsets, min) == 0);
+        assert!(core::mem::offset_of!(RawDepthRangeOffsets, max) == 4);
+    };
+
+    #[repr(C)]
     #[derive(Clone, Copy)]
     struct RawGlslOutput {
         glsl: *mut c_char,
@@ -1525,6 +1537,7 @@ mod real {
             n_ov: usize,
             has_first_instance_offset: bool,
             first_instance_offset: u32,
+            depth_range_offsets: *const RawDepthRangeOffsets,
             out: *mut RawGlslOutput,
             err: *mut *mut c_char,
         ) -> bool;
@@ -2303,30 +2316,26 @@ mod real {
 
         /// Generates GLSL ES 3.1 for `entry_point`.
         ///
-        /// `first_instance_offset`, when `Some`, is passed through to Tint's
-        /// `glsl::writer::Options::first_instance_offset` (a byte offset into
-        /// Tint's internal "immediate data" map -- yawgpu-core always passes
-        /// `Some(0)` for vertex stages, since GLES does not share that map
-        /// with any other internal immediate today). This makes Tint rewrite
-        /// `@builtin(instance_index)` to add a value it reads back from a
-        /// plain array-typed uniform, `layout(location = 0) uniform uint
-        /// tint_immediates[1]` -- NOT a named struct with a
-        /// `tint_first_instance` member; query it as
-        /// `glGetUniformLocation(program, "tint_immediates[0]")` (see
-        /// `tint_shim.h` docs on `yawgpu_tint_generate_glsl`, and the
-        /// `generate_glsl_first_instance_offset_only_applied_when_requested`
-        /// test below, which pins the exact GLSL text). `None` leaves
-        /// `instance_index` as raw `gl_InstanceID` with no immediate-data
-        /// array emitted.
+        /// `first_instance_offset` is a byte offset for the instance-index
+        /// adjustment. `depth_range_offsets` contains byte offsets for the
+        /// fragment depth clamp's min/max f32 values. Both use Tint's plain
+        /// `uint tint_immediates[]` uniform, queried by array element name
+        /// and uploaded with `glUniform1ui` (floats use their u32 bit patterns).
+        /// When either option is present, the shim reserves at least 16 bytes
+        /// so linked stages share the same array size. Core reserves word 0
+        /// for firstInstance and words 1/2 for min/max depth.
         pub fn generate_glsl(
             &self,
             entry_point: &str,
             bindings: &Bindings,
             overrides: &[OverrideValue],
             first_instance_offset: Option<u32>,
+            depth_range_offsets: Option<[u32; 2]>,
         ) -> Result<GlslOutput, TintError> {
             let ep = cstring(entry_point, "entry point").map_err(TintError::Codegen)?;
             let raw_bindings = bindings.as_raw();
+            let raw_depth_range =
+                depth_range_offsets.map(|[min, max]| RawDepthRangeOffsets { min, max });
             let raw_overrides = RawOverrideValues::new(overrides)?;
             let mut out = RawGlslOutput {
                 glsl: ptr::null_mut(),
@@ -2348,6 +2357,7 @@ mod real {
                     raw_overrides.len(),
                     first_instance_offset.is_some(),
                     first_instance_offset.unwrap_or(0),
+                    raw_depth_range.as_ref().map_or(ptr::null(), |range| range),
                     &mut out,
                     &mut err,
                 )
@@ -2603,6 +2613,7 @@ mod stub {
             _bindings: &Bindings,
             _overrides: &[OverrideValue],
             _first_instance_offset: Option<u32>,
+            _depth_range_offsets: Option<[u32; 2]>,
         ) -> Result<GlslOutput, TintError> {
             Err(TintError::Unavailable)
         }
@@ -2996,7 +3007,7 @@ fn main() {
             Some(0x0723_0203)
         );
         let glsl = program
-            .generate_glsl("cs", &bindings, &[], None)
+            .generate_glsl("cs", &bindings, &[], None, None)
             .unwrap()
             .source;
         assert!(glsl.contains("#version 310 es"), "GLSL:\n{glsl}");
@@ -3015,7 +3026,7 @@ fn fs() -> @location(0) vec4f {
 "#;
         let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let glsl = program
-            .generate_glsl("fs", &Bindings::default(), &[], None)
+            .generate_glsl("fs", &Bindings::default(), &[], None, None)
             .unwrap()
             .source;
         assert!(glsl.contains("#version 320 es"), "GLSL:\n{glsl}");
@@ -3038,7 +3049,7 @@ fn vs(@builtin(instance_index) ii: u32, @builtin(vertex_index) vi: u32) -> @buil
     /// confirms that a HAL which never requests the offset (the naga-era
     /// `naga_vs_first_instance` uniform lookup this replaces) makes
     /// `firstInstance` silently no-op. With it, Tint emits a single
-    /// `layout(location = 0) uniform uint tint_immediates[1]` array (NOT a
+    /// `layout(location = 0) uniform uint tint_immediates[4]` array (NOT a
     /// named struct member -- Tint's internal immediate symbol name
     /// (`tint_first_instance`) never reaches the printed GLSL text; the
     /// raise pass indexes the immediate block by word offset only) and
@@ -3062,7 +3073,7 @@ fn vs(@builtin(instance_index) ii: u32, @builtin(vertex_index) vi: u32) -> @buil
         let bindings = Bindings::default();
 
         let glsl_without = program
-            .generate_glsl("vs", &bindings, &[], None)
+            .generate_glsl("vs", &bindings, &[], None, None)
             .unwrap()
             .source;
         assert!(
@@ -3075,14 +3086,14 @@ fn vs(@builtin(instance_index) ii: u32, @builtin(vertex_index) vi: u32) -> @buil
         );
 
         let glsl_with = program
-            .generate_glsl("vs", &bindings, &[], Some(0))
+            .generate_glsl("vs", &bindings, &[], Some(0), None)
             .unwrap()
             .source;
         // The immediate-data block is a plain array-typed uniform with an
         // explicit location, not a UBO -- HAL must look it up by
         // `glGetUniformLocation`, not `glGetUniformBlockIndex`.
         assert!(
-            glsl_with.contains("layout(location = 0) uniform uint tint_immediates[1];"),
+            glsl_with.contains("layout(location = 0) uniform uint tint_immediates[4];"),
             "GLSL:\n{glsl_with}"
         );
         assert!(
@@ -3096,6 +3107,73 @@ fn vs(@builtin(instance_index) ii: u32, @builtin(vertex_index) vi: u32) -> @buil
     }
 
     #[test]
+    fn generate_glsl_depth_range_offsets_clamp_fragment_output() {
+        let program = Program::parse(
+            r#"
+@vertex fn vs(@builtin(instance_index) i: u32) -> @builtin(position) vec4f {
+    return vec4f(f32(i), 0.0, 0.0, 1.0);
+}
+struct Output { @builtin(frag_depth) depth: f32, @location(0) color: vec4f }
+@fragment fn fs(@builtin(front_facing) front: bool) -> Output {
+    if front { return Output(-0.5, vec4f(1.0)); }
+    return Output(1.5, vec4f(0.0));
+}
+"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let bindings = Bindings::default();
+        let plain = program
+            .generate_glsl("fs", &bindings, &[], None, None)
+            .unwrap();
+        assert!(!plain.source.contains("clamp("), "{}", plain.source);
+        assert!(
+            !plain.source.contains("tint_immediates"),
+            "{}",
+            plain.source
+        );
+        // Use non-default offsets to prove both values reach Tint unchanged.
+        let clamped = program
+            .generate_glsl("fs", &bindings, &[], None, Some([8, 12]))
+            .unwrap();
+        assert!(clamped.source.contains("clamp("), "{}", clamped.source);
+        assert!(
+            clamped.source.contains("uintBitsToFloat(tint_immediates[2"),
+            "{}",
+            clamped.source
+        );
+        assert!(
+            clamped.source.contains("uintBitsToFloat(tint_immediates[3"),
+            "{}",
+            clamped.source
+        );
+        assert!(
+            clamped.source.contains("uniform uint tint_immediates[4]"),
+            "{}",
+            clamped.source
+        );
+        let vertex = program
+            .generate_glsl("vs", &bindings, &[], Some(0), None)
+            .unwrap();
+        assert!(
+            vertex.source.contains("uniform uint tint_immediates[4]"),
+            "{}",
+            vertex.source
+        );
+        assert!(
+            vertex.source.contains("tint_immediates[0"),
+            "{}",
+            vertex.source
+        );
+    }
+
+    #[test]
     fn generate_glsl_sample_mask_output_emits_sample_variables_extension() {
         let wgsl = r#"
 @fragment
@@ -3105,7 +3183,7 @@ fn fs() -> @builtin(sample_mask) u32 {
 "#;
         let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let glsl = program
-            .generate_glsl("fs", &Bindings::default(), &[], None)
+            .generate_glsl("fs", &Bindings::default(), &[], None, None)
             .unwrap()
             .source;
         assert!(
@@ -3128,7 +3206,7 @@ fn fs(@builtin(sample_mask) mask_in: u32) -> @location(0) vec4f {
 "#;
         let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let glsl = program
-            .generate_glsl("fs", &Bindings::default(), &[], None)
+            .generate_glsl("fs", &Bindings::default(), &[], None, None)
             .unwrap()
             .source;
         assert!(
@@ -3150,7 +3228,7 @@ fn fs(@builtin(sample_index) sample_index: u32) -> @location(0) vec4f {
 "#;
         let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let glsl = program
-            .generate_glsl("fs", &Bindings::default(), &[], None)
+            .generate_glsl("fs", &Bindings::default(), &[], None, None)
             .unwrap()
             .source;
         assert!(glsl.contains("sampler2DMS"), "GLSL:\n{glsl}");
@@ -3177,7 +3255,7 @@ fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
 "#;
         let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let glsl = program
-            .generate_glsl("fs", &Bindings::default(), &[], None)
+            .generate_glsl("fs", &Bindings::default(), &[], None, None)
             .unwrap()
             .source;
         assert!(glsl.contains("sampler2D "), "expected sampler2D: {glsl}");
@@ -3208,7 +3286,7 @@ fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
 "#;
         let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let glsl = program
-            .generate_glsl("fs", &Bindings::default(), &[], None)
+            .generate_glsl("fs", &Bindings::default(), &[], None, None)
             .unwrap()
             .source;
         assert!(glsl.contains("sampler2D "), "expected sampler2D: {glsl}");
@@ -3239,7 +3317,7 @@ fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
 "#;
         let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let glsl = program
-            .generate_glsl("fs", &Bindings::default(), &[], None)
+            .generate_glsl("fs", &Bindings::default(), &[], None, None)
             .unwrap()
             .source;
         assert!(
@@ -3267,7 +3345,7 @@ fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
 "#;
         let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let glsl = program
-            .generate_glsl("fs", &Bindings::default(), &[], None)
+            .generate_glsl("fs", &Bindings::default(), &[], None, None)
             .unwrap()
             .source;
         assert!(
@@ -3325,7 +3403,9 @@ fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
                 dst_group: 0,
                 dst_binding: 1,
             });
-            let output = program.generate_glsl("main", &bindings, &[], None).unwrap();
+            let output = program
+                .generate_glsl("main", &bindings, &[], None, None)
+                .unwrap();
             assert!(
                 output.source.contains("TintTextureUniformData"),
                 "GLSL for {texture_type}:\n{}",
@@ -3377,7 +3457,9 @@ fn main() {
             dst_group: 0,
             dst_binding: 1,
         });
-        let output = program.generate_glsl("main", &bindings, &[], None).unwrap();
+        let output = program
+            .generate_glsl("main", &bindings, &[], None, None)
+            .unwrap();
         assert!(
             output.source.contains("TintTextureUniformData"),
             "GLSL:\n{}",
@@ -3436,8 +3518,12 @@ fn fs() -> @location(0) vec4f {
             });
         }
 
-        let vs = program.generate_glsl("vs", &bindings, &[], None).unwrap();
-        let fs = program.generate_glsl("fs", &bindings, &[], None).unwrap();
+        let vs = program
+            .generate_glsl("vs", &bindings, &[], None, None)
+            .unwrap();
+        let fs = program
+            .generate_glsl("fs", &bindings, &[], None, None)
+            .unwrap();
 
         // Every slot's offset equals its resolved binding, in both stages.
         for slot in vs
@@ -3490,7 +3576,7 @@ fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
 "#;
         let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let output = program
-            .generate_glsl("fs", &Bindings::default(), &[], None)
+            .generate_glsl("fs", &Bindings::default(), &[], None, None)
             .unwrap();
 
         assert_eq!(
@@ -3527,7 +3613,7 @@ fn fs() -> @location(0) vec4f {
 "#;
         let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let output = program
-            .generate_glsl("fs", &Bindings::default(), &[], None)
+            .generate_glsl("fs", &Bindings::default(), &[], None, None)
             .unwrap();
 
         assert_eq!(
@@ -3579,7 +3665,7 @@ fn cs() {
         let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
         let bindings = Bindings::default();
         let glsl = program
-            .generate_glsl("cs", &bindings, &[], None)
+            .generate_glsl("cs", &bindings, &[], None, None)
             .unwrap()
             .source;
         assert!(
@@ -3640,7 +3726,7 @@ fn cs() {
             ..Default::default()
         };
         let glsl = program
-            .generate_glsl("cs", &bindings, &[], None)
+            .generate_glsl("cs", &bindings, &[], None, None)
             .unwrap()
             .source;
         assert!(
