@@ -2,8 +2,10 @@ use crate::{HalTextureFormat, HalTextureUsage};
 
 /// Wraps  for the selected backend.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct HalSurfaceConfiguration {
+    /// Additional formats permitted for views of the surface texture.
+    pub view_formats: Vec<HalTextureFormat>,
     /// Format.
     pub format: HalTextureFormat,
     /// Usage.
@@ -30,6 +32,7 @@ impl HalSurfaceConfiguration {
         alpha_mode: HalCompositeAlphaMode,
     ) -> Self {
         Self {
+            view_formats: Vec::new(),
             format,
             usage,
             width,
@@ -105,6 +108,7 @@ mod tests {
             crate::HalCompositeAlphaMode::Opaque,
         );
 
+        assert!(config.view_formats.is_empty());
         assert!(matches!(config.format, HalTextureFormat::Rgba8Unorm));
         assert_eq!(config.usage.copy_src, usage.copy_src);
         assert_eq!(config.usage.copy_dst, usage.copy_dst);

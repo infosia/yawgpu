@@ -354,7 +354,9 @@ YAWGPU_TINT_API bool yawgpu_tint_generate_msl(const YawgpuTintProgram*,
                               YawgpuTintMslOutput* out,
                               char** err);
 
-/* `user_immediate_size` has the same meaning as in yawgpu_tint_generate_msl:
+/* `use_storage_input_output_16` must match the enabled Vulkan
+   storageInputOutput16 feature, so Tint can widen f16 stage IO when absent.
+   `user_immediate_size` has the same meaning as in yawgpu_tint_generate_msl:
    the owning pipeline layout's reserved user-immediate byte budget (Block
    94). It only matters when `has_polyfill_pixel_center` is set -- the
    depth-range internal immediates are placed at byte offsets
@@ -367,6 +369,7 @@ YAWGPU_TINT_API bool yawgpu_tint_generate_spirv(const YawgpuTintProgram*,
                                 size_t n_ov,
                                 bool disable_robustness,
                                 bool use_vulkan_memory_model,
+                                bool use_storage_input_output_16,
                                 uint32_t framebuffer_fetch_descriptor_set,
                                 bool multisampled_input_attachment,
                                 bool has_polyfill_pixel_center,

@@ -290,10 +290,12 @@ pub(super) unsafe fn cleanup_retire_ops(device: &ash::Device, cleanup: Vec<Retir
 
 /// Stores vulkan surface data used by validation and backend submission.
 pub struct VulkanSurface {
+    pub(super) suboptimal: bool,
+    pub(super) present_error: Option<vk::Result>,
     pub(super) surface: vk::SurfaceKHR,
     pub(super) surface_inner: Arc<VulkanSurfaceInner>,
     pub(super) swapchain: Option<Arc<VulkanSwapchainInner>>,
-    pub(super) config: Option<HalSurfaceConfiguration>,
+    pub(super) config: Option<Box<HalSurfaceConfiguration>>,
     pub(super) current_image_index: Option<u32>,
     pub(super) pending_state: Arc<Mutex<SurfacePendingState>>,
     pub(super) image_acquired_semaphores: Vec<vk::Semaphore>,
@@ -326,6 +328,10 @@ impl Drop for VulkanSurface {
 }
 
 impl VulkanSurface {
+    pub(crate) fn is_suboptimal(&self) -> bool {
+        self.suboptimal
+    }
+
     /// Queries the driver for this surface's supported configurations.
     pub fn capabilities(
         &self,
@@ -392,11 +398,13 @@ impl VulkanSurface {
         let swapchain = create_swapchain(
             Arc::clone(&device.inner),
             Arc::clone(&self.surface_inner),
-            config,
+            config.clone(),
             Arc::clone(&self.pending_state),
         )?;
         self.create_sync_objects(&device.inner.device, swapchain.images.len())?;
-        self.config = Some(config);
+        self.suboptimal = false;
+        self.present_error = None;
+        self.config = Some(Box::new(config));
         self.current_image_index = None;
         self.next_sync_index = 0;
         self.swapchain = Some(swapchain);
@@ -420,6 +428,9 @@ impl VulkanSurface {
 
     /// Returns acquire next texture.
     pub fn acquire_next_texture(&mut self) -> Result<VulkanTexture, HalError> {
+        if let Some(error) = self.present_error {
+            return Err(surface_status_error(error));
+        }
         let swapchain = self.swapchain.as_ref().ok_or(HalError::AcquireFailed {
             backend: BACKEND,
             message: "surface is not configured",
@@ -452,15 +463,8 @@ impl VulkanSurface {
                 vk::Fence::null(),
             )
         };
-        let image_index = match acquire {
-            Ok((image_index, _suboptimal)) => image_index,
-            Err(_) => {
-                return Err(HalError::AcquireFailed {
-                    backend: BACKEND,
-                    message: "vkAcquireNextImageKHR failed",
-                });
-            }
-        };
+        let (image_index, suboptimal) = acquire.map_err(surface_status_error)?;
+        self.suboptimal |= suboptimal;
         let mut state = self
             .pending_state
             .lock()
@@ -493,7 +497,9 @@ impl VulkanSurface {
             consumed: false,
         });
         let mut texture = swapchain
-            .images
+            .blit_images
+            .as_ref()
+            .unwrap_or(&swapchain.images)
             .get(index)
             .cloned()
             .ok_or(HalError::AcquireFailed {
@@ -542,18 +548,15 @@ impl VulkanSurface {
                     message: "pending acquire image mismatch",
                 });
             }
-            let wait_semaphore = if pending.consumed {
-                pending.render_finished_sem
-            } else {
-                pending.acquired_sem
-            };
             transition_swapchain_image_to_present(
                 queue,
                 texture,
+                swapchain
+                    .blit_images
+                    .as_ref()
+                    .and_then(|images| images.get(image_index as usize)),
                 Arc::clone(&self.pending_state),
-                wait_semaphore,
-                pending.present_ready_sem,
-                pending.in_flight_fence,
+                pending,
                 &mut transition_submitted,
             )?;
             let swapchains = [swapchain.swapchain];
@@ -563,7 +566,7 @@ impl VulkanSurface {
                 .wait_semaphores(&wait_semaphores)
                 .swapchains(&swapchains)
                 .image_indices(&image_indices);
-            {
+            let present_result = {
                 let _queue_access = queue
                     .inner
                     .queue_access
@@ -574,12 +577,17 @@ impl VulkanSurface {
                         .loader
                         .queue_present(queue.inner.queue, &present_info)
                 }
+            };
+            match present_result {
+                Ok(suboptimal) => {
+                    self.suboptimal |= suboptimal;
+                    Ok(())
+                }
+                Err(error) => {
+                    self.present_error = Some(error);
+                    Err(surface_status_error(error))
+                }
             }
-            .map_err(|_| HalError::PresentFailed {
-                backend: BACKEND,
-                message: "vkQueuePresentKHR failed",
-            })?;
-            Ok(())
         })();
         if result.is_err() && !transition_submitted {
             if let Some(pending) = pending {
@@ -728,6 +736,7 @@ pub(super) struct VulkanSwapchainInner {
     pub(super) loader: ash::khr::swapchain::Device,
     pub(super) swapchain: vk::SwapchainKHR,
     pub(super) images: Vec<VulkanTexture>,
+    pub(super) blit_images: Option<Vec<VulkanTexture>>,
     teardown_waited: AtomicBool,
 }
 
@@ -787,14 +796,47 @@ pub(super) fn create_swapchain(
     if capabilities.max_image_count > 0 {
         image_count = image_count.min(capabilities.max_image_count);
     }
-    let extent = swapchain_extent(config.width, config.height, &capabilities)?;
+    let (extent, blit_descriptor) = swapchain_texture_plan(&config, &capabilities)?;
     let present_modes = unsafe {
         surface_loader
             .get_physical_device_surface_present_modes(device.physical_device, surface.surface)
     }
     .unwrap_or_else(|_| vec![vk::PresentModeKHR::FIFO]);
     let present_mode = select_present_mode(config.present_mode, &present_modes);
-    let usage = swapchain_image_usage(config.usage, capabilities.supported_usage_flags)?;
+    let needs_blit = blit_descriptor.is_some();
+    let usage = if needs_blit {
+        if !capabilities
+            .supported_usage_flags
+            .contains(vk::ImageUsageFlags::TRANSFER_DST)
+        {
+            return Err(HalError::SwapchainCreationFailed {
+                backend: BACKEND,
+                message: "surface does not support transfer destination for scaled presentation",
+            });
+        }
+        let features = unsafe {
+            device
+                ._instance
+                .instance
+                .get_physical_device_format_properties(device.physical_device, format)
+        }
+        .optimal_tiling_features;
+        if !features.contains(
+            vk::FormatFeatureFlags::BLIT_SRC
+                | vk::FormatFeatureFlags::BLIT_DST
+                | vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR,
+        ) {
+            return Err(HalError::SwapchainCreationFailed {
+                backend: BACKEND,
+                message: "surface format does not support a linear presentation blit",
+            });
+        }
+        vk::ImageUsageFlags::TRANSFER_DST
+    } else {
+        swapchain_image_usage(config.usage, capabilities.supported_usage_flags)?
+    };
+    let view_formats = super::texture::texture_view_formats(config.format, &config.view_formats)?;
+    let mutable = mutable_swapchain_flags(&view_formats, device.swapchain_mutable_format)?;
     let alpha = hal_alpha_to_vk(config.alpha_mode);
     if !capabilities.supported_composite_alpha.contains(alpha) {
         return Err(surface_query_error());
@@ -807,7 +849,9 @@ pub(super) fn create_swapchain(
         .iter()
         .find(|entry| entry.format == format)
         .ok_or_else(surface_query_error)?;
-    let create_info = vk::SwapchainCreateInfoKHR::default()
+    let mut format_list = vk::ImageFormatListCreateInfo::default().view_formats(&view_formats);
+    let mut create_info = vk::SwapchainCreateInfoKHR::default()
+        .flags(mutable)
         .surface(surface.surface)
         .min_image_count(image_count)
         .image_format(format)
@@ -820,6 +864,9 @@ pub(super) fn create_swapchain(
         .composite_alpha(alpha)
         .present_mode(present_mode)
         .clipped(true);
+    if !mutable.is_empty() {
+        create_info = create_info.push_next(&mut format_list);
+    }
     let loader = ash::khr::swapchain::Device::new(&device._instance.instance, &device.device);
     let swapchain = unsafe { loader.create_swapchain(&create_info, None) }.map_err(|_| {
         HalError::SwapchainCreationFailed {
@@ -836,6 +883,17 @@ pub(super) fn create_swapchain(
             message: "vkGetSwapchainImagesKHR failed",
         }
     })?;
+    let mut image_config = config.clone();
+    if needs_blit {
+        image_config.usage = HalTextureUsage {
+            copy_src: false,
+            copy_dst: true,
+            texture_binding: false,
+            storage_binding: false,
+            render_attachment: false,
+            transient: false,
+        };
+    }
     let textures = images
         .into_iter()
         .map(|image| {
@@ -843,7 +901,7 @@ pub(super) fn create_swapchain(
                 Arc::clone(&device),
                 image,
                 format,
-                config,
+                &image_config,
                 extent,
                 (bytes_per_pixel, usage),
                 Arc::clone(&pending_state),
@@ -853,6 +911,41 @@ pub(super) fn create_swapchain(
         .inspect_err(|_| unsafe {
             loader.destroy_swapchain(swapchain, None);
         })?;
+    // Keep a separate app-visible image for every swapchain image, so reuse is
+    // ordered by the acquire/present semaphore chain and its frame fence.
+    let blit_images = if let Some(descriptor) = blit_descriptor {
+        let result = (0..textures.len())
+            .map(|_| {
+                let (inner, bytes_per_pixel) = create_texture(Arc::clone(&device), &descriptor)?;
+                let image_usage = inner.usage;
+                Ok(VulkanTexture {
+                    inner: Some(Arc::new(inner)),
+                    swapchain: None,
+                    _surface_pending: Some(Arc::clone(&pending_state)),
+                    dimension: HalTextureDimension::D2,
+                    width: config.width,
+                    height: config.height,
+                    depth_or_array_layers: 1,
+                    sample_count: 1,
+                    bytes_per_pixel,
+                    format: config.format,
+                    image_usage,
+                })
+            })
+            .collect::<Result<Vec<_>, HalError>>();
+        match result {
+            Ok(images) => Some(images),
+            Err(error) => {
+                drop(textures);
+                unsafe {
+                    loader.destroy_swapchain(swapchain, None);
+                }
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
     {
         let mut surfaces = device
             .surfaces
@@ -870,6 +963,7 @@ pub(super) fn create_swapchain(
         loader,
         swapchain,
         images: textures,
+        blit_images,
         teardown_waited: AtomicBool::new(false),
     }))
 }
@@ -908,6 +1002,62 @@ fn swapchain_pre_transform(
     } else {
         capabilities.current_transform
     }
+}
+
+fn surface_status_error(error: vk::Result) -> HalError {
+    match error {
+        vk::Result::ERROR_OUT_OF_DATE_KHR => HalError::SurfaceOutdated,
+        vk::Result::ERROR_SURFACE_LOST_KHR => HalError::SurfaceLost,
+        vk::Result::TIMEOUT | vk::Result::NOT_READY => HalError::SurfaceTimeout,
+        _ => HalError::AcquireFailed {
+            backend: BACKEND,
+            message: "Vulkan surface operation failed",
+        },
+    }
+}
+
+// The image returned to core must always match the configured extent. The
+// native extent can differ only when an intermediate is returned instead.
+fn swapchain_texture_plan(
+    config: &HalSurfaceConfiguration,
+    caps: &vk::SurfaceCapabilitiesKHR,
+) -> Result<(vk::Extent2D, Option<HalTextureDescriptor>), HalError> {
+    let extent = swapchain_extent(config.width, config.height, caps)?;
+    let blit = (extent.width != config.width || extent.height != config.height)
+        .then(|| blit_texture_descriptor(config));
+    Ok((extent, blit))
+}
+
+fn blit_texture_descriptor(config: &HalSurfaceConfiguration) -> HalTextureDescriptor {
+    let mut usage = config.usage;
+    usage.copy_src = true;
+    HalTextureDescriptor {
+        dimension: HalTextureDimension::D2,
+        format: config.format,
+        view_formats: config.view_formats.clone(),
+        width: config.width,
+        height: config.height,
+        depth_or_array_layers: 1,
+        mip_level_count: 1,
+        sample_count: 1,
+        usage,
+    }
+}
+
+fn mutable_swapchain_flags(
+    formats: &[vk::Format],
+    supported: bool,
+) -> Result<vk::SwapchainCreateFlagsKHR, HalError> {
+    if formats.len() <= 1 {
+        return Ok(vk::SwapchainCreateFlagsKHR::empty());
+    }
+    if !supported {
+        return Err(HalError::SwapchainCreationFailed {
+            backend: BACKEND,
+            message: "surface view formats require VK_KHR_swapchain_mutable_format",
+        });
+    }
+    Ok(vk::SwapchainCreateFlagsKHR::MUTABLE_FORMAT)
 }
 
 /// Selects the fixed surface extent or bounds the configured extent to its limits.
@@ -959,7 +1109,7 @@ pub(super) fn create_swapchain_texture(
     device: Arc<VulkanDeviceInner>,
     image: vk::Image,
     vk_format: vk::Format,
-    config: HalSurfaceConfiguration,
+    config: &HalSurfaceConfiguration,
     extent: vk::Extent2D,
     pixel_info: (u32, vk::ImageUsageFlags),
     pending_state: Arc<Mutex<SurfacePendingState>>,
@@ -1112,6 +1262,87 @@ fn hal_usage_to_vk_image_usage(usage: HalTextureUsage) -> vk::ImageUsageFlags {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audit_t1_blit_texture_preserves_configured_extent_and_views() {
+        let mut config = surface_config();
+        config.width = 128;
+        config.height = 96;
+        config.view_formats = vec![HalTextureFormat::Bgra8UnormSrgb];
+        let fixed = vk::SurfaceCapabilitiesKHR::default().current_extent(vk::Extent2D {
+            width: 64,
+            height: 64,
+        });
+        let (actual, descriptor) = swapchain_texture_plan(&config, &fixed).unwrap();
+        assert_eq!((actual.width, actual.height), (64, 64));
+        let descriptor = descriptor.expect("fixed extent mismatch must return an intermediate");
+        assert_eq!((descriptor.width, descriptor.height), (128, 96));
+        assert!(descriptor.usage.copy_src);
+        assert_eq!(descriptor.view_formats, config.view_formats);
+        let flexible = vk::SurfaceCapabilitiesKHR::default()
+            .current_extent(vk::Extent2D {
+                width: u32::MAX,
+                height: u32::MAX,
+            })
+            .min_image_extent(vk::Extent2D {
+                width: 32,
+                height: 32,
+            })
+            .max_image_extent(vk::Extent2D {
+                width: 256,
+                height: 256,
+            });
+        let (actual, blit) = swapchain_texture_plan(&config, &flexible).unwrap();
+        assert_eq!((actual.width, actual.height), (128, 96));
+        assert!(blit.is_none());
+        config.width = 512;
+        config.height = 16;
+        let (clamped, blit) = swapchain_texture_plan(&config, &flexible).unwrap();
+        assert_eq!((clamped.width, clamped.height), (256, 32));
+        let blit = blit.expect("out of range extent must return an intermediate");
+        assert_eq!((blit.width, blit.height), (512, 16));
+    }
+
+    #[test]
+    fn audit_t2_mutable_swapchain_requires_extension_and_both_formats() {
+        let formats = super::super::texture::texture_view_formats(
+            HalTextureFormat::Bgra8Unorm,
+            &[HalTextureFormat::Bgra8UnormSrgb],
+        )
+        .unwrap();
+        assert_eq!(
+            formats,
+            [vk::Format::B8G8R8A8_UNORM, vk::Format::B8G8R8A8_SRGB]
+        );
+        assert_eq!(
+            mutable_swapchain_flags(&formats, true).unwrap(),
+            vk::SwapchainCreateFlagsKHR::MUTABLE_FORMAT
+        );
+        assert!(mutable_swapchain_flags(&formats, false).is_err());
+        assert!(mutable_swapchain_flags(&formats[..1], false)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn audit_t3_vulkan_surface_errors_remain_distinct() {
+        assert!(matches!(
+            surface_status_error(vk::Result::ERROR_OUT_OF_DATE_KHR),
+            HalError::SurfaceOutdated
+        ));
+        assert!(matches!(
+            surface_status_error(vk::Result::ERROR_SURFACE_LOST_KHR),
+            HalError::SurfaceLost
+        ));
+        assert!(matches!(
+            surface_status_error(vk::Result::TIMEOUT),
+            HalError::SurfaceTimeout
+        ));
+        assert!(matches!(
+            surface_status_error(vk::Result::ERROR_DEVICE_LOST),
+            HalError::AcquireFailed { .. }
+        ));
+    }
+
     #[test]
     fn reconfigure_does_not_publish_new_acquire_to_previous_device() {
         let mut state = Arc::new(Mutex::new(SurfacePendingState::new()));
@@ -1295,7 +1526,7 @@ mod tests {
             Arc::clone(&device.inner),
             vk::Image::null(),
             vk::Format::B8G8R8A8_UNORM,
-            config,
+            &config,
             vk::Extent2D {
                 width: 4,
                 height: 4,

@@ -2289,6 +2289,7 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
                                 size_t n_ov,
                                 bool disable_robustness,
                                 bool use_vulkan_memory_model,
+                                bool use_storage_input_output_16,
                                 uint32_t framebuffer_fetch_descriptor_set,
                                 bool multisampled_input_attachment,
                                 bool has_polyfill_pixel_center,
@@ -2321,6 +2322,7 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
         options.entry_point_name = entry_point;
         options.disable_robustness = disable_robustness;
         options.extensions.use_vulkan_memory_model = use_vulkan_memory_model;
+        options.extensions.use_storage_input_output_16 = use_storage_input_output_16;
         options.multisampled_input_attachment = multisampled_input_attachment;
         // Pixel-center polyfill for @builtin(position): under Vulkan sample-rate
         // shading FragCoord.xy/z/w reflect the sample location, but WebGPU

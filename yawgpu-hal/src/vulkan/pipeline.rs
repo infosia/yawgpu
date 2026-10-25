@@ -2364,6 +2364,7 @@ mod tests {
             texture: HalTexture::Noop(
                 device
                     .create_texture(&HalTextureDescriptor {
+                        view_formats: Vec::new(),
                         dimension: HalTextureDimension::D2,
                         format,
                         width: 4,

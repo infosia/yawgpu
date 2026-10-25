@@ -288,16 +288,52 @@ pub(super) fn record_and_submit_copies(
     result
 }
 
+fn presentation_blit_region(
+    src_width: u32,
+    src_height: u32,
+    dst_width: u32,
+    dst_height: u32,
+) -> vk::ImageBlit {
+    let subresource = vk::ImageSubresourceLayers::default()
+        .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .layer_count(1);
+    vk::ImageBlit::default()
+        .src_subresource(subresource)
+        .dst_subresource(subresource)
+        .src_offsets([
+            vk::Offset3D::default(),
+            vk::Offset3D {
+                x: src_width as i32,
+                y: src_height as i32,
+                z: 1,
+            },
+        ])
+        .dst_offsets([
+            vk::Offset3D::default(),
+            vk::Offset3D {
+                x: dst_width as i32,
+                y: dst_height as i32,
+                z: 1,
+            },
+        ])
+}
+
 /// Transitions a swapchain image to present and records whether its submit succeeded.
 pub(super) fn transition_swapchain_image_to_present(
     queue: &VulkanQueue,
     texture: &VulkanTexture,
+    blit_source: Option<&VulkanTexture>,
     pending_state: Arc<Mutex<SurfacePendingState>>,
-    wait_semaphore: vk::Semaphore,
-    signal_semaphore: vk::Semaphore,
-    fence: vk::Fence,
+    pending: PendingAcquire,
     submitted: &mut bool,
 ) -> Result<(), HalError> {
+    let wait_semaphore = if pending.consumed {
+        pending.render_finished_sem
+    } else {
+        pending.acquired_sem
+    };
+    let signal_semaphore = pending.present_ready_sem;
+    let fence = pending.in_flight_fence;
     let _queue_access = queue
         .inner
         .queue_access
@@ -364,6 +400,42 @@ pub(super) fn transition_swapchain_image_to_present(
                     backend: BACKEND,
                     message: "command buffer begin failed",
                 })?;
+        }
+        if let Some(source) = blit_source {
+            let source_inner = source.inner()?;
+            transition_image(
+                &mut layouts,
+                &queue.inner.device.device,
+                command_buffer,
+                source_inner,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                IMAGE_LAYOUT_TRANSFER_SRC,
+            )?;
+            transition_image(
+                &mut layouts,
+                &queue.inner.device.device,
+                command_buffer,
+                inner,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                IMAGE_LAYOUT_TRANSFER_DST,
+            )?;
+            let region = presentation_blit_region(
+                source.width,
+                source.height,
+                texture.width,
+                texture.height,
+            );
+            unsafe {
+                queue.inner.device.device.cmd_blit_image(
+                    command_buffer,
+                    source_inner.image,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    inner.image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &[region],
+                    vk::Filter::LINEAR,
+                );
+            }
         }
         transition_image(
             &mut layouts,
@@ -4825,6 +4897,25 @@ pub(super) fn to_image_extent(extent: HalExtent3d) -> vk::Extent3D {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audit_t1_present_blit_scales_the_complete_configured_image() {
+        let region = presentation_blit_region(128, 96, 64, 64);
+        assert_eq!(
+            region.src_offsets[1],
+            vk::Offset3D {
+                x: 128,
+                y: 96,
+                z: 1
+            }
+        );
+        assert_eq!(region.dst_offsets[1], vk::Offset3D { x: 64, y: 64, z: 1 });
+        assert_eq!(region.src_subresource.layer_count, 1);
+        assert_eq!(
+            region.dst_subresource.aspect_mask,
+            vk::ImageAspectFlags::COLOR
+        );
+    }
+
     fn storage_bind_command(binding: u32) -> HalRenderPassCommand {
         let mut texture = bound_texture(dummy_texture(HalTextureFormat::Rgba8Unorm));
         texture.binding = binding;
@@ -5823,6 +5914,7 @@ mod tests {
         HalTexture::Noop(
             device
                 .create_texture(&HalTextureDescriptor {
+                    view_formats: Vec::new(),
                     dimension: HalTextureDimension::D2,
                     format,
                     width: 4,
@@ -7343,6 +7435,7 @@ mod tests {
         let format = HalTextureFormat::Depth32Float;
         let texture = device
             .create_texture(&HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: HalTextureDimension::D2,
                 format,
                 width: 4,
@@ -7413,6 +7506,7 @@ mod tests {
         let format = HalTextureFormat::Depth32FloatStencil8;
         let texture = device
             .create_texture(&HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: HalTextureDimension::D2,
                 format,
                 width: 4,
@@ -7516,6 +7610,7 @@ mod tests {
         let format = HalTextureFormat::Rgba8Unorm;
         let multisampled = device
             .create_texture(&HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: HalTextureDimension::D2,
                 format,
                 width: 4,
@@ -7535,6 +7630,7 @@ mod tests {
             .expect("create 4x MSAA texture");
         let resolved = device
             .create_texture(&HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: HalTextureDimension::D2,
                 format,
                 width: 4,
@@ -7624,6 +7720,7 @@ mod tests {
         let format = HalTextureFormat::Bc1RgbaUnorm;
         let texture = device
             .create_texture(&HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: HalTextureDimension::D2,
                 format,
                 width: 8,

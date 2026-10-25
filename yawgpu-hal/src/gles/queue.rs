@@ -4791,6 +4791,7 @@ mod tests {
         let device = crate::noop::NoopDevice::new();
         let texture = device
             .create_texture(&crate::HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: crate::HalTextureDimension::D2,
                 format: HalTextureFormat::Rgba8Unorm,
                 width,
@@ -5048,6 +5049,7 @@ mod tests {
 
         let color_texture = device
             .create_texture(&crate::HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: crate::HalTextureDimension::D2,
                 format: crate::HalTextureFormat::Rgba8Unorm,
                 width: 4,
@@ -5171,6 +5173,7 @@ mod tests {
     ) -> super::super::texture::GlesTexture {
         device
             .create_texture(&crate::HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension,
                 format: crate::HalTextureFormat::Rgba8Unorm,
                 width: 2,
@@ -5288,6 +5291,7 @@ mod tests {
 
         let color_texture = device
             .create_texture(&crate::HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: crate::HalTextureDimension::D2,
                 format: crate::HalTextureFormat::Rgba8Unorm,
                 width: 2,
@@ -5307,6 +5311,7 @@ mod tests {
             .expect("GLES color render attachment creation must succeed");
         let depth_texture = device
             .create_texture(&crate::HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: crate::HalTextureDimension::D2,
                 format: crate::HalTextureFormat::Depth24Plus,
                 width: 2,
@@ -5534,6 +5539,7 @@ mod tests {
 
         let color_texture = device
             .create_texture(&crate::HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: crate::HalTextureDimension::D2,
                 format: crate::HalTextureFormat::R32Uint,
                 width: 1,
@@ -5635,6 +5641,7 @@ mod tests {
         let metadata_texture = |mip_level_count: u32| {
             device
                 .create_texture(&crate::HalTextureDescriptor {
+                    view_formats: Vec::new(),
                     dimension: crate::HalTextureDimension::D2,
                     format: crate::HalTextureFormat::Rgba8Unorm,
                     width: 4,
@@ -5658,6 +5665,7 @@ mod tests {
 
         let color_texture = device
             .create_texture(&crate::HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: crate::HalTextureDimension::D2,
                 format: crate::HalTextureFormat::Rgba8Unorm,
                 width: 1,
@@ -5878,6 +5886,7 @@ mod tests {
     ) -> super::super::texture::GlesTexture {
         device
             .create_texture(&crate::HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension,
                 format: crate::HalTextureFormat::Rgba8Unorm,
                 width: 2,
@@ -5905,6 +5914,7 @@ mod tests {
     ) -> super::super::texture::GlesTexture {
         device
             .create_texture(&crate::HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: crate::HalTextureDimension::D2,
                 format: crate::HalTextureFormat::Rgba8Unorm,
                 width,
@@ -6047,6 +6057,7 @@ mod tests {
     ) -> super::super::texture::GlesTexture {
         device
             .create_texture(&crate::HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: crate::HalTextureDimension::D2,
                 format: crate::HalTextureFormat::R8Unorm,
                 width,
@@ -6161,6 +6172,7 @@ mod tests {
     ) -> super::super::texture::GlesTexture {
         device
             .create_texture(&crate::HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: crate::HalTextureDimension::D2,
                 format,
                 width,
@@ -6190,6 +6202,7 @@ mod tests {
     ) -> super::super::texture::GlesTexture {
         device
             .create_texture(&crate::HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension,
                 format,
                 width,
@@ -6592,6 +6605,7 @@ mod tests {
     ) -> super::super::texture::GlesTexture {
         let texture = device
             .create_texture(&crate::HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: crate::HalTextureDimension::D2,
                 format: crate::HalTextureFormat::Rgba8Unorm,
                 width: 2,
@@ -6647,6 +6661,7 @@ mod tests {
     ) -> super::super::texture::GlesTexture {
         let texture = device
             .create_texture(&crate::HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: crate::HalTextureDimension::D2,
                 format: crate::HalTextureFormat::Rgba8Unorm,
                 width: 2,
@@ -6788,6 +6803,7 @@ mod tests {
         let sampled = sampled_rgba8_texture(&device, &pixels);
         let target = device
             .create_texture(&crate::HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: crate::HalTextureDimension::D2,
                 format: crate::HalTextureFormat::Rgba8Unorm,
                 width: 2,
@@ -6945,6 +6961,7 @@ mod tests {
 
         let depth = device
             .create_texture(&crate::HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: crate::HalTextureDimension::D2,
                 format: crate::HalTextureFormat::Depth32Float,
                 width: 1,
@@ -7119,6 +7136,7 @@ mod tests {
         );
         let target = device
             .create_texture(&crate::HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: crate::HalTextureDimension::D2,
                 format: crate::HalTextureFormat::Rgba8Unorm,
                 width: 2,
@@ -9118,6 +9136,7 @@ mod tests {
         let format = crate::HalTextureFormat::R32Uint;
         let texture = device
             .create_texture(&crate::HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: crate::HalTextureDimension::D2,
                 format,
                 width: 2,
@@ -9322,6 +9341,7 @@ mod tests {
     ) -> super::super::texture::GlesTexture {
         device
             .create_texture(&crate::HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: crate::HalTextureDimension::D2,
                 format,
                 width: 2,
@@ -9425,6 +9445,7 @@ mod tests {
     ) -> super::super::texture::GlesTexture {
         device
             .create_texture(&crate::HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: crate::HalTextureDimension::D2,
                 format,
                 width: 1,
@@ -9450,6 +9471,7 @@ mod tests {
     ) -> super::super::texture::GlesTexture {
         device
             .create_texture(&crate::HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: crate::HalTextureDimension::D2,
                 format: crate::HalTextureFormat::Rgba8Unorm,
                 width: 2,
@@ -10752,6 +10774,7 @@ mod tests {
         };
         let target = device
             .create_texture(&crate::HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: crate::HalTextureDimension::D2,
                 format: crate::HalTextureFormat::Rgba8Unorm,
                 width: 2,

@@ -1490,6 +1490,7 @@ mod real {
             n_ov: usize,
             disable_robustness: bool,
             use_vulkan_memory_model: bool,
+            use_storage_input_output_16: bool,
             framebuffer_fetch_descriptor_set: u32,
             multisampled_input_attachment: bool,
             has_polyfill_pixel_center: bool,
@@ -2128,6 +2129,8 @@ mod real {
         }
 
         /// Generates SPIR-V words for `entry_point`.
+        /// `use_storage_input_output_16` permits 16-bit stage IO; disable it
+        /// when the Vulkan device did not enable `storageInputOutput16`.
         ///
         /// `user_immediate_size` is the owning pipeline layout's reserved
         /// user-immediate byte budget (Block 94, 0..=64) -- same meaning as
@@ -2149,6 +2152,7 @@ mod real {
             multisampled_input_attachment: bool,
             polyfill_pixel_center: Option<u32>,
             user_immediate_size: u32,
+            use_storage_input_output_16: bool,
         ) -> Result<Vec<u32>, TintError> {
             let ep = cstring(entry_point, "entry point").map_err(TintError::Codegen)?;
             let raw_bindings = bindings.as_raw();
@@ -2166,6 +2170,7 @@ mod real {
                     raw_overrides.len(),
                     !robust,
                     use_vulkan_memory_model,
+                    use_storage_input_output_16,
                     framebuffer_fetch_descriptor_set,
                     multisampled_input_attachment,
                     polyfill_pixel_center.is_some(),
@@ -2563,6 +2568,7 @@ mod stub {
             _multisampled_input_attachment: bool,
             _polyfill_pixel_center: Option<u32>,
             _user_immediate_size: u32,
+            _use_storage_input_output_16: bool,
         ) -> Result<Vec<u32>, TintError> {
             Err(TintError::Unavailable)
         }
@@ -2627,6 +2633,40 @@ pub use stub::initialize;
 
 #[cfg(all(test, have_tint))]
 mod tests {
+    #[test]
+    fn audit_t4_spirv_f16_io_capability_follows_device_option() {
+        let source = "enable f16; @fragment fn fs(@location(0) x: vec4<f16>) -> @location(0) vec4<f32> { return vec4<f32>(x); }";
+        let program = Program::parse(source, true, false, false, false, false, false, &[]).unwrap();
+        for enabled in [true, false, true] {
+            let words = program
+                .generate_spirv(
+                    "fs",
+                    &Bindings::default(),
+                    &[],
+                    true,
+                    false,
+                    0,
+                    false,
+                    None,
+                    0,
+                    enabled,
+                )
+                .unwrap();
+            let mut i = 5;
+            let mut storage_io16 = false;
+            while i < words.len() {
+                let count = (words[i] >> 16) as usize;
+                assert!(count > 0);
+                // OpCapability StorageInputOutput16.
+                if words[i] & 0xffff == 17 && words[i + 1] == 4436 {
+                    storage_io16 = true;
+                }
+                i += count;
+            }
+            assert_eq!(storage_io16, enabled);
+        }
+    }
+
     #[test]
     fn entry_point_override_ids_are_scoped_and_include_transitive_uses() {
         let program = Program::parse(
@@ -2996,11 +3036,11 @@ fn main() {
             .unwrap();
         assert!(msl.source.contains("kernel"), "MSL:\n{}", msl.source);
         let spirv = program
-            .generate_spirv("cs", &bindings, &[], true, false, 0, false, None, 0)
+            .generate_spirv("cs", &bindings, &[], true, false, 0, false, None, 0, true)
             .unwrap();
         assert_eq!(spirv.first().copied(), Some(0x0723_0203));
         let spirv_with_vulkan_memory_model = program
-            .generate_spirv("cs", &bindings, &[], true, true, 0, false, None, 0)
+            .generate_spirv("cs", &bindings, &[], true, true, 0, false, None, 0, true)
             .unwrap();
         assert_eq!(
             spirv_with_vulkan_memory_model.first().copied(),
@@ -3762,6 +3802,7 @@ fn main() {
                 false,
                 None,
                 0,
+                true,
             )
             .unwrap_err();
         assert!(!err.to_string().is_empty());
@@ -3861,7 +3902,7 @@ fn cs() {
                 .unwrap();
             assert!(!msl.source.is_empty());
             let spirv = program
-                .generate_spirv(ep, &bindings, &[], true, false, 0, false, None, 0)
+                .generate_spirv(ep, &bindings, &[], true, false, 0, false, None, 0, true)
                 .unwrap();
             assert_eq!(spirv.first().copied(), Some(0x0723_0203));
         }
@@ -3911,6 +3952,7 @@ fn cs() {
                 false,
                 None,
                 0,
+                true,
             )
             .unwrap();
         assert!(!spirv.is_empty());
@@ -4062,6 +4104,7 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
                 false,
                 None,
                 0,
+                true,
             )
             .unwrap();
         let with = program
@@ -4075,6 +4118,7 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
                 false,
                 Some(1),
                 0,
+                true,
             )
             .unwrap();
         assert_eq!(without.first().copied(), Some(0x0723_0203));
@@ -4140,6 +4184,7 @@ fn cs() {
                 false,
                 Some(1),
                 16,
+                true,
             )
             .unwrap();
         assert_eq!(spirv.first().copied(), Some(0x0723_0203));
@@ -4157,6 +4202,7 @@ fn cs() {
             false,
             Some(1),
             0,
+            true,
         );
         let Err(collision_err) = collision else {
             panic!(
@@ -4184,6 +4230,7 @@ fn cs() {
                 false,
                 None,
                 16,
+                true,
             )
             .unwrap();
         assert_eq!(compute.first().copied(), Some(0x0723_0203));
@@ -4214,6 +4261,7 @@ fn cs() {
                 false,
                 None,
                 0,
+                true,
             )
             .unwrap();
         assert!(!spirv.is_empty());
@@ -4244,6 +4292,7 @@ fn cs() {
             true,
             None,
             0,
+            true,
         ) {
             Ok(_) => panic!("expected multisampled input attachment generation to fail"),
             Err(err) => err,
@@ -4294,6 +4343,7 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
                 true,
                 None,
                 0,
+                true,
             )
             .unwrap();
         assert!(!spirv.is_empty());
@@ -4351,6 +4401,7 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
                 true,
                 None,
                 0,
+                true,
             )
             .unwrap();
         assert_eq!(vertex.first().copied(), Some(0x0723_0203));
@@ -4367,7 +4418,8 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
                 0,
                 false,
                 None,
-                0
+                0,
+                true,
             )
             .is_err());
     }
@@ -5008,10 +5060,21 @@ fn cs() { _ = u.value; }
         assert_ne!(default_msl, remapped_msl);
 
         let default_spv = program
-            .generate_spirv("cs", &default_bindings, &[], true, false, 0, false, None, 0)
+            .generate_spirv(
+                "cs",
+                &default_bindings,
+                &[],
+                true,
+                false,
+                0,
+                false,
+                None,
+                0,
+                true,
+            )
             .unwrap();
         let remapped_spv = program
-            .generate_spirv("cs", &remapped, &[], true, false, 0, false, None, 0)
+            .generate_spirv("cs", &remapped, &[], true, false, 0, false, None, 0, true)
             .unwrap();
         assert_ne!(default_spv, remapped_spv);
         assert!(spirv_has_binding_decoration(&remapped_spv, 7));
@@ -5492,6 +5555,7 @@ fn cs() {
                     false,
                     None,
                     0,
+                    true,
                 )
                 .unwrap()
         };
@@ -5577,6 +5641,7 @@ fn fs(in: VsOut) -> @location(0) vec4f {
                         false,
                         None,
                         0,
+                        true,
                     )
                     .unwrap()
             };
@@ -5720,6 +5785,7 @@ fn cs() {
                     false,
                     None,
                     0,
+                    true,
                 )
                 .unwrap()
         };

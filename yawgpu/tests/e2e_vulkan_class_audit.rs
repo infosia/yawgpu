@@ -333,6 +333,81 @@ fn vulkan_buffer_read_by_copy_then_overwritten_in_same_command_buffer() {
     });
 }
 
+/// F2: clearing an `rgba8unorm` texture through its `rgba8unorm-srgb` view
+/// (declared in `viewFormats`) must be valid usage — the image needs
+/// `MUTABLE_FORMAT` — and must store the sRGB encoding of 0.5 (~188).
+#[test]
+#[ignore = "manual real-backend test"]
+fn vulkan_srgb_view_of_unorm_texture_clears_srgb_encoded() {
+    with_device(&[], |ctx| unsafe {
+        let view_formats = [native::WGPUTextureFormat_RGBA8UnormSrgb];
+        let descriptor = native::WGPUTextureDescriptor {
+            usage: native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_CopySrc,
+            dimension: native::WGPUTextureDimension_2D,
+            size: extent(1),
+            format: native::WGPUTextureFormat_RGBA8Unorm,
+            mipLevelCount: 1,
+            sampleCount: 1,
+            viewFormatCount: view_formats.len(),
+            viewFormats: view_formats.as_ptr(),
+            ..std::mem::zeroed()
+        };
+        let texture = yawgpu::wgpuDeviceCreateTexture(ctx.device, &descriptor);
+        assert!(!texture.is_null());
+        let view_descriptor = native::WGPUTextureViewDescriptor {
+            format: native::WGPUTextureFormat_RGBA8UnormSrgb,
+            dimension: native::WGPUTextureViewDimension_2D,
+            baseMipLevel: 0,
+            mipLevelCount: 1,
+            baseArrayLayer: 0,
+            arrayLayerCount: 1,
+            aspect: native::WGPUTextureAspect_All,
+            ..std::mem::zeroed()
+        };
+        let view = yawgpu::wgpuTextureCreateView(texture, &view_descriptor);
+        let readback = create_buffer(
+            ctx.device,
+            LAYER_BYTES as u64,
+            native::WGPUBufferUsage_MapRead | native::WGPUBufferUsage_CopyDst,
+        );
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(ctx.device, std::ptr::null());
+        let attachment = native::WGPURenderPassColorAttachment {
+            nextInChain: std::ptr::null_mut(),
+            view,
+            depthSlice: native::WGPU_DEPTH_SLICE_UNDEFINED,
+            resolveTarget: std::ptr::null(),
+            loadOp: native::WGPULoadOp_Clear,
+            storeOp: native::WGPUStoreOp_Store,
+            clearValue: native::WGPUColor {
+                r: 0.5,
+                g: 0.5,
+                b: 0.5,
+                a: 1.0,
+            },
+        };
+        let pass_descriptor = native::WGPURenderPassDescriptor {
+            colorAttachmentCount: 1,
+            colorAttachments: &attachment,
+            ..std::mem::zeroed()
+        };
+        let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &pass_descriptor);
+        yawgpu::wgpuRenderPassEncoderEnd(pass);
+        yawgpu::wgpuRenderPassEncoderRelease(pass);
+        record_t2b(encoder, texture, readback, 1);
+        ctx.submit(encoder);
+        let bytes = read_buffer(ctx.instance, readback, 4);
+        for channel in &bytes[..3] {
+            assert!(
+                channel.abs_diff(188) <= 1,
+                "sRGB 0.5 must be ~188, got {bytes:?}"
+            );
+        }
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuTextureViewRelease(view);
+        yawgpu::wgpuTextureRelease(texture);
+    });
+}
+
 unsafe fn compute_pipeline(
     device: native::WGPUDevice,
     module: native::WGPUShaderModule,

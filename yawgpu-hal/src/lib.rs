@@ -762,6 +762,17 @@ impl HalDevice {
         }
     }
 
+    /// Whether Vulkan SPIR-V may use 16-bit stage inputs and outputs.
+    #[must_use]
+    pub fn vulkan_storage_input_output16(&self) -> bool {
+        match self {
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(device) => device.storage_input_output16(),
+            #[allow(unreachable_patterns)]
+            _ => false,
+        }
+    }
+
     /// Returns true when `VK_KHR_vulkan_memory_model` / `vulkanMemoryModel` was
     /// enabled at device creation (Vulkan only).
     #[must_use]
@@ -1112,6 +1123,17 @@ pub enum HalSurface {
 }
 
 impl HalSurface {
+    /// Whether the current acquisition or preceding presentation was suboptimal.
+    #[must_use]
+    pub fn is_suboptimal(&self) -> bool {
+        match self {
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(surface) => surface.is_suboptimal(),
+            #[allow(unreachable_patterns)]
+            _ => false,
+        }
+    }
+
     /// Queries configurations supported by this surface and adapter.
     pub fn capabilities(&self, adapter: &HalAdapter) -> Result<HalSurfaceCapabilities, HalError> {
         #[allow(unreachable_patterns)]
@@ -1488,6 +1510,7 @@ mod tests {
 
     fn texture_descriptor() -> HalTextureDescriptor {
         HalTextureDescriptor {
+            view_formats: Vec::new(),
             dimension: HalTextureDimension::D2,
             format: HalTextureFormat::Rgba8Unorm,
             width: 1,
@@ -1508,6 +1531,7 @@ mod tests {
 
     fn depth_texture_descriptor() -> HalTextureDescriptor {
         HalTextureDescriptor {
+            view_formats: Vec::new(),
             dimension: HalTextureDimension::D2,
             format: HalTextureFormat::Depth32Float,
             width: 1,
@@ -1817,6 +1841,18 @@ mod tests {
         let device = noop_device()?;
 
         assert_eq!(device.backend(), HalBackend::Noop);
+        Ok(())
+    }
+
+    #[test]
+    fn audit_t3_noop_surface_is_not_suboptimal() {
+        assert!(!HalSurface::Noop.is_suboptimal());
+    }
+
+    #[test]
+    fn audit_t4_noop_does_not_enable_vulkan_storage_io16() -> Result<(), HalError> {
+        let device = noop_device()?;
+        assert!(!device.vulkan_storage_input_output16());
         Ok(())
     }
 

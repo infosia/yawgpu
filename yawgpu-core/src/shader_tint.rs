@@ -46,6 +46,7 @@ struct SpirvCodegenKey {
     entry_point: String,
     constants: CanonicalConstants,
     vulkan_memory_model: bool,
+    use_storage_input_output_16: bool,
     framebuffer_fetch_descriptor_set: u32,
     multisampled_input_attachment: bool,
     polyfill_pixel_center: Option<u32>,
@@ -285,6 +286,8 @@ impl ReflectedModule {
     /// `vulkan_memory_model` enables Tint's SPV_KHR_vulkan_memory_model output
     /// when the Vulkan backend enabled `VK_KHR_vulkan_memory_model` /
     /// `vulkanMemoryModel`. SPIR-V robustness stays enabled.
+    /// `use_storage_input_output_16` mirrors the enabled Vulkan
+    /// `storageInputOutput16` feature; false makes Tint widen f16 stage IO.
     ///
     /// `multisampled_input_attachment` makes Tint emit multisampled
     /// `SubpassData` input attachments (the 2-arg `inputAttachmentLoad(ia,
@@ -308,11 +311,13 @@ impl ReflectedModule {
         multisampled_input_attachment: bool,
         polyfill_pixel_center: Option<u32>,
         user_immediate_size: u32,
+        use_storage_input_output_16: bool,
     ) -> Result<Vec<u32>, String> {
         let key = SpirvCodegenKey {
             entry_point: entry_name.to_owned(),
             constants: CanonicalConstants::from(pipeline_constants),
             vulkan_memory_model,
+            use_storage_input_output_16,
             framebuffer_fetch_descriptor_set,
             multisampled_input_attachment,
             polyfill_pixel_center,
@@ -338,6 +343,7 @@ impl ReflectedModule {
                 multisampled_input_attachment,
                 polyfill_pixel_center,
                 user_immediate_size,
+                use_storage_input_output_16,
             )
             .map_err(|e| e.to_string());
         cache.insert(key, generated.clone());
@@ -1816,6 +1822,40 @@ fn reflected_override(override_: yawgpu_tint::Override) -> ReflectedOverride {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audit_t4_spirv_f16_io_capability_follows_device_option() {
+        let source = "enable f16; @fragment fn fs(@location(0) x: vec4<f16>) -> @location(0) vec4<f32> { return vec4<f32>(x); }";
+        let program = parse_and_validate_wgsl(source).unwrap();
+        for enabled in [true, false, true] {
+            let words = program
+                .generate_spirv(
+                    "fs",
+                    ShaderStage::Fragment,
+                    &PipelineConstants::default(),
+                    false,
+                    0,
+                    false,
+                    None,
+                    0,
+                    enabled,
+                )
+                .unwrap();
+            let mut i = 5;
+            let mut storage_io16 = false;
+            while i < words.len() {
+                let count = (words[i] >> 16) as usize;
+                assert!(count > 0);
+                // OpCapability StorageInputOutput16.
+                if words[i] & 0xffff == 17 && words[i + 1] == 4436 {
+                    storage_io16 = true;
+                }
+                i += count;
+            }
+            assert_eq!(storage_io16, enabled);
+        }
+        assert_eq!(program.codegen_miss_count(), 2);
+    }
+
     use super::*;
 
     fn empty_msl_binding_map() -> MslBindingMap {
@@ -2036,6 +2076,7 @@ fn cs() {}
                 false,
                 None,
                 0,
+                true,
             )
             .unwrap();
         let second = module
@@ -2048,6 +2089,7 @@ fn cs() {}
                 false,
                 None,
                 0,
+                true,
             )
             .unwrap();
         assert_eq!(first, second);
@@ -2063,6 +2105,7 @@ fn cs() {}
                 false,
                 None,
                 0,
+                true,
             )
             .unwrap();
         assert_eq!(module.codegen_miss_count(), 2);
@@ -2952,6 +2995,7 @@ fn cs() {}
             false,
             None,
             0,
+            true,
         )
         .unwrap();
         assert_eq!(compute.first().copied(), Some(0x0723_0203));
@@ -2987,6 +3031,7 @@ fn fs() -> @location(0) vec4<f32> {
                 false,
                 None,
                 0,
+                true,
             )
             .unwrap();
         let fragment = render
@@ -2999,6 +3044,7 @@ fn fs() -> @location(0) vec4<f32> {
                 false,
                 None,
                 0,
+                true,
             )
             .unwrap();
         assert_eq!(vertex.first().copied(), Some(0x0723_0203));
@@ -3089,6 +3135,7 @@ fn cs() {
                     false,
                     None,
                     0,
+                    true,
                 )
                 .unwrap();
             assert_eq!(spirv.first().copied(), Some(0x0723_0203));

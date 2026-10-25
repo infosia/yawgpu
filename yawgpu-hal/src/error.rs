@@ -2,6 +2,16 @@
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum HalError {
+    /// The surface configuration must be recreated.
+    #[error("HAL surface is outdated")]
+    SurfaceOutdated,
+    /// The native presentation surface was lost.
+    #[error("HAL surface is lost")]
+    SurfaceLost,
+    /// Acquisition timed out before an image became available.
+    #[error("HAL surface acquisition timed out")]
+    SurfaceTimeout,
+
     #[error("HAL backend is unavailable: {backend}")]
     /// Backend unavailable variant.
     BackendUnavailable {

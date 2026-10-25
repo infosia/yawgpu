@@ -190,6 +190,21 @@ fn default_texture_image_view_type(
     }
 }
 
+/// Includes the base format and removes duplicates before building Vulkan format lists.
+pub(super) fn texture_view_formats(
+    format: HalTextureFormat,
+    views: &[HalTextureFormat],
+) -> Result<Vec<vk::Format>, HalError> {
+    let mut formats = vec![map_texture_format(format)?.0];
+    for view in views {
+        let format = map_texture_format(*view)?.0;
+        if !formats.contains(&format) {
+            formats.push(format);
+        }
+    }
+    Ok(formats)
+}
+
 /// Creates texture and reports validation errors through the owning device.
 pub(super) fn create_texture(
     device: Arc<VulkanDeviceInner>,
@@ -220,10 +235,11 @@ pub(super) fn create_texture(
     let bgra8_storage_vk_format = bgra8_storage_view_format(descriptor.format, descriptor.usage);
     let tiling = vk::ImageTiling::OPTIMAL;
     let usage = map_texture_usage(descriptor.usage, descriptor.format);
+    let view_formats = texture_view_formats(descriptor.format, &descriptor.view_formats)?;
     let image_flags = texture_image_flags(
         descriptor.dimension,
         usage,
-        bgra8_storage_vk_format.is_some(),
+        bgra8_storage_vk_format.is_some() || view_formats.len() > 1,
     );
     // Multisampled images must only be created with a sample count the device
     // reports for this exact (format, type, tiling, usage, flags) combination;
@@ -253,10 +269,24 @@ pub(super) fn create_texture(
             samples,
         )?;
     }
-    let image_format_list_formats = device
-        .image_format_list
-        .then(|| bgra8_storage_view_format_list(descriptor.format, descriptor.usage))
-        .flatten();
+    let image_format_list_formats = if device.image_format_list {
+        if descriptor.usage.storage_binding && view_formats.len() > 1 {
+            // Dawn omits the list when an alternate view (such as sRGB) may
+            // not support the image's storage usage (gpuweb/gpuweb#4426).
+            None
+        } else if descriptor.usage.storage_binding {
+            // Preserve the BGRA storage polyfill list when no user alternate
+            // format needs the relaxed mutable image compatibility rule.
+            bgra8_storage_view_format_list(descriptor.format, descriptor.usage)
+                .map(|formats| formats.to_vec())
+        } else if view_formats.len() > 1 {
+            Some(view_formats)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let mut image_format_list = vk::ImageFormatListCreateInfo::default();
     let mut image_info = vk::ImageCreateInfo::default()
         .flags(image_flags)
@@ -752,6 +782,40 @@ pub(super) fn color_subresource_range(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audit_f2_view_formats_require_mutable_images_and_include_base() {
+        let formats = texture_view_formats(
+            HalTextureFormat::Rgba8Unorm,
+            &[
+                HalTextureFormat::Rgba8UnormSrgb,
+                HalTextureFormat::Rgba8UnormSrgb,
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            formats,
+            [vk::Format::R8G8B8A8_UNORM, vk::Format::R8G8B8A8_SRGB]
+        );
+        let flags = texture_image_flags(
+            HalTextureDimension::D2,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT,
+            formats.len() > 1,
+        );
+        assert!(flags.contains(vk::ImageCreateFlags::MUTABLE_FORMAT));
+        let formats = texture_view_formats(
+            HalTextureFormat::Rgba8Unorm,
+            &[HalTextureFormat::Rgba8Unorm],
+        )
+        .unwrap();
+        assert_eq!(formats.len(), 1);
+        assert!(texture_image_flags(
+            HalTextureDimension::D2,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT,
+            formats.len() > 1
+        )
+        .is_empty());
+    }
+
     use super::*;
 
     /// Exercises both recording entry points and range rejection on a real device.

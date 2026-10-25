@@ -364,8 +364,10 @@ pub enum HalTextureDimension {
 }
 
 /// Describes HAL texture descriptor.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct HalTextureDescriptor {
+    /// Additional formats permitted for views of this image.
+    pub view_formats: Vec<HalTextureFormat>,
     /// Dimension.
     pub dimension: HalTextureDimension,
     /// Format.

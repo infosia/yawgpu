@@ -24,6 +24,8 @@ pub(super) struct VulkanDeviceInner {
     pub(super) vulkan_memory_model: bool,
     /// Whether `VkImageFormatListCreateInfo` is available for mutable image views.
     pub(super) image_format_list: bool,
+    /// Whether the swapchain mutable format extension and its dependencies are enabled.
+    pub(super) swapchain_mutable_format: bool,
     /// Whether `VK_EXT_subgroup_size_control` with `subgroupSizeControl` and
     /// `computeFullSubgroups` was enabled (Block 108 R5). Compute pipelines
     /// need it for a required subgroup size and for
@@ -96,6 +98,10 @@ pub struct VulkanDevice {
 }
 
 impl VulkanDevice {
+    pub(crate) fn storage_input_output16(&self) -> bool {
+        self.inner.storage_input_output16
+    }
+
     /// Returns the allocation count.
     #[must_use]
     pub fn allocation_count(&self) -> u64 {

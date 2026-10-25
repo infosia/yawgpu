@@ -938,6 +938,12 @@ impl Texture {
 /// Returns HAL texture descriptor.
 pub(crate) fn hal_texture_descriptor(descriptor: &TextureDescriptor) -> HalTextureDescriptor {
     HalTextureDescriptor {
+        view_formats: descriptor
+            .view_formats
+            .iter()
+            .copied()
+            .map(hal_texture_format)
+            .collect(),
         dimension: hal_texture_dimension(descriptor.dimension),
         format: hal_texture_format(descriptor.format),
         width: descriptor.size.width,
@@ -1779,6 +1785,16 @@ mod tests {
         assert_eq!(
             hal_texture_dimension(TextureDimension::D3),
             HalTextureDimension::D3
+        );
+    }
+
+    #[test]
+    fn audit_f2_hal_texture_descriptor_preserves_view_formats() {
+        let mut descriptor = texture_descriptor_4x4();
+        descriptor.view_formats = vec![TextureFormat::from_raw(TextureFormat::RGBA8_UNORM_SRGB)];
+        assert_eq!(
+            hal_texture_descriptor(&descriptor).view_formats,
+            [HalTextureFormat::Rgba8UnormSrgb]
         );
     }
 

@@ -30,6 +30,7 @@ pub(crate) fn texture_usage() -> HalTextureUsage {
 /// Returns texture descriptor.
 pub(crate) fn texture_descriptor() -> HalTextureDescriptor {
     HalTextureDescriptor {
+        view_formats: Vec::new(),
         dimension: HalTextureDimension::D2,
         format: HalTextureFormat::Rgba8Unorm,
         width: 4,
@@ -95,6 +96,8 @@ pub(crate) fn surface_config() -> HalSurfaceConfiguration {
 pub(crate) fn dummy_surface(instance: &VulkanInstance) -> VulkanSurface {
     let surface = vk::SurfaceKHR::null();
     VulkanSurface {
+        suboptimal: false,
+        present_error: None,
         surface,
         surface_inner: Arc::new(VulkanSurfaceInner::new(
             Arc::clone(&instance.inner),

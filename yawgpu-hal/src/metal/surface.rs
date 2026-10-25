@@ -117,7 +117,7 @@ impl MetalSurface {
 
     /// Returns acquire next texture.
     pub fn acquire_next_texture(&mut self) -> Result<MetalTexture, HalError> {
-        let config = self.config.ok_or(HalError::AcquireFailed {
+        let config = self.config.as_ref().ok_or(HalError::AcquireFailed {
             backend: BACKEND,
             message: "surface is not configured",
         })?;
@@ -298,7 +298,7 @@ mod tests {
             config.format = format;
             config.present_mode = HalPresentMode::Immediate;
             config.alpha_mode = HalCompositeAlphaMode::Premultiplied;
-            surface.configure(&device, config).unwrap();
+            surface.configure(&device, config.clone()).unwrap();
             #[cfg(target_os = "macos")]
             assert!(!layer.displaySyncEnabled());
             assert!(!layer.isOpaque());
@@ -306,7 +306,7 @@ mod tests {
             assert_eq!(layer.pixelFormat(), map_texture_format(format).unwrap().0);
             config.present_mode = HalPresentMode::Mailbox;
             config.alpha_mode = HalCompositeAlphaMode::Opaque;
-            surface.configure(&device, config).unwrap();
+            surface.configure(&device, config.clone()).unwrap();
             #[cfg(target_os = "macos")]
             assert!(layer.displaySyncEnabled());
             assert!(layer.isOpaque());
@@ -354,7 +354,7 @@ mod tests {
         let mut surface = unsafe { MetalSurface::from_layer(raw) }.expect("create Metal surface");
         let config = surface_config();
         surface
-            .configure(&device, config)
+            .configure(&device, config.clone())
             .expect("configure Metal surface");
         assert_eq!(surface.config.expect("stored config").width, 100);
     }

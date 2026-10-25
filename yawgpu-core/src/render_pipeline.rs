@@ -989,6 +989,7 @@ fn create_hal_render_pipeline_with_subpass_color_slots(
             subpass_color_slots,
             hal_device.vulkan_memory_model(),
             bind_group_layouts,
+            hal_device.vulkan_storage_input_output16(),
         ) {
             Ok(selection) => selection,
             Err(message) => return (None, Some(message)),
@@ -1133,6 +1134,7 @@ fn create_hal_non_vulkan_subpass_render_pipeline(
             subpass_color_slots,
             hal_device.vulkan_memory_model(),
             bind_group_layouts,
+            hal_device.vulkan_storage_input_output16(),
         ) {
             Ok(selection) => selection,
             Err(message) => return (None, Some(message)),
@@ -1185,6 +1187,7 @@ fn create_hal_vulkan_subpass_render_pipeline(
             subpass_color_slots,
             hal_device.vulkan_memory_model(),
             bind_group_layouts,
+            hal_device.vulkan_storage_input_output16(),
         ) {
             Ok(selection) => selection,
             Err(message) => return (None, Some(message)),
@@ -1374,6 +1377,7 @@ pub(crate) fn select_render_shader_source(
     subpass_color_slots: &[((u32, u32), u32)],
     vulkan_memory_model: bool,
     bind_group_layouts: &[Arc<BindGroupLayout>],
+    use_storage_input_output_16: bool,
 ) -> Result<
     (
         HalShaderSource,
@@ -1655,6 +1659,7 @@ pub(crate) fn select_render_shader_source(
                 multisampled_input_attachment,
                 polyfill_pixel_center,
                 user_immediate_size,
+                use_storage_input_output_16,
             )?;
             let fragment_color_slots = match (fragment, fragment_entry_name) {
                 (Some(fragment), Some(fragment_entry_name)) => fragment
@@ -1683,6 +1688,7 @@ pub(crate) fn select_render_shader_source(
                         multisampled_input_attachment,
                         polyfill_pixel_center,
                         user_immediate_size,
+                        use_storage_input_output_16,
                     )?)
                 }
                 (None, None) => None,
@@ -5540,6 +5546,7 @@ fn fs() -> @location(0) vec4<f32> {
             &[],
             false,
             &[],
+            true,
         )
         .expect("separate WGSL modules should generate per-stage MSL");
 
@@ -5606,6 +5613,7 @@ fn fs() -> @builtin(frag_depth) f32 {
             &[],
             false,
             &[],
+            true,
         )
         .expect("render pipeline with a user immediate should select Metal MSL");
 
@@ -6073,6 +6081,7 @@ fn fs() -> @builtin(frag_depth) f32 {
             &[],
             false,
             &[],
+            true,
         )
         .expect("MSL passthrough should select Metal MSL stages");
 
@@ -6102,6 +6111,7 @@ fn fs() -> @builtin(frag_depth) f32 {
             &[],
             false,
             &[],
+            true,
         )
         .expect_err("MSL passthrough must reject Vulkan");
 
@@ -6124,6 +6134,7 @@ fn fs() -> @builtin(frag_depth) f32 {
             &[],
             false,
             &[],
+            true,
         )
         .expect("SPIR-V passthrough should select Vulkan SPIR-V stages");
 
@@ -6153,6 +6164,7 @@ fn fs() -> @builtin(frag_depth) f32 {
             &[],
             false,
             &[],
+            true,
         )
         .expect_err("SPIR-V passthrough must reject Metal");
 
@@ -6195,6 +6207,7 @@ fn fs() -> @builtin(frag_depth) f32 {
             &[],
             false,
             &[],
+            true,
         )
         .expect("WGSL should generate GLES GLSL stages");
 
@@ -6685,6 +6698,7 @@ fn fs() -> @builtin(frag_depth) f32 {
             &[],
             false,
             &[],
+            true,
         )
         .expect_err("Vulkan must reject external textures");
         assert_eq!(

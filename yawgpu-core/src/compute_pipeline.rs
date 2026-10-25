@@ -322,6 +322,7 @@ pub(crate) fn create_hal_compute_pipeline(
         metal_bindings,
         hal_device.vulkan_memory_model(),
         user_immediate_size,
+        hal_device.vulkan_storage_input_output16(),
     ) {
         Ok(selection) => selection,
         Err(message) => return (None, Some(message)),
@@ -354,6 +355,7 @@ pub(crate) fn select_compute_shader_source(
     metal_bindings: &[MetalBufferBinding],
     vulkan_memory_model: bool,
     user_immediate_size: u32,
+    use_storage_input_output_16: bool,
 ) -> Result<(HalShaderSource, String, Vec<HalDescriptorBinding>), String> {
     let pipeline_constants = pipeline_constant_map(constants);
     match backend {
@@ -439,6 +441,7 @@ pub(crate) fn select_compute_shader_source(
                 false,
                 None,
                 user_immediate_size,
+                use_storage_input_output_16,
             )?;
             Ok((
                 HalShaderSource::SpirV(spirv),
@@ -2645,7 +2648,7 @@ fn cs() {
         ));
 
         let (source, entry, bindings) =
-            select_compute_shader_source(HalBackend::Gles, &wgsl, "cs", &[], &[], false, 0)
+            select_compute_shader_source(HalBackend::Gles, &wgsl, "cs", &[], &[], false, 0, true)
                 .expect("WGSL should generate GLES GLSL");
 
         let HalShaderSource::Glsl {
@@ -2695,9 +2698,17 @@ fn cs() {
 
         // `params` is a vec4f (16 bytes); the owning pipeline layout
         // reserves exactly that much user-immediate budget.
-        let (source, entry, bindings) =
-            select_compute_shader_source(HalBackend::Metal, &module, "cs", &[], &[], false, 16)
-                .expect("compute pipeline with a user immediate should select Metal MSL");
+        let (source, entry, bindings) = select_compute_shader_source(
+            HalBackend::Metal,
+            &module,
+            "cs",
+            &[],
+            &[],
+            false,
+            16,
+            true,
+        )
+        .expect("compute pipeline with a user immediate should select Metal MSL");
 
         let HalShaderSource::MslWithBufferSizes { immediates, .. } = source else {
             panic!("Metal backend must select MslWithBufferSizes");
@@ -2732,9 +2743,17 @@ fn cs() {
             .to_owned(),
         ));
 
-        let (source, entry, bindings) =
-            select_compute_shader_source(HalBackend::Vulkan, &module, "cs", &[], &[], false, 16)
-                .expect("compute pipeline with a user immediate should select Vulkan SPIR-V");
+        let (source, entry, bindings) = select_compute_shader_source(
+            HalBackend::Vulkan,
+            &module,
+            "cs",
+            &[],
+            &[],
+            false,
+            16,
+            true,
+        )
+        .expect("compute pipeline with a user immediate should select Vulkan SPIR-V");
 
         let HalShaderSource::SpirV(words) = source else {
             panic!("Vulkan backend must select SpirV");
@@ -2793,9 +2812,17 @@ fn cs() {
             fragment_metal_index: None,
             kind: MetalBindingKind::ExternalTexture,
         }];
-        let err =
-            select_compute_shader_source(HalBackend::Vulkan, &wgsl, "cs", &[], &external, false, 0)
-                .expect_err("Vulkan must reject external textures");
+        let err = select_compute_shader_source(
+            HalBackend::Vulkan,
+            &wgsl,
+            "cs",
+            &[],
+            &external,
+            false,
+            0,
+            true,
+        )
+        .expect_err("Vulkan must reject external textures");
         assert_eq!(
             err,
             "external textures are not supported on the Vulkan backend"
@@ -3267,9 +3294,17 @@ fn cs() {
         let device = noop_device();
         let module = spirv_passthrough_module(&device);
 
-        let err =
-            select_compute_shader_source(HalBackend::Metal, &module, "cs", &[], &[], false, 0)
-                .expect_err("SPIR-V passthrough must reject Metal");
+        let err = select_compute_shader_source(
+            HalBackend::Metal,
+            &module,
+            "cs",
+            &[],
+            &[],
+            false,
+            0,
+            true,
+        )
+        .expect_err("SPIR-V passthrough must reject Metal");
 
         assert_eq!(err, "SPIR-V passthrough shader requires the Vulkan backend");
     }
@@ -3290,6 +3325,7 @@ fn cs() {
             &metal_bindings,
             false,
             0,
+            true,
         )
         .expect("SPIR-V passthrough should select Vulkan source");
 
@@ -3373,9 +3409,17 @@ fn cs() {
         let device = noop_device();
         let module = msl_passthrough_module(&device, vec![msl_compute_entry("cs", [1, 1, 1])]);
 
-        let err =
-            select_compute_shader_source(HalBackend::Vulkan, &module, "cs", &[], &[], false, 0)
-                .expect_err("MSL passthrough must reject Vulkan");
+        let err = select_compute_shader_source(
+            HalBackend::Vulkan,
+            &module,
+            "cs",
+            &[],
+            &[],
+            false,
+            0,
+            true,
+        )
+        .expect_err("MSL passthrough must reject Vulkan");
 
         assert_eq!(err, "MSL passthrough shader requires the Metal backend");
     }

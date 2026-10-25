@@ -143,6 +143,8 @@ impl VulkanInstance {
         })?;
         let surface_inner = Arc::new(VulkanSurfaceInner::new(Arc::clone(&self.inner), surface));
         Ok(VulkanSurface {
+            suboptimal: false,
+            present_error: None,
             surface,
             surface_inner,
             swapchain: None,
@@ -185,6 +187,8 @@ impl VulkanInstance {
         })?;
         let surface_inner = Arc::new(VulkanSurfaceInner::new(Arc::clone(&self.inner), surface));
         Ok(VulkanSurface {
+            suboptimal: false,
+            present_error: None,
             surface,
             surface_inner,
             swapchain: None,
@@ -586,13 +590,23 @@ impl VulkanAdapter {
         }
 
         let mut features = vk::PhysicalDeviceShaderFloat16Int8Features::default();
-        let mut features2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut features);
+        // 16-bit storage is core in Vulkan 1.1, the minimum instance version.
+        let mut storage = vk::PhysicalDevice16BitStorageFeatures::default();
+        let mut features2 = vk::PhysicalDeviceFeatures2::default()
+            .push_next(&mut features)
+            .push_next(&mut storage);
         unsafe {
             self.instance
                 .instance
                 .get_physical_device_features2(self.physical_device, &mut features2);
         }
-        shader_float16_supported(extension_present, features.shader_float16)
+        let shader_int16 = features2.features.shader_int16;
+        shader_float16_supported(
+            extension_present,
+            features.shader_float16,
+            shader_int16,
+            storage.storage_buffer16_bit_access,
+        )
     }
 
     /// Returns true when WGSL `subgroups` is supported by this physical device.
@@ -867,37 +881,37 @@ impl VulkanAdapter {
             && vulkan_memory_model_supported_features.vulkan_memory_model_device_scope == vk::TRUE;
         let image_format_list =
             image_format_list_available(effective_api_version, image_format_list_extension);
+        let swapchain_mutable_format = image_format_list
+            && self.has_device_extension(vk::KHR_SWAPCHAIN_NAME)
+            && self.has_device_extension(vk::KHR_SWAPCHAIN_MUTABLE_FORMAT_NAME);
+        if swapchain_mutable_format {
+            extension_names.push(vk::KHR_SWAPCHAIN_MUTABLE_FORMAT_NAME.as_ptr());
+        }
         let mut shader_float16_int8_features =
             vk::PhysicalDeviceShaderFloat16Int8Features::default();
         let mut storage_16bit_supported_features =
             vk::PhysicalDevice16BitStorageFeatures::default();
-        if shader_float16_int8_extension || storage_16bit_extension {
-            let mut features2 = vk::PhysicalDeviceFeatures2::default();
-            if shader_float16_int8_extension {
-                features2 = features2.push_next(&mut shader_float16_int8_features);
-            }
-            if storage_16bit_extension {
-                features2 = features2.push_next(&mut storage_16bit_supported_features);
-            }
-            unsafe {
-                self.instance
-                    .instance
-                    .get_physical_device_features2(self.physical_device, &mut features2);
-            }
+        // VK_KHR_16bit_storage is core in Vulkan 1.1, even when the driver
+        // omits its extension name. Query and enable those core feature bits.
+        let mut features2 =
+            vk::PhysicalDeviceFeatures2::default().push_next(&mut storage_16bit_supported_features);
+        if shader_float16_int8_extension {
+            features2 = features2.push_next(&mut shader_float16_int8_features);
         }
+        unsafe {
+            self.instance
+                .instance
+                .get_physical_device_features2(self.physical_device, &mut features2);
+        }
+        let supported_features = features2.features;
         let shader_float16 = shader_float16_supported(
             shader_float16_int8_extension,
             shader_float16_int8_features.shader_float16,
+            supported_features.shader_int16,
+            storage_16bit_supported_features.storage_buffer16_bit_access,
         );
-        let storage_16bit_features = enabled_16bit_storage_features(
-            storage_16bit_extension,
-            storage_16bit_supported_features,
-        );
-        let supported_features = unsafe {
-            self.instance
-                .instance
-                .get_physical_device_features(self.physical_device)
-        };
+        let storage_16bit_features =
+            enabled_16bit_storage_features(true, storage_16bit_supported_features);
         let occlusion_query_precise = supported_features.occlusion_query_precise == vk::TRUE;
         // Enable samplerAnisotropy when the physical device supports it.
         // Setting anisotropyEnable = true without this feature enabled is a VUID
@@ -938,6 +952,9 @@ impl VulkanAdapter {
         let fragment_stores_and_atomics =
             supported_features.fragment_stores_and_atomics == vk::TRUE;
         let mut enabled_features = enabled_texture_compression_features(&supported_features);
+        if shader_float16 {
+            enabled_features.shader_int16 = vk::TRUE;
+        }
         if occlusion_query_precise {
             enabled_features.occlusion_query_precise = vk::TRUE;
         }
@@ -983,7 +1000,7 @@ impl VulkanAdapter {
         if shader_float16 {
             extension_names.push(vk::KHR_SHADER_FLOAT16_INT8_NAME.as_ptr());
         }
-        if storage_16bit_features.enabled {
+        if storage_16bit_features.enabled && storage_16bit_extension {
             extension_names.push(vk::KHR_16BIT_STORAGE_NAME.as_ptr());
         }
         if vulkan_memory_model
@@ -1079,6 +1096,7 @@ impl VulkanAdapter {
             shader_float16,
             vulkan_memory_model,
             image_format_list,
+            swapchain_mutable_format,
             subgroup_size_control,
             storage_buffer16_bit_access: storage_16bit_features.storage_buffer16_bit_access,
             uniform_and_storage_buffer16_bit_access: storage_16bit_features
@@ -1255,8 +1273,16 @@ fn enabled_texture_compression_features(
     enabled
 }
 
-fn shader_float16_supported(extension_present: bool, shader_float16: vk::Bool32) -> bool {
-    extension_present && shader_float16 == vk::TRUE
+fn shader_float16_supported(
+    extension_present: bool,
+    shader_float16: vk::Bool32,
+    shader_int16: vk::Bool32,
+    storage_buffer16: vk::Bool32,
+) -> bool {
+    extension_present
+        && shader_float16 == vk::TRUE
+        && shader_int16 == vk::TRUE
+        && storage_buffer16 == vk::TRUE
 }
 
 /// Block 106: WebGPU `texture-component-swizzle` needs a non-identity
@@ -2353,9 +2379,25 @@ mod tests {
         }
     }
 
-    /// `supports_shader_float16` advertises support only when the
-    /// `VK_KHR_shader_float16_int8` extension is present and `shaderFloat16`
-    /// reports TRUE. Pure-logic test, no real GPU required.
+    /// Shader f16 requires float arithmetic, integer decomposition and buffer storage.
+    /// Pure logic test; no real GPU required.
+    #[test]
+    fn audit_t4_f16_requires_float_int_and_storage_features() {
+        for mask in 0..16 {
+            let bit = |n| {
+                if mask & (1 << n) != 0 {
+                    vk::TRUE
+                } else {
+                    vk::FALSE
+                }
+            };
+            assert_eq!(
+                shader_float16_supported(mask & 1 != 0, bit(1), bit(2), bit(3)),
+                mask == 15
+            );
+        }
+    }
+
     #[test]
     fn vulkan_supports_shader_float16_requires_extension_and_feature() {
         for (extension_present, shader_float16, expected) in [
@@ -2365,7 +2407,7 @@ mod tests {
             (false, vk::FALSE, false),
         ] {
             assert_eq!(
-                shader_float16_supported(extension_present, shader_float16),
+                shader_float16_supported(extension_present, shader_float16, vk::TRUE, vk::TRUE),
                 expected
             );
         }

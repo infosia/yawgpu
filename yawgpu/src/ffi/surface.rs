@@ -6,6 +6,14 @@ use super::*;
 pub(super) type TestSurfaceAcquire =
     Box<dyn FnMut() -> Result<yawgpu_hal::HalTexture, yawgpu_hal::HalError> + Send>;
 
+// Capture the exact descriptor passed to HAL configure on this test thread.
+#[cfg(test)]
+thread_local! {
+    static TEST_HAL_SURFACE_CONFIG: std::cell::RefCell<Option<HalSurfaceConfiguration>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
 /// Returns the HAL surface capabilities for the adapter.
 ///
 /// # Safety
@@ -124,7 +132,7 @@ pub unsafe extern "C" fn wgpuSurfaceConfigure(
         .expect("surface HAL lock is not poisoned")
         .as_mut()
     {
-        let hal_config = HalSurfaceConfiguration::new(
+        let mut hal_config = HalSurfaceConfiguration::new(
             hal_surface_format(config.format),
             hal_surface_usage(config.usage),
             config.width,
@@ -132,6 +140,17 @@ pub unsafe extern "C" fn wgpuSurfaceConfigure(
             hal_present_mode(present_mode),
             hal_alpha_mode(alpha_mode),
         );
+        hal_config.view_formats = if config.viewFormatCount == 0 {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(config.viewFormats, config.viewFormatCount)
+                .iter()
+                .copied()
+                .map(hal_surface_format)
+                .collect()
+        };
+        #[cfg(test)]
+        TEST_HAL_SURFACE_CONFIG.with(|capture| *capture.borrow_mut() = Some(hal_config.clone()));
         hal.configure(device.core.hal(), hal_config).err()
     } else {
         None
@@ -203,6 +222,27 @@ pub unsafe extern "C" fn wgpuSurfaceUnconfigure(surface: native::WGPUSurface) {
     }
 }
 
+fn surface_success_status(suboptimal: bool) -> native::WGPUSurfaceGetCurrentTextureStatus {
+    if suboptimal {
+        native::WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal
+    } else {
+        native::WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal
+    }
+}
+
+fn surface_error_status(
+    error: &yawgpu_hal::HalError,
+) -> native::WGPUSurfaceGetCurrentTextureStatus {
+    match error {
+        yawgpu_hal::HalError::SurfaceOutdated => {
+            native::WGPUSurfaceGetCurrentTextureStatus_Outdated
+        }
+        yawgpu_hal::HalError::SurfaceLost => native::WGPUSurfaceGetCurrentTextureStatus_Lost,
+        yawgpu_hal::HalError::SurfaceTimeout => native::WGPUSurfaceGetCurrentTextureStatus_Timeout,
+        _ => native::WGPUSurfaceGetCurrentTextureStatus_Error,
+    }
+}
+
 /// Gets the current surface texture.
 ///
 /// # Safety
@@ -227,7 +267,14 @@ pub unsafe extern "C" fn wgpuSurfaceGetCurrentTexture(
         .expect("surface current texture lock is not poisoned");
     if let Some(texture) = current_texture.as_ref() {
         surface_texture.texture = arc_to_handle(Arc::clone(texture));
-        surface_texture.status = native::WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal;
+        surface_texture.status = surface_success_status(
+            surface
+                .hal
+                .lock()
+                .expect("surface HAL lock is not poisoned")
+                .as_ref()
+                .is_some_and(HalSurface::is_suboptimal),
+        );
         return;
     }
     let config = surface
@@ -293,11 +340,12 @@ pub unsafe extern "C" fn wgpuSurfaceGetCurrentTexture(
                 });
                 *current_texture = Some(Arc::clone(&texture));
                 surface_texture.texture = arc_to_handle(texture);
-                surface_texture.status = native::WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal;
+                surface_texture.status =
+                    surface_success_status(hal.as_ref().is_some_and(HalSurface::is_suboptimal));
                 return;
             }
-            Err(_) => {
-                surface_texture.status = native::WGPUSurfaceGetCurrentTextureStatus_Error;
+            Err(error) => {
+                surface_texture.status = surface_error_status(&error);
                 return;
             }
         }
@@ -454,6 +502,85 @@ fn fill_surface_capabilities(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn audit_t2_surface_configure_forwards_view_formats_to_hal() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let surface = create_noop_surface(instance);
+            let implementation = borrow_handle(surface, "WGPUSurface");
+            *implementation.hal.lock().unwrap() = Some(HalSurface::Noop);
+            let mut config = valid_surface_config(device);
+            let formats = [native::WGPUTextureFormat_BGRA8UnormSrgb];
+            config.format = native::WGPUTextureFormat_BGRA8Unorm;
+            config.viewFormatCount = formats.len();
+            config.viewFormats = formats.as_ptr();
+            TEST_HAL_SURFACE_CONFIG.with(|capture| *capture.borrow_mut() = None);
+            wgpuSurfaceConfigure(surface, &config);
+            TEST_HAL_SURFACE_CONFIG.with(|capture| {
+                let capture = capture
+                    .borrow_mut()
+                    .take()
+                    .expect("HAL configure must be called");
+                assert_eq!(capture.format, HalTextureFormat::Bgra8Unorm);
+                assert_eq!(capture.view_formats, [HalTextureFormat::Bgra8UnormSrgb]);
+                assert_eq!(
+                    (capture.width, capture.height),
+                    (config.width, config.height)
+                );
+            });
+            config.viewFormatCount = 0;
+            config.viewFormats = std::ptr::null();
+            wgpuSurfaceConfigure(surface, &config);
+            TEST_HAL_SURFACE_CONFIG.with(|capture| {
+                assert!(capture.borrow_mut().take().unwrap().view_formats.is_empty());
+            });
+            wgpuSurfaceRelease(surface);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn audit_t3_acquire_errors_reach_ffi_status() {
+        assert_eq!(
+            surface_success_status(true),
+            native::WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal
+        );
+        assert_eq!(
+            surface_success_status(false),
+            native::WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal
+        );
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let surface = create_noop_surface(instance);
+            wgpuSurfaceConfigure(surface, &valid_surface_config(device));
+            let implementation = borrow_handle(surface, "WGPUSurface");
+            for (error, expected) in [
+                (
+                    yawgpu_hal::HalError::SurfaceOutdated,
+                    native::WGPUSurfaceGetCurrentTextureStatus_Outdated,
+                ),
+                (
+                    yawgpu_hal::HalError::SurfaceLost,
+                    native::WGPUSurfaceGetCurrentTextureStatus_Lost,
+                ),
+                (
+                    yawgpu_hal::HalError::SurfaceTimeout,
+                    native::WGPUSurfaceGetCurrentTextureStatus_Timeout,
+                ),
+            ] {
+                let mut error = Some(error);
+                *implementation.acquire_texture_override.lock().unwrap() =
+                    Some(Box::new(move || Err(error.take().unwrap())));
+                let mut output = std::mem::zeroed();
+                wgpuSurfaceGetCurrentTexture(surface, &mut output);
+                assert_eq!(output.status, expected);
+                assert!(output.texture.is_null());
+            }
+            wgpuSurfaceRelease(surface);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
     fn audit_c10_configure_failure_clears_state_before_reentrant_error_callback() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         unsafe {
@@ -545,6 +672,7 @@ mod tests {
                 core_device
                     .hal()
                     .create_texture(&yawgpu_hal::HalTextureDescriptor {
+                        view_formats: Vec::new(),
                         dimension: yawgpu_hal::HalTextureDimension::D2,
                         format: HalTextureFormat::Bgra8Unorm,
                         width: config.width,

@@ -916,6 +916,7 @@ mod external_texture_tests {
     fn noop_texture(device: &crate::HalDevice) -> crate::HalTexture {
         device
             .create_texture(&HalTextureDescriptor {
+                view_formats: Vec::new(),
                 dimension: HalTextureDimension::D2,
                 format: HalTextureFormat::Rgba8Unorm,
                 width: 4,
@@ -1064,6 +1065,7 @@ mod tests {
         HalTexture::Noop(
             device
                 .create_texture(&HalTextureDescriptor {
+                    view_formats: Vec::new(),
                     dimension: HalTextureDimension::D2,
                     format: HalTextureFormat::Depth32Float,
                     width: 4,

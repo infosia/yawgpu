@@ -488,6 +488,167 @@ fn vulkan_surface_double_get_current_texture_returns_same_texture_and_does_not_h
     });
 }
 
+/// Block 114 T1: a configuration larger than the window (128x128 on a 64x64
+/// layer) must still give the app a texture whose every texel it can render
+/// and copy — the swapchain may not silently shrink to `currentExtent`.
+#[test]
+#[ignore = "manual real-backend test"]
+fn vulkan_surface_configured_size_differs_from_window() {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
+        return;
+    }
+    unsafe {
+        let instance = create_vulkan_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+        let (surface, _window) = create_test_surface(instance);
+        let mut config = frame_loop_config(surface, adapter, device);
+        config.usage = native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_CopySrc;
+        config.width = 128;
+        config.height = 128;
+        yawgpu::wgpuSurfaceConfigure(surface, &config);
+        let mut surface_texture = native::WGPUSurfaceTexture {
+            nextInChain: std::ptr::null_mut(),
+            texture: std::ptr::null(),
+            status: 0,
+        };
+        yawgpu::wgpuSurfaceGetCurrentTexture(surface, &mut surface_texture);
+        let texture = surface_texture.texture.cast_mut();
+        assert!(!texture.is_null());
+        assert_eq!(yawgpu::wgpuTextureGetWidth(texture), 128);
+        let view = yawgpu::wgpuTextureCreateView(texture, std::ptr::null());
+        let readback = create_buffer(
+            device,
+            512 * 128,
+            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+        );
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        record_clear_render_pass(encoder, view, [1.0, 0.0, 0.0, 1.0]);
+        let source = native::WGPUTexelCopyTextureInfo {
+            texture,
+            mipLevel: 0,
+            origin: native::WGPUOrigin3D { x: 0, y: 0, z: 0 },
+            aspect: native::WGPUTextureAspect_All,
+        };
+        let destination = native::WGPUTexelCopyBufferInfo {
+            layout: native::WGPUTexelCopyBufferLayout {
+                offset: 0,
+                bytesPerRow: 512,
+                rowsPerImage: 128,
+            },
+            buffer: readback,
+        };
+        let extent = native::WGPUExtent3D {
+            width: 128,
+            height: 128,
+            depthOrArrayLayers: 1,
+        };
+        yawgpu::wgpuCommandEncoderCopyTextureToBuffer(encoder, &source, &destination, &extent);
+        let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+        yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+        yawgpu::wgpuCommandBufferRelease(command_buffer);
+        yawgpu::wgpuCommandEncoderRelease(encoder);
+        let bytes = read_buffer(instance, readback, 512 * 128);
+        let last = &bytes[512 * 127 + 127 * 4..512 * 127 + 128 * 4];
+        assert!(
+            last == [255, 0, 0, 255] || last == [0, 0, 255, 255],
+            "bottom-right texel of the configured 128x128 texture must be cleared, got {last:?}"
+        );
+        assert_eq!(
+            yawgpu::wgpuSurfacePresent(surface),
+            native::WGPUStatus_Success
+        );
+        assert!(
+            errors.lock().expect("error lock").is_empty(),
+            "unexpected errors: {:?}",
+            errors.lock().expect("error lock")
+        );
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuTextureViewRelease(view);
+        yawgpu::wgpuTextureRelease(texture);
+        yawgpu::wgpuSurfaceUnconfigure(surface);
+        yawgpu::wgpuSurfaceRelease(surface);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+/// Block 114 T2: a surface configured with an sRGB `viewFormats` entry must
+/// accept rendering through the sRGB view (mutable-format swapchain).
+#[test]
+#[ignore = "manual real-backend test"]
+fn vulkan_surface_srgb_view_format_renders() {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
+        return;
+    }
+    unsafe {
+        let instance = create_vulkan_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+        let (surface, _window) = create_test_surface(instance);
+        let mut config = frame_loop_config(surface, adapter, device);
+        let view_format = match config.format {
+            native::WGPUTextureFormat_BGRA8Unorm => native::WGPUTextureFormat_BGRA8UnormSrgb,
+            native::WGPUTextureFormat_RGBA8Unorm => native::WGPUTextureFormat_RGBA8UnormSrgb,
+            native::WGPUTextureFormat_BGRA8UnormSrgb => native::WGPUTextureFormat_BGRA8Unorm,
+            native::WGPUTextureFormat_RGBA8UnormSrgb => native::WGPUTextureFormat_RGBA8Unorm,
+            other => panic!("unexpected surface format {other}"),
+        };
+        let view_formats = [view_format];
+        config.viewFormatCount = view_formats.len();
+        config.viewFormats = view_formats.as_ptr();
+        yawgpu::wgpuSurfaceConfigure(surface, &config);
+        let mut surface_texture = native::WGPUSurfaceTexture {
+            nextInChain: std::ptr::null_mut(),
+            texture: std::ptr::null(),
+            status: 0,
+        };
+        yawgpu::wgpuSurfaceGetCurrentTexture(surface, &mut surface_texture);
+        let texture = surface_texture.texture.cast_mut();
+        assert!(!texture.is_null());
+        let view_descriptor = native::WGPUTextureViewDescriptor {
+            format: view_format,
+            dimension: native::WGPUTextureViewDimension_2D,
+            baseMipLevel: 0,
+            mipLevelCount: 1,
+            baseArrayLayer: 0,
+            arrayLayerCount: 1,
+            aspect: native::WGPUTextureAspect_All,
+            ..std::mem::zeroed()
+        };
+        let view = yawgpu::wgpuTextureCreateView(texture, &view_descriptor);
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        record_clear_render_pass(encoder, view, [0.5, 0.5, 0.5, 1.0]);
+        let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+        yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+        yawgpu::wgpuCommandBufferRelease(command_buffer);
+        yawgpu::wgpuCommandEncoderRelease(encoder);
+        assert_eq!(
+            yawgpu::wgpuSurfacePresent(surface),
+            native::WGPUStatus_Success
+        );
+        assert!(
+            errors.lock().expect("error lock").is_empty(),
+            "unexpected errors: {:?}",
+            errors.lock().expect("error lock")
+        );
+        yawgpu::wgpuTextureViewRelease(view);
+        yawgpu::wgpuTextureRelease(texture);
+        yawgpu::wgpuSurfaceUnconfigure(surface);
+        yawgpu::wgpuSurfaceRelease(surface);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
 /// Runs `body` on a helper thread and fails the test if it does not finish
 /// within 30 s, so a fence deadlock reports as a failure instead of hanging
 /// the test binary.

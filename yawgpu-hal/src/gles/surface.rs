@@ -159,9 +159,9 @@ impl GlesSurface {
         device: &GlesDevice,
         config: HalSurfaceConfiguration,
     ) -> Result<(), HalError> {
-        validate_config(config)?;
+        validate_config(&config)?;
         let device = device.inner_clone();
-        let back_buffer = GlesTexture::new(Arc::clone(&device), &back_buffer_descriptor(config));
+        let back_buffer = GlesTexture::new(Arc::clone(&device), &back_buffer_descriptor(&config));
         back_buffer
             .raw_or_err()
             .map_err(|_| HalError::SwapchainCreationFailed {
@@ -228,7 +228,7 @@ impl GlesSurface {
     }
 }
 
-fn validate_config(config: HalSurfaceConfiguration) -> Result<(), HalError> {
+fn validate_config(config: &HalSurfaceConfiguration) -> Result<(), HalError> {
     if !matches!(
         config.format,
         HalTextureFormat::Rgba8Unorm | HalTextureFormat::Bgra8Unorm
@@ -247,8 +247,9 @@ fn validate_config(config: HalSurfaceConfiguration) -> Result<(), HalError> {
     Ok(())
 }
 
-fn back_buffer_descriptor(config: HalSurfaceConfiguration) -> HalTextureDescriptor {
+fn back_buffer_descriptor(config: &HalSurfaceConfiguration) -> HalTextureDescriptor {
     HalTextureDescriptor {
+        view_formats: Vec::new(),
         dimension: HalTextureDimension::D2,
         format: config.format,
         width: config.width,
@@ -549,7 +550,7 @@ mod tests {
                 crate::HalCompositeAlphaMode::Opaque,
             );
 
-            assert!(validate_config(config).is_ok());
+            assert!(validate_config(&config).is_ok());
         }
     }
 
@@ -572,7 +573,7 @@ mod tests {
             crate::HalCompositeAlphaMode::Opaque,
         );
         assert!(matches!(
-            validate_config(format),
+            validate_config(&format),
             Err(HalError::SwapchainCreationFailed {
                 backend: "gles",
                 message: "GLES surfaces support only Rgba8Unorm and Bgra8Unorm formats",
@@ -588,7 +589,7 @@ mod tests {
             crate::HalCompositeAlphaMode::Opaque,
         );
         assert!(matches!(
-            validate_config(zero_size),
+            validate_config(&zero_size),
             Err(HalError::SwapchainCreationFailed {
                 backend: "gles",
                 message: "surface width and height must be non-zero",
