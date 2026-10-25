@@ -545,7 +545,11 @@ impl Texture {
             });
 
         ResolvedTextureViewDescriptor {
-            format: descriptor.format.unwrap_or_else(|| self.format()),
+            format: descriptor.format.unwrap_or_else(|| {
+                self.format()
+                    .aspect_view_format(descriptor.aspect.unwrap_or(TextureAspect::All))
+                    .unwrap_or_else(|| self.format())
+            }),
             dimension,
             base_mip_level,
             mip_level_count,
@@ -841,7 +845,7 @@ pub(crate) fn validate_queue_write_texture(
     if texture.sample_count() != 1 {
         return Err("queue texture write destination sampleCount must be one".to_owned());
     }
-    let (format_caps, subresource, empty_write) = validate_texture_copy_range(
+    let (format_caps, subresource, _) = validate_texture_copy_range(
         texture,
         mip_level,
         origin,
@@ -881,7 +885,6 @@ pub(crate) fn validate_queue_write_texture(
     // (non-zero `origin.z` / `write_size.depth_or_array_layers > 1`) is allowed —
     // each layer is its own 2D subresource — and is bounds-checked above.
     if (format_caps.aspects.depth || format_caps.aspects.stencil)
-        && !empty_write
         && (origin.x != 0
             || origin.y != 0
             || write_size.width != subresource.width
@@ -1095,6 +1098,66 @@ pub(crate) fn max_texture_mips(size: Extent3d, dimension: TextureDimension) -> u
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audit_empty_depth_stencil_write_still_requires_full_subresource() {
+        let device = noop_device();
+        let texture = device.create_texture(TextureDescriptor {
+            format: TextureFormat::from_raw(TextureFormat::STENCIL8),
+            ..texture_descriptor_4x4()
+        });
+        assert!(!texture.is_error());
+        let layout = TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4),
+            rows_per_image: None,
+        };
+        for size in [
+            Extent3d {
+                width: 0,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            Extent3d {
+                width: 4,
+                height: 0,
+                depth_or_array_layers: 1,
+            },
+            Extent3d {
+                width: 0,
+                height: 0,
+                depth_or_array_layers: 0,
+            },
+        ] {
+            assert_eq!(
+                texture
+                    .validate_queue_write(
+                        0,
+                        Origin3d { x: 0, y: 0, z: 0 },
+                        size,
+                        TextureAspect::All,
+                        layout,
+                        0
+                    )
+                    .unwrap_err(),
+                "queue texture write depth/stencil copies must cover the full 2D subresource"
+            );
+        }
+        assert!(texture
+            .validate_queue_write(
+                0,
+                Origin3d { x: 0, y: 0, z: 0 },
+                Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 0
+                },
+                TextureAspect::All,
+                layout,
+                0
+            )
+            .is_ok());
+    }
+
     use super::*;
     use crate::test_helpers::*;
     use crate::*;

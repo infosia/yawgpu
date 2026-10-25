@@ -24,6 +24,13 @@ pub(crate) fn validate_bind_group_layout_descriptor(
     let mut stage_counts = [StageResourceCounts::default(); 3];
 
     for entry in entries {
+        if entry.visibility & !(SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT | SHADER_STAGE_COMPUTE)
+            != 0
+        {
+            return Some(
+                "bind group layout visibility contains unknown shader stage bits".to_owned(),
+            );
+        }
         if entry.binding >= limits.max_bindings_per_bind_group {
             return Some(
                 "bind group layout entry binding number exceeds maxBindingsPerBindGroup".to_owned(),
@@ -406,6 +413,48 @@ impl BindGroupLayout {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audit_unknown_visibility_bits_are_rejected() {
+        let entry = BindGroupLayoutEntry {
+            binding: 0,
+            visibility: 0,
+            binding_array_size: 1,
+            kind: Some(BindingLayoutKind::Buffer {
+                ty: BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: 4,
+            }),
+        };
+        for visibility in [
+            0,
+            SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT | SHADER_STAGE_COMPUTE,
+        ] {
+            assert!(validate_bind_group_layout_descriptor(
+                &[BindGroupLayoutEntry {
+                    visibility,
+                    ..entry
+                }],
+                Limits::DEFAULT,
+                &FeatureSet::default()
+            )
+            .is_none());
+        }
+        for visibility in [8, u64::MAX, SHADER_STAGE_COMPUTE | (1 << 32)] {
+            assert_eq!(
+                validate_bind_group_layout_descriptor(
+                    &[BindGroupLayoutEntry {
+                        visibility,
+                        ..entry
+                    }],
+                    Limits::DEFAULT,
+                    &FeatureSet::default()
+                )
+                .as_deref(),
+                Some("bind group layout visibility contains unknown shader stage bits")
+            );
+        }
+    }
+
     use super::*;
     use crate::test_helpers::*;
     use crate::*;

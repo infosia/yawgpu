@@ -3623,10 +3623,12 @@ fn metal_readonly_depth_stencil_isolation() {
             assert!(!pipeline.is_null(), "sample pipeline creation failed");
 
             // Aspect view + auto bind group.
+            // Block 113 D7: a single-aspect view must use the aspect's format
+            // (Dawn `ValidateCanViewTextureAs`); `Undefined` resolves to it.
             let aspect_view_desc = native::WGPUTextureViewDescriptor {
                 nextInChain: std::ptr::null_mut(),
                 label: empty_string_view(),
-                format: native::WGPUTextureFormat_Depth24PlusStencil8,
+                format: native::WGPUTextureFormat_Undefined,
                 dimension: native::WGPUTextureViewDimension_2D,
                 baseMipLevel: 0,
                 mipLevelCount: 1,
@@ -3880,7 +3882,8 @@ fn metal_readonly_depth_stencil_single_submit() {
                 &native::WGPUTextureViewDescriptor {
                     nextInChain: std::ptr::null_mut(),
                     label: empty_string_view(),
-                    format: native::WGPUTextureFormat_Depth24PlusStencil8,
+                    // Block 113 D7: aspect views take the aspect's format.
+                    format: native::WGPUTextureFormat_Undefined,
                     dimension: native::WGPUTextureViewDimension_2D,
                     baseMipLevel: 0,
                     mipLevelCount: 1,

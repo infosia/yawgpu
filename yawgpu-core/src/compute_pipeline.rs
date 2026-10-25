@@ -913,8 +913,7 @@ pub(crate) fn resolve_compute_pipeline_descriptor(
         return Err("compute pipeline requires a reflected shader module".to_owned());
     };
     let entry_name = resolve_compute_entry(module, descriptor.entry_point.as_deref())?;
-    let overrides = module.overrides();
-    let constants = resolve_pipeline_constants(&overrides, &descriptor.constants)?;
+    let constants = resolve_pipeline_constants(module, &entry_name, &descriptor.constants)?;
     let workgroup = resolve_compute_workgroup(
         module,
         &entry_name,
@@ -1071,9 +1070,12 @@ pub(crate) struct ResolvedOverrideConstant {
 
 /// Records resolve into the command stream.
 pub(crate) fn resolve_pipeline_constants(
-    overrides: &[frontend::ReflectedOverride],
+    module: &frontend::ReflectedModule,
+    entry_name: &str,
     constants: &[PipelineConstant],
 ) -> Result<Vec<ResolvedOverrideConstant>, String> {
+    let overrides = module.overrides();
+    let required_indices = module.entry_point_override_indices(entry_name)?;
     let mut seen_keys = BTreeSet::new();
     let mut resolved = Vec::new();
 
@@ -1081,7 +1083,7 @@ pub(crate) fn resolve_pipeline_constants(
         if !seen_keys.insert(constant.key.as_str()) {
             return Err("pipeline constant keys must be unique".to_owned());
         }
-        let index = resolve_pipeline_constant_key(overrides, &constant.key)?;
+        let index = resolve_pipeline_constant_key(&overrides, &constant.key)?;
         validate_pipeline_constant_value(&overrides[index], constant.value)?;
         resolved.push(ResolvedOverrideConstant {
             index,
@@ -1091,7 +1093,10 @@ pub(crate) fn resolve_pipeline_constants(
     }
 
     for (index, override_) in overrides.iter().enumerate() {
-        if !override_.has_default && !resolved.iter().any(|constant| constant.index == index) {
+        if required_indices.contains(&index)
+            && !override_.has_default
+            && !resolved.iter().any(|constant| constant.index == index)
+        {
             return Err("pipeline constant is required for override without a default".to_owned());
         }
     }
@@ -1107,7 +1112,7 @@ pub(crate) fn resolve_pipeline_constant_key(
     if let Ok(id) = key.parse::<u16>() {
         return overrides
             .iter()
-            .position(|override_| override_.id == Some(id))
+            .position(|override_| override_.id == Some(id) && key == id.to_string())
             .ok_or_else(|| "pipeline constant key does not match a shader override".to_owned());
     }
 
@@ -1148,12 +1153,12 @@ pub(crate) fn validate_pipeline_constant_value(
             }
         }
         frontend::ReflectedTypeScalarClass::Sint => {
-            if value.fract() != 0.0 || value < f64::from(i32::MIN) || value > f64::from(i32::MAX) {
+            if value < f64::from(i32::MIN) || value > f64::from(i32::MAX) {
                 return Err("pipeline constant value is outside the override type range".to_owned());
             }
         }
         frontend::ReflectedTypeScalarClass::Uint => {
-            if value.fract() != 0.0 || value < 0.0 || value > f64::from(u32::MAX) {
+            if value < 0.0 || value > f64::from(u32::MAX) {
                 return Err("pipeline constant value is outside the override type range".to_owned());
             }
         }
@@ -2039,6 +2044,105 @@ pub(crate) fn buffer_binding_types_compatible(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audit_override_requirements_are_entry_scoped() {
+        let module = frontend::parse_and_validate_wgsl(
+            r#"
+override required: u32;
+@compute @workgroup_size(1) fn first() {}
+@compute @workgroup_size(required) fn second() {}
+"#,
+        )
+        .unwrap();
+        assert!(resolve_pipeline_constants(&module, "first", &[]).is_ok());
+        assert!(resolve_pipeline_constants(&module, "second", &[]).is_err());
+        let constants = [PipelineConstant {
+            key: "required".to_owned(),
+            value: 2.0,
+        }];
+        assert!(resolve_pipeline_constants(&module, "first", &constants).is_ok());
+        assert!(resolve_pipeline_constants(&module, "second", &constants).is_ok());
+    }
+
+    #[test]
+    fn audit_numeric_override_keys_require_exact_decimal_spelling() {
+        let module = frontend::parse_and_validate_wgsl(
+            "@id(1) override n: u32 = 1; @compute @workgroup_size(n) fn cs() {}",
+        )
+        .unwrap();
+        let overrides = module.overrides();
+        assert!(resolve_pipeline_constant_key(&overrides, "1").is_ok());
+        for key in ["01", "+1", "001", "n"] {
+            assert!(
+                resolve_pipeline_constant_key(&overrides, key).is_err(),
+                "{key}"
+            );
+        }
+        assert!(resolve_pipeline_constants(
+            &module,
+            "cs",
+            &[
+                PipelineConstant {
+                    key: "1".to_owned(),
+                    value: 2.0
+                },
+                PipelineConstant {
+                    key: "01".to_owned(),
+                    value: 3.0
+                },
+            ]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn audit_integer_overrides_accept_in_range_fractional_values() {
+        let module = frontend::parse_and_validate_wgsl("override i: i32 = 1; override u: u32 = 1; @compute @workgroup_size(1) fn cs() { let x = i; let y = u; }").unwrap();
+        let overrides = module.overrides();
+        for (name, accepted, rejected) in [
+            (
+                "i",
+                vec![-1.9, 1.9, f64::from(i32::MIN), f64::from(i32::MAX)],
+                vec![f64::from(i32::MIN) - 0.5, f64::from(i32::MAX) + 0.5],
+            ),
+            (
+                "u",
+                vec![0.9, 1.9, f64::from(u32::MAX)],
+                vec![-0.5, f64::from(u32::MAX) + 0.5],
+            ),
+        ] {
+            let ov = overrides
+                .iter()
+                .find(|ov| ov.name.as_deref() == Some(name))
+                .unwrap();
+            for value in accepted {
+                assert!(validate_pipeline_constant_value(ov, value).is_ok());
+            }
+            for value in rejected.into_iter().chain([f64::NAN, f64::INFINITY]) {
+                assert!(validate_pipeline_constant_value(ov, value).is_err());
+            }
+        }
+        let workgroup = frontend::parse_and_validate_wgsl(
+            "override n: u32 = 1; @compute @workgroup_size(n) fn cs() {}",
+        )
+        .unwrap();
+        let constants = resolve_pipeline_constants(
+            &workgroup,
+            "cs",
+            &[PipelineConstant {
+                key: "n".to_owned(),
+                value: 2.9,
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_compute_workgroup(&workgroup, "cs", &constants, Limits::DEFAULT, None)
+                .unwrap()
+                .size,
+            [2, 1, 1]
+        );
+    }
+
     use super::*;
     use crate::test_helpers::*;
     use crate::*;

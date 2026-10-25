@@ -687,6 +687,8 @@ struct YawgpuTintProgram {
     std::unique_ptr<tint::Source::File> file;
     tint::Program program;
     std::vector<tint::inspector::EntryPoint> entry_points;
+    // Immutable, parallel to entry_points; includes implicit IDs as well.
+    std::vector<std::vector<uint16_t>> entry_point_override_ids;
     // Parallel to `entry_points`: whether each entry point declares
     // `@subgroup_size(...)`. The Inspector does not reflect the attribute, so
     // it is read off the AST once at program creation.
@@ -1850,6 +1852,14 @@ YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
         }
         tint::inspector::Inspector inspector(out->program);
         out->entry_points = inspector.GetEntryPoints();
+        const auto& override_ids = inspector.GetNamedOverrideIds();
+        for (const auto& entry : out->entry_points) {
+            std::vector<uint16_t> ids;
+            for (const auto& override_ : entry.overrides) {
+                ids.push_back(override_ids.at(override_.name).value);
+            }
+            out->entry_point_override_ids.push_back(std::move(ids));
+        }
         out->entry_point_has_subgroup_size.reserve(out->entry_points.size());
         for (const auto& entry : out->entry_points) {
             bool has_subgroup_size = false;
@@ -2018,6 +2028,35 @@ bool yawgpu_tint_resource_binding_get(const YawgpuTintProgram* program,
     auto found = cached.texture_sample_usages.find(key);
     fill_resource_binding(binding, found != cached.texture_sample_usages.end() ? found->second : 0, out);
     return true;
+}
+
+size_t yawgpu_tint_entry_point_override_count(const YawgpuTintProgram* program, const char* ep) {
+    if (program != nullptr && ep != nullptr) {
+        for (size_t i = 0; i < program->entry_points.size(); ++i) {
+            if (program->entry_points[i].name == ep) {
+                return program->entry_point_override_ids[i].size();
+            }
+        }
+    }
+    return SIZE_MAX;
+}
+
+bool yawgpu_tint_entry_point_override_id_get(const YawgpuTintProgram* program, const char* ep,
+                                            size_t index, uint16_t* out) {
+    if (program == nullptr || ep == nullptr || out == nullptr) {
+        return false;
+    }
+    for (size_t i = 0; i < program->entry_points.size(); ++i) {
+        if (program->entry_points[i].name == ep) {
+            const auto& ids = program->entry_point_override_ids[i];
+            if (index >= ids.size()) {
+                return false;
+            }
+            *out = ids[index];
+            return true;
+        }
+    }
+    return false;
 }
 
 size_t yawgpu_tint_override_count(const YawgpuTintProgram* program) {

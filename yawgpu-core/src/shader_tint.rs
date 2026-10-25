@@ -1046,6 +1046,23 @@ impl ReflectedModule {
             .unwrap_or(0)
     }
 
+    /// Returns module override indices referenced by this entry point.
+    pub(crate) fn entry_point_override_indices(
+        &self,
+        entry_point: &str,
+    ) -> Result<Vec<usize>, String> {
+        let ids = self
+            .program
+            .entry_point_override_ids(entry_point)
+            .map_err(|err| err.to_string())?;
+        let overrides = self.program.overrides().map_err(|err| err.to_string())?;
+        Ok(overrides
+            .iter()
+            .enumerate()
+            .filter_map(|(index, ov)| ids.contains(&ov.id).then_some(index))
+            .collect())
+    }
+
     /// Returns overrides reflected by the validated shader module, memoized once.
     pub(crate) fn overrides(&self) -> Vec<ReflectedOverride> {
         self.overrides_cache

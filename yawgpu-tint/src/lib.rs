@@ -1438,6 +1438,16 @@ mod real {
             i: usize,
             out: *mut RawResourceBinding,
         ) -> bool;
+        fn yawgpu_tint_entry_point_override_count(
+            program: *const RawProgram,
+            ep: *const c_char,
+        ) -> usize;
+        fn yawgpu_tint_entry_point_override_id_get(
+            program: *const RawProgram,
+            ep: *const c_char,
+            i: usize,
+            out: *mut u16,
+        ) -> bool;
         fn yawgpu_tint_override_count(program: *const RawProgram) -> usize;
         fn yawgpu_tint_override_get(
             program: *const RawProgram,
@@ -1944,6 +1954,32 @@ mod real {
                 out.push(ResourceBinding::try_from_raw(raw)?);
             }
             Ok(out)
+        }
+
+        /// Returns the explicit or implicit IDs of overrides referenced by `entry_point`.
+        pub fn entry_point_override_ids(&self, entry_point: &str) -> Result<Vec<u16>, TintError> {
+            let ep = cstring(entry_point, "entry point").map_err(TintError::Reflection)?;
+            // SAFETY: the Program owns raw, and ep is live for this call.
+            let count = unsafe { yawgpu_tint_entry_point_override_count(self.raw, ep.as_ptr()) };
+            if count == usize::MAX {
+                return Err(TintError::Reflection(
+                    "tint: unknown entry point".to_owned(),
+                ));
+            }
+            let mut ids = Vec::with_capacity(count);
+            for i in 0..count {
+                let mut id = 0;
+                // SAFETY: id is writable and the Program and ep remain live.
+                if !unsafe {
+                    yawgpu_tint_entry_point_override_id_get(self.raw, ep.as_ptr(), i, &mut id)
+                } {
+                    return Err(TintError::Reflection(
+                        "tint: failed to read entry point override ID".to_owned(),
+                    ));
+                }
+                ids.push(id);
+            }
+            Ok(ids)
         }
 
         /// Returns module override declarations.
@@ -2477,6 +2513,11 @@ mod stub {
             Err(TintError::Unavailable)
         }
 
+        /// Returns the explicit or implicit IDs of overrides referenced by `entry_point`.
+        pub fn entry_point_override_ids(&self, _entry_point: &str) -> Result<Vec<u16>, TintError> {
+            Err(TintError::Unavailable)
+        }
+
         /// Returns module override declarations.
         pub fn overrides(&self) -> Result<Vec<Override>, TintError> {
             Err(TintError::Unavailable)
@@ -2575,6 +2616,43 @@ pub use stub::initialize;
 
 #[cfg(all(test, have_tint))]
 mod tests {
+    #[test]
+    fn entry_point_override_ids_are_scoped_and_include_transitive_uses() {
+        let program = Program::parse(
+            r#"
+override implicit: f32;
+@id(7) override specified: f32;
+override unused: f32;
+fn helper() -> f32 { return implicit; }
+@vertex fn vs() -> @builtin(position) vec4f { return vec4f(helper()); }
+@fragment fn fs() -> @location(0) vec4f { return vec4f(specified); }
+@compute @workgroup_size(1) fn cs() {}
+"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let overrides = program.overrides().unwrap();
+        let implicit_id = overrides
+            .iter()
+            .find(|ov| ov.name == "implicit")
+            .unwrap()
+            .id;
+        assert_eq!(
+            program.entry_point_override_ids("vs").unwrap(),
+            vec![implicit_id]
+        );
+        assert_eq!(program.entry_point_override_ids("fs").unwrap(), vec![7]);
+        assert!(program.entry_point_override_ids("cs").unwrap().is_empty());
+        assert!(program.entry_point_override_ids("missing").is_err());
+        assert!(program.entry_point_override_ids("bad\0name").is_err());
+    }
+
     use super::*;
 
     fn compute_wgsl() -> &'static str {

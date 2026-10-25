@@ -2317,9 +2317,9 @@ pub(crate) fn resolve_render_pipeline_descriptor(
         None
     };
 
-    validate_render_constants(&descriptor.vertex.shader)?;
-    if let Some(fragment) = &descriptor.fragment {
-        validate_render_constants(&fragment.shader)?;
+    validate_render_constants(&descriptor.vertex.shader, &vertex_entry)?;
+    if let (Some(fragment), Some(entry)) = (&descriptor.fragment, &fragment_entry) {
+        validate_render_constants(&fragment.shader, entry)?;
     }
     validate_vertex_state(&descriptor.vertex, &vertex_entry, limits)?;
     validate_render_presence(descriptor)?;
@@ -2525,6 +2525,10 @@ pub(crate) fn validate_vertex_state(
         }
 
         for attribute in &buffer.attributes {
+            // webgpu.h defines contiguous values from Uint8 through Unorm8x4BGRA.
+            if !(1..=0x29).contains(&attribute.format.raw()) {
+                return Err("render pipeline vertex attribute format is invalid".to_owned());
+            }
             let info = attribute.format.info();
             let alignment = info.byte_size.min(4);
             if attribute.offset % alignment != 0 {
@@ -2652,6 +2656,9 @@ pub(crate) fn resolve_render_entry(
 pub(crate) fn validate_render_presence(
     descriptor: &RenderPipelineDescriptor,
 ) -> Result<(), String> {
+    if descriptor.multisample.alpha_to_coverage_enabled && descriptor.fragment.is_none() {
+        return Err("render pipeline alphaToCoverage requires a fragment state".to_owned());
+    }
     if descriptor.fragment.is_none() && descriptor.depth_stencil.is_none() {
         return Err("render pipeline requires a fragment state or depthStencil state".to_owned());
     }
@@ -2670,11 +2677,14 @@ pub(crate) fn validate_render_presence(
 }
 
 /// Validates render constants and returns a descriptive error on failure.
-pub(crate) fn validate_render_constants(stage: &RenderPipelineShaderStage) -> Result<(), String> {
+pub(crate) fn validate_render_constants(
+    stage: &RenderPipelineShaderStage,
+    entry_name: &str,
+) -> Result<(), String> {
     let Some(module) = stage.module.reflected() else {
         return Err("render pipeline stage requires a reflected shader module".to_owned());
     };
-    resolve_pipeline_constants(&module.overrides(), &stage.constants)?;
+    resolve_pipeline_constants(module, entry_name, &stage.constants)?;
     Ok(())
 }
 
@@ -2901,7 +2911,7 @@ pub(crate) fn validate_color_targets(
         if target.blend.is_some() && !caps.is_blendable {
             return Err("render pipeline color target format must be blendable".to_owned());
         }
-        if descriptor.multisample.alpha_to_coverage_enabled && caps.is_blendable && caps.has_alpha {
+        if index == 0 && caps.has_alpha {
             has_alpha_to_coverage_target = true;
         }
 
@@ -2937,7 +2947,8 @@ pub(crate) fn validate_color_targets(
 
     if descriptor.multisample.alpha_to_coverage_enabled && !has_alpha_to_coverage_target {
         return Err(
-            "render pipeline alphaToCoverage requires an alpha blendable color target".to_owned(),
+            "render pipeline alphaToCoverage requires color target[0] with an alpha channel"
+                .to_owned(),
         );
     }
     let color_bytes = color_attachment_bytes_per_sample(color_formats)
@@ -3539,6 +3550,111 @@ pub(crate) fn validate_multisample_state(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audit_render_overrides_are_entry_scoped() {
+        let device = noop_device();
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r#"
+override fragment_only: f32;
+@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0); }
+@fragment fn fs() -> @location(0) vec4f { return vec4f(fragment_only); }
+"#
+                .to_owned(),
+            )),
+        );
+        let mut descriptor = render_pipeline_descriptor(module);
+        descriptor.fragment.as_mut().unwrap().shader.constants = vec![PipelineConstant {
+            key: "fragment_only".to_owned(),
+            value: 1.0,
+        }];
+        assert!(!device.create_render_pipeline(descriptor.clone()).is_error());
+        descriptor
+            .fragment
+            .as_mut()
+            .unwrap()
+            .shader
+            .constants
+            .clear();
+        assert!(device.create_render_pipeline(descriptor).is_error());
+    }
+
+    #[test]
+    fn audit_unknown_vertex_formats_are_rejected_at_pipeline_creation() {
+        let device = noop_device();
+        for raw in [0, 0x2a, u32::MAX] {
+            let mut descriptor = render_pipeline_descriptor(render_shader_module(&device));
+            descriptor.vertex.buffer_count = 1;
+            descriptor.vertex.buffers = vec![VertexBufferLayout {
+                used: true,
+                array_stride: 16,
+                step_mode: VertexStepMode::Vertex,
+                attributes: vec![VertexAttribute {
+                    format: VertexFormat::from_raw(raw),
+                    offset: 0,
+                    shader_location: 0,
+                }],
+            }];
+            assert_eq!(
+                validate_vertex_state(&descriptor.vertex, "vs", device.limits()).unwrap_err(),
+                "render pipeline vertex attribute format is invalid"
+            );
+            assert!(device.create_render_pipeline(descriptor).is_error());
+        }
+    }
+
+    #[test]
+    fn audit_alpha_to_coverage_requires_first_target_and_fragment() {
+        let device = noop_device();
+        let mut descriptor = render_pipeline_descriptor(render_shader_module(&device));
+        descriptor.multisample.count = 4;
+        descriptor.multisample.alpha_to_coverage_enabled = true;
+        let fragment = descriptor.fragment.as_mut().unwrap();
+        let mut second = fragment.targets[0];
+        second.write_mask = 0;
+        fragment.target_count = 2;
+        fragment.targets.push(second);
+        for raw in [TextureFormat::UNDEFINED, TextureFormat::R8_UNORM] {
+            descriptor.fragment.as_mut().unwrap().targets[0].format = TextureFormat::from_raw(raw);
+            assert_eq!(
+                validate_color_targets(
+                    &descriptor,
+                    Some("fs"),
+                    device.limits(),
+                    &device.features(),
+                    None
+                )
+                .unwrap_err(),
+                "render pipeline alphaToCoverage requires color target[0] with an alpha channel"
+            );
+        }
+        descriptor.fragment = None;
+        descriptor.depth_stencil = Some(depth_stencil_state());
+        assert_eq!(
+            validate_render_presence(&descriptor).unwrap_err(),
+            "render pipeline alphaToCoverage requires a fragment state"
+        );
+        assert!(device.create_render_pipeline(descriptor).is_error());
+
+        // Integer targets have alpha but are not blendable.
+        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+            "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0); } @fragment fn fs() -> @location(0) vec4u { return vec4u(1u); }".to_owned())));
+        let mut descriptor = render_pipeline_descriptor(module);
+        descriptor.multisample.count = 4;
+        descriptor.multisample.alpha_to_coverage_enabled = true;
+        descriptor.fragment.as_mut().unwrap().targets[0].format =
+            TextureFormat::from_raw(TextureFormat::RGBA8_UINT);
+        assert!(validate_color_targets(
+            &descriptor,
+            Some("fs"),
+            device.limits(),
+            &device.features(),
+            None
+        )
+        .is_ok());
+        assert!(!device.create_render_pipeline(descriptor).is_error());
+    }
+
     use super::*;
     use crate::pass::bind_group_layouts_compatible;
     #[cfg(feature = "tiled")]

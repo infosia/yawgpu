@@ -350,6 +350,10 @@ pub(crate) fn validate_texture_view_descriptor(
         return Some("cube texture views require square faces");
     }
 
+    if texture.sample_count() > 1 && dimension != TextureViewDimension::D2 {
+        return Some("multisampled textures require 2D views");
+    }
+
     match texture.dimension() {
         TextureDimension::D1 if dimension != TextureViewDimension::D1 => {
             return Some("1D textures require 1D views");
@@ -380,17 +384,16 @@ pub(crate) fn validate_texture_view_descriptor(
         _ => {}
     }
 
-    // A view whose `aspect` selects a single aspect of a combined
-    // depth-stencil texture may use the aspect-specific format (e.g. a
-    // `DepthOnly` view of `depth24plus-stencil8` may declare `depth24plus`),
-    // in addition to the texture's own format and its `viewFormats`. This
-    // matches the WebGPU spec (and Dawn) and is relied on by the CTS
-    // `textureLoad` tests on combined depth-stencil textures.
-    let aspect_format_ok = texture
-        .format()
-        .aspect_view_format(aspect)
-        .is_some_and(|aspect_format| aspect_format == format);
-    if !aspect_format_ok && !texture.is_view_format_compatible(format) {
+    let format_compatible = if aspect == TextureAspect::All {
+        texture.is_view_format_compatible(format)
+    } else {
+        texture
+            .format()
+            .aspect_view_format(aspect)
+            .unwrap_or_else(|| texture.format())
+            == format
+    };
+    if !format_compatible {
         return Some("texture view format is not compatible with the texture");
     }
 
@@ -419,6 +422,89 @@ pub(crate) fn validate_texture_view_descriptor(
 
 #[cfg(test)]
 mod tests {
+    fn view_descriptor() -> TextureViewDescriptor {
+        TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+            swizzle: None,
+        }
+    }
+
+    #[test]
+    fn audit_multisampled_view_requires_2d() {
+        let device = noop_device();
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::RENDER_ATTACHMENT,
+            sample_count: 4,
+            ..texture_descriptor_4x4()
+        });
+        assert!(!texture.is_error());
+        let descriptor = view_descriptor();
+        assert!(!texture.create_view(descriptor).0.is_error());
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            dimension: Some(TextureViewDimension::D2Array),
+            ..descriptor
+        });
+        assert!(view.is_error());
+        assert_eq!(error, Some("multisampled textures require 2D views"));
+    }
+
+    #[test]
+    fn single_aspect_formats_keep_their_own_format() {
+        for (raw, aspect) in [
+            (TextureFormat::DEPTH16_UNORM, TextureAspect::DepthOnly),
+            (TextureFormat::DEPTH24_PLUS, TextureAspect::DepthOnly),
+            (TextureFormat::DEPTH32_FLOAT, TextureAspect::DepthOnly),
+            (TextureFormat::STENCIL8, TextureAspect::StencilOnly),
+        ] {
+            let texture = depth_stencil_texture(raw);
+            let (view, error) = texture.create_view(TextureViewDescriptor {
+                aspect: Some(aspect),
+                ..view_descriptor()
+            });
+            assert_eq!(error, None);
+            assert_eq!(view.format(), texture.format());
+        }
+    }
+
+    #[test]
+    fn audit_single_aspect_requires_and_defaults_to_aspect_format() {
+        for raw in [
+            TextureFormat::DEPTH24_PLUS_STENCIL8,
+            TextureFormat::DEPTH32_FLOAT_STENCIL8,
+        ] {
+            let texture = depth_stencil_texture(raw);
+            for aspect in [TextureAspect::DepthOnly, TextureAspect::StencilOnly] {
+                let descriptor = TextureViewDescriptor {
+                    aspect: Some(aspect),
+                    usage: Some(TextureUsage::TEXTURE_BINDING),
+                    ..view_descriptor()
+                };
+                let (view, error) = texture.create_view(descriptor);
+                assert_eq!(error, None);
+                assert_eq!(
+                    view.format(),
+                    texture.format().aspect_view_format(aspect).unwrap()
+                );
+                let (view, error) = texture.create_view(TextureViewDescriptor {
+                    format: Some(texture.format()),
+                    ..descriptor
+                });
+                assert!(view.is_error());
+                assert_eq!(
+                    error,
+                    Some("texture view format is not compatible with the texture")
+                );
+            }
+        }
+    }
+
     use super::*;
     use crate::test_helpers::*;
 
@@ -993,8 +1079,7 @@ mod tests {
         });
         assert_eq!(error, None);
 
-        // format=Undefined on a DepthOnly view still resolves to the texture's
-        // own format and is accepted (unchanged behavior).
+        // An unspecified format on a DepthOnly view resolves to the aspect format.
         let (_, error) = texture.create_view(TextureViewDescriptor {
             format: None,
             dimension: None,

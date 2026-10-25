@@ -87,14 +87,8 @@ fn vulkan_same_texture_copy_chains_preserve_layout_tracking() {
         let errors = install_error_capture(device);
         let queue = yawgpu::wgpuDeviceGetQueue(device);
         for (name, dimension, base_width, depth, mips, middle_mip) in [
-            (
-                "3D depth slices",
-                native::WGPUTextureDimension_3D,
-                WIDTH,
-                3,
-                1,
-                0,
-            ),
+            // Block 113 D3: same-mip 3D self copies are invalid (Dawn), so the
+            // former "3D depth slices" chain is no longer a valid sequence.
             (
                 "2D array layers",
                 native::WGPUTextureDimension_2D,

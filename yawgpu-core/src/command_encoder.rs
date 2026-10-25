@@ -1229,7 +1229,7 @@ pub(crate) fn validate_copy_buffer_to_buffer(
         destination.size(),
         "copy destination range",
     )?;
-    if size > 0 && source.same(destination) {
+    if source.same(destination) {
         return Err("copy source and destination ranges must not use the same buffer".to_owned());
     }
     Ok(())
@@ -1960,6 +1960,12 @@ pub(crate) fn validate_resolve_target(
     color_view: &TextureView,
     resolve_target: &TextureView,
 ) -> Result<(), String> {
+    if !matches!(
+        resolve_target.dimension(),
+        TextureViewDimension::D2 | TextureViewDimension::D2Array
+    ) {
+        return Err("render pass resolveTarget view dimension must be 2D or 2DArray".to_owned());
+    }
     let color_texture = color_view.texture();
     let resolve_texture = resolve_target.texture();
     if color_texture.sample_count() <= 1 {
@@ -2189,7 +2195,7 @@ pub(crate) fn validate_texture_copy_subresource(
     label: &str,
     require_2d_single_layer: bool,
 ) -> Result<FormatCaps, String> {
-    let (format_caps, subresource, empty_copy) = validate_texture_copy_range(
+    let (format_caps, subresource, _) = validate_texture_copy_range(
         texture,
         mip_level,
         origin,
@@ -2216,7 +2222,6 @@ pub(crate) fn validate_texture_copy_subresource(
     // each layer is its own 2D subresource — and is bounds-checked above. This
     // matches WebGPU for buffer copies and texture-to-texture copies alike.
     if (format_caps.aspects.depth || format_caps.aspects.stencil)
-        && !empty_copy
         && (origin.x != 0
             || origin.y != 0
             || copy_size.width != subresource.width
@@ -2252,11 +2257,14 @@ pub(crate) fn validate_same_texture_copy(
     destination_origin: Origin3d,
     copy_size: Extent3d,
 ) -> Result<(), String> {
-    if copy_size.width == 0 || copy_size.height == 0 || copy_size.depth_or_array_layers == 0 {
-        return Ok(());
+    if texture.dimension() == TextureDimension::D1 {
+        return Err("copy texture to texture must not copy a 1D texture to itself".to_owned());
     }
     if source_mip_level != destination_mip_level {
         return Ok(());
+    }
+    if texture.dimension() == TextureDimension::D3 {
+        return Err("copy texture to texture must not copy a 3D mip to itself".to_owned());
     }
     let source_end = source_origin
         .z
@@ -2264,14 +2272,6 @@ pub(crate) fn validate_same_texture_copy(
     let destination_end = destination_origin
         .z
         .saturating_add(copy_size.depth_or_array_layers);
-    if texture.dimension() == TextureDimension::D3 {
-        if source_origin.z < destination_end && destination_origin.z < source_end {
-            return Err(
-                "copy texture to texture same-texture 3D z ranges must not overlap".to_owned(),
-            );
-        }
-        return Ok(());
-    }
 
     if source_origin.z < destination_end && destination_origin.z < source_end {
         return Err(
@@ -2422,6 +2422,169 @@ impl CommandBuffer {
 
 #[cfg(test)]
 mod tests {
+    fn view_descriptor() -> TextureViewDescriptor {
+        TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+            swizzle: None,
+        }
+    }
+
+    #[test]
+    fn audit_resolve_target_rejects_3d_view() {
+        let device = noop_device();
+        let color = device
+            .create_texture(TextureDescriptor {
+                usage: TextureUsage::RENDER_ATTACHMENT,
+                sample_count: 4,
+                ..texture_descriptor_4x4()
+            })
+            .create_view(view_descriptor())
+            .0;
+        let resolve = device
+            .create_texture(TextureDescriptor {
+                usage: TextureUsage::RENDER_ATTACHMENT,
+                dimension: TextureDimension::D3,
+                ..texture_descriptor_4x4()
+            })
+            .create_view(view_descriptor())
+            .0;
+        assert!(!color.is_error() && !resolve.is_error());
+        assert_eq!(
+            validate_resolve_target(&color, &resolve).unwrap_err(),
+            "render pass resolveTarget view dimension must be 2D or 2DArray"
+        );
+    }
+
+    #[test]
+    fn audit_self_copy_checks_subresources_even_when_empty() {
+        let device = noop_device();
+        for dimension in [
+            TextureDimension::D1,
+            TextureDimension::D2,
+            TextureDimension::D3,
+        ] {
+            let texture = device.create_texture(TextureDescriptor {
+                dimension,
+                size: Extent3d {
+                    width: 4,
+                    height: if dimension == TextureDimension::D1 {
+                        1
+                    } else {
+                        4
+                    },
+                    depth_or_array_layers: 1,
+                },
+                ..texture_descriptor_4x4()
+            });
+            assert!(!texture.is_error());
+            let zero = Origin3d { x: 0, y: 0, z: 0 };
+            for size in [
+                Extent3d {
+                    width: 0,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                Extent3d {
+                    width: 1,
+                    height: 0,
+                    depth_or_array_layers: 1,
+                },
+            ] {
+                assert!(validate_same_texture_copy(&texture, 0, zero, 0, zero, size).is_err());
+            }
+            let size = Extent3d {
+                width: 0,
+                height: 0,
+                depth_or_array_layers: 0,
+            };
+            assert_eq!(
+                validate_same_texture_copy(&texture, 0, zero, 0, zero, size).is_ok(),
+                dimension == TextureDimension::D2
+            );
+        }
+    }
+
+    #[test]
+    fn audit_zero_size_buffer_self_copy_is_rejected() {
+        let device = noop_device();
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
+            size: 4,
+            mapped_at_creation: false,
+        });
+        assert!(validate_copy_buffer_to_buffer(&buffer, 0, &buffer, 0, 0).is_err());
+        let other = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 4,
+            mapped_at_creation: false,
+        });
+        assert!(validate_copy_buffer_to_buffer(&buffer, 0, &other, 0, 0).is_ok());
+    }
+
+    #[test]
+    fn audit_empty_depth_stencil_copy_still_requires_full_subresource() {
+        let device = noop_device();
+        let texture = device.create_texture(TextureDescriptor {
+            format: TextureFormat::from_raw(TextureFormat::STENCIL8),
+            ..texture_descriptor_4x4()
+        });
+        assert!(!texture.is_error());
+        let zero = Origin3d { x: 0, y: 0, z: 0 };
+        for size in [
+            Extent3d {
+                width: 0,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            Extent3d {
+                width: 4,
+                height: 0,
+                depth_or_array_layers: 1,
+            },
+            Extent3d {
+                width: 0,
+                height: 0,
+                depth_or_array_layers: 0,
+            },
+        ] {
+            let error = validate_texture_copy_subresource(
+                &texture,
+                0,
+                zero,
+                size,
+                TextureAspect::All,
+                "copy",
+                false,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error,
+                "copy depth/stencil copies must cover the full 2D subresource"
+            );
+        }
+        assert!(validate_texture_copy_subresource(
+            &texture,
+            0,
+            zero,
+            Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 0
+            },
+            TextureAspect::All,
+            "copy",
+            false
+        )
+        .is_ok());
+    }
+
     #[test]
     fn timestamp_conversion_pipeline_failure_invalidates_encoder_without_recording_resolve() {
         let (device, set) = timestamp_device_and_set();
@@ -4187,7 +4350,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_texture_to_texture_allows_same_3d_texture_disjoint_z_ranges_only() {
+    fn copy_texture_to_texture_rejects_same_3d_mip_even_with_disjoint_z_ranges() {
         let device = noop_device();
         let texture_3d = Arc::new(device.create_texture(TextureDescriptor {
             usage: TextureUsage::COPY_SRC | TextureUsage::COPY_DST,
@@ -4228,8 +4391,11 @@ mod tests {
             None
         );
         let (command_buffer, error) = encoder.finish();
-        assert_eq!(error, None);
-        assert!(!command_buffer.is_error());
+        assert_eq!(
+            error.as_deref(),
+            Some("copy texture to texture must not copy a 3D mip to itself")
+        );
+        assert!(command_buffer.is_error());
 
         let encoder = device.create_command_encoder();
         assert_eq!(
@@ -4254,7 +4420,7 @@ mod tests {
         assert!(command_buffer.is_error());
         assert_eq!(
             error,
-            Some("copy texture to texture same-texture 3D z ranges must not overlap".to_owned())
+            Some("copy texture to texture must not copy a 3D mip to itself".to_owned())
         );
 
         let texture_2d = Arc::new(device.create_texture(texture_descriptor_4x4()));

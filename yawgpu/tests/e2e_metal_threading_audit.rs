@@ -237,11 +237,15 @@ fn metal_storage_2d_array_binding_writes_per_layer() {
 /// z-slices must be accepted and execute. Fill z=0, copy z=0 → z=1, read back z=1.
 #[test]
 #[ignore = "manual real-backend test"]
-fn metal_same_3d_texture_disjoint_copy() {
-    let value = run_3d_disjoint_copy();
-    assert_eq!(
-        value, COPY3D_VALUE,
-        "3D same-texture disjoint copy did not execute"
+fn metal_same_3d_texture_same_mip_copy_is_rejected() {
+    // Block 113 D3: a 3D mip level is ONE subresource, so copying a 3D texture
+    // onto itself within a mip is invalid even for disjoint z ranges (WebGPU
+    // spec; Dawn `CommandValidation.cpp` `ValidateTextureToTextureCopyCommonRestrictions`).
+    // This reverses the earlier over-strict audit #3, which followed wgpu.
+    let messages = run_3d_disjoint_copy();
+    assert!(
+        messages.iter().any(|m| m.contains("3D mip")),
+        "same-mip 3D self copy must be a validation error, got {messages:?}"
     );
 }
 
@@ -658,8 +662,8 @@ fn run_storage_2d_array() -> (u32, u32) {
     out
 }
 
-fn run_3d_disjoint_copy() -> u32 {
-    let mut out = 0u32;
+fn run_3d_disjoint_copy() -> Vec<String> {
+    let mut out = Vec::new();
     with_device(|ctx| unsafe {
         let texture = create_3d_texture(
             ctx.device,
@@ -714,28 +718,14 @@ fn run_3d_disjoint_copy() -> u32 {
             &copy_dst,
             &slice_extent,
         );
-        // Read back z=1.
-        let readback = ctx.readback_buffer(READBACK_SIZE as u64);
-        let read_src = native::WGPUTexelCopyTextureInfo {
-            texture,
-            mipLevel: 0,
-            origin: native::WGPUOrigin3D { x: 0, y: 0, z: 1 },
-            aspect: native::WGPUTextureAspect_All,
-        };
-        let read_dst = native::WGPUTexelCopyBufferInfo {
-            layout: native::WGPUTexelCopyBufferLayout {
-                offset: 0,
-                bytesPerRow: BYTES_PER_ROW,
-                rowsPerImage: HEIGHT,
-            },
-            buffer: readback,
-        };
-        yawgpu::wgpuCommandEncoderCopyTextureToBuffer(encoder, &read_src, &read_dst, &slice_extent);
-        ctx.submit(encoder);
-        let bytes = read_buffer(ctx.instance, readback, READBACK_SIZE);
-        out = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-
-        yawgpu::wgpuBufferRelease(readback);
+        let commands = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+        yawgpu::wgpuCommandBufferRelease(commands);
+        yawgpu::wgpuCommandEncoderRelease(encoder);
+        {
+            let mut errors = ctx.errors.lock().expect("error lock");
+            out = errors.iter().map(|e| e.message.clone()).collect();
+            errors.clear();
+        }
         yawgpu::wgpuTextureRelease(texture);
     });
     out

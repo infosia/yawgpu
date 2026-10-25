@@ -230,6 +230,10 @@ typedef struct {
     double default_value;
 } YawgpuTintOverride;
 
+/* Entry-point referenced override IDs (explicit or implicit). Count returns
+ * SIZE_MAX for an unknown entry point. No ownership is transferred. */
+YAWGPU_TINT_API size_t yawgpu_tint_entry_point_override_count(const YawgpuTintProgram*, const char* ep);
+YAWGPU_TINT_API bool yawgpu_tint_entry_point_override_id_get(const YawgpuTintProgram*, const char* ep, size_t i, uint16_t* out);
 YAWGPU_TINT_API size_t yawgpu_tint_override_count(const YawgpuTintProgram*);
 YAWGPU_TINT_API bool yawgpu_tint_override_get(const YawgpuTintProgram*, size_t i, YawgpuTintOverride* out);
 
