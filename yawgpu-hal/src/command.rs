@@ -606,6 +606,8 @@ pub struct HalSubpassDraw {
     pub bind_samplers: Vec<HalBoundSampler>,
     /// Vertex buffers.
     pub vertex_buffers: Vec<HalBoundBuffer>,
+    /// Bound index buffer for indexed draws.
+    pub index_buffer: Option<HalBoundIndexBuffer>,
     /// Optional viewport override.
     pub viewport: Option<HalViewport>,
     /// Optional scissor rectangle override.
@@ -759,6 +761,18 @@ pub enum HalSubpassAttachmentResource {
     Persistent {
         /// Texture.
         texture: HalTexture,
+        /// Attachment view format.
+        view_format: HalTextureFormat,
+        /// Attachment view base mip level.
+        mip_level: u32,
+        /// Attachment view base array layer.
+        array_layer: u32,
+        /// Resolve view format, when a resolve target is present.
+        resolve_view_format: Option<HalTextureFormat>,
+        /// Resolve view base mip level.
+        resolve_mip_level: u32,
+        /// Resolve view base array layer.
+        resolve_array_layer: u32,
         /// Optional resolve target.
         resolve_target: Option<HalTexture>,
     },

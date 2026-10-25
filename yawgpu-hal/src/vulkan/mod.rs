@@ -1,5 +1,3 @@
-#[cfg(feature = "tiled")]
-use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::fmt;
@@ -1104,8 +1102,6 @@ impl VulkanAdapter {
             storage_input_output16: storage_16bit_features.storage_input_output16,
             storage_push_constant16: storage_16bit_features.storage_push_constant16,
             max_sampler_anisotropy,
-            #[cfg(feature = "tiled")]
-            subpass_render_pass_cache: Mutex::new(BTreeMap::new()),
             surfaces: Mutex::new(Vec::new()),
             allocations: AtomicU64::new(0),
         });

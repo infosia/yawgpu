@@ -1483,8 +1483,11 @@ fn resolve_written_occlusion_queries(
         .collect()
 }
 
+/// Lowers a validated tiled pass, preserving its attachment views and draw bindings.
 #[cfg(feature = "tiled")]
-fn hal_subpass_render_pass_execution(pass: &SubpassRenderPassCommand) -> Option<HalCopy> {
+pub(crate) fn hal_subpass_render_pass_execution(
+    pass: &SubpassRenderPassCommand,
+) -> Option<HalCopy> {
     Some(HalCopy::SubpassRenderPass(HalSubpassRenderPassCommand {
         layout: hal_subpass_pass_layout(pass.layout.descriptor()),
         extent: hal_extent(pass.extent),
@@ -1527,6 +1530,10 @@ fn hal_subpass_draw_execution(draw: &SubpassDrawExecution) -> Option<HalSubpassD
         });
     }
     Some(HalSubpassDraw {
+        index_buffer: match &draw.index_buffer {
+            Some(bound) => Some(hal_bound_index_buffer(bound)?),
+            None => None,
+        },
         subpass_index: draw.subpass_index,
         pipeline: draw.pipeline.hal()?,
         bind_buffers: bindings.buffers,
@@ -1580,6 +1587,18 @@ fn hal_subpass_attachment_resource(
         resolve_target,
     } = resource;
     Some(HalSubpassAttachmentResource::Persistent {
+        view_format: hal_texture_format(view.format()),
+        mip_level: view.base_mip_level(),
+        array_layer: view.base_array_layer(),
+        resolve_view_format: resolve_target
+            .as_ref()
+            .map(|view| hal_texture_format(view.format())),
+        resolve_mip_level: resolve_target
+            .as_ref()
+            .map_or(0, |view| view.base_mip_level()),
+        resolve_array_layer: resolve_target
+            .as_ref()
+            .map_or(0, |view| view.base_array_layer()),
         texture: view.texture().hal()?,
         resolve_target: match resolve_target {
             Some(view) => Some(view.texture().hal()?),

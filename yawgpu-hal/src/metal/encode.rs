@@ -1204,12 +1204,7 @@ pub(super) fn subpass_render_pass_descriptor(
             .color_attachments
             .get(attachment_index as usize)
             .ok_or_else(|| texture_error("subpass color attachment binding missing"))?;
-        let layout = pass
-            .layout
-            .color_attachments
-            .get(attachment_index as usize)
-            .ok_or_else(|| texture_error("subpass color attachment layout missing"))?;
-        let target = subpass_color_target(binding, layout.format);
+        let target = subpass_color_target(binding);
         set_render_color_target(&descriptor, attachment_index as usize, &target)?;
     }
     if let Some(layout_depth_stencil) = &pass.layout.depth_stencil_attachment {
@@ -1221,21 +1216,29 @@ pub(super) fn subpass_render_pass_descriptor(
         if uses_depth_stencil {
             if let Some(depth) = &pass.depth_stencil_attachment {
                 let format = layout_depth_stencil.format;
+                let HalSubpassAttachmentResource::Persistent {
+                    mip_level,
+                    array_layer,
+                    view_format,
+                    ..
+                } = &depth.resource;
+                let metal = subpass_attachment_texture(&depth.resource)?;
+                let format_view = attachment_format_view(metal, *view_format)?;
+                let texture = format_view.as_deref().unwrap_or(metal.inner()?);
                 if format_has_depth_aspect(format) {
                     let depth_attachment = descriptor.depthAttachment();
-                    depth_attachment.setTexture(Some(subpass_attachment_texture(&depth.resource)?));
-                    depth_attachment.setLevel(0);
-                    depth_attachment.setSlice(0);
+                    depth_attachment.setTexture(Some(texture));
+                    depth_attachment.setLevel(to_ns(u64::from(*mip_level))?);
+                    depth_attachment.setSlice(to_ns(u64::from(*array_layer))?);
                     depth_attachment.setLoadAction(mtl_load_action(depth.depth_load_op));
                     depth_attachment.setStoreAction(mtl_store_action(depth.depth_store));
                     depth_attachment.setClearDepth(f64::from(depth.depth_clear_value));
                 }
                 if format_has_stencil_aspect(format) {
                     let stencil_attachment = descriptor.stencilAttachment();
-                    stencil_attachment
-                        .setTexture(Some(subpass_attachment_texture(&depth.resource)?));
-                    stencil_attachment.setLevel(0);
-                    stencil_attachment.setSlice(0);
+                    stencil_attachment.setTexture(Some(texture));
+                    stencil_attachment.setLevel(to_ns(u64::from(*mip_level))?);
+                    stencil_attachment.setSlice(to_ns(u64::from(*array_layer))?);
                     stencil_attachment.setLoadAction(mtl_load_action(depth.stencil_load_op));
                     stencil_attachment.setStoreAction(mtl_store_action(depth.stencil_store));
                     stencil_attachment.setClearStencil(depth.stencil_clear_value);
@@ -1246,31 +1249,31 @@ pub(super) fn subpass_render_pass_descriptor(
     Ok(descriptor)
 }
 
-// Persistent subpass resources carry whole textures, with no mip/layer view
-// metadata. Bind their base subresource explicitly, including the resolve.
 #[cfg(feature = "tiled")]
-fn subpass_color_target(
-    binding: &crate::HalSubpassColorAttachment,
-    format: HalTextureFormat,
-) -> crate::HalRenderColorTarget {
-    match &binding.resource {
-        HalSubpassAttachmentResource::Persistent {
-            texture,
-            resolve_target,
-        } => crate::HalRenderColorTarget {
-            texture: texture.clone(),
-            view_format: format,
-            resolve_target: resolve_target.clone(),
-            resolve_view_format: resolve_target.as_ref().map(|_| format),
-            mip_level: 0,
-            array_layer: 0,
-            depth_slice: 0,
-            resolve_mip_level: 0,
-            resolve_array_layer: 0,
-            load_op: binding.load_op,
-            store: binding.store,
-            clear_color: binding.clear_color,
-        },
+fn subpass_color_target(binding: &crate::HalSubpassColorAttachment) -> crate::HalRenderColorTarget {
+    let HalSubpassAttachmentResource::Persistent {
+        texture,
+        view_format,
+        mip_level,
+        array_layer,
+        resolve_target,
+        resolve_view_format,
+        resolve_mip_level,
+        resolve_array_layer,
+    } = &binding.resource;
+    crate::HalRenderColorTarget {
+        texture: texture.clone(),
+        view_format: *view_format,
+        resolve_target: resolve_target.clone(),
+        resolve_view_format: *resolve_view_format,
+        mip_level: *mip_level,
+        array_layer: *array_layer,
+        depth_slice: 0,
+        resolve_mip_level: *resolve_mip_level,
+        resolve_array_layer: *resolve_array_layer,
+        load_op: binding.load_op,
+        store: binding.store,
+        clear_color: binding.clear_color,
     }
 }
 
@@ -1290,12 +1293,13 @@ fn subpass_color_attachment_indices(pass: &HalSubpassRenderPassCommand) -> Vec<u
 #[cfg(feature = "tiled")]
 fn subpass_attachment_texture(
     resource: &HalSubpassAttachmentResource,
-) -> Result<&ProtocolObject<dyn MTLTextureTrait>, HalError> {
+) -> Result<&MetalTexture, HalError> {
     #[allow(unreachable_patterns)]
     match resource {
         HalSubpassAttachmentResource::Persistent {
             texture,
             resolve_target,
+            ..
         } => {
             if resolve_target.is_some() {
                 return Err(texture_error(
@@ -1305,7 +1309,7 @@ fn subpass_attachment_texture(
             let HalTexture::Metal(texture) = texture else {
                 return Err(texture_error("subpass attachment is not Metal-backed"));
             };
-            texture.inner()
+            Ok(texture)
         }
         _ => Err(texture_error(
             "transient subpass attachments not yet supported",
@@ -1581,7 +1585,7 @@ pub(super) fn encode_subpass_render_pass(
             bind_external_textures: &[],
             bind_samplers: &draw.bind_samplers,
             vertex_buffers: &draw.vertex_buffers,
-            index_buffer: None,
+            index_buffer: draw.index_buffer.as_ref(),
             indirect_buffer: None,
             viewport: draw.viewport,
             scissor_rect: draw.scissor_rect,
@@ -2436,13 +2440,19 @@ mod tests {
 
     #[test]
     #[cfg(all(feature = "noop", feature = "tiled"))]
-    fn subpass_color_builder_preserves_resolve_and_binds_base_subresources() {
+    fn audit_f3_subpass_color_builder_preserves_view_subresources() {
         let device = crate::noop::NoopDevice::new();
         let texture = HalTexture::Noop(device.create_texture(&texture_descriptor()).unwrap());
         for resolve in [false, true] {
             for store in [false, true] {
                 let binding = HalSubpassColorAttachment {
                     resource: HalSubpassAttachmentResource::Persistent {
+                        view_format: HalTextureFormat::Rgba8UnormSrgb,
+                        mip_level: 2,
+                        array_layer: 3,
+                        resolve_view_format: resolve.then_some(HalTextureFormat::Rgba8UnormSrgb),
+                        resolve_mip_level: 1,
+                        resolve_array_layer: 4,
                         texture: texture.clone(),
                         resolve_target: resolve.then(|| texture.clone()),
                     },
@@ -2450,7 +2460,7 @@ mod tests {
                     store,
                     clear_color: [0.25, 0.5, 0.75, 1.0],
                 };
-                let target = subpass_color_target(&binding, HalTextureFormat::Rgba8UnormSrgb);
+                let target = subpass_color_target(&binding);
                 assert_eq!(target.resolve_target.is_some(), resolve);
                 assert_eq!(target.view_format, HalTextureFormat::Rgba8UnormSrgb);
                 assert_eq!(
@@ -2459,11 +2469,11 @@ mod tests {
                 );
                 assert_eq!(
                     (target.mip_level, target.array_layer, target.depth_slice),
-                    (0, 0, 0)
+                    (2, 3, 0)
                 );
                 assert_eq!(
                     (target.resolve_mip_level, target.resolve_array_layer),
-                    (0, 0)
+                    (1, 4)
                 );
                 assert_eq!(target.store, store);
                 assert!(matches!(target.load_op, HalRenderLoadOp::Clear));
@@ -2585,6 +2595,12 @@ mod tests {
         for store in [false, true] {
             let mut binding = subpass_attachment(HalTexture::Metal(texture.clone()));
             binding.resource = HalSubpassAttachmentResource::Persistent {
+                view_format: HalTextureFormat::Rgba8Unorm,
+                mip_level: 0,
+                array_layer: 0,
+                resolve_view_format: None,
+                resolve_mip_level: 0,
+                resolve_array_layer: 0,
                 texture: HalTexture::Metal(texture.clone()),
                 resolve_target: Some(HalTexture::Metal(resolve.clone())),
             };
@@ -3179,6 +3195,12 @@ mod tests {
         HalSubpassColorAttachment {
             resource: HalSubpassAttachmentResource::Persistent {
                 texture,
+                view_format: HalTextureFormat::Rgba8Unorm,
+                mip_level: 0,
+                array_layer: 0,
+                resolve_view_format: None,
+                resolve_mip_level: 0,
+                resolve_array_layer: 0,
                 resolve_target: None,
             },
             load_op: HalRenderLoadOp::Clear,

@@ -1574,6 +1574,230 @@ mod tests {
     }
 
     #[test]
+    fn audit_f7_subpass_indexed_draw_reaches_hal() {
+        for format in [IndexFormat::Uint16, IndexFormat::Uint32] {
+            let device = noop_device();
+            let layout =
+                Arc::new(device.create_subpass_pass_layout(valid_two_subpass_deferred_layout()));
+            let pipeline = subpass_pipeline(&device, Arc::clone(&layout), 0);
+            let indices = Arc::new(device.create_buffer(BufferDescriptor {
+                usage: BufferUsage::INDEX,
+                size: 64,
+                mapped_at_creation: false,
+            }));
+            let encoder = device.create_command_encoder();
+            let (pass, error) =
+                encoder.begin_subpass_render_pass(&device, subpass_descriptor(layout, &device));
+            assert_eq!(error, None);
+            assert_eq!(pass.set_pipeline(pipeline), None);
+            assert_eq!(pass.set_index_buffer(indices, Some(format), 8, 48), None);
+            assert_eq!(pass.draw_indexed(3, 2, 1, -2, 4, device.limits()), None);
+            assert_eq!(pass.next_subpass(), None);
+            assert_eq!(pass.end(), None);
+            let (command, error) = encoder.finish();
+            assert_eq!(error, None);
+            let lowered =
+                crate::queue::hal_subpass_render_pass_execution(match &command.command_ops()[0] {
+                    CommandExecution::SubpassRenderPass(pass) => pass,
+                    _ => panic!("expected recorded subpass pass"),
+                })
+                .unwrap();
+            let yawgpu_hal::HalCopy::SubpassRenderPass(lowered) = lowered else {
+                panic!("expected subpass pass")
+            };
+            let bound = lowered.draws[0]
+                .index_buffer
+                .as_ref()
+                .expect("HAL index buffer");
+            assert_eq!((bound.offset, bound.size), (8, 48));
+            assert_eq!(
+                bound.format,
+                match format {
+                    IndexFormat::Uint16 => yawgpu_hal::HalIndexFormat::Uint16,
+                    IndexFormat::Uint32 => yawgpu_hal::HalIndexFormat::Uint32,
+                }
+            );
+            assert_eq!(
+                lowered.draws[0].draw,
+                yawgpu_hal::HalDraw::Indexed {
+                    index_count: 3,
+                    instance_count: 2,
+                    first_index: 1,
+                    base_vertex: -2,
+                    first_instance: 4,
+                }
+            );
+            assert_eq!(device.queue().submit(&[Arc::new(command)]), None);
+        }
+    }
+
+    #[test]
+    fn audit_f3_subpass_accepts_and_lowers_view_mip_layer_and_format() {
+        let device = noop_device();
+        let format = TextureFormat::from_raw(TextureFormat::RGBA8_UNORM_SRGB);
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::RENDER_ATTACHMENT,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 16,
+                height: 16,
+                depth_or_array_layers: 4,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 3,
+            sample_count: 1,
+            view_formats: vec![format],
+        });
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: Some(format),
+            dimension: Some(TextureViewDimension::D2),
+            base_mip_level: 2,
+            mip_level_count: Some(1),
+            base_array_layer: 3,
+            array_layer_count: Some(1),
+            aspect: None,
+            usage: None,
+            swizzle: None,
+        });
+        assert_eq!(error, None);
+        let mut descriptor = valid_two_subpass_deferred_layout();
+        descriptor.color_attachments[0].format = format;
+        let layout = Arc::new(device.create_subpass_pass_layout(descriptor));
+        let mut descriptor = subpass_descriptor(layout, &device);
+        descriptor.color_attachments[0].resource = SubpassAttachmentResource::Persistent {
+            view: Arc::new(view),
+            resolve_target: None,
+        };
+        let encoder = device.create_command_encoder();
+        let (pass, error) = encoder.begin_subpass_render_pass(&device, descriptor);
+        assert_eq!(error, None);
+        assert!(!pass.is_error());
+        assert_eq!(pass.next_subpass(), None);
+        assert_eq!(pass.end(), None);
+        let (command, error) = encoder.finish();
+        assert_eq!(error, None);
+        let yawgpu_hal::HalCopy::SubpassRenderPass(lowered) =
+            crate::queue::hal_subpass_render_pass_execution(match &command.command_ops()[0] {
+                CommandExecution::SubpassRenderPass(pass) => pass,
+                _ => panic!("expected recorded subpass pass"),
+            })
+            .unwrap()
+        else {
+            panic!("expected subpass pass")
+        };
+        let yawgpu_hal::HalSubpassAttachmentResource::Persistent {
+            view_format,
+            mip_level,
+            array_layer,
+            ..
+        } = &lowered.color_attachments[0].resource
+        else {
+            panic!("expected persistent attachment")
+        };
+        assert_eq!(
+            (*view_format, *mip_level, *array_layer),
+            (yawgpu_hal::HalTextureFormat::Rgba8UnormSrgb, 2, 3)
+        );
+    }
+
+    #[test]
+    fn audit_f3_f4_subpass_resolve_view_reaches_hal() {
+        let device = noop_device();
+        let format = TextureFormat::from_raw(TextureFormat::RGBA8_UNORM_SRGB);
+        let mut layout_descriptor = valid_two_subpass_deferred_layout();
+        layout_descriptor.color_attachments[0] = AttachmentLayout {
+            format,
+            sample_count: 4,
+        };
+        let layout = Arc::new(device.create_subpass_pass_layout(layout_descriptor));
+        let make_view = |size, samples, mip, layer| {
+            let texture = device.create_texture(TextureDescriptor {
+                usage: TextureUsage::RENDER_ATTACHMENT,
+                dimension: TextureDimension::D2,
+                size,
+                format: rgba8_unorm(),
+                mip_level_count: mip + 1,
+                sample_count: samples,
+                view_formats: vec![format],
+            });
+            let (view, error) = texture.create_view(TextureViewDescriptor {
+                format: Some(format),
+                dimension: Some(TextureViewDimension::D2),
+                base_mip_level: mip,
+                mip_level_count: Some(1),
+                base_array_layer: layer,
+                array_layer_count: Some(1),
+                aspect: None,
+                usage: None,
+                swizzle: None,
+            });
+            assert_eq!(error, None);
+            Arc::new(view)
+        };
+        let source = make_view(
+            Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            4,
+            0,
+            0,
+        );
+        let resolve = make_view(
+            Extent3d {
+                width: 8,
+                height: 8,
+                depth_or_array_layers: 3,
+            },
+            1,
+            1,
+            2,
+        );
+        let mut descriptor = subpass_descriptor(layout, &device);
+        descriptor.color_attachments[0].resource = SubpassAttachmentResource::Persistent {
+            view: source,
+            resolve_target: Some(resolve),
+        };
+        let encoder = device.create_command_encoder();
+        let (pass, error) = encoder.begin_subpass_render_pass(&device, descriptor);
+        assert_eq!(error, None);
+        assert!(!pass.is_error());
+        assert_eq!(pass.next_subpass(), None);
+        assert_eq!(pass.end(), None);
+        let (command, error) = encoder.finish();
+        assert_eq!(error, None);
+        let CommandExecution::SubpassRenderPass(recorded) = &command.command_ops()[0] else {
+            panic!("expected subpass pass")
+        };
+        let yawgpu_hal::HalCopy::SubpassRenderPass(lowered) =
+            crate::queue::hal_subpass_render_pass_execution(recorded).unwrap()
+        else {
+            panic!("expected HAL subpass pass")
+        };
+        let yawgpu_hal::HalSubpassAttachmentResource::Persistent {
+            resolve_target,
+            resolve_view_format,
+            resolve_mip_level,
+            resolve_array_layer,
+            ..
+        } = &lowered.color_attachments[0].resource
+        else {
+            panic!("expected persistent attachment")
+        };
+        assert!(resolve_target.is_some());
+        assert_eq!(
+            (
+                *resolve_view_format,
+                *resolve_mip_level,
+                *resolve_array_layer
+            ),
+            (Some(yawgpu_hal::HalTextureFormat::Rgba8UnormSrgb), 1, 2)
+        );
+        assert_eq!(device.queue().submit(&[Arc::new(command)]), None);
+    }
+
+    #[test]
     fn subpass_render_pass_next_subpass_past_last_records_error() {
         let device = noop_device();
         let layout =
@@ -1604,8 +1828,13 @@ mod tests {
             size: 4,
             mapped_at_creation: false,
         }));
+        let destination = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 4,
+            mapped_at_creation: false,
+        }));
         assert_eq!(
-            encoder.copy_buffer_to_buffer(Arc::clone(&buffer), 0, Arc::clone(&buffer), 0, 0),
+            encoder.copy_buffer_to_buffer(buffer, 0, destination, 0, 4),
             None
         );
         let (pass, begin_error) =

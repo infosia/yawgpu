@@ -115,6 +115,9 @@ pub(super) struct VulkanRenderPipelineInner {
     pub(super) pipeline_layout: vk::PipelineLayout,
     pub(super) render_pass: vk::RenderPass,
     pub(super) render_pass_owned: bool,
+    /// Pipeline variants for the resolve shape supplied at tiled pass submission.
+    #[cfg(feature = "tiled")]
+    pub(super) subpass_variants: Option<SubpassPipelineVariants>,
     pub(super) descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
     pub(super) descriptor_bindings: Vec<HalDescriptorBinding>,
     /// Writable storage bindings present in the vertex or fragment SPIR-V.
@@ -129,9 +132,67 @@ pub(super) struct VulkanRenderPipelineInner {
     pub(super) immediates: Option<VulkanImmediates>,
 }
 
+/// Lazily compiled pipelines compatible with the bound subpass resolve shape.
+#[cfg(feature = "tiled")]
+#[derive(Debug)]
+pub(super) struct SubpassPipelineVariants {
+    descriptor: HalRenderPipelineDescriptor,
+    vertex_entry: CString,
+    fragment_entry: Option<CString>,
+    subpass_index: u32,
+    pipelines: std::sync::Mutex<std::collections::BTreeMap<Vec<Option<u32>>, vk::Pipeline>>,
+}
+
+/// Selects a pipeline compatible with the actual pass's resolve references.
+#[cfg(feature = "tiled")]
+pub(super) fn subpass_pipeline_for_resolves(
+    pipeline: &VulkanRenderPipeline,
+    render_pass: vk::RenderPass,
+    resolves: Vec<Option<u32>>,
+) -> Result<vk::Pipeline, HalError> {
+    let inner = &pipeline.inner;
+    if resolves.iter().all(Option::is_none) {
+        return Ok(inner.pipeline);
+    }
+    let variants = inner
+        .subpass_variants
+        .as_ref()
+        .ok_or_else(|| shader_error("subpass pipeline metadata missing"))?;
+    let mut cache = variants
+        .pipelines
+        .lock()
+        .map_err(|_| shader_error("subpass pipeline cache lock poisoned"))?;
+    if let Some(pipeline) = cache.get(&resolves) {
+        return Ok(*pipeline);
+    }
+    let compiled = create_graphics_pipeline(
+        &inner.device,
+        &variants.descriptor,
+        inner.pipeline_layout,
+        render_pass,
+        variants.subpass_index,
+        inner.vertex_shader_module,
+        inner.fragment_shader_module,
+        &variants.vertex_entry,
+        variants.fragment_entry.as_deref(),
+    )?;
+    cache.insert(resolves, compiled);
+    Ok(compiled)
+}
+
 impl Drop for VulkanRenderPipelineInner {
     fn drop(&mut self) {
         unsafe {
+            #[cfg(feature = "tiled")]
+            if let Some(variants) = &mut self.subpass_variants {
+                let cache = variants
+                    .pipelines
+                    .get_mut()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                for (_, pipeline) in std::mem::take(cache) {
+                    self.device.device.destroy_pipeline(pipeline, None);
+                }
+            }
             self.device.device.destroy_pipeline(self.pipeline, None);
             self.device
                 .device
@@ -590,6 +651,8 @@ pub(super) fn create_render_pipeline(
             pipeline_layout,
             render_pass,
             render_pass_owned: true,
+            #[cfg(feature = "tiled")]
+            subpass_variants: None,
             descriptor_set_layouts,
             descriptor_bindings: bindings.to_vec(),
             writable_storage_bindings,
@@ -772,6 +835,13 @@ pub(super) fn create_subpass_render_pipeline(
             pipeline_layout,
             render_pass,
             render_pass_owned: true,
+            subpass_variants: Some(SubpassPipelineVariants {
+                descriptor: descriptor.clone(),
+                vertex_entry,
+                fragment_entry,
+                subpass_index,
+                pipelines: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            }),
             descriptor_set_layouts,
             descriptor_bindings: bindings.to_vec(),
             writable_storage_bindings,
