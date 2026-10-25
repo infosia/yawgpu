@@ -1034,6 +1034,77 @@ fn fs() -> @location(0) vec4f {
     }
 
     #[test]
+    fn render_draw_and_bundle_reject_overlapping_writable_bindings() {
+        let device = noop_device();
+        let pipeline = render_pipeline_from_shader(
+            &device,
+            r"
+@group(0) @binding(0) var<storage, read_write> a: array<u32>;
+@group(0) @binding(1) var<storage, read_write> b: array<u32>;
+@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
+@fragment fn fs() -> @location(0) vec4<f32> {
+    a[0] = 1u; b[0] = 2u; return vec4<f32>(1.0);
+}
+",
+        );
+        assert!(!pipeline.is_error());
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE,
+            size: 512,
+            mapped_at_creation: false,
+        }));
+        let group =
+            aliasing_buffer_bind_group(&device, pipeline.bind_group_layouts()[0].clone(), buffer);
+        assert!(!group.is_error());
+        let expected = Some("writable storage buffer binding aliasing: group 0 binding 0 range [0, 16) overlaps group 0 binding 1 range [0, 16)".to_owned());
+        let encoder = device.create_command_encoder();
+        let (pass, error) = encoder.begin_render_pass(&noop_render_pass_descriptor(
+            noop_render_attachment(&device),
+            None,
+        ));
+        assert_eq!(error, None);
+        assert_eq!(pass.set_pipeline(pipeline.clone()), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(group.clone()), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end(), None);
+        let (commands, error) = encoder.finish();
+        assert!(commands.is_error());
+        assert_eq!(error, expected);
+
+        let (bundle_encoder, error) = crate::render_bundle::RenderBundleEncoder::new(
+            render_bundle_encoder_descriptor(),
+            device.limits(),
+            device.features(),
+        );
+        assert_eq!(error, None);
+        assert_eq!(bundle_encoder.set_pipeline(pipeline), None);
+        assert_eq!(
+            bundle_encoder.set_bind_group(0, Some(group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(bundle_encoder.draw(3, 1, 0, 0, device.limits()), None);
+        let (bundle, error) = bundle_encoder.finish();
+        assert!(bundle.is_error());
+        assert_eq!(error, expected);
+
+        let encoder = device.create_command_encoder();
+        let (pass, error) = encoder.begin_render_pass(&noop_render_pass_descriptor(
+            noop_render_attachment(&device),
+            None,
+        ));
+        assert_eq!(error, None);
+        assert_eq!(pass.execute_bundles(&[Arc::new(bundle)]), None);
+        assert_eq!(pass.end(), None);
+        assert_eq!(
+            encoder.finish().1.as_deref(),
+            Some("render pass cannot execute an error render bundle")
+        );
+    }
+
+    #[test]
     fn render_pass_encoder_rejects_cross_draw_storage_write_uniform_read_alias() {
         let device = noop_device();
         let write_pipeline = storage_write_render_pipeline(&device);

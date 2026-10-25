@@ -40,8 +40,9 @@ pub(crate) struct PassEncoderState {
     // RenderPassEncoder::execute_bundles calls clear_render_state because
     // bundle replay invalidates all outer render bindings. Rebinding the exact
     // same immutable object does not change the compatibility input; dynamic
-    // offsets are deliberately excluded and remain draw-time validated.
+    // offsets remain draw-time validated and separately invalidate aliasing.
     pub(crate) pipeline_bind_group_compatibility_dirty: bool,
+    writable_binding_aliasing_dirty: bool,
     pub(crate) vertex_buffers: BTreeMap<u32, BoundVertexBuffer>,
     pub(crate) index_buffer: Option<BoundIndexBuffer>,
     pub(crate) viewport: Option<Viewport>,
@@ -116,6 +117,7 @@ impl PassEncoderState {
             limits,
             bind_groups: BTreeMap::new(),
             pipeline_bind_group_compatibility_dirty: true,
+            writable_binding_aliasing_dirty: true,
             vertex_buffers: BTreeMap::new(),
             index_buffer: None,
             viewport: None,
@@ -154,6 +156,7 @@ impl PassEncoderState {
         self.render_pipeline = None;
         self.bind_groups.clear();
         self.pipeline_bind_group_compatibility_dirty = true;
+        self.writable_binding_aliasing_dirty = true;
         self.vertex_buffers.clear();
         self.index_buffer = None;
     }
@@ -226,6 +229,7 @@ impl PassEncoderState {
             .is_none_or(|current| !Arc::ptr_eq(current, &pipeline))
         {
             self.pipeline_bind_group_compatibility_dirty = true;
+            self.writable_binding_aliasing_dirty = true;
         }
         self.render_pipeline = Some(pipeline);
     }
@@ -237,17 +241,25 @@ impl PassEncoderState {
             .is_none_or(|current| !Arc::ptr_eq(current, &pipeline))
         {
             self.pipeline_bind_group_compatibility_dirty = true;
+            self.writable_binding_aliasing_dirty = true;
         }
         self.compute_pipeline = Some(pipeline);
     }
 
     pub(crate) fn set_bind_group(&mut self, index: u32, bound: BoundBindGroup) {
+        if self.bind_groups.get(&index).is_none_or(|current| {
+            !Arc::ptr_eq(&current.group, &bound.group)
+                || current.dynamic_offsets != bound.dynamic_offsets
+        }) {
+            self.writable_binding_aliasing_dirty = true;
+        }
         if self
             .bind_groups
             .get(&index)
             .is_none_or(|current| !Arc::ptr_eq(&current.group, &bound.group))
         {
             self.pipeline_bind_group_compatibility_dirty = true;
+            self.writable_binding_aliasing_dirty = true;
         }
         self.bind_groups.insert(index, bound);
     }
@@ -255,6 +267,7 @@ impl PassEncoderState {
     pub(crate) fn clear_bind_group(&mut self, index: u32) {
         if self.bind_groups.remove(&index).is_some() {
             self.pipeline_bind_group_compatibility_dirty = true;
+            self.writable_binding_aliasing_dirty = true;
         }
     }
 
@@ -1167,7 +1180,7 @@ impl TextureAccess {
     }
 
     fn compatible_in_compute_scope(self, other: Self) -> bool {
-        matches!((self, other), (Self::Read, Self::Read))
+        self.compatible_in_render_scope(other)
     }
 }
 
@@ -1382,7 +1395,6 @@ pub(crate) fn collect_bind_group_usage(
                 .offset
                 .checked_add(u64::from(dynamic_offset))
                 .ok_or_else(|| "usage scope buffer offset overflows".to_owned())?;
-            scope_use.size = scope_use.size.saturating_sub(u64::from(dynamic_offset));
         }
         buffer_uses.push(scope_use);
     }
@@ -1498,7 +1510,7 @@ pub(crate) fn validate_buffer_usage_scope(buffer_uses: &[BufferScopeUse]) -> Res
             if !current.buffer.same(&previous.buffer) {
                 continue;
             }
-            if current.access == ResourceAccess::Write || previous.access == ResourceAccess::Write {
+            if current.access != previous.access {
                 return Err(
                     "usage scope cannot read and write or write the same buffer range twice"
                         .to_owned(),
@@ -1711,7 +1723,8 @@ pub(crate) fn validate_pipeline_bind_groups(
     limits: Limits,
 ) -> Result<(), String> {
     validate_pipeline_bind_group_compatibility(required_layouts, bound_groups)?;
-    validate_pipeline_dynamic_offsets(required_layouts, bound_groups, limits)
+    validate_pipeline_dynamic_offsets(required_layouts, bound_groups, limits)?;
+    validate_writable_binding_aliasing(required_layouts, bound_groups)
 }
 
 pub(crate) fn validate_pipeline_bind_groups_memoized(
@@ -1722,11 +1735,143 @@ pub(crate) fn validate_pipeline_bind_groups_memoized(
     if state.pipeline_bind_group_compatibility_dirty {
         validate_pipeline_bind_groups(required_layouts, &state.bind_groups, limits)?;
         state.pipeline_bind_group_compatibility_dirty = false;
+        state.writable_binding_aliasing_dirty = false;
         return Ok(());
     }
-    // Dynamic offsets are intentionally validated on every draw/dispatch;
-    // only the immutable pipeline-layout ↔ bind-group-layout verdict is cached.
-    validate_pipeline_dynamic_offsets(required_layouts, &state.bind_groups, limits)
+    validate_pipeline_dynamic_offsets(required_layouts, &state.bind_groups, limits)?;
+    if state.writable_binding_aliasing_dirty {
+        validate_writable_binding_aliasing(required_layouts, &state.bind_groups)?;
+        state.writable_binding_aliasing_dirty = false;
+    }
+    Ok(())
+}
+
+// Dawn checks every writable binding in the current pipeline layout, including
+// bindings not statically used by a shader. Scope validation separately rejects
+// combinations of writable and read-only usage.
+fn validate_writable_binding_aliasing(
+    required_layouts: &[Arc<BindGroupLayout>],
+    bound_groups: &BTreeMap<u32, BoundBindGroup>,
+) -> Result<(), String> {
+    let mut buffers = Vec::new();
+    let mut textures = Vec::new();
+    for (group_index, layout) in required_layouts.iter().enumerate() {
+        if pipeline_bind_group_layout_is_implicitly_satisfied(layout) {
+            continue;
+        }
+        let group_index = validate_pipeline_bind_group_index(group_index)?;
+        let Some(bound) = bound_groups.get(&group_index) else {
+            return Err("pipeline requires a missing bind group".to_owned());
+        };
+        let mut dynamic_index = 0;
+        for layout_entry in layout.entries() {
+            let dynamic_offset = if matches!(
+                layout_entry.kind,
+                Some(BindingLayoutKind::Buffer {
+                    has_dynamic_offset: true,
+                    ..
+                })
+            ) {
+                let offset = bound
+                    .dynamic_offsets
+                    .get(dynamic_index)
+                    .copied()
+                    .ok_or_else(|| "bind group dynamic offset count is invalid".to_owned())?;
+                dynamic_index += 1;
+                u64::from(offset)
+            } else {
+                0
+            };
+            let Some(entry) = bound
+                .group
+                .entries()
+                .iter()
+                .find(|entry| entry.binding == layout_entry.binding)
+            else {
+                continue;
+            };
+            match (layout_entry.kind, &entry.resource) {
+                (
+                    Some(BindingLayoutKind::Buffer {
+                        ty: BufferBindingType::Storage,
+                        ..
+                    }),
+                    BindGroupResource::Buffer {
+                        buffer,
+                        offset,
+                        size,
+                        ..
+                    },
+                ) => {
+                    let size = if *size == u64::MAX {
+                        buffer.size().saturating_sub(*offset)
+                    } else {
+                        *size
+                    };
+                    if size == 0 {
+                        continue;
+                    }
+                    let start = offset
+                        .checked_add(dynamic_offset)
+                        .ok_or_else(|| "writable binding offset overflows".to_owned())?;
+                    let end = start
+                        .checked_add(size)
+                        .ok_or_else(|| "writable binding range overflows".to_owned())?;
+                    buffers.push((group_index, entry.binding, buffer, start, end));
+                }
+                (
+                    Some(BindingLayoutKind::StorageTexture {
+                        access: StorageTextureAccess::WriteOnly | StorageTextureAccess::ReadWrite,
+                        ..
+                    }),
+                    BindGroupResource::TextureView { texture_view, .. },
+                ) => {
+                    textures.push((group_index, entry.binding, texture_view));
+                }
+                _ => {}
+            }
+        }
+    }
+    for (index, (group, binding, buffer, start, end)) in buffers.iter().enumerate() {
+        for (other_group, other_binding, other, other_start, other_end) in &buffers[..index] {
+            if buffer.same(other) && start < other_end && other_start < end {
+                return Err(format!(
+                    "writable storage buffer binding aliasing: group {other_group} binding {other_binding} range [{other_start}, {other_end}) overlaps group {group} binding {binding} range [{start}, {end})"
+                ));
+            }
+        }
+    }
+    for (index, (group, binding, view)) in textures.iter().enumerate() {
+        for (other_group, other_binding, other) in &textures[..index] {
+            if view.texture().same(&other.texture())
+                && ranges_overlap(
+                    view.base_mip_level(),
+                    view.mip_level_count(),
+                    other.base_mip_level(),
+                    other.mip_level_count(),
+                )
+                && ranges_overlap(
+                    view.base_array_layer(),
+                    view.array_layer_count(),
+                    other.base_array_layer(),
+                    other.array_layer_count(),
+                )
+            {
+                return Err(format!(
+                    "writable storage texture binding aliasing: group {other_group} binding {other_binding} range (mip {}, count {}, layer {}, count {}) overlaps group {group} binding {binding} range (mip {}, count {}, layer {}, count {})",
+                    other.base_mip_level(),
+                    other.mip_level_count(),
+                    other.base_array_layer(),
+                    other.array_layer_count(),
+                    view.base_mip_level(),
+                    view.mip_level_count(),
+                    view.base_array_layer(),
+                    view.array_layer_count()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_pipeline_bind_group_compatibility(
@@ -2351,6 +2496,165 @@ mod tests {
     }
 
     #[test]
+    fn writable_buffer_aliasing_uses_active_groups_effective_sizes_and_access() {
+        let device = noop_device();
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE | BufferUsage::UNIFORM,
+            size: 1024,
+            mapped_at_creation: false,
+        }));
+        let make_layout = |ty| {
+            Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+                entries: vec![BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: 4,
+                    binding_array_size: 0,
+                    kind: Some(BindingLayoutKind::Buffer {
+                        ty,
+                        has_dynamic_offset: false,
+                        min_binding_size: 4,
+                    }),
+                }],
+                error: None,
+            }))
+        };
+        let writable = make_layout(BufferBindingType::Storage);
+        let readonly = make_layout(BufferBindingType::ReadOnlyStorage);
+        let uniform = make_layout(BufferBindingType::Uniform);
+        let make_bound = |layout: Arc<BindGroupLayout>, offset, size| BoundBindGroup {
+            group: Arc::new(device.create_bind_group(
+                layout,
+                vec![BindGroupEntry {
+                    binding: 5,
+                    resource: BindGroupResource::Buffer {
+                        buffer: buffer.clone(),
+                        device: Arc::new(device.clone()),
+                        offset,
+                        size,
+                    },
+                }],
+            )),
+            dynamic_offsets: Vec::new(),
+        };
+        for (other_layout, offset, size, aliases) in [
+            (writable.clone(), 256, 256, false), // Touching endpoints.
+            (writable.clone(), 0, 256, true),
+            (writable.clone(), 0, u64::MAX, true),
+            (readonly, 0, 256, false),
+            (uniform, 0, 256, false),
+        ] {
+            let groups = BTreeMap::from([
+                (0, make_bound(writable.clone(), 0, 256)),
+                (1, make_bound(other_layout.clone(), offset, size)),
+            ]);
+            let result = validate_pipeline_bind_groups(
+                &[writable.clone(), other_layout],
+                &groups,
+                device.limits(),
+            );
+            assert_eq!(result.is_err(), aliases);
+            if let Err(error) = result {
+                assert!(error.contains("group 0 binding 5 range [0, 256)"));
+                assert!(error.contains("group 1 binding 5 range [0,"));
+            }
+            // Bound groups outside the pipeline layout never participate.
+            assert_eq!(
+                validate_pipeline_bind_groups(
+                    std::slice::from_ref(&writable),
+                    &groups,
+                    device.limits()
+                ),
+                Ok(())
+            );
+        }
+        assert_eq!(
+            validate_buffer_usage_scope(&[
+                buffer_scope_use(buffer.clone(), 0, 256, ResourceAccess::Write),
+                buffer_scope_use(buffer, 0, 256, ResourceAccess::Write),
+            ]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn writable_texture_aliasing_tracks_array_layers_and_readwrite_access() {
+        let device = noop_device();
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::STORAGE_BINDING,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 2,
+            },
+            format: crate::format::TextureFormat::from_raw(crate::format::TextureFormat::R32_UINT),
+            mip_level_count: 2,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 2,
+                visibility: 4,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::StorageTexture {
+                    access: StorageTextureAccess::ReadWrite,
+                    format: crate::format::TextureFormat::from_raw(
+                        crate::format::TextureFormat::R32_UINT,
+                    ),
+                    view_dimension: crate::texture_view::TextureViewDimension::D2Array,
+                }),
+            }],
+            error: None,
+        }));
+        assert!(!layout.is_error());
+        let make_bound = |mip, layer| {
+            let (view, error) = texture.create_view(crate::texture_view::TextureViewDescriptor {
+                format: None,
+                dimension: Some(crate::texture_view::TextureViewDimension::D2Array),
+                base_mip_level: mip,
+                mip_level_count: Some(1),
+                base_array_layer: layer,
+                array_layer_count: Some(1),
+                aspect: None,
+                usage: None,
+                swizzle: None,
+            });
+            assert_eq!(error, None);
+            let group = Arc::new(device.create_bind_group(
+                layout.clone(),
+                vec![BindGroupEntry {
+                    binding: 2,
+                    resource: BindGroupResource::TextureView {
+                        texture_view: Arc::new(view),
+                        device: Arc::new(device.clone()),
+                    },
+                }],
+            ));
+            assert!(!group.is_error());
+            BoundBindGroup {
+                group,
+                dynamic_offsets: Vec::new(),
+            }
+        };
+        for (mip, layer, aliases) in [(0, 0, true), (1, 0, false), (0, 1, false)] {
+            let groups = BTreeMap::from([(0, make_bound(0, 0)), (1, make_bound(mip, layer))]);
+            let result = validate_pipeline_bind_groups(
+                &[layout.clone(), layout.clone()],
+                &groups,
+                device.limits(),
+            );
+            assert_eq!(result.is_err(), aliases);
+            if let Err(error) = result {
+                assert!(
+                    error.contains("group 0 binding 2 range (mip 0, count 1, layer 0, count 1)")
+                );
+                assert!(error.contains("group 1 binding 2"));
+            }
+        }
+    }
+
+    #[test]
     fn validate_buffer_usage_scope_uses_whole_buffer_access() {
         let device = noop_device();
         let buffer = Arc::new(device.create_buffer(BufferDescriptor {
@@ -2708,7 +3012,7 @@ mod tests {
         assert_eq!(buffer_uses.len(), 1);
         assert!(buffer_uses[0].buffer.same(&buffer));
         assert_eq!(buffer_uses[0].offset, 256);
-        assert_eq!(buffer_uses[0].size, 256);
+        assert_eq!(buffer_uses[0].size, 512);
         assert_eq!(buffer_uses[0].access, ResourceAccess::Read);
     }
 
@@ -2762,6 +3066,15 @@ mod tests {
             Ok(())
         );
         assert!(!state.pipeline_bind_group_compatibility_dirty);
+        assert!(!state.writable_binding_aliasing_dirty);
+        state.set_bind_group(
+            0,
+            BoundBindGroup {
+                group: group.clone(),
+                dynamic_offsets: vec![256],
+            },
+        );
+        assert!(!state.writable_binding_aliasing_dirty);
 
         state.set_bind_group(
             0,
@@ -2771,6 +3084,7 @@ mod tests {
             },
         );
         assert!(!state.pipeline_bind_group_compatibility_dirty);
+        assert!(state.writable_binding_aliasing_dirty);
         assert_eq!(
             validate_pipeline_bind_groups_memoized(
                 &mut state,
@@ -3235,10 +3549,7 @@ mod tests {
         );
         assert_eq!(
             validate_texture_usage_scope(&[storage_write_a.clone(), storage_write_b.clone()]),
-            Err(
-                "usage scope cannot read and write or write the same texture subresource twice"
-                    .to_owned()
-            )
+            Ok(())
         );
         let readwrite_storage_a = texture_use(
             &texture,
@@ -3263,10 +3574,7 @@ mod tests {
                 readwrite_storage_a.clone(),
                 readwrite_storage_b.clone()
             ]),
-            Err(
-                "usage scope cannot read and write or write the same texture subresource twice"
-                    .to_owned()
-            )
+            Ok(())
         );
         assert_eq!(
             validate_texture_usage_scope_lenient(&[storage_write_a.clone(), storage_write_b]),
