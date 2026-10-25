@@ -1,6 +1,10 @@
 # Block 112 — whole-codebase review: queue submit serialization + writable-binding aliasing
 
-Status: **PLANNED (2026-10-25)**.
+Status: **COMPLETE (2026-10-25)** — S1 `74e7415`, S2 `e493528`, Phase Review
+fixes (R5, m1, m2) in the closing commit. Gate after fixes: `cargo test
+--workspace` green, strict clippy + fmt clean, Metal e2e 127/0, Vulkan e2e
+under sync validation 115 pass / 1 pre-existing MoltenVK fail, 0
+`SYNC-HAZARD`.
 Source: `specs/tracking/code-review-2026-10.md` (core MAJOR rows "concurrent
 `Queue::submit` lowering vs HAL submit order" and "writable-binding aliasing
 check at draw/dispatch missing"). Both are core (`yawgpu-core`), Noop-testable.
@@ -91,3 +95,30 @@ Claude runs webgpu-native-cts on Metal before / after:
 ## S3 — Phase Review
 
 Fresh no-context reviewer over the block's cumulative diff.
+
+## S3 — Phase Review (2026-10-25)
+
+Fresh reviewer over `78e5bfb..e493528`: **0 CRITICAL / 1 MAJOR / 2 MINOR**;
+R2/R3 found at parity with Dawn on every axis. Gates before review:
+`cargo test --workspace` green, strict clippy + fmt clean;
+webgpu-native-cts on Metal unchanged vs the pre-block baseline
+(`resource_usages` 7978/0, `encoding,programmable` 2701/0,
+`encoding,cmds` 30613/0), plus `render_pass` 16626/0 and
+`api,operation` 228854/0.
+
+| ID | Finding | Disposition |
+|---|---|---|
+| M1 | submit validation (mapped / destroyed checks, `mark_submitted`) runs before the submission lock: a concurrent `mapAsync` can pass `begin_map`, read `latest_submission_index() = N` and gate on N while the racing submit then becomes N+1 and writes the buffer — the map resolves while the GPU still writes it (pre-existing; breaks R1's goal) | fix (R5): run the map / destroy validation and `mark_submitted` under the submission lock |
+| m1 | `write_texture` / `mapAsync` flush now wait for an in-progress (possibly blocking) HAL submit | document in the lock comment (throughput note, not a bug) |
+| m2 | no dispatch-level test that read-only + writable storage on one buffer is still a usage-scope error | add the test |
+
+### R5. Submit validation is serialized with map / destroy
+
+The checks that read buffer / texture state shared with `mapAsync` /
+`destroy` (mapped-state, destroyed-state, `mark_submitted`) run after the
+submission lock is taken, so `mapAsync`'s flush (which takes the same lock)
+either completes before the submit's validation (the submit then fails on
+a pending-map buffer) or after the submit is issued (the map gates on its
+index). Test: deterministic Noop test using the existing hook pattern —
+`begin_map` + index read on one side, submit on the other, assert either a
+submit validation error or a map gated on the new index.

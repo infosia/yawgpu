@@ -55,13 +55,15 @@ pub(crate) struct QueueInner {
     // pending_writes, resource-state or device locks; never invoke user callbacks
     // under submission. Completion recycling needs only pending_writes and
     // never acquires submission. QueueInner::drop has exclusive access instead.
+    // This also serializes mapAsync flushes and write_texture with a possibly
+    // blocking HAL submit; these callers may wait for the whole submit.
     submission: Mutex<()>,
     pending_writes: Mutex<PendingWriteBatch>,
     #[cfg(test)]
     submit_test_hook: Mutex<Option<SubmitTestHook>>,
 }
 
-// A one-shot seam around the HAL call and commit, scoped to one queue.
+// A one-shot seam around validation, the HAL call and commit, scoped to one queue.
 // Channels let tests pause a submit without invoking callbacks under its lock.
 #[cfg(test)]
 #[derive(Debug)]
@@ -716,6 +718,18 @@ impl Queue {
 
     /// Submits command buffers to the queue after validating each is non-error and not already submitted.
     pub fn submit(&self, command_buffers: &[Arc<CommandBuffer>]) -> Option<DeviceError> {
+        // Serialize resource-state validation and command-buffer consumption with
+        // lowering, HAL submission, initialization commit and staging retirement.
+        // A map starts without this lock, then flushes under it before reading
+        // the latest index: either validation sees Pending or that flush waits
+        // until this submit has recorded the index the map must gate on.
+        let _submission = self.inner.submission.lock();
+        #[cfg(test)]
+        let test_hook = self.inner.submit_test_hook.lock().take();
+        #[cfg(test)]
+        if let Some(hook) = &test_hook {
+            hook.pause("validating");
+        }
         let mut validation_error = None;
         for (index, command_buffer) in command_buffers.iter().enumerate() {
             if command_buffer.is_error() {
@@ -786,7 +800,7 @@ impl Queue {
         }
         for command_buffer in command_buffers {
             if let Err(message) = command_buffer.mark_submitted() {
-                let _ = self.flush_pending_writes();
+                let _ = self.flush_pending_writes_locked();
                 return Some(DeviceError::validation(message));
             }
         }
@@ -796,13 +810,9 @@ impl Queue {
             // ordering even though the command buffers themselves are
             // rejected. The validation error remains the submit's reported
             // error, matching the existing error surface.
-            let _ = self.flush_pending_writes();
+            let _ = self.flush_pending_writes_locked();
             return Some(DeviceError::validation(message));
         }
-        // Keep lowering, HAL submission, initialization commit and staging
-        // retirement in the same queue order. Error paths above flush through
-        // the public helper before taking this non-reentrant lock.
-        let _submission = self.inner.submission.lock();
         if command_buffers.is_empty() {
             let PendingWriteSubmission { copies, chunks } = self.take_pending_writes();
             let result = if copies.is_empty() {
@@ -899,8 +909,6 @@ impl Queue {
         }
 
         #[cfg(test)]
-        let test_hook = self.inner.submit_test_hook.lock().take();
-        #[cfg(test)]
         if let Some(hook) = &test_hook {
             hook.pause("lowered");
         }
@@ -928,6 +936,11 @@ impl Queue {
     /// submission and leaves the latest index unchanged.
     pub fn flush_pending_writes(&self) -> Option<DeviceError> {
         let _submission = self.inner.submission.lock();
+        self.flush_pending_writes_locked()
+    }
+
+    // The caller holds submission; validation-error paths must not reacquire it.
+    fn flush_pending_writes_locked(&self) -> Option<DeviceError> {
         let PendingWriteSubmission { copies, chunks } = self.take_pending_writes();
         if copies.is_empty() {
             return None;
@@ -6849,6 +6862,9 @@ fn fs() -> @location(0) vec4<f32> {
         let first_queue = queue.clone();
         let first = std::thread::spawn(move || first_queue.submit(&[write]));
         let timeout = Duration::from_secs(5);
+        assert_eq!(reached_rx.recv_timeout(timeout).unwrap(), "validating");
+        assert!(queue.inner.submission.try_lock().is_none());
+        resume_tx.send(()).unwrap();
         assert_eq!(reached_rx.recv_timeout(timeout).unwrap(), "lowered");
         assert!(submitted_copies(&queue).is_empty());
         assert!(!texture.is_initialized(0, 0, InitAspect::Color));
@@ -6902,6 +6918,95 @@ fn fs() -> @location(0) vec4<f32> {
                 HalCopy::TextureToBuffer(_)
             ]
         ));
+    }
+
+    /// R5: mapAsync's begin/flush/index sequence must either invalidate the
+    /// racing submit or gate the map on that submit's newly recorded index.
+    #[test]
+    fn concurrent_map_and_submit_serialize_validation_and_map_gate() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        for map_before_validation in [true, false] {
+            let device = noop_device();
+            let queue = device.queue();
+            let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+                usage: BufferUsage::MAP_READ | BufferUsage::COPY_DST,
+                size: 4,
+                mapped_at_creation: false,
+            }));
+            let encoder = device.create_command_encoder();
+            assert_eq!(encoder.clear_buffer(Arc::clone(&buffer), 0, 4), None);
+            let (commands, error) = encoder.finish();
+            assert_eq!(error, None);
+            let commands = Arc::new(commands);
+            let (reached_tx, reached_rx) = mpsc::channel();
+            let (resume_tx, resume_rx) = mpsc::channel();
+            *queue.inner.submit_test_hook.lock() = Some(SubmitTestHook {
+                reached: reached_tx,
+                resume: resume_rx,
+            });
+            let submit_queue = queue.clone();
+            let submit_commands = Arc::clone(&commands);
+            let submit = std::thread::spawn(move || submit_queue.submit(&[submit_commands]));
+            let timeout = Duration::from_secs(5);
+            assert_eq!(reached_rx.recv_timeout(timeout).unwrap(), "validating");
+            assert!(queue.inner.submission.try_lock().is_none());
+            assert!(!commands.is_submitted());
+            let earlier = queue.latest_submission_index();
+            if !map_before_validation {
+                resume_tx.send(()).unwrap();
+                assert_eq!(reached_rx.recv_timeout(timeout).unwrap(), "lowered");
+            }
+            let serial = buffer.begin_map(crate::MapMode::Read, 0, 4).unwrap();
+            assert_eq!(buffer.map_state(), BufferMapState::Pending);
+
+            // Mirror the FFI map path, without registering or firing callbacks.
+            let map_queue = queue.clone();
+            let (started_tx, started_rx) = mpsc::channel();
+            let (gate_tx, gate_rx) = mpsc::channel();
+            let map = std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                assert_eq!(map_queue.flush_pending_writes(), None);
+                gate_tx.send(map_queue.latest_submission_index()).unwrap();
+            });
+            started_rx.recv_timeout(timeout).unwrap();
+            assert!(queue.inner.submission.try_lock().is_none());
+            assert!(gate_rx.try_recv().is_err());
+            resume_tx.send(()).unwrap();
+            if !map_before_validation {
+                assert_eq!(reached_rx.recv_timeout(timeout).unwrap(), "submitted");
+                assert_eq!(queue.latest_submission_index(), earlier);
+                assert!(gate_rx.try_recv().is_err());
+                resume_tx.send(()).unwrap();
+                assert_eq!(reached_rx.recv_timeout(timeout).unwrap(), "committed");
+                assert!(queue.latest_submission_index() > earlier);
+                assert!(queue.inner.submission.try_lock().is_none());
+                assert!(gate_rx.try_recv().is_err());
+                resume_tx.send(()).unwrap();
+            }
+            let result = submit.join().unwrap();
+            let gate = gate_rx.recv_timeout(timeout).unwrap();
+            map.join().unwrap();
+            assert!(commands.is_submitted());
+            if map_before_validation {
+                assert_eq!(
+                    result.unwrap().message,
+                    "queue submit cannot use a mapped buffer"
+                );
+                assert_eq!(gate, earlier);
+                assert!(submitted_copies(&queue).is_empty());
+            } else {
+                assert_eq!(result, None);
+                assert!(gate > earlier);
+                assert_eq!(gate, queue.latest_submission_index());
+                assert_eq!(queue.wait_for_submission(gate), Ok(()));
+            }
+            assert_eq!(
+                buffer.resolve_pending_map(serial),
+                crate::MapAsyncStatus::Success
+            );
+        }
     }
 
     /// Block 104 R5: a submission that never reaches the HAL leaves every

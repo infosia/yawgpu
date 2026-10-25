@@ -311,6 +311,112 @@ mod tests {
         }
     }
 
+    /// Read-only storage is excluded from writable binding alias checks, but
+    /// still conflicts with writable storage in a dispatch's usage scope.
+    #[test]
+    fn compute_dispatch_read_only_and_writable_storage_share_buffer_usage_error() {
+        let device = noop_device();
+        let layout = Arc::new(
+            device.create_bind_group_layout(BindGroupLayoutDescriptor {
+                entries: [
+                    BufferBindingType::ReadOnlyStorage,
+                    BufferBindingType::Storage,
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(binding, ty)| BindGroupLayoutEntry {
+                    binding: binding as u32,
+                    visibility: SHADER_STAGE_COMPUTE,
+                    binding_array_size: 0,
+                    kind: Some(BindingLayoutKind::Buffer {
+                        ty,
+                        has_dynamic_offset: false,
+                        min_binding_size: 4,
+                    }),
+                })
+                .collect(),
+                error: None,
+            }),
+        );
+        assert!(!layout.is_error());
+        let pipeline_layout = Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: vec![Arc::clone(&layout)],
+            immediate_size: 0,
+            error: None,
+        }));
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r"
+@group(0) @binding(0) var<storage, read> input: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output: array<u32>;
+@compute @workgroup_size(1)
+fn cs() { output[0] = input[0]; }
+"
+                .to_owned(),
+            )),
+        );
+        assert!(!module.is_error());
+        let pipeline = Arc::new(device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Explicit(pipeline_layout),
+            shader_module: module,
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        }));
+        assert!(!pipeline.is_error());
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE,
+            size: 256,
+            mapped_at_creation: false,
+        }));
+        let group = Arc::new(
+            device.create_bind_group(
+                layout,
+                (0..2)
+                    .map(|binding| BindGroupEntry {
+                        binding,
+                        resource: BindGroupResource::Buffer {
+                            buffer: Arc::clone(&buffer),
+                            device: Arc::new(device.clone()),
+                            offset: 0,
+                            size: 256,
+                        },
+                    })
+                    .collect(),
+            ),
+        );
+        assert!(!group.is_error());
+        for indirect in [false, true] {
+            let encoder = device.create_command_encoder();
+            let (pass, error) = encoder.begin_compute_pass(None);
+            assert_eq!(error, None);
+            assert_eq!(pass.set_pipeline(Arc::clone(&pipeline)), None);
+            assert_eq!(
+                pass.set_bind_group(0, Some(Arc::clone(&group)), vec![], device.limits()),
+                None
+            );
+            if indirect {
+                assert_eq!(
+                    pass.dispatch_workgroups_indirect(
+                        noop_indirect_buffer(&device),
+                        0,
+                        device.limits()
+                    ),
+                    None
+                );
+            } else {
+                assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
+            }
+            assert_eq!(pass.end(), None);
+            let (commands, error) = encoder.finish();
+            assert!(commands.is_error());
+            assert_eq!(
+                error.as_deref(),
+                Some("usage scope cannot read and write or write the same buffer range twice")
+            );
+        }
+    }
+
     #[test]
     fn compute_pass_encoder_lifecycle_and_debug_markers() {
         let encoder = noop_device().create_command_encoder();

@@ -12,9 +12,11 @@ Fix blocks: **Block 109** (CRITICAL) — **COMPLETE 2026-10-25** (`eee477b`,
 **Block 110** (core / FFI MAJORs + 3 core MINORs) — COMPLETE 2026-10-25.
 **Block 111** (Metal / Vulkan / Tint / GLES MAJORs) — slices committed
 2026-10-25; first Vulkan sync-validation run found and fixed 3 more
-pre-existing hazard classes (R16–R18). Still open after 111: core submit
-serialization, writable-binding aliasing at draw/dispatch, GLES context
-release across threads, Vulkan per-submit object churn (perf).
+pre-existing hazard classes (R16–R18). **Block 112** (queue submit serialization + writable-binding aliasing) —
+COMPLETE 2026-10-25. Still open: GLES context release across threads,
+Vulkan per-submit object churn + retire waits under `queue_access` (perf),
+Tint double IR lowering (perf), MINOR list; owed: GLES Block 109/111 e2e
+on Windows ANGLE.
 Block 109 also closed the Vulkan MAJOR "transient attachments end in
 `TRANSFER_SRC_OPTIMAL`" (R7) and added a surface double-acquire fix (R8).
 
