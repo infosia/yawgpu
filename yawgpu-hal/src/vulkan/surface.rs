@@ -387,6 +387,7 @@ impl VulkanSurface {
         self.wait_all_in_flight_frames();
         self.destroy_sync_objects();
         self.destroy_transition_command_pool();
+        reset_pending_state(&mut self.pending_state);
         self.swapchain = None;
         let swapchain = create_swapchain(
             Arc::clone(&device.inner),
@@ -434,7 +435,6 @@ impl VulkanSurface {
                     message: "surface synchronization is not configured",
                 })?;
         let render_finished_sem = self.render_finished_semaphores[sync_index];
-        let present_ready_sem = self.present_ready_semaphores[sync_index];
         let in_flight_fence = self.in_flight_fences[sync_index];
         unsafe {
             device
@@ -479,6 +479,7 @@ impl VulkanSurface {
                 })?;
         }
         let index = usize::try_from(image_index).unwrap_or(usize::MAX);
+        let present_ready_sem = present_ready_semaphore(&self.present_ready_semaphores, index)?;
         if !self.image_acquired_semaphores.is_empty() {
             self.next_sync_index = (sync_index + 1) % self.image_acquired_semaphores.len();
         }
@@ -815,7 +816,7 @@ pub(super) fn create_swapchain(
         .image_array_layers(1)
         .image_usage(usage)
         .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
-        .pre_transform(capabilities.current_transform)
+        .pre_transform(swapchain_pre_transform(&capabilities))
         .composite_alpha(alpha)
         .present_mode(present_mode)
         .clipped(true);
@@ -852,6 +853,17 @@ pub(super) fn create_swapchain(
         .inspect_err(|_| unsafe {
             loader.destroy_swapchain(swapchain, None);
         })?;
+    {
+        let mut surfaces = device
+            .surfaces
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        surfaces.retain(|surface| surface.strong_count() != 0);
+        let weak = Arc::downgrade(&pending_state);
+        if !surfaces.iter().any(|surface| surface.ptr_eq(&weak)) {
+            surfaces.push(weak);
+        }
+    }
     Ok(Arc::new(VulkanSwapchainInner {
         device,
         _surface: surface,
@@ -860,6 +872,42 @@ pub(super) fn create_swapchain(
         images: textures,
         teardown_waited: AtomicBool::new(false),
     }))
+}
+
+// Old devices and retained textures must never observe a new swapchain's semaphores.
+fn reset_pending_state(state: &mut Arc<Mutex<SurfacePendingState>>) {
+    state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .pending_acquire = None;
+    *state = Arc::new(Mutex::new(SurfacePendingState::new()));
+}
+
+// Image reacquisition guarantees the previous present's semaphore wait completed.
+fn present_ready_semaphore(
+    semaphores: &[vk::Semaphore],
+    image_index: usize,
+) -> Result<vk::Semaphore, HalError> {
+    semaphores
+        .get(image_index)
+        .copied()
+        .ok_or(HalError::AcquireFailed {
+            backend: BACKEND,
+            message: "acquired image synchronization index is out of range",
+        })
+}
+
+fn swapchain_pre_transform(
+    capabilities: &vk::SurfaceCapabilitiesKHR,
+) -> vk::SurfaceTransformFlagsKHR {
+    if capabilities
+        .supported_transforms
+        .contains(vk::SurfaceTransformFlagsKHR::IDENTITY)
+    {
+        vk::SurfaceTransformFlagsKHR::IDENTITY
+    } else {
+        capabilities.current_transform
+    }
 }
 
 /// Selects the fixed surface extent or bounds the configured extent to its limits.
@@ -948,7 +996,7 @@ pub(super) fn create_swapchain_texture(
             layouts: SubresourceLayouts::new(1, 1),
         })),
         swapchain: None,
-        surface_pending: Some(pending_state),
+        _surface_pending: Some(pending_state),
         dimension: HalTextureDimension::D2,
         width: extent.width,
         height: extent.height,
@@ -1064,6 +1112,67 @@ fn hal_usage_to_vk_image_usage(usage: HalTextureUsage) -> vk::ImageUsageFlags {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reconfigure_does_not_publish_new_acquire_to_previous_device() {
+        let mut state = Arc::new(Mutex::new(SurfacePendingState::new()));
+        let old_device_registration = Arc::downgrade(&state);
+        let retained_texture_state = Arc::clone(&state);
+        state.lock().unwrap().pending_acquire = Some(PendingAcquire {
+            image_index: 0,
+            acquired_sem: vk::Semaphore::null(),
+            render_finished_sem: vk::Semaphore::null(),
+            present_ready_sem: vk::Semaphore::null(),
+            in_flight_fence: vk::Fence::null(),
+            consumed: false,
+        });
+        reset_pending_state(&mut state);
+        assert!(!Arc::ptr_eq(&state, &retained_texture_state));
+        assert!(old_device_registration
+            .upgrade()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .pending_acquire
+            .is_none());
+        assert!(state.lock().unwrap().pending_acquire.is_none());
+    }
+
+    #[test]
+    fn present_ready_semaphore_follows_image_even_when_sync_slots_rotate() {
+        use ash::vk::Handle;
+        let semaphores = [
+            vk::Semaphore::from_raw(10),
+            vk::Semaphore::from_raw(11),
+            vk::Semaphore::from_raw(12),
+        ];
+        for (sync_slot, image_index) in [(0, 2), (1, 0), (2, 1), (0, 1)] {
+            let selected = present_ready_semaphore(&semaphores, image_index).unwrap();
+            assert_eq!(selected, semaphores[image_index]);
+            if sync_slot != image_index {
+                assert_ne!(selected, semaphores[sync_slot]);
+            }
+        }
+        assert!(present_ready_semaphore(&semaphores, 3).is_err());
+    }
+
+    #[test]
+    fn swapchain_prefers_identity_transform_when_supported() {
+        let mut capabilities = vk::SurfaceCapabilitiesKHR::default()
+            .current_transform(vk::SurfaceTransformFlagsKHR::ROTATE_90)
+            .supported_transforms(
+                vk::SurfaceTransformFlagsKHR::IDENTITY | vk::SurfaceTransformFlagsKHR::ROTATE_90,
+            );
+        assert_eq!(
+            swapchain_pre_transform(&capabilities),
+            vk::SurfaceTransformFlagsKHR::IDENTITY
+        );
+        capabilities.supported_transforms = vk::SurfaceTransformFlagsKHR::ROTATE_90;
+        assert_eq!(
+            swapchain_pre_transform(&capabilities),
+            vk::SurfaceTransformFlagsKHR::ROTATE_90
+        );
+    }
+
     #[test]
     fn teardown_waits_only_once_including_direct_drop() {
         let waited = AtomicBool::new(false);

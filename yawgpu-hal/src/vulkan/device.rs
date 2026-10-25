@@ -43,6 +43,8 @@ pub(super) struct VulkanDeviceInner {
     pub(super) max_sampler_anisotropy: f32,
     #[cfg(feature = "tiled")]
     pub(super) subpass_render_pass_cache: Mutex<BTreeMap<HalSubpassPassLayout, vk::RenderPass>>,
+    /// Configured surfaces whose next acquire must be waited on by the queue.
+    pub(super) surfaces: Mutex<Vec<std::sync::Weak<Mutex<SurfacePendingState>>>>,
     pub(super) allocations: AtomicU64,
 }
 
@@ -138,7 +140,7 @@ impl VulkanDevice {
         Ok(VulkanTexture {
             inner: Some(Arc::new(inner)),
             swapchain: None,
-            surface_pending: None,
+            _surface_pending: None,
             dimension: descriptor.dimension,
             width: descriptor.width,
             height: descriptor.height,

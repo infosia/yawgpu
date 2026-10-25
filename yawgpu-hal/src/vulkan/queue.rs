@@ -147,68 +147,7 @@ impl Drop for VulkanQueueInner {
 impl VulkanQueue {
     /// Submits an empty command buffer to flush the queue.
     pub fn submit_empty(&self) -> Result<SubmissionIndex, HalError> {
-        let fence_info = vk::FenceCreateInfo::default();
-        let mut fence = Some(
-            unsafe { self.inner.device.device.create_fence(&fence_info, None) }
-                .map_err(|error| queue_submission_error("vkCreateFence", error))?,
-        );
-        let submitted = (|| {
-            let _queue_access = self
-                .inner
-                .queue_access
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let mut submissions = self
-                .inner
-                .submissions
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let index = submissions.reserve()?;
-            let submitted_fence = fence.expect("empty submission fence should exist");
-            unsafe {
-                self.inner
-                    .device
-                    .device
-                    .queue_submit(self.inner.queue, &[], submitted_fence)
-                    .map_err(|error| queue_submission_error("vkQueueSubmit", error))?;
-            }
-            submissions.register_fence(index, submitted_fence);
-            Ok((
-                index,
-                TrackedSubmission {
-                    index,
-                    tracker: Arc::clone(&self.inner.submissions),
-                },
-            ))
-        })();
-        let (index, tracked_submission) = match submitted {
-            Ok(submitted) => submitted,
-            Err(error) => {
-                unsafe {
-                    self.inner
-                        .device
-                        .device
-                        .destroy_fence(fence.take().expect("empty submission fence"), None);
-                }
-                return Err(error);
-            }
-        };
-        let submitted_fence = fence.take().expect("submitted empty fence should exist");
-        {
-            let mut retire = self
-                .inner
-                .retire
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            retire.retire_tracked(
-                &self.inner.device.device,
-                submitted_fence,
-                Vec::new(),
-                Vec::new(),
-                true,
-                Some(tracked_submission),
-            )?;
-        }
+        let index = submit_copies(&self.inner, &[])?;
         self.wait_for_submission(index)?;
         Ok(index)
     }

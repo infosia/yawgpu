@@ -43,7 +43,6 @@ pub(super) fn record_and_submit_copies(
     let mut render_passes = Vec::new();
     let mut fence = None;
     let mut command_pool_cleanup = Some(command_pool);
-    let surface_pending = find_surface_pending(copies);
     let result = (|| {
         // Serialize layout reads, command recording, submission and layout commit.
         let _queue_access = queue
@@ -74,6 +73,12 @@ pub(super) fn record_and_submit_copies(
                 .map_err(|error| queue_submission_error("vkBeginCommandBuffer", error))?;
         }
         for copy in copies {
+            // Covers earlier submissions as well as previous commands in this one.
+            record_memory_barrier(
+                &queue.device.device,
+                command_buffer,
+                buffer_read_to_write_scopes(),
+            );
             match copy {
                 HalCopy::Buffer(copy) => {
                     encode_buffer_copy(&queue.device.device, command_buffer, copy)?;
@@ -164,6 +169,11 @@ pub(super) fn record_and_submit_copies(
                 }
             }
         }
+        record_memory_barrier(
+            &queue.device.device,
+            command_buffer,
+            gpu_write_to_host_read_scopes(),
+        );
         unsafe {
             queue
                 .device
@@ -174,19 +184,21 @@ pub(super) fn record_and_submit_copies(
             let mut wait_semaphores = Vec::new();
             let mut wait_stages = Vec::new();
             let mut signal_semaphores = Vec::new();
-            let mut surface_retire = None;
-            if let Some(pending_state) = surface_pending.as_ref() {
-                let mut state = pending_state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(pending) = state.pending_acquire.as_mut() {
-                    if !pending.consumed {
-                        wait_semaphores.push(pending.acquired_sem);
-                        wait_stages.push(acquire_wait_stage());
-                        signal_semaphores.push(pending.render_finished_sem);
-                        pending.consumed = true;
-                        surface_retire = Some(Arc::clone(pending_state));
-                    }
+            // Wait on every acquired surface, independent of the command kinds/resources.
+            let surfaces = pending_surfaces(&queue.device.surfaces);
+            let mut states: Vec<_> = surfaces
+                .iter()
+                .map(|surface| {
+                    surface
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                })
+                .collect();
+            for state in &states {
+                if let Some(pending) = state.pending_acquire.filter(|pending| !pending.consumed) {
+                    wait_semaphores.push(pending.acquired_sem);
+                    wait_stages.push(acquire_wait_stage());
+                    signal_semaphores.push(pending.render_finished_sem);
                 }
             }
             let fence_info = vk::FenceCreateInfo::default();
@@ -209,11 +221,13 @@ pub(super) fn record_and_submit_copies(
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let submission_index = submissions.reserve()?;
-                queue
-                    .device
-                    .device
-                    .queue_submit(queue.queue, &[submit_info], created_fence)
-                    .map_err(|error| queue_submission_error("vkQueueSubmit", error))?;
+                submit_with_acquires(&mut states, || {
+                    queue
+                        .device
+                        .device
+                        .queue_submit(queue.queue, &[submit_info], created_fence)
+                        .map_err(|error| queue_submission_error("vkQueueSubmit", error))
+                })?;
                 layouts.commit();
                 submissions.register_fence(submission_index, created_fence);
                 (
@@ -224,6 +238,7 @@ pub(super) fn record_and_submit_copies(
                     },
                 )
             };
+            drop(states);
             fence = None;
             let retire_fence = created_fence;
             let mut retained = collect_retained_resources(copies);
@@ -236,32 +251,18 @@ pub(super) fn record_and_submit_copies(
                 std::mem::take(&mut render_passes),
             );
             command_pool_cleanup = None;
-            if let Some(pending_state) = surface_retire {
-                let mut pending_state = pending_state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                pending_state.retire.retire_tracked(
-                    &queue.device.device,
-                    retire_fence,
-                    cleanup,
-                    retained,
-                    true,
-                    Some(tracked_submission),
-                )?;
-            } else {
-                let mut retire = queue
-                    .retire
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                retire.retire_tracked(
-                    &queue.device.device,
-                    retire_fence,
-                    cleanup,
-                    retained,
-                    true,
-                    Some(tracked_submission),
-                )?;
-            }
+            let mut retire = queue
+                .retire
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            retire.retire_tracked(
+                &queue.device.device,
+                retire_fence,
+                cleanup,
+                retained,
+                true,
+                Some(tracked_submission),
+            )?;
             Ok(submission_index)
         }
     })();
@@ -729,52 +730,32 @@ fn retain_subpass_attachment_resource(
     }
 }
 
-fn find_surface_pending(copies: &[HalCopy]) -> Option<Arc<Mutex<SurfacePendingState>>> {
-    copies.iter().find_map(surface_pending_from_copy)
+fn pending_surfaces(
+    registry: &Mutex<Vec<std::sync::Weak<Mutex<SurfacePendingState>>>>,
+) -> Vec<Arc<Mutex<SurfacePendingState>>> {
+    let mut registry = registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let surfaces = registry
+        .iter()
+        .filter_map(std::sync::Weak::upgrade)
+        .collect();
+    registry.retain(|surface| surface.strong_count() != 0);
+    surfaces
 }
 
-fn surface_pending_from_copy(copy: &HalCopy) -> Option<Arc<Mutex<SurfacePendingState>>> {
-    match copy {
-        HalCopy::Buffer(_)
-        | HalCopy::BufferClear(_)
-        | HalCopy::ClearTexture(_)
-        | HalCopy::WriteTimestamp(_)
-        | HalCopy::ResolveQuerySet(_)
-        | HalCopy::ComputePass(_) => None,
-        #[cfg(feature = "tiled")]
-        HalCopy::SubpassRenderPass(pass) => surface_pending_from_subpass(pass),
-        HalCopy::BufferToTexture(copy) | HalCopy::TextureToBuffer(copy) => {
-            surface_pending_from_hal_texture(&copy.texture)
-        }
-        HalCopy::TextureToTexture(copy) => surface_pending_from_hal_texture(&copy.source)
-            .or_else(|| surface_pending_from_hal_texture(&copy.destination)),
-        HalCopy::RenderPassCommandStream(pass) => {
-            pass.color_targets.iter().flatten().find_map(|target| {
-                surface_pending_from_hal_texture(&target.texture).or_else(|| {
-                    target
-                        .resolve_target
-                        .as_ref()
-                        .and_then(surface_pending_from_hal_texture)
-                })
-            })
+// Keep acquire state locked through submit; errors leave present waiting on acquire.
+fn submit_with_acquires<T>(
+    states: &mut [std::sync::MutexGuard<'_, SurfacePendingState>],
+    submit: impl FnOnce() -> Result<T, HalError>,
+) -> Result<T, HalError> {
+    let result = submit()?;
+    for state in states {
+        if let Some(pending) = &mut state.pending_acquire {
+            pending.consumed = true;
         }
     }
-}
-
-fn surface_pending_from_hal_texture(
-    texture: &HalTexture,
-) -> Option<Arc<Mutex<SurfacePendingState>>> {
-    let HalTexture::Vulkan(texture) = texture else {
-        return None;
-    };
-    texture.surface_pending.as_ref().map(Arc::clone)
-}
-
-#[cfg(feature = "tiled")]
-fn surface_pending_from_subpass(
-    _pass: &HalSubpassRenderPassCommand,
-) -> Option<Arc<Mutex<SurfacePendingState>>> {
-    None
+    Ok(result)
 }
 
 /// Records encode into the command stream.
@@ -1684,7 +1665,12 @@ pub(super) fn encode_texture_to_texture(
         }
         return Ok(());
     }
-    let image_extent = source_extent;
+    let image_extent = image_copy_extent(
+        source.dimension,
+        destination.dimension,
+        source_extent,
+        copy.extent.depth_or_array_layers,
+    );
     let region = vk::ImageCopy::default()
         .src_subresource(texture_copy_subresource_layers(
             aspect,
@@ -1898,6 +1884,29 @@ struct MemoryBarrierScopes {
     src_access: vk::AccessFlags,
     dst_stages: vk::PipelineStageFlags,
     dst_access: vk::AccessFlags,
+}
+
+// Conservative WAR execution dependency for vertex/index/indirect, shader and copy reads.
+fn buffer_read_to_write_scopes() -> MemoryBarrierScopes {
+    MemoryBarrierScopes {
+        src_stages: buffer_write_read_barrier_dst_stage_mask(),
+        src_access: vk::AccessFlags::empty(),
+        dst_stages: vk::PipelineStageFlags::TRANSFER
+            | vk::PipelineStageFlags::VERTEX_SHADER
+            | vk::PipelineStageFlags::FRAGMENT_SHADER
+            | vk::PipelineStageFlags::COMPUTE_SHADER,
+        dst_access: vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::SHADER_WRITE,
+    }
+}
+
+// All Vulkan buffers are host visible; publish all GPU writes before fence completion.
+fn gpu_write_to_host_read_scopes() -> MemoryBarrierScopes {
+    MemoryBarrierScopes {
+        src_stages: vk::PipelineStageFlags::ALL_COMMANDS,
+        src_access: vk::AccessFlags::MEMORY_WRITE,
+        dst_stages: vk::PipelineStageFlags::HOST,
+        dst_access: vk::AccessFlags::HOST_READ,
+    }
 }
 
 /// Records a global memory barrier with the given scopes.
@@ -2963,7 +2972,7 @@ fn subpass_dependencies(layout: &HalSubpassPassLayout) -> Vec<vk::SubpassDepende
         .dst_subpass(0)
         .src_stage_mask(render_attachment_stage_flags())
         .dst_stage_mask(render_attachment_stage_flags())
-        .src_access_mask(vk::AccessFlags::empty())
+        .src_access_mask(render_attachment_access_flags())
         .dst_access_mask(render_attachment_access_flags())];
     dependencies.extend(layout.dependencies.iter().map(|dependency| {
         let (src_stage, src_access, dst_stage, dst_access) = match dependency.dependency_type {
@@ -4745,6 +4754,18 @@ fn compressed_temporary_copy(
     })
 }
 
+fn image_copy_extent(
+    source: HalTextureDimension,
+    destination: HalTextureDimension,
+    mut extent: vk::Extent3D,
+    copy_depth: u32,
+) -> vk::Extent3D {
+    if source == HalTextureDimension::D3 || destination == HalTextureDimension::D3 {
+        extent.depth = copy_depth;
+    }
+    extent
+}
+
 fn texture_copy_extent(dimension: HalTextureDimension, extent: HalExtent3d) -> vk::Extent3D {
     match dimension {
         HalTextureDimension::D3 => to_image_extent(extent),
@@ -4815,6 +4836,132 @@ mod tests {
             samplers: Vec::new(),
             external_textures: Vec::new(),
         }
+    }
+
+    #[test]
+    fn buffer_war_barrier_waits_for_all_reader_stages_before_writes() {
+        let scopes = buffer_read_to_write_scopes();
+        for reader in [
+            vk::PipelineStageFlags::VERTEX_INPUT,
+            vk::PipelineStageFlags::DRAW_INDIRECT,
+            vk::PipelineStageFlags::VERTEX_SHADER,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::TRANSFER,
+        ] {
+            assert!(scopes.src_stages.contains(reader));
+        }
+        assert!(scopes.dst_stages.contains(
+            vk::PipelineStageFlags::TRANSFER
+                | vk::PipelineStageFlags::COMPUTE_SHADER
+                | vk::PipelineStageFlags::VERTEX_SHADER
+                | vk::PipelineStageFlags::FRAGMENT_SHADER
+        ));
+        assert!(scopes
+            .dst_access
+            .contains(vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::SHADER_WRITE));
+    }
+
+    #[test]
+    fn all_shader_read_barriers_publish_uniform_writes() {
+        for scopes in [
+            query_resolve_outgoing_barrier_scopes(),
+            render_pass_shader_write_scopes(),
+            compute_pass_pre_dispatch_barrier_scopes(),
+            compute_pass_post_dispatch_barrier_scopes(),
+        ] {
+            assert!(scopes.dst_access.contains(vk::AccessFlags::UNIFORM_READ));
+        }
+        assert!(buffer_write_read_barrier_dst_access_mask().contains(vk::AccessFlags::UNIFORM_READ));
+    }
+
+    #[test]
+    fn submission_publishes_gpu_writes_to_host_reads() {
+        let scopes = gpu_write_to_host_read_scopes();
+        assert_eq!(scopes.src_stages, vk::PipelineStageFlags::ALL_COMMANDS);
+        assert!(scopes.src_access.contains(vk::AccessFlags::MEMORY_WRITE));
+        assert!(scopes.dst_stages.contains(vk::PipelineStageFlags::HOST));
+        assert!(scopes.dst_access.contains(vk::AccessFlags::HOST_READ));
+    }
+
+    fn acquired_state() -> SurfacePendingState {
+        use ash::vk::Handle;
+        let mut state = SurfacePendingState::new();
+        state.pending_acquire = Some(PendingAcquire {
+            image_index: 2,
+            acquired_sem: vk::Semaphore::from_raw(1),
+            render_finished_sem: vk::Semaphore::from_raw(2),
+            present_ready_sem: vk::Semaphore::from_raw(3),
+            in_flight_fence: vk::Fence::null(),
+            consumed: false,
+        });
+        state
+    }
+
+    #[test]
+    fn next_submit_waits_for_all_acquires_without_inspecting_commands() {
+        let first = Arc::new(Mutex::new(acquired_state()));
+        let second = Arc::new(Mutex::new(acquired_state()));
+        let registry = Mutex::new(vec![
+            Arc::downgrade(&first),
+            Arc::downgrade(&second),
+            std::sync::Weak::new(),
+        ]);
+        // No command or texture is passed: empty, compute, clears and tiled submits
+        // all discover the same pending acquisitions, including multiple surfaces.
+        let surfaces = pending_surfaces(&registry);
+        assert_eq!(surfaces.len(), 2);
+        assert_eq!(registry.lock().unwrap().len(), 2);
+        let mut states: Vec<_> = surfaces
+            .iter()
+            .map(|surface| surface.lock().unwrap())
+            .collect();
+        assert!(states
+            .iter()
+            .all(|state| !state.pending_acquire.unwrap().consumed));
+        submit_with_acquires(&mut states, || Ok(())).unwrap();
+        assert!(states
+            .iter()
+            .all(|state| state.pending_acquire.unwrap().consumed));
+        assert_eq!(acquire_wait_stage(), vk::PipelineStageFlags::ALL_COMMANDS);
+    }
+
+    #[test]
+    fn failed_fence_or_queue_submit_preserves_acquire_for_present_and_retry() {
+        let state = Mutex::new(acquired_state());
+        let mut states = [state.lock().unwrap()];
+        for operation in ["vkCreateFence", "vkQueueSubmit"] {
+            let result = submit_with_acquires(&mut states, || {
+                Err::<(), _>(queue_submission_error(
+                    operation,
+                    vk::Result::ERROR_OUT_OF_HOST_MEMORY,
+                ))
+            });
+            assert!(result.is_err());
+            assert!(!states[0].pending_acquire.unwrap().consumed);
+        }
+        submit_with_acquires(&mut states, || Ok(())).unwrap();
+        assert!(states[0].pending_acquire.unwrap().consumed);
+    }
+
+    #[test]
+    fn array_to_3d_image_copy_preserves_all_slices_in_both_directions() {
+        let extent = vk::Extent3D {
+            width: 8,
+            height: 4,
+            depth: 1,
+        };
+        for (source, destination) in [
+            (HalTextureDimension::D2, HalTextureDimension::D3),
+            (HalTextureDimension::D3, HalTextureDimension::D2),
+            (HalTextureDimension::D3, HalTextureDimension::D3),
+        ] {
+            assert_eq!(image_copy_extent(source, destination, extent, 5).depth, 5);
+        }
+        assert_eq!(
+            image_copy_extent(HalTextureDimension::D2, HalTextureDimension::D2, extent, 5).depth,
+            1
+        );
     }
 
     #[test]
@@ -4968,6 +5115,14 @@ mod tests {
             let dependencies = render_pass_dependencies(framebuffer_fetch);
             let dependency_in = &dependencies[0];
             assert_eq!(dependency_in.src_subpass, vk::SUBPASS_EXTERNAL);
+            assert_eq!(
+                dependency_in.src_stage_mask,
+                render_attachment_stage_flags()
+            );
+            assert_eq!(
+                dependency_in.src_access_mask,
+                render_attachment_access_flags()
+            );
             assert_eq!(dependency_in.dst_subpass, 0);
             assert_eq!(dependency_in.src_stage_mask, stages);
             assert_eq!(dependency_in.dst_stage_mask, stages);
@@ -5005,7 +5160,7 @@ mod tests {
         let texture = VulkanTexture {
             inner: None,
             swapchain: None,
-            surface_pending: None,
+            _surface_pending: None,
             dimension: HalTextureDimension::D2,
             width: 4,
             height: 4,
@@ -5695,7 +5850,7 @@ mod tests {
         VulkanTexture {
             inner: None,
             swapchain: None,
-            surface_pending: None,
+            _surface_pending: None,
             dimension,
             width: 4,
             height: 4,
@@ -6365,6 +6520,14 @@ mod tests {
         let dependencies = subpass_dependencies(&pass.layout);
         let dependency_in = &dependencies[0];
         assert_eq!(dependency_in.src_subpass, vk::SUBPASS_EXTERNAL);
+        assert_eq!(
+            dependency_in.src_stage_mask,
+            render_attachment_stage_flags()
+        );
+        assert_eq!(
+            dependency_in.src_access_mask,
+            render_attachment_access_flags()
+        );
         assert_eq!(dependency_in.dst_subpass, 0);
         assert_eq!(
             dependency_in.dst_stage_mask,

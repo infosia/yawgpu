@@ -23,7 +23,8 @@ pub(super) const IMAGE_LAYOUT_SHADER_READ_ONLY: u8 = 7;
 pub struct VulkanTexture {
     pub(super) inner: Option<Arc<VulkanTextureInner>>,
     pub(super) swapchain: Option<Arc<VulkanSwapchainInner>>,
-    pub(super) surface_pending: Option<Arc<Mutex<SurfacePendingState>>>,
+    /// Keeps the registered acquire state alive while a swapchain texture is retained.
+    pub(super) _surface_pending: Option<Arc<Mutex<SurfacePendingState>>>,
     pub(super) dimension: HalTextureDimension,
     pub(super) width: u32,
     pub(super) height: u32,
@@ -588,7 +589,8 @@ pub(super) fn layout_barriers(
 }
 
 pub(super) fn buffer_write_read_barrier_dst_access_mask() -> vk::AccessFlags {
-    vk::AccessFlags::SHADER_READ
+    vk::AccessFlags::UNIFORM_READ
+        | vk::AccessFlags::SHADER_READ
         | vk::AccessFlags::SHADER_WRITE
         | vk::AccessFlags::TRANSFER_READ
         | vk::AccessFlags::TRANSFER_WRITE

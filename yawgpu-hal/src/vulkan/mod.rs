@@ -1075,6 +1075,7 @@ impl VulkanAdapter {
             max_sampler_anisotropy,
             #[cfg(feature = "tiled")]
             subpass_render_pass_cache: Mutex::new(BTreeMap::new()),
+            surfaces: Mutex::new(Vec::new()),
             allocations: AtomicU64::new(0),
         });
         Ok(VulkanDevice {
