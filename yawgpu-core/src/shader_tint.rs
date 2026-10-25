@@ -194,6 +194,12 @@ pub struct ReflectedModule {
     fragment_builtins_cache: OnceLock<Vec<ReflectedFragmentBuiltins>>,
     /// Memoized [`Self::overrides`] result.
     overrides_cache: OnceLock<Vec<ReflectedOverride>>,
+    /// Tint module overrides, including implicit ids, shared by reflection queries.
+    raw_overrides_cache: OnceLock<Result<Vec<yawgpu_tint::Override>, String>>,
+    /// Per-entry-point override indices, including deterministic lookup failures.
+    entry_point_override_indices_cache: Mutex<HashMap<String, Result<Vec<usize>, String>>>,
+    #[cfg(test)]
+    entry_point_override_misses: AtomicUsize,
 }
 
 // `ReflectedModule` is `Send + Sync` via ordinary auto-trait derivation, with
@@ -271,6 +277,10 @@ pub(crate) fn parse_and_validate_wgsl_gated(
         codegen_misses: AtomicUsize::new(0),
         fragment_builtins_cache: OnceLock::new(),
         overrides_cache: OnceLock::new(),
+        raw_overrides_cache: OnceLock::new(),
+        entry_point_override_indices_cache: Mutex::new(HashMap::new()),
+        #[cfg(test)]
+        entry_point_override_misses: AtomicUsize::new(0),
     })
 }
 
@@ -1063,26 +1073,43 @@ impl ReflectedModule {
         &self,
         entry_point: &str,
     ) -> Result<Vec<usize>, String> {
-        let ids = self
-            .program
-            .entry_point_override_ids(entry_point)
-            .map_err(|err| err.to_string())?;
-        let overrides = self.program.overrides().map_err(|err| err.to_string())?;
-        Ok(overrides
-            .iter()
-            .enumerate()
-            .filter_map(|(index, ov)| ids.contains(&ov.id).then_some(index))
-            .collect())
+        self.entry_point_override_indices_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(entry_point.to_owned())
+            .or_insert_with(|| {
+                #[cfg(test)]
+                self.entry_point_override_misses
+                    .fetch_add(1, Ordering::Relaxed);
+                let ids = self
+                    .program
+                    .entry_point_override_ids(entry_point)
+                    .map_err(|err| err.to_string())?;
+                let overrides = self.raw_overrides()?;
+                Ok(overrides
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, ov)| ids.contains(&ov.id).then_some(index))
+                    .collect())
+            })
+            .clone()
+    }
+
+    fn raw_overrides(&self) -> Result<&[yawgpu_tint::Override], String> {
+        self.raw_overrides_cache
+            .get_or_init(|| self.program.overrides().map_err(|err| err.to_string()))
+            .as_deref()
+            .map_err(Clone::clone)
     }
 
     /// Returns overrides reflected by the validated shader module, memoized once.
     pub(crate) fn overrides(&self) -> Vec<ReflectedOverride> {
         self.overrides_cache
             .get_or_init(|| {
-                self.program
-                    .overrides()
+                self.raw_overrides()
                     .unwrap_or_default()
-                    .into_iter()
+                    .iter()
+                    .cloned()
                     .map(reflected_override)
                     .collect()
             })
@@ -1822,6 +1849,52 @@ fn reflected_override(override_: yawgpu_tint::Override) -> ReflectedOverride {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn phase_review_m5_override_lookup_memoizes_success_errors_and_concurrent_calls() {
+        let module = std::sync::Arc::new(parse_and_validate_wgsl("override x: u32 = 1; @compute @workgroup_size(x) fn cs() {} @compute @workgroup_size(1) fn other() {}").unwrap());
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let module = module.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..4 {
+                        assert_eq!(module.entry_point_override_indices("cs").unwrap(), vec![0]);
+                        assert!(module
+                            .entry_point_override_indices("other")
+                            .unwrap()
+                            .is_empty());
+                        assert!(module.entry_point_override_indices("missing").is_err());
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(
+            module.entry_point_override_misses.load(Ordering::Relaxed),
+            3
+        );
+        assert!(module.raw_overrides_cache.get().is_some());
+        assert_eq!(module.overrides().len(), 1);
+    }
+
+    #[test]
+    fn phase_review_m6_override_initializer_keeps_transitive_dependency() {
+        let module = parse_and_validate_wgsl("@id(5) override source: u32; override derived: u32 = source + 1; @compute @workgroup_size(derived) fn cs() {} @compute @workgroup_size(1) fn unrelated() {}").unwrap();
+        let overrides = module.overrides();
+        let indices = module.entry_point_override_indices("cs").unwrap();
+        let mut names: Vec<_> = indices
+            .iter()
+            .map(|&i| overrides[i].name.as_deref().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["derived", "source"]);
+        assert!(module
+            .entry_point_override_indices("unrelated")
+            .unwrap()
+            .is_empty());
+    }
+
     #[test]
     fn audit_t4_spirv_f16_io_capability_follows_device_option() {
         let source = "enable f16; @fragment fn fs(@location(0) x: vec4<f16>) -> @location(0) vec4<f32> { return vec4<f32>(x); }";

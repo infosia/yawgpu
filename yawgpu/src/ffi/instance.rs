@@ -243,6 +243,7 @@ pub unsafe extern "C" fn wgpuSupportedInstanceFeaturesFreeMembers(
 /// Returns WGPU instance release.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuInstanceRelease(instance: native::WGPUInstance) {
+    let _ = borrow_handle(instance, "WGPUInstance");
     let owned = Arc::from_raw(instance);
     if owned
         .external_refs

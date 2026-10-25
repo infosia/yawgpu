@@ -216,9 +216,11 @@ pub struct WGPUDeviceImpl {
     pub(crate) instance: Arc<WGPUInstanceImpl>,
     pub(crate) adapter: Arc<core::Adapter>,
     pub(crate) device_lost_callback: DeviceLostCallbackInfo,
-    pub(crate) device_lost_futures: Mutex<Vec<u64>>,
+    pub(crate) device_lost_future: Mutex<Option<u64>>,
     #[cfg(test)]
     pub(crate) lost_future_test_hook: Mutex<Option<LostFutureTestHook>>,
+    #[cfg(test)]
+    pub(crate) destroy_test_error: Mutex<Option<core::DeviceError>>,
     pub(crate) default_queue: Mutex<Option<Arc<WGPUQueueImpl>>>,
     // These descriptor caches deliberately omit labels, matching Dawn cached-object behavior.
     pub(crate) shader_module_cache: ObjectCache<ShaderModuleCacheKey>,
@@ -883,13 +885,11 @@ impl WGPUDeviceImpl {
             return;
         };
         self.instance.abort_pending_device_callbacks(&self.core);
-        let futures = std::mem::take(
-            &mut *self
-                .device_lost_futures
-                .lock()
-                .expect("device lost future lock is not poisoned"),
-        );
-        for future_id in futures {
+        let future = *self
+            .device_lost_future
+            .lock()
+            .expect("device lost future lock is not poisoned");
+        if let Some(future_id) = future {
             {
                 let mut callbacks = self
                     .instance
@@ -908,38 +908,57 @@ impl WGPUDeviceImpl {
     }
 
     fn get_lost_future(&self, device: native::WGPUDevice) -> native::WGPUFuture {
-        let reason = self
-            .core
-            .lost_reason()
-            .unwrap_or(core::DeviceLostReason::Unknown);
-        let future = self
-            .instance
-            .register_pending_callback(PendingCallback::DeviceLost {
-                mode: native::WGPUCallbackMode_WaitAnyOnly,
-                callback: None,
-                device: if device.is_null() {
-                    std::sync::Weak::new()
-                } else {
-                    unsafe { Arc::downgrade(&clone_handle(device, "WGPUDevice")) }
-                },
-                reason,
-                userdata1: 0,
-                userdata2: 0,
-            });
-        let mut lost_futures = self
-            .device_lost_futures
+        let mut lost_future = self
+            .device_lost_future
             .lock()
             .expect("device lost future lock is not poisoned");
+        let newly_registered = lost_future.is_none();
+        let future_id = *lost_future.get_or_insert_with(|| {
+            let info = self.device_lost_callback;
+            self.instance
+                .register_pending_callback(PendingCallback::DeviceLost {
+                    mode: if info.has_callback() {
+                        info.mode
+                    } else {
+                        native::WGPUCallbackMode_WaitAnyOnly
+                    },
+                    callback: info.callback,
+                    device: if device.is_null() {
+                        std::sync::Weak::new()
+                    } else {
+                        unsafe { Arc::downgrade(&clone_handle(device, "WGPUDevice")) }
+                    },
+                    reason: self
+                        .core
+                        .lost_reason()
+                        .unwrap_or(core::DeviceLostReason::Unknown),
+                    userdata1: info.userdata1,
+                    userdata2: info.userdata2,
+                })
+                .id
+        });
         let is_lost = self.core.is_lost();
         #[cfg(test)]
         if let Some((reached, resume)) = self.lost_future_test_hook.lock().unwrap().take() {
             reached.send(()).unwrap();
             resume.recv().unwrap();
         }
-        if is_lost {
+        drop(lost_future);
+        let future = native::WGPUFuture { id: future_id };
+        if is_lost && newly_registered {
+            if let Some(PendingCallback::DeviceLost { reason, .. }) = self
+                .instance
+                .pending_callbacks
+                .lock()
+                .expect("pending callback lock is not poisoned")
+                .get_mut(&future_id)
+            {
+                *reason = self
+                    .core
+                    .lost_reason()
+                    .unwrap_or(core::DeviceLostReason::Unknown);
+            }
             self.instance.complete_future(future);
-        } else {
-            lost_futures.push(future.id);
         }
         future
     }
@@ -1608,11 +1627,13 @@ unsafe fn pipeline_constant_cache_keys(
     }
     let mut keys = std::slice::from_raw_parts(constants, count)
         .iter()
-        .map(|constant| PipelineConstantCacheKey {
-            key: cache_string_view(constant.key).unwrap_or_default(),
-            value_bits: canonical_f64_bits(constant.value),
+        .map(|constant| {
+            Some(PipelineConstantCacheKey {
+                key: cache_string_view(constant.key)?,
+                value_bits: canonical_f64_bits(constant.value),
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Option<Vec<_>>>()?;
     keys.sort_by(|a, b| {
         a.key
             .cmp(&b.key)
@@ -2937,6 +2958,268 @@ pub unsafe fn testing_get_queue_label(queue: native::WGPUQueue) -> String {
 #[cfg(test)]
 mod tests {
     #![allow(non_snake_case)]
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn phase_review_major_m1_tiled_entries_retain_device_during_release() {
+        unsafe {
+            let mut retained = Vec::new();
+            for pipeline in [false, true] {
+                let (instance, adapter, device) = noop_chain();
+                let module = create_wgsl_module(device, "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0); } @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }");
+                let layout =
+                    wgpuDeviceCreatePipelineLayout(device, &pipeline_layout_descriptor(&[]));
+                let pass_desc: crate::YaWGPUSubpassPassLayoutDescriptor = std::mem::zeroed();
+                // A live error layout supplies the required handle while forcing pipeline validation.
+                wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+                let pass_layout = crate::yawgpuDeviceCreateSubpassPassLayout(device, &pass_desc);
+                assert_validation_error_contains(instance, device, "");
+                let weak = Arc::downgrade(&clone_handle(device, "WGPUDevice"));
+                let check = weak.clone();
+                let observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let count = observed.clone();
+                let address = device as usize;
+                borrow_handle(device, "WGPUDevice")
+                    .core
+                    .set_uncaptured_error_callback(Some(move |_| {
+                        let refs = check.strong_count();
+                        count.store(refs, std::sync::atomic::Ordering::SeqCst);
+                        if refs >= 2 {
+                            wgpuDeviceRelease(address as native::WGPUDevice);
+                        }
+                    }));
+                if pipeline {
+                    let descriptor = crate::YaWGPUSubpassRenderPipelineDescriptor {
+                        nextInChain: std::ptr::null(),
+                        base: render_pipeline_descriptor(module, module, layout),
+                        passLayout: pass_layout,
+                        subpassIndex: 0,
+                    };
+                    let result =
+                        crate::yawgpuDeviceCreateSubpassRenderPipeline(device, &descriptor);
+                    assert!(borrow_handle(result, "WGPURenderPipeline")._core.is_error());
+                    wgpuRenderPipelineRelease(result);
+                } else {
+                    let result = crate::yawgpuDeviceCreateSubpassPassLayout(device, &pass_desc);
+                    assert!(borrow_handle(result, "YaWGPUSubpassPassLayout")
+                        ._core
+                        .is_error());
+                    crate::yawgpuSubpassPassLayoutRelease(result);
+                }
+                let refs = observed.load(std::sync::atomic::Ordering::SeqCst);
+                if refs < 2 {
+                    wgpuDeviceRelease(device);
+                }
+                assert!(weak.upgrade().is_none());
+                crate::yawgpuSubpassPassLayoutRelease(pass_layout);
+                wgpuPipelineLayoutRelease(layout);
+                wgpuShaderModuleRelease(module);
+                wgpuAdapterRelease(adapter);
+                wgpuInstanceRelease(instance);
+                retained.push((pipeline, refs));
+            }
+            assert!(
+                retained.iter().all(|(_, refs)| *refs >= 2),
+                "tiled entries must retain the device: {retained:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn phase_review_major_m1_vendor_entry_retains_device_during_release() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let weak = Arc::downgrade(&clone_handle(device, "WGPUDevice"));
+            let check = weak.clone();
+            let observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count = observed.clone();
+            let address = device as usize;
+            borrow_handle(device, "WGPUDevice")
+                .core
+                .set_uncaptured_error_callback(Some(move |_| {
+                    let refs = check.strong_count();
+                    count.store(refs, std::sync::atomic::Ordering::SeqCst);
+                    // Avoid executing a use-after-free on the pre-fix implementation.
+                    if refs >= 2 {
+                        wgpuDeviceRelease(address as native::WGPUDevice);
+                    }
+                }));
+            let descriptor: crate::YaWGPUExternalTextureDescriptor = std::mem::zeroed();
+            assert!(crate::yawgpuDeviceCreateExternalTexture(device, &descriptor).is_null());
+            let refs = observed.load(std::sync::atomic::Ordering::SeqCst);
+            if refs < 2 {
+                wgpuDeviceRelease(device);
+            }
+            assert!(weak.upgrade().is_none());
+            wgpuAdapterRelease(adapter);
+            wgpuInstanceRelease(instance);
+            assert!(refs >= 2, "vendor entry point did not retain the device");
+        }
+    }
+
+    #[test]
+    fn phase_review_major_m1_destroy_retains_device_during_release() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let weak = Arc::downgrade(&clone_handle(device, "WGPUDevice"));
+            let check = weak.clone();
+            let observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count = observed.clone();
+            let address = device as usize;
+            borrow_handle(device, "WGPUDevice")
+                .core
+                .set_uncaptured_error_callback(Some(move |_| {
+                    let refs = check.strong_count();
+                    count.store(refs, std::sync::atomic::Ordering::SeqCst);
+                    if refs >= 2 {
+                        wgpuDeviceRelease(address as native::WGPUDevice);
+                    }
+                }));
+            *borrow_handle(device, "WGPUDevice")
+                .destroy_test_error
+                .lock()
+                .unwrap() = Some(core::DeviceError::new(
+                core::ErrorKind::Internal,
+                "injected wait_idle failure",
+            ));
+            wgpuDeviceDestroy(device);
+            let refs = observed.load(std::sync::atomic::Ordering::SeqCst);
+            if refs < 2 {
+                wgpuDeviceRelease(device);
+            }
+            assert!(weak.upgrade().is_none());
+            wgpuAdapterRelease(adapter);
+            wgpuInstanceRelease(instance);
+            assert!(refs >= 2, "destroy did not retain the device");
+        }
+    }
+
+    #[test]
+    fn phase_review_m2_null_instance_release_checks_contract() {
+        const CHILD: &str = "YAWGPU_TEST_NULL_INSTANCE_RELEASE";
+        if std::env::var_os(CHILD).is_some() {
+            unsafe {
+                wgpuInstanceRelease(std::ptr::null());
+            }
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "ffi::tests::phase_review_m2_null_instance_release_checks_contract",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("WGPUInstance must not be null"));
+    }
+
+    #[test]
+    fn phase_review_m3_wait_any_uses_creation_lost_event() {
+        unsafe extern "C" fn lost(
+            _: *const native::WGPUDevice,
+            _: native::WGPUDeviceLostReason,
+            _: native::WGPUStringView,
+            data: *mut c_void,
+            _: *mut c_void,
+        ) {
+            *(data as *mut usize) += 1;
+        }
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+            let mut errors = UncapturedErrorState::default();
+            let mut descriptor = device_descriptor_with_uncaptured_error_callback(&mut errors, 0);
+            let mut calls = 0usize;
+            descriptor.deviceLostCallbackInfo = native::WGPUDeviceLostCallbackInfo {
+                mode: native::WGPUCallbackMode_WaitAnyOnly,
+                callback: Some(lost),
+                userdata1: (&mut calls as *mut usize).cast(),
+                ..std::mem::zeroed()
+            };
+            let device = request_noop_device_with_descriptor(instance, adapter, &descriptor);
+            let future = wgpuDeviceGetLostFuture(device);
+            assert_eq!(wgpuDeviceGetLostFuture(device).id, future.id);
+            assert_eq!(calls, 0);
+            wgpuDeviceDestroy(device);
+            wgpuInstanceProcessEvents(instance);
+            assert_eq!(calls, 0);
+            let mut wait = native::WGPUFutureWaitInfo {
+                future,
+                completed: 0,
+            };
+            assert_eq!(
+                wgpuInstanceWaitAny(instance, 1, &mut wait, 0),
+                native::WGPUWaitStatus_Success
+            );
+            assert_eq!(wait.completed, 1);
+            let calls_after_wait = calls;
+            assert_eq!(wgpuDeviceGetLostFuture(device).id, future.id);
+            wgpuInstanceWaitAny(instance, 1, &mut wait, 0);
+            assert_eq!(calls, calls_after_wait);
+            release_handles(instance, adapter, device);
+            assert_eq!(calls_after_wait, 1);
+        }
+    }
+
+    #[test]
+    fn phase_review_m7_constant_keys_reject_invalid_utf8_in_all_stages() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let module = create_wgsl_module(device, "override x: f32 = 1; @compute @workgroup_size(1) fn cs() {} @vertex fn vs() -> @builtin(position) vec4f { return vec4f(x); } @fragment fn fs() -> @location(0) vec4f { return vec4f(x); }");
+            let layout = wgpuDeviceCreatePipelineLayout(device, &pipeline_layout_descriptor(&[]));
+            // Exercise validation with a live successful pipeline in the cache.
+            let mut constant = native::WGPUConstantEntry {
+                key: string_view(b"x"),
+                value: 2.0,
+                ..std::mem::zeroed()
+            };
+            let mut compute = compute_pipeline_descriptor(module, layout);
+            compute.compute.constantCount = 1;
+            compute.compute.constants = &constant;
+            let cached = wgpuDeviceCreateComputePipeline(device, &compute);
+            assert!(!borrow_handle(cached, "WGPUComputePipeline")
+                ._core
+                .is_error());
+            constant.key = string_view(&[0xFF]);
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let pipeline = wgpuDeviceCreateComputePipeline(device, &compute);
+            assert!(borrow_handle(pipeline, "WGPUComputePipeline")
+                ._core
+                .is_error());
+            assert_validation_error_contains(instance, device, "constant key must be valid UTF-8");
+            wgpuComputePipelineRelease(pipeline);
+            wgpuComputePipelineRelease(cached);
+            for vertex in [true, false] {
+                let mut render = render_pipeline_descriptor(module, module, layout);
+                let fragment = &mut *render.fragment.cast_mut();
+                if vertex {
+                    render.vertex.constantCount = 1;
+                    render.vertex.constants = &constant;
+                } else {
+                    fragment.constantCount = 1;
+                    fragment.constants = &constant;
+                }
+                render.fragment = fragment;
+                wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+                let pipeline = wgpuDeviceCreateRenderPipeline(device, &render);
+                assert!(borrow_handle(pipeline, "WGPURenderPipeline")
+                    ._core
+                    .is_error());
+                assert_validation_error_contains(
+                    instance,
+                    device,
+                    "constant key must be valid UTF-8",
+                );
+                wgpuRenderPipelineRelease(pipeline);
+            }
+            wgpuPipelineLayoutRelease(layout);
+            wgpuShaderModuleRelease(module);
+            release_handles(instance, adapter, device);
+        }
+    }
+
     #[test]
     fn audit_c11_uncaptured_callback_can_release_its_device_reentrantly() {
         unsafe extern "C" fn release(
@@ -9869,7 +10152,7 @@ mod tests {
     }
 
     #[test]
-    fn audit_e12_invalid_binding_dimension_chain_is_a_validation_error() {
+    fn phase_review_m4_core_ignores_invalid_binding_dimension_chain() {
         unsafe {
             let (instance, adapter, device) = noop_chain();
             let mut binding = native::WGPUTextureBindingViewDimension {
@@ -9883,8 +10166,10 @@ mod tests {
             desc.nextInChain = &mut binding.chain;
             wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
             let texture = wgpuDeviceCreateTexture(device, &desc);
-            assert!(borrow_handle(texture, "WGPUTexture").core.is_error());
-            assert_validation_error_contains(instance, device, "invalid texture view dimension");
+            assert!(!borrow_handle(texture, "WGPUTexture").core.is_error());
+            let mut scope = PopErrorScopeState::default();
+            pop_error_scope(instance, device, &mut scope);
+            assert_eq!(scope.error_type, native::WGPUErrorType_NoError);
             assert_eq!(
                 wgpuTextureGetTextureBindingViewDimension(texture),
                 native::WGPUTextureViewDimension_Undefined

@@ -44,7 +44,7 @@ pub unsafe extern "C" fn yawgpuDeviceCreateSubpassPassLayout(
     device: native::WGPUDevice,
     descriptor: *const YaWGPUSubpassPassLayoutDescriptor,
 ) -> crate::YaWGPUSubpassPassLayout {
-    let device = borrow_handle(device, "WGPUDevice");
+    let device = clone_handle(device, "WGPUDevice");
     let descriptor = descriptor
         .as_ref()
         .expect("YaWGPUSubpassPassLayoutDescriptor must not be null");
@@ -93,11 +93,11 @@ pub unsafe extern "C" fn yawgpuDeviceCreateSubpassRenderPipeline(
     device: native::WGPUDevice,
     descriptor: *const YaWGPUSubpassRenderPipelineDescriptor,
 ) -> native::WGPURenderPipeline {
-    let device = borrow_handle(device, "WGPUDevice");
+    let device = clone_handle(device, "WGPUDevice");
     let descriptor = descriptor
         .as_ref()
         .expect("YaWGPUSubpassRenderPipelineDescriptor must not be null");
-    let device_error = validate_subpass_render_pipeline_devices(device, descriptor);
+    let device_error = validate_subpass_render_pipeline_devices(&device, descriptor);
     let label = label_from_string_view(descriptor.base.label);
     let mut descriptor = map_subpass_render_pipeline_descriptor(descriptor);
     if descriptor.error.is_none() {

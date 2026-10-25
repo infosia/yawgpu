@@ -191,9 +191,11 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
                 instance: Arc::clone(&adapter.instance),
                 adapter: Arc::clone(&adapter.core),
                 device_lost_callback,
-                device_lost_futures: Mutex::new(Vec::new()),
+                device_lost_future: Mutex::new(None),
                 #[cfg(test)]
                 lost_future_test_hook: Mutex::new(None),
+                #[cfg(test)]
+                destroy_test_error: Mutex::new(None),
                 external_refs: std::sync::atomic::AtomicUsize::new(1),
                 default_queue: Mutex::new(None),
                 shader_module_cache: ObjectCache::new(),
@@ -226,25 +228,7 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
                     );
                 }));
             }
-            let device_lost_callback = device_impl.device_lost_callback;
-            if device_lost_callback.has_callback() {
-                let future =
-                    adapter
-                        .instance
-                        .register_pending_callback(PendingCallback::DeviceLost {
-                            mode: device_lost_callback.mode,
-                            callback: device_lost_callback.callback,
-                            device: Arc::downgrade(&device_impl),
-                            reason: core::DeviceLostReason::Unknown,
-                            userdata1: device_lost_callback.userdata1,
-                            userdata2: device_lost_callback.userdata2,
-                        });
-                device_impl
-                    .device_lost_futures
-                    .lock()
-                    .expect("device lost future lock is not poisoned")
-                    .push(future.id);
-            }
+            device_impl.get_lost_future(Arc::as_ptr(&device_impl));
             device_impl
         });
     let failed = result.is_err();

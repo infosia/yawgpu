@@ -29,7 +29,7 @@ pub unsafe extern "C" fn yawgpuDeviceCreateExternalTexture(
     device: native::WGPUDevice,
     descriptor: *const YaWGPUExternalTextureDescriptor,
 ) -> native::WGPUExternalTexture {
-    let device = borrow_handle(device, "WGPUDevice");
+    let device = clone_handle(device, "WGPUDevice");
     let descriptor = descriptor
         .as_ref()
         .expect("YaWGPUExternalTextureDescriptor must not be null");
@@ -178,9 +178,11 @@ mod tests {
                 userdata1: 0,
                 userdata2: 0,
             },
-            device_lost_futures: Mutex::new(Vec::new()),
+            device_lost_future: Mutex::new(None),
             #[cfg(test)]
             lost_future_test_hook: Mutex::new(None),
+            #[cfg(test)]
+            destroy_test_error: Mutex::new(None),
             external_refs: std::sync::atomic::AtomicUsize::new(1),
             default_queue: Mutex::new(None),
             shader_module_cache: ObjectCache::new(),

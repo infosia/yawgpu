@@ -242,7 +242,13 @@ unsafe fn map_pipeline_constants(
     std::slice::from_raw_parts(entries, count)
         .iter()
         .map(|entry| {
-            let key = string_view_to_str(entry.key).unwrap_or_default().to_owned();
+            let key = match string_view_to_str(entry.key) {
+                Some(key) => key.to_owned(),
+                None => {
+                    set_first_error(error, &format!("{label} constant key must be valid UTF-8"));
+                    String::new()
+                }
+            };
             core::PipelineConstant {
                 key,
                 value: entry.value,

@@ -44,7 +44,15 @@ pub unsafe extern "C" fn wgpuDeviceAddRef(device: native::WGPUDevice) {
 /// Returns WGPU device destroy.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceDestroy(device: native::WGPUDevice) {
-    let device_impl = borrow_handle(device, "WGPUDevice");
+    let device_impl = clone_handle(device, "WGPUDevice");
+    // Exercise the wait-idle error path on Noop without backend fault injection.
+    #[cfg(test)]
+    {
+        let error = device_impl.destroy_test_error.lock().unwrap().take();
+        if let Some(error) = error {
+            device_impl.dispatch_error(error.kind, error.message);
+        }
+    }
     device_impl.schedule_device_lost(core::DeviceLostReason::Destroyed);
 }
 
@@ -56,7 +64,7 @@ pub unsafe extern "C" fn wgpuDeviceDestroy(device: native::WGPUDevice) {
 /// Returns WGPU device get lost future.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceGetLostFuture(device: native::WGPUDevice) -> native::WGPUFuture {
-    let device_impl = borrow_handle(device, "WGPUDevice");
+    let device_impl = clone_handle(device, "WGPUDevice");
     device_impl.get_lost_future(device)
 }
 
@@ -223,6 +231,9 @@ unsafe fn texture_binding_view_dimension(
     device: &core::Device,
     error: &mut Option<String>,
 ) -> native::WGPUTextureViewDimension {
+    if device.has_feature(core::Feature::CoreFeaturesAndLimits) {
+        return native::WGPUTextureViewDimension_Undefined;
+    }
     let dimension = find_in_chain::<native::WGPUTextureBindingViewDimension>(
         descriptor.nextInChain,
         native::WGPUSType_TextureBindingViewDimension,
@@ -231,9 +242,6 @@ unsafe fn texture_binding_view_dimension(
         binding.textureBindingViewDimension
     });
     let _ = crate::conv::map_texture_view_dimension(dimension, error);
-    if device.has_feature(core::Feature::CoreFeaturesAndLimits) {
-        return native::WGPUTextureViewDimension_Undefined;
-    }
     let dimension = if dimension == native::WGPUTextureViewDimension_Undefined {
         match descriptor.dimension {
             native::WGPUTextureDimension_1D => native::WGPUTextureViewDimension_1D,

@@ -149,10 +149,12 @@ fn get_lost_future_completes_once_on_destroy_and_after_already_lost() {
         assert_wait_pending(fixture.instance, future);
 
         yawgpu::wgpuDeviceDestroy(device);
+        // Block 113 Phase Review m3: `GetLostFuture` returns the device-lost
+        // event's own future (Dawn `APIGetLostFuture`), so waiting on it
+        // delivers the lost callback — exactly once, never again from
+        // ProcessEvents.
         wait_one(fixture.instance, future);
         wait_one(fixture.instance, future);
-        assert!(recorder.events.is_empty());
-
         yawgpu::wgpuInstanceProcessEvents(fixture.instance);
         yawgpu::wgpuInstanceProcessEvents(fixture.instance);
         assert_eq!(

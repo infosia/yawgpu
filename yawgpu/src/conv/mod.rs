@@ -195,9 +195,11 @@ mod tests {
                 userdata1: 0,
                 userdata2: 0,
             },
-            device_lost_futures: Mutex::new(Vec::new()),
+            device_lost_future: Mutex::new(None),
             #[cfg(test)]
             lost_future_test_hook: Mutex::new(None),
+            #[cfg(test)]
+            destroy_test_error: Mutex::new(None),
             external_refs: std::sync::atomic::AtomicUsize::new(1),
             default_queue: Mutex::new(None),
             shader_module_cache: ObjectCache::new(),
@@ -1086,6 +1088,9 @@ mod tests {
             map_load_op(native::WGPULoadOp_Undefined, &mut None),
             core::LoadOp::Undefined
         );
+        let mut error = None;
+        assert_eq!(map_load_op(0xCAFE, &mut error), core::LoadOp::Undefined);
+        assert_eq!(error.as_deref(), Some("invalid load op"));
     }
 
     #[test]
@@ -1102,6 +1107,9 @@ mod tests {
             map_store_op(native::WGPUStoreOp_Undefined, &mut None),
             core::StoreOp::Undefined
         );
+        let mut error = None;
+        assert_eq!(map_store_op(0xCAFE, &mut error), core::StoreOp::Undefined);
+        assert_eq!(error.as_deref(), Some("invalid store op"));
     }
 
     #[test]
@@ -2146,6 +2154,10 @@ mod tests {
             unsafe { map_texture_descriptor(&null_view_formats, &mut error) }
                 .view_formats
                 .is_empty()
+        );
+        assert_eq!(
+            error.as_deref(),
+            Some("viewFormats must not be null when count is non-zero")
         );
     }
 

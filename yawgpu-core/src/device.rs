@@ -296,14 +296,20 @@ impl Device {
 
     /// Pops the innermost error scope, returning the first matching error it captured.
     pub fn pop_error_scope(&self) -> Result<Option<DeviceError>, PopErrorScopeError> {
-        self.inner
-            .error_sink
-            .lock()
+        let thread = std::thread::current().id();
+        let mut sink = self.inner.error_sink.lock();
+        let stack = sink
             .scopes
-            .get_mut(&std::thread::current().id())
-            .and_then(Vec::pop)
+            .get_mut(&thread)
+            .ok_or(PopErrorScopeError::EmptyStack)?;
+        let result = stack
+            .pop()
             .map(|scope| scope.error)
-            .ok_or(PopErrorScopeError::EmptyStack)
+            .ok_or(PopErrorScopeError::EmptyStack);
+        if stack.is_empty() {
+            sink.scopes.remove(&thread);
+        }
+        result
     }
 
     /// Routes an error to the active error scope, or to the uncaptured-error callback if none is active.
@@ -318,9 +324,9 @@ impl Device {
             let mut sink = self.inner.error_sink.lock();
             for scope in sink
                 .scopes
-                .entry(std::thread::current().id())
-                .or_default()
-                .iter_mut()
+                .get_mut(&std::thread::current().id())
+                .into_iter()
+                .flatten()
                 .rev()
             {
                 if scope.filter.matches(error.kind) {
@@ -348,6 +354,9 @@ impl Device {
                     if let Some(count) = sink.active_callbacks.get_mut(&std::thread::current().id())
                     {
                         *count -= 1;
+                        if *count == 0 {
+                            sink.active_callbacks.remove(&std::thread::current().id());
+                        }
                     }
                     self.0.callbacks_idle.notify_all();
                 }
@@ -959,6 +968,55 @@ impl Device {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn phase_review_m6_pipeline_requires_override_used_only_by_initializer() {
+        let device = noop_device();
+        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+            "@id(5) override source: u32; override derived: u32 = source + 1; @compute @workgroup_size(derived) fn cs() {}".into())));
+        let mut descriptor = compute_pipeline_descriptor(module);
+        device.push_error_scope(ErrorFilter::Validation);
+        let missing = device.create_compute_pipeline(descriptor.clone());
+        assert!(missing.is_error());
+        assert!(device.pop_error_scope().unwrap().is_some());
+        descriptor.constants.push(crate::PipelineConstant {
+            key: "5".into(),
+            value: 1.0,
+        });
+        device.push_error_scope(ErrorFilter::Validation);
+        let pipeline = device.create_compute_pipeline(descriptor);
+        assert!(!pipeline.is_error());
+        assert_eq!(device.pop_error_scope(), Ok(None));
+    }
+
+    #[test]
+    fn phase_review_m1_thread_bookkeeping_is_trimmed() {
+        let device = noop_device();
+        device.set_uncaptured_error_callback(Some(|_| {}));
+        for _ in 0..16 {
+            let worker = device.clone();
+            std::thread::spawn(move || {
+                worker.dispatch_error(ErrorKind::Validation, "unscoped");
+                assert_eq!(
+                    worker.pop_error_scope(),
+                    Err(PopErrorScopeError::EmptyStack)
+                );
+                worker.push_error_scope(ErrorFilter::Internal);
+                worker.push_error_scope(ErrorFilter::Validation);
+                worker.dispatch_error(ErrorKind::Validation, "scoped");
+                assert!(worker.pop_error_scope().unwrap().is_some());
+                worker.dispatch_error(ErrorKind::Validation, "unmatched");
+                assert_eq!(worker.pop_error_scope(), Ok(None));
+            })
+            .join()
+            .unwrap();
+        }
+        let sink = device.inner.error_sink.lock();
+        assert!(sink.scopes.is_empty());
+        assert!(sink.active_callbacks.is_empty());
+        drop(sink);
+        device.clear_uncaptured_error_callback();
+    }
+
     #[test]
     fn audit_c5_error_scopes_belong_to_the_current_thread() {
         let device = noop_device();
