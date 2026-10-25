@@ -221,7 +221,15 @@ pub unsafe extern "C" fn wgpuQueueWriteTexture(
         );
         return;
     }
-    let aspect = map_texture_aspect(destination.aspect).unwrap_or(core::TextureAspect::All);
+    let mut error = None;
+    let aspect =
+        map_texture_aspect(destination.aspect, &mut error).unwrap_or(core::TextureAspect::All);
+    if let Some(error) = error {
+        queue
+            .device
+            .dispatch_error(core::ErrorKind::Validation, error);
+        return;
+    }
 
     let data = ffi_slice(data.cast::<u8>(), data_size_usize);
     dispatch_optional_device_error(

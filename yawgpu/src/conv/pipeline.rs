@@ -86,7 +86,7 @@ pub unsafe fn map_compute_pipeline_descriptor(
             borrow_handle::<WGPUPipelineLayoutImpl>(descriptor.layout, "WGPUPipelineLayout");
         core::ComputePipelineLayout::Explicit(Arc::clone(&layout._core))
     };
-    let entry_point = string_view_to_str(compute.entryPoint).map(ToOwned::to_owned);
+    let entry_point = map_entry_point(compute.entryPoint, &mut error);
     let constants = map_pipeline_constants(
         compute.constantCount,
         compute.constants,
@@ -130,7 +130,7 @@ pub unsafe fn map_render_pipeline_descriptor(
     let vertex = core::RenderPipelineVertexState {
         shader: core::RenderPipelineShaderStage {
             module: Arc::clone(&vertex_module._core),
-            entry_point: string_view_to_str(descriptor.vertex.entryPoint).map(ToOwned::to_owned),
+            entry_point: map_entry_point(descriptor.vertex.entryPoint, &mut error),
             constants: map_pipeline_constants(
                 descriptor.vertex.constantCount,
                 descriptor.vertex.constants,
@@ -154,7 +154,7 @@ pub unsafe fn map_render_pipeline_descriptor(
         Some(core::RenderPipelineFragmentState {
             shader: core::RenderPipelineShaderStage {
                 module: Arc::clone(&fragment_module._core),
-                entry_point: string_view_to_str(fragment.entryPoint).map(ToOwned::to_owned),
+                entry_point: map_entry_point(fragment.entryPoint, &mut error),
                 constants: map_pipeline_constants(
                     fragment.constantCount,
                     fragment.constants,
@@ -461,6 +461,17 @@ fn map_stencil_operation(
             core::StencilOperation::Keep
         }
     }
+}
+
+unsafe fn map_entry_point(
+    value: native::WGPUStringView,
+    error: &mut Option<String>,
+) -> Option<String> {
+    let text = string_view_to_str(value);
+    if !value.data.is_null() && text.is_none() {
+        set_first_error(error, "entry point must be valid UTF-8");
+    }
+    text.map(ToOwned::to_owned)
 }
 
 #[cfg(test)]

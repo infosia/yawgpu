@@ -102,7 +102,11 @@ pub unsafe extern "C" fn wgpuTextureGetTextureBindingViewDimension(
     texture: native::WGPUTexture,
 ) -> native::WGPUTextureViewDimension {
     let texture = borrow_handle(texture, "WGPUTexture");
-    if texture.core.is_error() {
+    if texture.core.is_error()
+        || texture
+            .device
+            .has_feature(core::Feature::CoreFeaturesAndLimits)
+    {
         return native::WGPUTextureViewDimension_Undefined;
     }
     if texture.binding_view_dimension != native::WGPUTextureViewDimension_Undefined {

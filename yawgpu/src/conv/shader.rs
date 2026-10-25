@@ -40,8 +40,15 @@ pub unsafe fn map_shader_module_descriptor(
                         "WGSL shader source chain node must be valid".to_owned(),
                     );
                 };
-                let code =
-                    string_view_to_str(wgsl.code).map_or_else(String::new, ToOwned::to_owned);
+                let code = match string_view_to_str(wgsl.code) {
+                    Some(code) => code.to_owned(),
+                    None if wgsl.code.data.is_null() => String::new(),
+                    None => {
+                        return core::ShaderModuleSource::Invalid(
+                            "WGSL source must be valid UTF-8".to_owned(),
+                        )
+                    }
+                };
                 Some(core::ShaderModuleSource::Wgsl(code))
             }
             native::WGPUSType_ShaderSourceSPIRV => {

@@ -615,10 +615,10 @@ impl WGPUInstanceImpl {
     }
 
     fn register_pending_callback(&self, callback: PendingCallback) -> native::WGPUFuture {
-        let future = self
-            .core
-            .future_registry()
-            .register(callback.callback_mode());
+        let Some(mode) = callback.callback_mode() else {
+            return native::WGPUFuture { id: 0 };
+        };
+        let future = self.core.future_registry().register(mode);
         self.pending_callbacks
             .lock()
             .expect("pending callback lock is not poisoned")
@@ -627,6 +627,9 @@ impl WGPUInstanceImpl {
     }
 
     fn complete_future(&self, future: native::WGPUFuture) {
+        if future.id == 0 {
+            return;
+        }
         self.core
             .future_registry()
             .complete(core::FutureId::from_raw(future.id));
@@ -845,7 +848,7 @@ impl WGPUDeviceImpl {
         let future = self
             .instance
             .register_pending_callback(PendingCallback::DeviceLost {
-                mode: 0,
+                mode: native::WGPUCallbackMode_WaitAnyOnly,
                 callback: None,
                 device: device as usize,
                 reason,
@@ -1116,7 +1119,10 @@ unsafe fn core_shader_module_ptr(module: native::WGPUShaderModule) -> usize {
 unsafe fn compute_pipeline_cache_key(
     descriptor: &native::WGPUComputePipelineDescriptor,
 ) -> Option<ComputePipelineCacheKey> {
-    if descriptor.compute.module.is_null() {
+    if descriptor.compute.module.is_null()
+        || (!descriptor.compute.entryPoint.data.is_null()
+            && string_view_to_str(descriptor.compute.entryPoint).is_none())
+    {
         return None;
     }
     let layout = unsafe { layout_identity(descriptor.layout) };
@@ -1137,7 +1143,13 @@ unsafe fn compute_pipeline_cache_key(
 unsafe fn render_pipeline_cache_key(
     descriptor: &native::WGPURenderPipelineDescriptor,
 ) -> Option<RenderPipelineCacheKey> {
-    if descriptor.vertex.module.is_null() {
+    if descriptor.vertex.module.is_null()
+        || (!descriptor.vertex.entryPoint.data.is_null()
+            && string_view_to_str(descriptor.vertex.entryPoint).is_none())
+        || descriptor.fragment.as_ref().is_some_and(|fragment| {
+            !fragment.entryPoint.data.is_null() && string_view_to_str(fragment.entryPoint).is_none()
+        })
+    {
         return None;
     }
     let layout = unsafe { layout_identity(descriptor.layout) };
@@ -1705,6 +1717,8 @@ pub(crate) enum PendingCallback {
         /// delivered with `WGPURequestAdapterStatus_Unavailable` and a null
         /// adapter when no enumerated adapter satisfies the request.
         result: Result<Arc<WGPUAdapterImpl>, String>,
+        /// Status delivered when adapter selection fails.
+        error_status: native::WGPURequestAdapterStatus,
         /// Userdata1 variant.
         userdata1: usize,
         /// Userdata2 variant.
@@ -1880,7 +1894,7 @@ impl PendingCallback {
         }
     }
 
-    fn callback_mode(&self) -> core::FutureCallbackMode {
+    fn callback_mode(&self) -> Option<core::FutureCallbackMode> {
         let mode = match self {
             Self::RequestAdapter { mode, .. }
             | Self::RequestDevice { mode, .. }
@@ -1894,10 +1908,13 @@ impl PendingCallback {
         };
         match mode {
             native::WGPUCallbackMode_AllowProcessEvents => {
-                core::FutureCallbackMode::AllowProcessEvents
+                Some(core::FutureCallbackMode::AllowProcessEvents)
             }
-            native::WGPUCallbackMode_AllowSpontaneous => core::FutureCallbackMode::AllowSpontaneous,
-            _ => core::FutureCallbackMode::WaitAnyOnly,
+            native::WGPUCallbackMode_AllowSpontaneous => {
+                Some(core::FutureCallbackMode::AllowSpontaneous)
+            }
+            native::WGPUCallbackMode_WaitAnyOnly => Some(core::FutureCallbackMode::WaitAnyOnly),
+            _ => None,
         }
     }
 
@@ -1905,6 +1922,7 @@ impl PendingCallback {
         match self {
             Self::RequestAdapter {
                 callback,
+                error_status,
                 result,
                 userdata1,
                 userdata2,
@@ -1920,7 +1938,7 @@ impl PendingCallback {
                             userdata2 as *mut c_void,
                         ),
                         Err(message) => callback(
-                            native::WGPURequestAdapterStatus_Unavailable,
+                            error_status,
                             std::ptr::null(),
                             string_view(message.as_bytes()),
                             userdata1 as *mut c_void,
@@ -2358,32 +2376,33 @@ unsafe fn free_owned_string_view(value: native::WGPUStringView) {
     drop(Box::from_raw(slice));
 }
 
-unsafe fn dynamic_offsets_slice(count: usize, offsets: *const u32) -> Vec<u32> {
+unsafe fn dynamic_offsets_slice(
+    count: usize,
+    offsets: *const u32,
+) -> Result<Vec<u32>, &'static str> {
     if count == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    assert!(
-        !offsets.is_null(),
-        "dynamicOffsets must not be null when count is non-zero"
-    );
-    std::slice::from_raw_parts(offsets, count).to_vec()
+    if offsets.is_null() {
+        return Err("dynamicOffsets must not be null when count is non-zero");
+    }
+    Ok(std::slice::from_raw_parts(offsets, count).to_vec())
 }
 
 unsafe fn render_bundle_slice(
     count: usize,
     bundles: *const native::WGPURenderBundle,
-) -> Vec<Arc<WGPURenderBundleImpl>> {
+) -> Result<Vec<Arc<WGPURenderBundleImpl>>, &'static str> {
     if count == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    assert!(
-        !bundles.is_null(),
-        "bundles must not be null when count is non-zero"
-    );
-    std::slice::from_raw_parts(bundles, count)
+    if bundles.is_null() {
+        return Err("bundles must not be null when count is non-zero");
+    }
+    Ok(std::slice::from_raw_parts(bundles, count)
         .iter()
         .map(|bundle| clone_handle::<WGPURenderBundleImpl>(*bundle, "WGPURenderBundle"))
-        .collect()
+        .collect())
 }
 
 fn map_index_format(format: native::WGPUIndexFormat) -> Option<core::IndexFormat> {
@@ -2523,16 +2542,16 @@ unsafe fn gles_context_backend_choice(
 
 unsafe fn required_features_from_descriptor(
     descriptor: &native::WGPUDeviceDescriptor,
-) -> Vec<core::Feature> {
+) -> Result<Vec<core::Feature>, String> {
     if descriptor.requiredFeatureCount == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     if descriptor.requiredFeatures.is_null() {
-        return Vec::new();
+        return Err("requiredFeatures must not be null when count is non-zero".to_owned());
     }
     let features =
         std::slice::from_raw_parts(descriptor.requiredFeatures, descriptor.requiredFeatureCount);
-    features.iter().copied().map(map_feature).collect()
+    Ok(features.iter().copied().map(map_feature).collect())
 }
 
 fn validate_map_async(
@@ -6832,14 +6851,14 @@ mod tests {
             let texture_1d = wgpuDeviceCreateTexture(device, &desc_1d);
             assert_eq!(
                 wgpuTextureGetTextureBindingViewDimension(texture_1d),
-                native::WGPUTextureViewDimension_1D
+                native::WGPUTextureViewDimension_Undefined
             );
 
             let desc_2d = texture_descriptor(native::WGPUTextureUsage_TextureBinding, 4);
             let texture_2d = wgpuDeviceCreateTexture(device, &desc_2d);
             assert_eq!(
                 wgpuTextureGetTextureBindingViewDimension(texture_2d),
-                native::WGPUTextureViewDimension_2D
+                native::WGPUTextureViewDimension_Undefined
             );
 
             let mut desc_2d_array = texture_descriptor(native::WGPUTextureUsage_TextureBinding, 4);
@@ -6847,7 +6866,7 @@ mod tests {
             let texture_2d_array = wgpuDeviceCreateTexture(device, &desc_2d_array);
             assert_eq!(
                 wgpuTextureGetTextureBindingViewDimension(texture_2d_array),
-                native::WGPUTextureViewDimension_2DArray
+                native::WGPUTextureViewDimension_Undefined
             );
 
             let desc_3d =
@@ -6855,7 +6874,7 @@ mod tests {
             let texture_3d = wgpuDeviceCreateTexture(device, &desc_3d);
             assert_eq!(
                 wgpuTextureGetTextureBindingViewDimension(texture_3d),
-                native::WGPUTextureViewDimension_3D
+                native::WGPUTextureViewDimension_Undefined
             );
 
             let mut explicit_binding = native::WGPUTextureBindingViewDimension {
@@ -6870,7 +6889,7 @@ mod tests {
             let explicit_texture = wgpuDeviceCreateTexture(device, &explicit_desc);
             assert_eq!(
                 wgpuTextureGetTextureBindingViewDimension(explicit_texture),
-                native::WGPUTextureViewDimension_3D
+                native::WGPUTextureViewDimension_Undefined
             );
 
             wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
@@ -8682,6 +8701,514 @@ mod tests {
             wgpuShaderModuleRelease(module_a);
             wgpuShaderModuleRelease(module_b);
             wgpuShaderModuleRelease(module_c);
+            release_handles(instance, adapter, device);
+        }
+    }
+    #[test]
+    fn audit_e2_invalid_sampler_and_view_enums_return_error_objects() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            for field in 0..6 {
+                let mut desc = default_sampler_descriptor();
+                match field {
+                    0 => desc.addressModeU = 0xCAFE,
+                    1 => desc.addressModeV = 0xCAFE,
+                    2 => desc.addressModeW = 0xCAFE,
+                    3 => desc.magFilter = 0xCAFE,
+                    4 => desc.minFilter = 0xCAFE,
+                    _ => desc.mipmapFilter = 0xCAFE,
+                }
+                wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+                let sampler = wgpuDeviceCreateSampler(device, &desc);
+                assert!(borrow_handle(sampler, "WGPUSampler")._core.is_error());
+                assert_validation_error_contains(instance, device, "invalid");
+                wgpuSamplerRelease(sampler);
+            }
+            let texture = wgpuDeviceCreateTexture(
+                device,
+                &texture_descriptor(native::WGPUTextureUsage_TextureBinding, 4),
+            );
+            for aspect in [false, true] {
+                let mut desc: native::WGPUTextureViewDescriptor = std::mem::zeroed();
+                desc.mipLevelCount = native::WGPU_MIP_LEVEL_COUNT_UNDEFINED;
+                desc.arrayLayerCount = native::WGPU_ARRAY_LAYER_COUNT_UNDEFINED;
+                if aspect {
+                    desc.aspect = 0xCAFE;
+                } else {
+                    desc.dimension = 0xCAFE;
+                }
+                wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+                let view = wgpuTextureCreateView(texture, &desc);
+                assert!(borrow_handle(view, "WGPUTextureView")._core.is_error());
+                assert_validation_error_contains(instance, device, "invalid texture");
+                wgpuTextureViewRelease(view);
+            }
+            wgpuTextureRelease(texture);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn audit_e2_invalid_copy_and_write_aspects_are_validation_errors() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let texture = wgpuDeviceCreateTexture(
+                device,
+                &texture_descriptor(
+                    native::WGPUTextureUsage_CopyDst | native::WGPUTextureUsage_CopySrc,
+                    4,
+                ),
+            );
+            let buffer = wgpuDeviceCreateBuffer(
+                device,
+                &buffer_descriptor(
+                    native::WGPUBufferUsage_CopySrc | native::WGPUBufferUsage_CopyDst,
+                    1024,
+                ),
+            );
+            let copy = native::WGPUTexelCopyTextureInfo {
+                texture,
+                mipLevel: 0,
+                origin: std::mem::zeroed(),
+                aspect: 0xCAFE,
+            };
+            let layout = native::WGPUTexelCopyBufferLayout {
+                offset: 0,
+                bytesPerRow: 256,
+                rowsPerImage: 4,
+            };
+            let buffer_copy = native::WGPUTexelCopyBufferInfo { buffer, layout };
+            let size = extent(1, 1, 1);
+            for operation in 0..3 {
+                let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+                match operation {
+                    0 => wgpuCommandEncoderCopyBufferToTexture(encoder, &buffer_copy, &copy, &size),
+                    1 => wgpuCommandEncoderCopyTextureToBuffer(encoder, &copy, &buffer_copy, &size),
+                    _ => wgpuCommandEncoderCopyTextureToTexture(encoder, &copy, &copy, &size),
+                }
+                wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+                let commands = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+                assert!(borrow_handle(commands, "WGPUCommandBuffer").core.is_error());
+                assert_validation_error_contains(instance, device, "invalid texture aspect");
+                wgpuCommandBufferRelease(commands);
+                wgpuCommandEncoderRelease(encoder);
+            }
+            let queue = wgpuDeviceGetQueue(device);
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let data = [0u8; 4];
+            wgpuQueueWriteTexture(
+                queue,
+                &copy,
+                data.as_ptr().cast(),
+                data.len(),
+                &layout,
+                &size,
+            );
+            assert_validation_error_contains(instance, device, "invalid texture aspect");
+            wgpuQueueRelease(queue);
+            wgpuBufferRelease(buffer);
+            wgpuTextureRelease(texture);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn audit_e2_invalid_read_only_depth_stencil_ops_are_not_undefined() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let mut desc = texture_descriptor(native::WGPUTextureUsage_RenderAttachment, 4);
+            desc.format = native::WGPUTextureFormat_Depth24PlusStencil8;
+            let texture = wgpuDeviceCreateTexture(device, &desc);
+            let view = wgpuTextureCreateView(texture, std::ptr::null());
+            for field in 0..4 {
+                let mut depth: native::WGPURenderPassDepthStencilAttachment = std::mem::zeroed();
+                depth.view = view;
+                depth.depthReadOnly = 1;
+                depth.stencilReadOnly = 1;
+                match field {
+                    0 => depth.depthLoadOp = 0xCAFE,
+                    1 => depth.depthStoreOp = 0xCAFE,
+                    2 => depth.stencilLoadOp = 0xCAFE,
+                    _ => depth.stencilStoreOp = 0xCAFE,
+                }
+                let mut pass_desc = noop_render_pass_descriptor(&[], std::ptr::null());
+                pass_desc.depthStencilAttachment = &depth;
+                let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+                let pass = wgpuCommandEncoderBeginRenderPass(encoder, &pass_desc);
+                wgpuRenderPassEncoderEnd(pass);
+                wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+                let commands = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+                assert!(borrow_handle(commands, "WGPUCommandBuffer").core.is_error());
+                assert_validation_error_contains(instance, device, "invalid");
+                wgpuCommandBufferRelease(commands);
+                wgpuRenderPassEncoderRelease(pass);
+                wgpuCommandEncoderRelease(encoder);
+            }
+            wgpuTextureViewRelease(view);
+            wgpuTextureRelease(texture);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn audit_e5_invalid_utf8_wgsl_has_compilation_info() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let mut source = native::WGPUShaderSourceWGSL {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: native::WGPUSType_ShaderSourceWGSL,
+                },
+                code: string_view(&[0xFF]),
+            };
+            let desc = native::WGPUShaderModuleDescriptor {
+                nextInChain: &mut source.chain,
+                label: empty_string_view(),
+            };
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let module = wgpuDeviceCreateShaderModule(device, &desc);
+            assert!(borrow_handle(module, "WGPUShaderModule")._core.is_error());
+            assert_validation_error_contains(instance, device, "UTF-8");
+            let mut info = CompilationInfoState::default();
+            wgpuShaderModuleGetCompilationInfo(
+                module,
+                native::WGPUCompilationInfoCallbackInfo {
+                    mode: native::WGPUCallbackMode_AllowProcessEvents,
+                    callback: Some(compilation_info_callback),
+                    userdata1: (&mut info as *mut CompilationInfoState).cast(),
+                    ..std::mem::zeroed()
+                },
+            );
+            wgpuInstanceProcessEvents(instance);
+            assert_eq!(info.fired, 1);
+            assert!(info
+                .error_messages
+                .iter()
+                .any(|message| message.contains("UTF-8")));
+            wgpuShaderModuleRelease(module);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn audit_e6_invalid_utf8_entry_points_reject_even_with_live_default_cache() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let module = create_wgsl_module(device, "@compute @workgroup_size(1) fn cs() {} @vertex fn vs() -> @builtin(position) vec4f { return vec4f(0); } @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }");
+            let layout = wgpuDeviceCreatePipelineLayout(device, &pipeline_layout_descriptor(&[]));
+            let mut compute = compute_pipeline_descriptor(module, layout);
+            compute.compute.entryPoint = empty_string_view();
+            let cached_compute = wgpuDeviceCreateComputePipeline(device, &compute);
+            assert!(!borrow_handle(cached_compute, "WGPUComputePipeline")
+                ._core
+                .is_error());
+            compute.compute.entryPoint = string_view(&[0xFF]);
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let pipeline = wgpuDeviceCreateComputePipeline(device, &compute);
+            assert!(borrow_handle(pipeline, "WGPUComputePipeline")
+                ._core
+                .is_error());
+            assert_validation_error_contains(instance, device, "entry point must be valid UTF-8");
+            wgpuComputePipelineRelease(pipeline);
+            let mut render = render_pipeline_descriptor(module, module, layout);
+            render.vertex.entryPoint = empty_string_view();
+            let fragment = &mut *render.fragment.cast_mut();
+            fragment.entryPoint = empty_string_view();
+            render.fragment = fragment;
+            let cached_render = wgpuDeviceCreateRenderPipeline(device, &render);
+            assert!(!borrow_handle(cached_render, "WGPURenderPipeline")
+                ._core
+                .is_error());
+            for vertex in [true, false] {
+                render.vertex.entryPoint = if vertex {
+                    string_view(&[0xFF])
+                } else {
+                    empty_string_view()
+                };
+                fragment.entryPoint = if vertex {
+                    empty_string_view()
+                } else {
+                    string_view(&[0xFF])
+                };
+                render.fragment = fragment;
+                wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+                let pipeline = wgpuDeviceCreateRenderPipeline(device, &render);
+                assert!(borrow_handle(pipeline, "WGPURenderPipeline")
+                    ._core
+                    .is_error());
+                assert_validation_error_contains(
+                    instance,
+                    device,
+                    "entry point must be valid UTF-8",
+                );
+                wgpuRenderPipelineRelease(pipeline);
+            }
+            wgpuRenderPipelineRelease(cached_render);
+            wgpuComputePipelineRelease(cached_compute);
+            wgpuPipelineLayoutRelease(layout);
+            wgpuShaderModuleRelease(module);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn audit_e10_null_creation_arrays_reject_without_consuming_adapter() {
+        unsafe {
+            let instance_desc = native::WGPUInstanceDescriptor {
+                requiredFeatureCount: 1,
+                ..std::mem::zeroed()
+            };
+            assert!(wgpuCreateInstance(&instance_desc).is_null());
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+            let mut state = RequestDeviceState::default();
+            let desc = native::WGPUDeviceDescriptor {
+                requiredFeatureCount: 1,
+                ..std::mem::zeroed()
+            };
+            let future = wgpuAdapterRequestDevice(
+                adapter,
+                &desc,
+                native::WGPURequestDeviceCallbackInfo {
+                    mode: native::WGPUCallbackMode_AllowProcessEvents,
+                    callback: Some(request_device_callback),
+                    userdata1: (&mut state as *mut RequestDeviceState).cast(),
+                    ..std::mem::zeroed()
+                },
+            );
+            assert_ne!(future.id, 0);
+            wgpuInstanceProcessEvents(instance);
+            assert_eq!(state.status, native::WGPURequestDeviceStatus_Error);
+            assert!(state.device.is_null());
+            let device = request_noop_device(instance, adapter);
+            let mut desc = texture_descriptor(native::WGPUTextureUsage_TextureBinding, 4);
+            desc.viewFormatCount = 1;
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let texture = wgpuDeviceCreateTexture(device, &desc);
+            assert!(borrow_handle(texture, "WGPUTexture").core.is_error());
+            assert_validation_error_contains(instance, device, "viewFormats must not be null");
+            wgpuTextureRelease(texture);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn audit_e10_null_command_arrays_poison_encoders_without_panicking() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let pass = wgpuCommandEncoderBeginComputePass(encoder, std::ptr::null());
+            wgpuComputePassEncoderSetBindGroup(pass, 0, std::ptr::null(), 1, std::ptr::null());
+            wgpuComputePassEncoderEnd(pass);
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let commands = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert!(borrow_handle(commands, "WGPUCommandBuffer").core.is_error());
+            assert_validation_error_contains(instance, device, "dynamicOffsets must not be null");
+            wgpuCommandBufferRelease(commands);
+            wgpuComputePassEncoderRelease(pass);
+            wgpuCommandEncoderRelease(encoder);
+            let (texture, view) = noop_render_attachment(device);
+            let attachments = [render_pass_color_attachment(view)];
+            for bundles in [false, true] {
+                let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+                let pass = wgpuCommandEncoderBeginRenderPass(
+                    encoder,
+                    &noop_render_pass_descriptor(&attachments, std::ptr::null()),
+                );
+                if bundles {
+                    wgpuRenderPassEncoderExecuteBundles(pass, 1, std::ptr::null());
+                } else {
+                    wgpuRenderPassEncoderSetBindGroup(
+                        pass,
+                        0,
+                        std::ptr::null(),
+                        1,
+                        std::ptr::null(),
+                    );
+                }
+                wgpuRenderPassEncoderEnd(pass);
+                wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+                let commands = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+                assert!(borrow_handle(commands, "WGPUCommandBuffer").core.is_error());
+                assert_validation_error_contains(instance, device, "must not be null");
+                wgpuCommandBufferRelease(commands);
+                wgpuRenderPassEncoderRelease(pass);
+                wgpuCommandEncoderRelease(encoder);
+            }
+            let formats = [native::WGPUTextureFormat_RGBA8Unorm];
+            let bundle_encoder = wgpuDeviceCreateRenderBundleEncoder(
+                device,
+                &render_bundle_encoder_descriptor(&formats),
+            );
+            wgpuRenderBundleEncoderSetBindGroup(
+                bundle_encoder,
+                0,
+                std::ptr::null(),
+                1,
+                std::ptr::null(),
+            );
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let bundle = wgpuRenderBundleEncoderFinish(bundle_encoder, std::ptr::null());
+            assert!(borrow_handle(bundle, "WGPURenderBundle").core.is_error());
+            assert_validation_error_contains(instance, device, "dynamicOffsets must not be null");
+            wgpuRenderBundleRelease(bundle);
+            wgpuRenderBundleEncoderRelease(bundle_encoder);
+            wgpuTextureViewRelease(view);
+            wgpuTextureRelease(texture);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn audit_e11_invalid_modes_options_and_fallback_requests() {
+        unsafe {
+            let instance = make_noop_instance();
+            for mode in [0, 0xCAFE] {
+                let mut state = RequestAdapterState::default();
+                let future = wgpuInstanceRequestAdapter(
+                    instance,
+                    std::ptr::null(),
+                    native::WGPURequestAdapterCallbackInfo {
+                        mode,
+                        callback: Some(request_adapter_callback),
+                        userdata1: (&mut state as *mut RequestAdapterState).cast(),
+                        ..std::mem::zeroed()
+                    },
+                );
+                assert_eq!(future.id, 0);
+                wgpuInstanceProcessEvents(instance);
+                assert_eq!(state.fired, 0);
+                assert!(borrow_handle(instance, "WGPUInstance")
+                    .pending_callbacks
+                    .lock()
+                    .unwrap()
+                    .is_empty());
+            }
+            for fallback in [false, true] {
+                let mut state = RequestAdapterState::default();
+                let options = native::WGPURequestAdapterOptions {
+                    featureLevel: if fallback {
+                        native::WGPUFeatureLevel_Core
+                    } else {
+                        0xCAFE
+                    },
+                    forceFallbackAdapter: u32::from(fallback),
+                    ..std::mem::zeroed()
+                };
+                let future = wgpuInstanceRequestAdapter(
+                    instance,
+                    &options,
+                    native::WGPURequestAdapterCallbackInfo {
+                        mode: native::WGPUCallbackMode_AllowProcessEvents,
+                        callback: Some(request_adapter_callback),
+                        userdata1: (&mut state as *mut RequestAdapterState).cast(),
+                        ..std::mem::zeroed()
+                    },
+                );
+                assert_ne!(future.id, 0);
+                wgpuInstanceProcessEvents(instance);
+                assert_eq!(state.fired, 1);
+                assert!(state.adapter.is_null());
+                assert_eq!(
+                    state.status,
+                    if fallback {
+                        native::WGPURequestAdapterStatus_Unavailable
+                    } else {
+                        native::WGPURequestAdapterStatus_Error
+                    }
+                );
+            }
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    #[test]
+    fn audit_e12_invalid_binding_dimension_chain_is_a_validation_error() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let mut binding = native::WGPUTextureBindingViewDimension {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: native::WGPUSType_TextureBindingViewDimension,
+                },
+                textureBindingViewDimension: 0xCAFE,
+            };
+            let mut desc = texture_descriptor(native::WGPUTextureUsage_TextureBinding, 4);
+            desc.nextInChain = &mut binding.chain;
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let texture = wgpuDeviceCreateTexture(device, &desc);
+            assert!(borrow_handle(texture, "WGPUTexture").core.is_error());
+            assert_validation_error_contains(instance, device, "invalid texture view dimension");
+            assert_eq!(
+                wgpuTextureGetTextureBindingViewDimension(texture),
+                native::WGPUTextureViewDimension_Undefined
+            );
+            wgpuTextureRelease(texture);
+            release_handles(instance, adapter, device);
+        }
+    }
+    #[test]
+    fn audit_e12_compatibility_binding_dimension_defaults_and_validation() {
+        unsafe {
+            let instance = make_noop_instance();
+            let options = native::WGPURequestAdapterOptions {
+                featureLevel: native::WGPUFeatureLevel_Compatibility,
+                ..std::mem::zeroed()
+            };
+            let mut state = RequestAdapterState::default();
+            wgpuInstanceRequestAdapter(
+                instance,
+                &options,
+                native::WGPURequestAdapterCallbackInfo {
+                    mode: native::WGPUCallbackMode_AllowProcessEvents,
+                    callback: Some(request_adapter_callback),
+                    userdata1: (&mut state as *mut RequestAdapterState).cast(),
+                    ..std::mem::zeroed()
+                },
+            );
+            wgpuInstanceProcessEvents(instance);
+            let adapter = state.adapter;
+            assert!(!adapter.is_null());
+            let device = request_noop_device(instance, adapter);
+            assert!(!borrow_handle(device, "WGPUDevice")
+                .core
+                .has_feature(core::Feature::CoreFeaturesAndLimits));
+            let mut desc = texture_descriptor(native::WGPUTextureUsage_TextureBinding, 4);
+            desc.size.depthOrArrayLayers = 2;
+            let texture = wgpuDeviceCreateTexture(device, &desc);
+            assert!(!borrow_handle(texture, "WGPUTexture").core.is_error());
+            assert_eq!(
+                wgpuTextureGetTextureBindingViewDimension(texture),
+                native::WGPUTextureViewDimension_2DArray
+            );
+            wgpuTextureRelease(texture);
+            let mut binding = native::WGPUTextureBindingViewDimension {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: native::WGPUSType_TextureBindingViewDimension,
+                },
+                textureBindingViewDimension: native::WGPUTextureViewDimension_2D,
+            };
+            desc.nextInChain = &mut binding.chain;
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let texture = wgpuDeviceCreateTexture(device, &desc);
+            assert!(borrow_handle(texture, "WGPUTexture").core.is_error());
+            assert_validation_error_contains(
+                instance,
+                device,
+                "textureBindingViewDimension is incompatible",
+            );
+            wgpuTextureRelease(texture);
+            binding.textureBindingViewDimension = native::WGPUTextureViewDimension_Cube;
+            desc.nextInChain = &mut binding.chain;
+            desc.size.depthOrArrayLayers = 6;
+            let texture = wgpuDeviceCreateTexture(device, &desc);
+            assert!(!borrow_handle(texture, "WGPUTexture").core.is_error());
+            assert_eq!(
+                wgpuTextureGetTextureBindingViewDimension(texture),
+                native::WGPUTextureViewDimension_Cube
+            );
+            wgpuTextureRelease(texture);
             release_handles(instance, adapter, device);
         }
     }

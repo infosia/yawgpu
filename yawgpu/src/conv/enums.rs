@@ -13,10 +13,19 @@ pub fn map_query_type_to_native(value: core::QueryType) -> native::WGPUQueryType
 
 /// Converts feature level into the corresponding yawgpu representation.
 #[must_use]
-pub fn map_feature_level(value: native::WGPUFeatureLevel) -> core::FeatureLevel {
+pub fn map_feature_level(
+    value: native::WGPUFeatureLevel,
+    error: &mut Option<String>,
+) -> core::FeatureLevel {
     match value {
         native::WGPUFeatureLevel_Compatibility => core::FeatureLevel::Compatibility,
-        _ => core::FeatureLevel::Core,
+        native::WGPUFeatureLevel_Undefined | native::WGPUFeatureLevel_Core => {
+            core::FeatureLevel::Core
+        }
+        _ => {
+            set_first_error(error, "invalid featureLevel");
+            core::FeatureLevel::Core
+        }
     }
 }
 
@@ -155,24 +164,36 @@ pub fn map_map_mode(value: native::WGPUMapMode) -> Result<core::MapMode, &'stati
 
 /// Converts address mode into the corresponding yawgpu representation.
 #[must_use]
-pub fn map_address_mode(value: native::WGPUAddressMode) -> Option<core::AddressMode> {
+pub fn map_address_mode(
+    value: native::WGPUAddressMode,
+    error: &mut Option<String>,
+) -> Option<core::AddressMode> {
     match value {
         native::WGPUAddressMode_Undefined => None,
         native::WGPUAddressMode_ClampToEdge => Some(core::AddressMode::ClampToEdge),
         native::WGPUAddressMode_Repeat => Some(core::AddressMode::Repeat),
         native::WGPUAddressMode_MirrorRepeat => Some(core::AddressMode::MirrorRepeat),
-        _ => None,
+        _ => {
+            set_first_error(error, "invalid address mode");
+            None
+        }
     }
 }
 
 /// Converts filter mode into the corresponding yawgpu representation.
 #[must_use]
-pub fn map_filter_mode(value: native::WGPUFilterMode) -> Option<core::FilterMode> {
+pub fn map_filter_mode(
+    value: native::WGPUFilterMode,
+    error: &mut Option<String>,
+) -> Option<core::FilterMode> {
     match value {
         native::WGPUFilterMode_Undefined => None,
         native::WGPUFilterMode_Nearest => Some(core::FilterMode::Nearest),
         native::WGPUFilterMode_Linear => Some(core::FilterMode::Linear),
-        _ => None,
+        _ => {
+            set_first_error(error, "invalid filter mode");
+            None
+        }
     }
 }
 
@@ -180,12 +201,16 @@ pub fn map_filter_mode(value: native::WGPUFilterMode) -> Option<core::FilterMode
 #[must_use]
 pub fn map_mipmap_filter_mode(
     value: native::WGPUMipmapFilterMode,
+    error: &mut Option<String>,
 ) -> Option<core::MipmapFilterMode> {
     match value {
         native::WGPUMipmapFilterMode_Undefined => None,
         native::WGPUMipmapFilterMode_Nearest => Some(core::MipmapFilterMode::Nearest),
         native::WGPUMipmapFilterMode_Linear => Some(core::MipmapFilterMode::Linear),
-        _ => None,
+        _ => {
+            set_first_error(error, "invalid mipmap filter mode");
+            None
+        }
     }
 }
 
@@ -265,21 +290,29 @@ pub fn map_query_index(value: u32) -> Option<u32> {
 
 /// Converts load op into the corresponding yawgpu representation.
 #[must_use]
-pub fn map_load_op(value: native::WGPULoadOp) -> core::LoadOp {
+pub fn map_load_op(value: native::WGPULoadOp, error: &mut Option<String>) -> core::LoadOp {
     match value {
         native::WGPULoadOp_Load => core::LoadOp::Load,
         native::WGPULoadOp_Clear => core::LoadOp::Clear,
-        _ => core::LoadOp::Undefined,
+        native::WGPULoadOp_Undefined => core::LoadOp::Undefined,
+        _ => {
+            set_first_error(error, "invalid load op");
+            core::LoadOp::Undefined
+        }
     }
 }
 
 /// Converts store op into the corresponding yawgpu representation.
 #[must_use]
-pub fn map_store_op(value: native::WGPUStoreOp) -> core::StoreOp {
+pub fn map_store_op(value: native::WGPUStoreOp, error: &mut Option<String>) -> core::StoreOp {
     match value {
         native::WGPUStoreOp_Store => core::StoreOp::Store,
         native::WGPUStoreOp_Discard => core::StoreOp::Discard,
-        _ => core::StoreOp::Undefined,
+        native::WGPUStoreOp_Undefined => core::StoreOp::Undefined,
+        _ => {
+            set_first_error(error, "invalid store op");
+            core::StoreOp::Undefined
+        }
     }
 }
 
@@ -287,6 +320,7 @@ pub fn map_store_op(value: native::WGPUStoreOp) -> core::StoreOp {
 #[must_use]
 pub fn map_texture_view_dimension(
     value: native::WGPUTextureViewDimension,
+    error: &mut Option<String>,
 ) -> Option<core::TextureViewDimension> {
     match value {
         native::WGPUTextureViewDimension_Undefined => None,
@@ -296,19 +330,28 @@ pub fn map_texture_view_dimension(
         native::WGPUTextureViewDimension_Cube => Some(core::TextureViewDimension::Cube),
         native::WGPUTextureViewDimension_CubeArray => Some(core::TextureViewDimension::CubeArray),
         native::WGPUTextureViewDimension_3D => Some(core::TextureViewDimension::D3),
-        _ => None,
+        _ => {
+            set_first_error(error, "invalid texture view dimension");
+            None
+        }
     }
 }
 
 /// Converts texture aspect into the corresponding yawgpu representation.
 #[must_use]
-pub fn map_texture_aspect(value: native::WGPUTextureAspect) -> Option<core::TextureAspect> {
+pub fn map_texture_aspect(
+    value: native::WGPUTextureAspect,
+    error: &mut Option<String>,
+) -> Option<core::TextureAspect> {
     match value {
         native::WGPUTextureAspect_Undefined => None,
         native::WGPUTextureAspect_All => Some(core::TextureAspect::All),
         native::WGPUTextureAspect_DepthOnly => Some(core::TextureAspect::DepthOnly),
         native::WGPUTextureAspect_StencilOnly => Some(core::TextureAspect::StencilOnly),
-        _ => None,
+        _ => {
+            set_first_error(error, "invalid texture aspect");
+            None
+        }
     }
 }
 

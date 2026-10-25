@@ -153,7 +153,13 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetBindGroup(
             return;
         }
     }
-    let offsets = dynamic_offsets_slice(dynamic_offset_count, dynamic_offsets);
+    let offsets = match dynamic_offsets_slice(dynamic_offset_count, dynamic_offsets) {
+        Ok(offsets) => offsets,
+        Err(error) => {
+            dispatch_optional_error(&pass.device, pass.core.record_validation_error(error));
+            return;
+        }
+    };
     dispatch_optional_error(
         &pass.device,
         pass.core.set_bind_group(
@@ -485,7 +491,13 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderExecuteBundles(
     bundles: *const native::WGPURenderBundle,
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
-    let bundle_handles = render_bundle_slice(bundle_count, bundles);
+    let bundle_handles = match render_bundle_slice(bundle_count, bundles) {
+        Ok(bundles) => bundles,
+        Err(error) => {
+            dispatch_optional_error(&pass.device, pass.core.record_validation_error(error));
+            return;
+        }
+    };
     if bundle_handles
         .iter()
         .any(|bundle| !bundle._device.same(&pass.device))

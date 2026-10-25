@@ -124,7 +124,13 @@ pub unsafe extern "C" fn wgpuComputePassEncoderSetBindGroup(
             return;
         }
     }
-    let offsets = dynamic_offsets_slice(dynamic_offset_count, dynamic_offsets);
+    let offsets = match dynamic_offsets_slice(dynamic_offset_count, dynamic_offsets) {
+        Ok(offsets) => offsets,
+        Err(error) => {
+            dispatch_optional_error(&pass.device, pass.core.record_validation_error(error));
+            return;
+        }
+    };
     dispatch_optional_error(
         &pass.device,
         pass.core.set_bind_group(

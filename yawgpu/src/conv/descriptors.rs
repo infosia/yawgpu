@@ -36,12 +36,12 @@ pub fn map_sampler_descriptor(
         return core::SamplerDescriptor::default();
     };
     core::SamplerDescriptor {
-        address_mode_u: map_address_mode(value.addressModeU),
-        address_mode_v: map_address_mode(value.addressModeV),
-        address_mode_w: map_address_mode(value.addressModeW),
-        mag_filter: map_filter_mode(value.magFilter),
-        min_filter: map_filter_mode(value.minFilter),
-        mipmap_filter: map_mipmap_filter_mode(value.mipmapFilter),
+        address_mode_u: map_address_mode(value.addressModeU, error),
+        address_mode_v: map_address_mode(value.addressModeV, error),
+        address_mode_w: map_address_mode(value.addressModeW, error),
+        mag_filter: map_filter_mode(value.magFilter, error),
+        min_filter: map_filter_mode(value.minFilter, error),
+        mipmap_filter: map_mipmap_filter_mode(value.mipmapFilter, error),
         lod_min_clamp: value.lodMinClamp,
         lod_max_clamp: value.lodMaxClamp,
         compare: map_compare_function(value.compare, error),
@@ -89,16 +89,16 @@ pub fn map_texel_copy_buffer_layout(
     }
 }
 
-/// Converts texel copy texture info parts into the corresponding yawgpu representation.
-#[must_use]
+/// Converts texel copy texture info parts, rejecting invalid aspect values.
 pub fn map_texel_copy_texture_info_parts(
     value: &native::WGPUTexelCopyTextureInfo,
-) -> (u32, core::Origin3d, core::TextureAspect) {
-    (
-        value.mipLevel,
-        map_origin_3d(value.origin),
-        map_texture_aspect(value.aspect).unwrap_or(core::TextureAspect::All),
-    )
+) -> Result<(u32, core::Origin3d, core::TextureAspect), String> {
+    let mut error = None;
+    let aspect = map_texture_aspect(value.aspect, &mut error).unwrap_or(core::TextureAspect::All);
+    if let Some(error) = error {
+        return Err(error);
+    }
+    Ok((value.mipLevel, map_origin_3d(value.origin), aspect))
 }
 
 /// Converts a render pass descriptor to core data.
@@ -113,6 +113,7 @@ pub unsafe fn map_render_pass_descriptor(
     value: &native::WGPURenderPassDescriptor,
     max_color_attachments: u32,
 ) -> Result<core::RenderPassDescriptor, String> {
+    let mut error = None;
     let color_attachment_count = value
         .colorAttachmentCount
         .min(max_color_attachments as usize + 1);
@@ -126,13 +127,13 @@ pub unsafe fn map_render_pass_descriptor(
     } else {
         std::slice::from_raw_parts(value.colorAttachments, color_attachment_count)
             .iter()
-            .map(|attachment| map_render_pass_color_attachment(attachment))
+            .map(|attachment| map_render_pass_color_attachment(attachment, &mut error))
             .collect()
     };
     let depth_stencil_attachment = value
         .depthStencilAttachment
         .as_ref()
-        .map(|attachment| map_render_pass_depth_stencil_attachment(attachment));
+        .map(|attachment| map_render_pass_depth_stencil_attachment(attachment, &mut error));
     let occlusion_query_set = if value.occlusionQuerySet.is_null() {
         None
     } else {
@@ -147,6 +148,9 @@ pub unsafe fn map_render_pass_descriptor(
         .map(|timestamp_writes| map_render_pass_timestamp_writes(timestamp_writes));
     let max_draw_count = render_pass_max_draw_count(value.nextInChain);
 
+    if let Some(error) = error {
+        return Err(error);
+    }
     Ok(core::RenderPassDescriptor {
         max_color_attachments,
         color_attachments,
@@ -326,8 +330,8 @@ unsafe fn map_subpass_color_attachment(
             view,
             resolve_target,
         },
-        load_op: map_load_op(attachment.loadOp),
-        store_op: map_store_op(attachment.storeOp),
+        load_op: map_load_op(attachment.loadOp, error),
+        store_op: map_store_op(attachment.storeOp, error),
         clear_value: map_color(attachment.clearValue),
     })
 }
@@ -352,11 +356,11 @@ unsafe fn map_subpass_depth_stencil_attachment(
             view,
             resolve_target: None,
         },
-        depth_load_op: map_load_op(attachment.depthLoadOp),
-        depth_store_op: map_store_op(attachment.depthStoreOp),
+        depth_load_op: map_load_op(attachment.depthLoadOp, error),
+        depth_store_op: map_store_op(attachment.depthStoreOp, error),
         depth_clear_value: attachment.depthClearValue,
-        stencil_load_op: map_load_op(attachment.stencilLoadOp),
-        stencil_store_op: map_store_op(attachment.stencilStoreOp),
+        stencil_load_op: map_load_op(attachment.stencilLoadOp, error),
+        stencil_store_op: map_store_op(attachment.stencilStoreOp, error),
         stencil_clear_value: attachment.stencilClearValue,
     })
 }
@@ -475,6 +479,7 @@ pub unsafe fn map_render_bundle_encoder_descriptor(
 
 unsafe fn map_render_pass_color_attachment(
     value: &native::WGPURenderPassColorAttachment,
+    error: &mut Option<String>,
 ) -> Option<core::RenderPassColorAttachment> {
     if value.view.is_null() {
         return None;
@@ -493,24 +498,25 @@ unsafe fn map_render_pass_color_attachment(
         depth_slice: (value.depthSlice != native::WGPU_DEPTH_SLICE_UNDEFINED)
             .then_some(value.depthSlice),
         resolve_target,
-        load_op: map_load_op(value.loadOp),
-        store_op: map_store_op(value.storeOp),
+        load_op: map_load_op(value.loadOp, error),
+        store_op: map_store_op(value.storeOp, error),
         clear_value: map_color(value.clearValue),
     })
 }
 
 unsafe fn map_render_pass_depth_stencil_attachment(
     value: &native::WGPURenderPassDepthStencilAttachment,
+    error: &mut Option<String>,
 ) -> core::RenderPassDepthStencilAttachment {
     let view = borrow_handle::<WGPUTextureViewImpl>(value.view, "WGPUTextureView");
     core::RenderPassDepthStencilAttachment {
         view: Arc::clone(&view._core),
-        depth_load_op: map_load_op(value.depthLoadOp),
-        depth_store_op: map_store_op(value.depthStoreOp),
+        depth_load_op: map_load_op(value.depthLoadOp, error),
+        depth_store_op: map_store_op(value.depthStoreOp, error),
         depth_clear_value: value.depthClearValue,
         depth_read_only: value.depthReadOnly != 0,
-        stencil_load_op: map_load_op(value.stencilLoadOp),
-        stencil_store_op: map_store_op(value.stencilStoreOp),
+        stencil_load_op: map_load_op(value.stencilLoadOp, error),
+        stencil_store_op: map_store_op(value.stencilStoreOp, error),
         stencil_clear_value: value.stencilClearValue,
         stencil_read_only: value.stencilReadOnly != 0,
     }
@@ -549,7 +555,10 @@ pub unsafe fn map_texture_descriptor(
     value: &native::WGPUTextureDescriptor,
     error: &mut Option<String>,
 ) -> core::TextureDescriptor {
-    let view_formats = if value.viewFormatCount == 0 || value.viewFormats.is_null() {
+    let view_formats = if value.viewFormatCount == 0 {
+        Vec::new()
+    } else if value.viewFormats.is_null() {
+        set_first_error(error, "viewFormats must not be null when count is non-zero");
         Vec::new()
     } else {
         std::slice::from_raw_parts(value.viewFormats, value.viewFormatCount)
@@ -595,7 +604,7 @@ pub fn map_texture_view_descriptor(
         } else {
             Some(map_texture_format(value.format))
         },
-        dimension: map_texture_view_dimension(value.dimension),
+        dimension: map_texture_view_dimension(value.dimension, error),
         base_mip_level: value.baseMipLevel,
         mip_level_count: if value.mipLevelCount == native::WGPU_MIP_LEVEL_COUNT_UNDEFINED {
             None
@@ -608,7 +617,7 @@ pub fn map_texture_view_descriptor(
         } else {
             Some(value.arrayLayerCount)
         },
-        aspect: map_texture_aspect(value.aspect),
+        aspect: map_texture_aspect(value.aspect, error),
         usage: if value.usage == native::WGPUTextureUsage_None {
             None
         } else {

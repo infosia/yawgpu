@@ -724,17 +724,20 @@ mod tests {
     #[test]
     fn map_feature_level_maps_compatibility_and_default_core() {
         assert_eq!(
-            map_feature_level(native::WGPUFeatureLevel_Compatibility),
+            map_feature_level(native::WGPUFeatureLevel_Compatibility, &mut None),
             core::FeatureLevel::Compatibility
         );
         assert_eq!(
-            map_feature_level(native::WGPUFeatureLevel_Core),
+            map_feature_level(native::WGPUFeatureLevel_Core, &mut None),
             core::FeatureLevel::Core
         );
         assert_eq!(
-            map_feature_level(native::WGPUFeatureLevel_Undefined),
+            map_feature_level(native::WGPUFeatureLevel_Undefined, &mut None),
             core::FeatureLevel::Core
         );
+        let mut error = None;
+        let _ = map_feature_level(0xCAFE, &mut error);
+        assert_eq!(error.as_deref(), Some("invalid featureLevel"));
     }
 
     #[test]
@@ -907,51 +910,63 @@ mod tests {
 
     #[test]
     fn map_address_mode_maps_known_values_and_rejects_unknown() {
-        assert_eq!(map_address_mode(native::WGPUAddressMode_Undefined), None);
         assert_eq!(
-            map_address_mode(native::WGPUAddressMode_ClampToEdge),
+            map_address_mode(native::WGPUAddressMode_Undefined, &mut None),
+            None
+        );
+        assert_eq!(
+            map_address_mode(native::WGPUAddressMode_ClampToEdge, &mut None),
             Some(core::AddressMode::ClampToEdge)
         );
         assert_eq!(
-            map_address_mode(native::WGPUAddressMode_Repeat),
+            map_address_mode(native::WGPUAddressMode_Repeat, &mut None),
             Some(core::AddressMode::Repeat)
         );
         assert_eq!(
-            map_address_mode(native::WGPUAddressMode_MirrorRepeat),
+            map_address_mode(native::WGPUAddressMode_MirrorRepeat, &mut None),
             Some(core::AddressMode::MirrorRepeat)
         );
-        assert_eq!(map_address_mode(0xCAFE), None);
+        let mut error = None;
+        assert_eq!(map_address_mode(0xCAFE, &mut error), None);
+        assert_eq!(error.as_deref(), Some("invalid address mode"));
     }
 
     #[test]
     fn map_filter_mode_maps_known_values_and_rejects_unknown() {
-        assert_eq!(map_filter_mode(native::WGPUFilterMode_Undefined), None);
         assert_eq!(
-            map_filter_mode(native::WGPUFilterMode_Nearest),
+            map_filter_mode(native::WGPUFilterMode_Undefined, &mut None),
+            None
+        );
+        assert_eq!(
+            map_filter_mode(native::WGPUFilterMode_Nearest, &mut None),
             Some(core::FilterMode::Nearest)
         );
         assert_eq!(
-            map_filter_mode(native::WGPUFilterMode_Linear),
+            map_filter_mode(native::WGPUFilterMode_Linear, &mut None),
             Some(core::FilterMode::Linear)
         );
-        assert_eq!(map_filter_mode(0xCAFE), None);
+        let mut error = None;
+        assert_eq!(map_filter_mode(0xCAFE, &mut error), None);
+        assert_eq!(error.as_deref(), Some("invalid filter mode"));
     }
 
     #[test]
     fn map_mipmap_filter_mode_maps_known_values_and_rejects_unknown() {
         assert_eq!(
-            map_mipmap_filter_mode(native::WGPUMipmapFilterMode_Undefined),
+            map_mipmap_filter_mode(native::WGPUMipmapFilterMode_Undefined, &mut None),
             None
         );
         assert_eq!(
-            map_mipmap_filter_mode(native::WGPUMipmapFilterMode_Nearest),
+            map_mipmap_filter_mode(native::WGPUMipmapFilterMode_Nearest, &mut None),
             Some(core::MipmapFilterMode::Nearest)
         );
         assert_eq!(
-            map_mipmap_filter_mode(native::WGPUMipmapFilterMode_Linear),
+            map_mipmap_filter_mode(native::WGPUMipmapFilterMode_Linear, &mut None),
             Some(core::MipmapFilterMode::Linear)
         );
-        assert_eq!(map_mipmap_filter_mode(0xCAFE), None);
+        let mut error = None;
+        assert_eq!(map_mipmap_filter_mode(0xCAFE, &mut error), None);
+        assert_eq!(error.as_deref(), Some("invalid mipmap filter mode"));
     }
 
     #[test]
@@ -998,63 +1013,73 @@ mod tests {
     #[test]
     fn map_texture_view_dimension_maps_known_values_and_rejects_unknown() {
         assert_eq!(
-            map_texture_view_dimension(native::WGPUTextureViewDimension_Undefined),
+            map_texture_view_dimension(native::WGPUTextureViewDimension_Undefined, &mut None),
             None
         );
         assert_eq!(
-            map_texture_view_dimension(native::WGPUTextureViewDimension_1D),
+            map_texture_view_dimension(native::WGPUTextureViewDimension_1D, &mut None),
             Some(core::TextureViewDimension::D1)
         );
         assert_eq!(
-            map_texture_view_dimension(native::WGPUTextureViewDimension_2D),
+            map_texture_view_dimension(native::WGPUTextureViewDimension_2D, &mut None),
             Some(core::TextureViewDimension::D2)
         );
         assert_eq!(
-            map_texture_view_dimension(native::WGPUTextureViewDimension_2DArray),
+            map_texture_view_dimension(native::WGPUTextureViewDimension_2DArray, &mut None),
             Some(core::TextureViewDimension::D2Array)
         );
         assert_eq!(
-            map_texture_view_dimension(native::WGPUTextureViewDimension_Cube),
+            map_texture_view_dimension(native::WGPUTextureViewDimension_Cube, &mut None),
             Some(core::TextureViewDimension::Cube)
         );
         assert_eq!(
-            map_texture_view_dimension(native::WGPUTextureViewDimension_CubeArray),
+            map_texture_view_dimension(native::WGPUTextureViewDimension_CubeArray, &mut None),
             Some(core::TextureViewDimension::CubeArray)
         );
         assert_eq!(
-            map_texture_view_dimension(native::WGPUTextureViewDimension_3D),
+            map_texture_view_dimension(native::WGPUTextureViewDimension_3D, &mut None),
             Some(core::TextureViewDimension::D3)
         );
-        assert_eq!(map_texture_view_dimension(0xCAFE), None);
+        let mut error = None;
+        assert_eq!(map_texture_view_dimension(0xCAFE, &mut error), None);
+        assert_eq!(error.as_deref(), Some("invalid texture view dimension"));
     }
 
     #[test]
     fn map_texture_aspect_maps_known_values_and_rejects_undefined() {
         assert_eq!(
-            map_texture_aspect(native::WGPUTextureAspect_Undefined),
+            map_texture_aspect(native::WGPUTextureAspect_Undefined, &mut None),
             None
         );
         assert_eq!(
-            map_texture_aspect(native::WGPUTextureAspect_All),
+            map_texture_aspect(native::WGPUTextureAspect_All, &mut None),
             Some(core::TextureAspect::All)
         );
         assert_eq!(
-            map_texture_aspect(native::WGPUTextureAspect_DepthOnly),
+            map_texture_aspect(native::WGPUTextureAspect_DepthOnly, &mut None),
             Some(core::TextureAspect::DepthOnly)
         );
         assert_eq!(
-            map_texture_aspect(native::WGPUTextureAspect_StencilOnly),
+            map_texture_aspect(native::WGPUTextureAspect_StencilOnly, &mut None),
             Some(core::TextureAspect::StencilOnly)
         );
-        assert_eq!(map_texture_aspect(0xCAFE), None);
+        let mut error = None;
+        assert_eq!(map_texture_aspect(0xCAFE, &mut error), None);
+        assert_eq!(error.as_deref(), Some("invalid texture aspect"));
     }
 
     #[test]
     fn map_load_op_maps_defined_values_and_undefined_fallback() {
-        assert_eq!(map_load_op(native::WGPULoadOp_Load), core::LoadOp::Load);
-        assert_eq!(map_load_op(native::WGPULoadOp_Clear), core::LoadOp::Clear);
         assert_eq!(
-            map_load_op(native::WGPULoadOp_Undefined),
+            map_load_op(native::WGPULoadOp_Load, &mut None),
+            core::LoadOp::Load
+        );
+        assert_eq!(
+            map_load_op(native::WGPULoadOp_Clear, &mut None),
+            core::LoadOp::Clear
+        );
+        assert_eq!(
+            map_load_op(native::WGPULoadOp_Undefined, &mut None),
             core::LoadOp::Undefined
         );
     }
@@ -1062,15 +1087,15 @@ mod tests {
     #[test]
     fn map_store_op_maps_defined_values_and_undefined_fallback() {
         assert_eq!(
-            map_store_op(native::WGPUStoreOp_Store),
+            map_store_op(native::WGPUStoreOp_Store, &mut None),
             core::StoreOp::Store
         );
         assert_eq!(
-            map_store_op(native::WGPUStoreOp_Discard),
+            map_store_op(native::WGPUStoreOp_Discard, &mut None),
             core::StoreOp::Discard
         );
         assert_eq!(
-            map_store_op(native::WGPUStoreOp_Undefined),
+            map_store_op(native::WGPUStoreOp_Undefined, &mut None),
             core::StoreOp::Undefined
         );
     }
@@ -1239,7 +1264,7 @@ mod tests {
             origin: native::WGPUOrigin3D { x: 1, y: 2, z: 3 },
             aspect: native::WGPUTextureAspect_DepthOnly,
         };
-        let (mip_level, origin, aspect) = map_texel_copy_texture_info_parts(&value);
+        let (mip_level, origin, aspect) = map_texel_copy_texture_info_parts(&value).unwrap();
         assert_eq!(mip_level, 2);
         assert_eq!(origin, core::Origin3d { x: 1, y: 2, z: 3 });
         assert_eq!(aspect, core::TextureAspect::DepthOnly);
@@ -2112,8 +2137,9 @@ mod tests {
             viewFormats: std::ptr::null(),
             ..descriptor
         };
+        let mut error = None;
         assert!(
-            unsafe { map_texture_descriptor(&null_view_formats, &mut None) }
+            unsafe { map_texture_descriptor(&null_view_formats, &mut error) }
                 .view_formats
                 .is_empty()
         );

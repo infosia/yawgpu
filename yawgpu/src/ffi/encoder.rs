@@ -412,7 +412,16 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyBufferToTexture(
         return;
     }
     let (destination_mip_level, destination_origin, destination_aspect) =
-        map_texel_copy_texture_info_parts(destination);
+        match map_texel_copy_texture_info_parts(destination) {
+            Ok(parts) => parts,
+            Err(error) => {
+                dispatch_optional_error(
+                    &encoder.device,
+                    encoder.core.record_validation_error(error),
+                );
+                return;
+            }
+        };
 
     dispatch_optional_error(
         &encoder.device,
@@ -470,7 +479,16 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToBuffer(
         return;
     }
     let (source_mip_level, source_origin, source_aspect) =
-        map_texel_copy_texture_info_parts(source);
+        match map_texel_copy_texture_info_parts(source) {
+            Ok(parts) => parts,
+            Err(error) => {
+                dispatch_optional_error(
+                    &encoder.device,
+                    encoder.core.record_validation_error(error),
+                );
+                return;
+            }
+        };
 
     dispatch_optional_error(
         &encoder.device,
@@ -529,9 +547,27 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToTexture(
         return;
     }
     let (source_mip_level, source_origin, source_aspect) =
-        map_texel_copy_texture_info_parts(source);
+        match map_texel_copy_texture_info_parts(source) {
+            Ok(parts) => parts,
+            Err(error) => {
+                dispatch_optional_error(
+                    &encoder.device,
+                    encoder.core.record_validation_error(error),
+                );
+                return;
+            }
+        };
     let (destination_mip_level, destination_origin, destination_aspect) =
-        map_texel_copy_texture_info_parts(destination);
+        match map_texel_copy_texture_info_parts(destination) {
+            Ok(parts) => parts,
+            Err(error) => {
+                dispatch_optional_error(
+                    &encoder.device,
+                    encoder.core.record_validation_error(error),
+                );
+                return;
+            }
+        };
 
     dispatch_optional_error(
         &encoder.device,

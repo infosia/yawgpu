@@ -51,6 +51,11 @@ fn finish_real_instance(
 pub unsafe extern "C" fn wgpuCreateInstance(
     descriptor: *const native::WGPUInstanceDescriptor,
 ) -> native::WGPUInstance {
+    if let Some(descriptor) = descriptor.as_ref() {
+        if descriptor.requiredFeatureCount > 0 && descriptor.requiredFeatures.is_null() {
+            return std::ptr::null();
+        }
+    }
     let timed_wait_any_enabled = instance_has_timed_wait_any(descriptor);
     let selection = instance_backend_selection(descriptor);
     let instance = match selection {
@@ -423,21 +428,32 @@ pub unsafe extern "C" fn wgpuInstanceRequestAdapter(
     callback_info: native::WGPURequestAdapterCallbackInfo,
 ) -> native::WGPUFuture {
     let instance = borrow_handle(instance_handle, "WGPUInstance");
+    let mut options_error = None;
     let feature_level = options
         .as_ref()
-        .map(|options| map_feature_level(options.featureLevel))
+        .map(|options| map_feature_level(options.featureLevel, &mut options_error))
         .unwrap_or(core::FeatureLevel::Core);
     let requested_backend_type = options
         .as_ref()
         .map(|options| options.backendType)
         .unwrap_or(native::WGPUBackendType_Undefined);
-    let result = select_request_adapter(
-        instance
-            .core
-            .enumerate_adapters_with_feature_level(feature_level),
-        requested_backend_type,
-        |adapter| backend_type_from_hal(adapter.backend()),
-    )
+    let invalid_feature_level = options_error.is_some();
+    let force_fallback = options
+        .as_ref()
+        .is_some_and(|options| options.forceFallbackAdapter != 0);
+    let result = if invalid_feature_level {
+        Err("invalid featureLevel".to_owned())
+    } else if force_fallback {
+        Err("no fallback adapter available".to_owned())
+    } else {
+        select_request_adapter(
+            instance
+                .core
+                .enumerate_adapters_with_feature_level(feature_level),
+            requested_backend_type,
+            |adapter| backend_type_from_hal(adapter.backend()),
+        )
+    }
     .map(|adapter| {
         Arc::new(WGPUAdapterImpl {
             core: Arc::new(adapter),
@@ -446,6 +462,11 @@ pub unsafe extern "C" fn wgpuInstanceRequestAdapter(
     });
 
     instance.register_callback(PendingCallback::RequestAdapter {
+        error_status: if invalid_feature_level {
+            native::WGPURequestAdapterStatus_Error
+        } else {
+            native::WGPURequestAdapterStatus_Unavailable
+        },
         mode: callback_info.mode,
         callback: callback_info.callback,
         result,

@@ -142,7 +142,7 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
     let required_features = descriptor
         .as_ref()
         .map(|descriptor| required_features_from_descriptor(descriptor))
-        .unwrap_or_default();
+        .unwrap_or_else(|| Ok(Vec::new()));
     let label = descriptor
         .as_ref()
         .and_then(|descriptor| label_from_string_view(descriptor.label))
@@ -170,14 +170,18 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
             userdata1: 0,
             userdata2: 0,
         });
-    let result = adapter
-        .core
-        .create_device(
-            required_limits.as_ref(),
-            &required_features,
-            label,
-            queue_label,
-        )
+    let result = required_features
+        .and_then(|required_features| {
+            adapter
+                .core
+                .create_device(
+                    required_limits.as_ref(),
+                    &required_features,
+                    label,
+                    queue_label,
+                )
+                .map_err(|error| error.to_string())
+        })
         .map(|device| {
             let device_impl = Arc::new(WGPUDeviceImpl {
                 core: Arc::new(device),
@@ -207,8 +211,7 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
                 }));
             }
             device_impl
-        })
-        .map_err(|err| err.to_string());
+        });
     let failed = result.is_err();
 
     let future = adapter
