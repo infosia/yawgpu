@@ -49,7 +49,33 @@ pub(crate) struct QueueInner {
     pub(crate) hal: HalQueue,
     pub(crate) label: Mutex<String>,
     latest_submission_index: Mutex<SubmissionIndex>,
+    // Lock order: submission -> pending_writes -> resource state (buffer/texture)
+    // or HAL/device-internal locks. latest_submission_index is taken only
+    // after releasing pending_writes. Never acquire submission while holding
+    // pending_writes, resource-state or device locks; never invoke user callbacks
+    // under submission. Completion recycling needs only pending_writes and
+    // never acquires submission. QueueInner::drop has exclusive access instead.
+    submission: Mutex<()>,
     pending_writes: Mutex<PendingWriteBatch>,
+    #[cfg(test)]
+    submit_test_hook: Mutex<Option<SubmitTestHook>>,
+}
+
+// A one-shot seam around the HAL call and commit, scoped to one queue.
+// Channels let tests pause a submit without invoking callbacks under its lock.
+#[cfg(test)]
+#[derive(Debug)]
+struct SubmitTestHook {
+    reached: std::sync::mpsc::Sender<&'static str>,
+    resume: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+impl SubmitTestHook {
+    fn pause(&self, stage: &'static str) {
+        self.reached.send(stage).unwrap();
+        self.resume.recv().unwrap();
+    }
 }
 
 const STAGING_CHUNK_SIZE: u64 = 64 * 1024;
@@ -314,7 +340,10 @@ impl Queue {
                 hal,
                 label: Mutex::new(label.into()),
                 latest_submission_index: Mutex::new(SubmissionIndex::NONE),
+                submission: Mutex::new(()),
                 pending_writes: Mutex::new(PendingWriteBatch::default()),
+                #[cfg(test)]
+                submit_test_hook: Mutex::new(None),
             }),
         }
     }
@@ -487,7 +516,7 @@ impl Queue {
             Err(_) => {
                 return Some(DeviceError::validation(
                     "queue write texture dataSize is too large",
-                ))
+                ));
             }
         };
         if let Err(message) =
@@ -558,7 +587,7 @@ impl Queue {
                 Err(_) => {
                     return Some(DeviceError::internal(
                         "queue write texture repack buffer size overflows",
-                    ))
+                    ));
                 }
             };
             // Build a packed HAL layout with a tight stride and
@@ -569,7 +598,7 @@ impl Queue {
                 Err(_) => {
                     return Some(DeviceError::internal(
                         "queue write texture packed bytes_per_row overflows u32",
-                    ))
+                    ));
                 }
             };
             let packed_rows_per_image = match u32::try_from(height_blocks) {
@@ -577,7 +606,7 @@ impl Queue {
                 Err(_) => {
                     return Some(DeviceError::internal(
                         "queue write texture packed rows_per_image overflows u32",
-                    ))
+                    ));
                 }
             };
             let format = hal_texture_format(texture.format());
@@ -586,6 +615,7 @@ impl Queue {
                     "queue write texture has no HAL texture",
                 ));
             };
+            let _submission = self.inner.submission.lock();
             self.recycle_completed_staging();
             let mut pending = self.inner.pending_writes.lock();
             let (staging, staging_offset) =
@@ -640,6 +670,7 @@ impl Queue {
                 "queue write texture has no HAL texture",
             ));
         };
+        let _submission = self.inner.submission.lock();
         self.recycle_completed_staging();
         let mut pending = self.inner.pending_writes.lock();
         let (staging, staging_offset) =
@@ -652,7 +683,7 @@ impl Queue {
             None => {
                 return Some(DeviceError::internal(
                     "queue write texture staging offset overflows",
-                ))
+                ));
             }
         };
         let copy = HalCopy::BufferToTexture(HalBufferTextureCopy {
@@ -768,6 +799,10 @@ impl Queue {
             let _ = self.flush_pending_writes();
             return Some(DeviceError::validation(message));
         }
+        // Keep lowering, HAL submission, initialization commit and staging
+        // retirement in the same queue order. Error paths above flush through
+        // the public helper before taking this non-reentrant lock.
+        let _submission = self.inner.submission.lock();
         if command_buffers.is_empty() {
             let PendingWriteSubmission { copies, chunks } = self.take_pending_writes();
             let result = if copies.is_empty() {
@@ -863,13 +898,28 @@ impl Queue {
             return Some(error);
         }
 
+        #[cfg(test)]
+        let test_hook = self.inner.submit_test_hook.lock().take();
+        #[cfg(test)]
+        if let Some(hook) = &test_hook {
+            hook.pause("lowered");
+        }
         let result = self.inner.hal.submit_copies(&copies);
+        #[cfg(test)]
+        if let Some(hook) = &test_hook {
+            hook.pause("submitted");
+        }
         if result.is_ok() {
             // The clears are on the GPU timeline now, so the marks they
             // justify become visible to later submissions (Block 104 R5).
             init_overlay.commit();
         }
-        self.finish_pending_submission(chunks, result)
+        let error = self.finish_pending_submission(chunks, result);
+        #[cfg(test)]
+        if let Some(hook) = &test_hook {
+            hook.pause("committed");
+        }
+        error
     }
 
     /// Submits all deferred queue writes and records their submission index.
@@ -877,6 +927,7 @@ impl Queue {
     /// If there are no deferred writes, this does not create an empty HAL
     /// submission and leaves the latest index unchanged.
     pub fn flush_pending_writes(&self) -> Option<DeviceError> {
+        let _submission = self.inner.submission.lock();
         let PendingWriteSubmission { copies, chunks } = self.take_pending_writes();
         if copies.is_empty() {
             return None;
@@ -6686,6 +6737,171 @@ fn fs() -> @location(0) vec4<f32> {
             ]
         ));
         assert!(texture.is_initialized(0, 0, InitAspect::Color));
+    }
+
+    // A full copy initializes the texture only when the first submit commits;
+    // the second command buffer reads that same subresource.
+    fn texture_write_and_read_commands(
+        device: &Device,
+    ) -> (Arc<Texture>, Arc<CommandBuffer>, Arc<CommandBuffer>) {
+        let extent = Extent3d {
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+        };
+        let texture = lazy_init_texture(
+            device,
+            TextureUsage::COPY_DST | TextureUsage::COPY_SRC,
+            rgba8_unorm(),
+            extent,
+            1,
+            1,
+        );
+        let source = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
+            size: 1024,
+            mapped_at_creation: false,
+        }));
+        let readback = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 1024,
+            mapped_at_creation: false,
+        }));
+        let texture_info = TexelCopyTextureInfo {
+            texture: Arc::clone(&texture),
+            mip_level: 0,
+            origin: Origin3d { x: 0, y: 0, z: 0 },
+            aspect: TextureAspect::All,
+        };
+        let layout = TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(256),
+            rows_per_image: Some(4),
+        };
+        let encoder = device.create_command_encoder();
+        // Exercise staging retirement as well as the initialization commit.
+        assert_eq!(encoder.write_buffer(Arc::clone(&source), 0, &[7; 4]), None);
+        assert_eq!(
+            encoder.copy_buffer_to_texture(
+                TexelCopyBufferInfo {
+                    buffer: source,
+                    device: None,
+                    layout
+                },
+                texture_info.clone(),
+                extent,
+            ),
+            None
+        );
+        let (write, error) = encoder.finish();
+        assert_eq!(error, None);
+        let encoder = device.create_command_encoder();
+        assert_eq!(
+            encoder.copy_texture_to_buffer(
+                texture_info,
+                TexelCopyBufferInfo {
+                    buffer: readback,
+                    device: None,
+                    layout
+                },
+                extent,
+            ),
+            None
+        );
+        let (read, error) = encoder.finish();
+        assert_eq!(error, None);
+        (texture, Arc::new(write), Arc::new(read))
+    }
+
+    #[test]
+    fn earlier_submitted_texture_copy_prevents_later_lazy_init_clear() {
+        let device = noop_device();
+        let queue = device.queue();
+        let (texture, write, read) = texture_write_and_read_commands(&device);
+        assert!(!texture.is_initialized(0, 0, InitAspect::Color));
+        assert_eq!(queue.submit(&[write]), None);
+        assert!(texture.is_initialized(0, 0, InitAspect::Color));
+        assert_eq!(queue.submit(&[read]), None);
+        assert!(matches!(
+            submitted_copies(&queue).as_slice(),
+            [
+                HalCopy::Buffer(_),
+                HalCopy::BufferToTexture(_),
+                HalCopy::TextureToBuffer(_)
+            ]
+        ));
+    }
+
+    #[test]
+    fn concurrent_submits_serialize_lowering_hal_commit_and_retirement() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let device = noop_device();
+        let queue = device.queue();
+        let (texture, write, read) = texture_write_and_read_commands(&device);
+        let (reached_tx, reached_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        *queue.inner.submit_test_hook.lock() = Some(SubmitTestHook {
+            reached: reached_tx,
+            resume: resume_rx,
+        });
+        let first_queue = queue.clone();
+        let first = std::thread::spawn(move || first_queue.submit(&[write]));
+        let timeout = Duration::from_secs(5);
+        assert_eq!(reached_rx.recv_timeout(timeout).unwrap(), "lowered");
+        assert!(submitted_copies(&queue).is_empty());
+        assert!(!texture.is_initialized(0, 0, InitAspect::Color));
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let second_queue = queue.clone();
+        let second = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = second_queue.submit(&[read]);
+            done_tx.send(()).unwrap();
+            result
+        });
+        started_rx.recv_timeout(timeout).unwrap();
+        // Check the actual lock at every boundary: no scheduler-dependent
+        // sleep is needed to prove the second submit cannot lower here.
+        assert!(queue.inner.submission.try_lock().is_none());
+        assert!(done_rx.try_recv().is_err());
+        resume_tx.send(()).unwrap();
+        assert_eq!(reached_rx.recv_timeout(timeout).unwrap(), "submitted");
+        assert!(queue.inner.submission.try_lock().is_none());
+        assert!(!texture.is_initialized(0, 0, InitAspect::Color));
+        assert!(matches!(
+            submitted_copies(&queue).as_slice(),
+            [HalCopy::Buffer(_), HalCopy::BufferToTexture(_)]
+        ));
+        assert!(queue.inner.pending_writes.lock().in_flight.is_empty());
+        resume_tx.send(()).unwrap();
+        assert_eq!(reached_rx.recv_timeout(timeout).unwrap(), "committed");
+        assert!(queue.inner.submission.try_lock().is_none());
+        assert!(texture.is_initialized(0, 0, InitAspect::Color));
+        let latest = queue.latest_submission_index();
+        assert_eq!(
+            queue
+                .inner
+                .pending_writes
+                .lock()
+                .in_flight_submission_indices(),
+            vec![latest]
+        );
+        assert!(done_rx.try_recv().is_err());
+        resume_tx.send(()).unwrap();
+        assert_eq!(first.join().unwrap(), None);
+        done_rx.recv_timeout(timeout).unwrap();
+        assert_eq!(second.join().unwrap(), None);
+        assert!(matches!(
+            submitted_copies(&queue).as_slice(),
+            [
+                HalCopy::Buffer(_),
+                HalCopy::BufferToTexture(_),
+                HalCopy::TextureToBuffer(_)
+            ]
+        ));
     }
 
     /// Block 104 R5: a submission that never reaches the HAL leaves every
