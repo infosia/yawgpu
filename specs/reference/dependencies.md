@@ -37,6 +37,14 @@
   and fetch each dependency at its gitlink SHA from its `.gitmodules` URL. Touching
   a file in `yawgpu-tint/shim/` is also needed, because Cargo does not watch the
   Dawn sources themselves.
+
+  The same missing `origin` breaks `git pull` when incoming commits move the pin:
+  the recursive submodule fetch fails, and the pull stops before it merges. Use
+  `git pull --no-recurse-submodules`, then `git submodule update third_party/dawn`.
+  The `v20261030` bump moved the googletest gitlink to `third_party/googletest/src`,
+  so an older checkout keeps an untracked `third_party/googletest/` tree in Dawn. The
+  Tint build does not use it.
+
   (Tint replaced the earlier naga frontend, which was consumed from an
   `infosia/wgpu` git fork; that fork and the `naga` crate dependency are no longer
   used.)

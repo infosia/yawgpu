@@ -136,11 +136,27 @@ buffer is created; the affected dispatch and compute queries were re-run after i
 The full Vulkan e2e run predates the GLES change and m1. Neither touches a Vulkan
 path; the indirect and threading-audit e2e were re-run after both.
 
-GLES has not been run: `yawgpu/tests/e2e_gles_indirect_dispatch.rs` and
-`submit_compute_pass_uploads_immediates_to_tint_immediates` compile here and need the
-native GLES host. Before this block, GLES indirect dispatch used the driver directly;
-now it depends on that unverified path. Native Vulkan is also unverified at this
-commit.
+### Linux native Vulkan and GLES (2026-11-01)
+
+Run on yawgpu `9977e34` / Dawn pin `843d53377` / CTS `b7ac3ef`, Linux / NVIDIA RTX
+5060 Ti, driver 615.71.09. This closes the native Vulkan and GLES gaps left by the
+Metal host. Vulkan e2e ran with `--test-threads=1` and without the Khronos layer.
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace` | 0 failed |
+| Vulkan e2e (`vulkan,tiled,shader-passthrough`) | 133 passed, 0 failed |
+| GLES e2e, including `e2e_gles_indirect_dispatch` | 36 passed, 0 failed |
+| `submit_compute_pass_uploads_immediates_to_tint_immediates` | passed on the EGL device |
+| webgpu-native-cts, native Vulkan, per-area `webgpu:*` | `fail=2 crash=0` with expectations |
+| webgpu-native-cts, GLES, per-area `webgpu:*` | `fail=28,810 crash=0`, raw |
+
+The 2 Vulkan failures are the R9 cases. The F-161 to F-164 queries have no other
+Vulkan failures. On GLES the indirect dispatch queries, `api,validation,dispatch`, and
+`min_buffer_binding_size:compute` all pass. The GLES failures in the Block 119 areas
+are existing Tier 2 gaps. `alpha_to_coverage` reports a color target that is not
+color-renderable on GLES 3.1 (`HalError`), and the 38 `snorm10-10-10-2` failures are in
+a vertex-format test that fails the same way for other formats, such as `float32`.
 
 ## Slices
 
