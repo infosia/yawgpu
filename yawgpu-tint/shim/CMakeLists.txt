@@ -45,6 +45,12 @@ set(TINT_BUILD_GLSL_VALIDATOR OFF CACHE BOOL "" FORCE)
 set(TINT_BUILD_HLSL_WRITER OFF CACHE BOOL "" FORCE)
 set(TINT_BUILD_NULL_WRITER OFF CACHE BOOL "" FORCE)
 
+# With a Visual Studio generator the Rust `cmake` crate replaces
+# CMAKE_<LANG>_FLAGS_RELEASE, which drops CMake's default /DNDEBUG. Dawn's
+# src/utils/compiler.h rejects a build with neither NDEBUG nor
+# DAWN_ENABLE_ASSERTS, so define it per configuration here.
+add_compile_definitions($<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
+
 # EXCLUDE_FROM_ALL: nothing in Dawn builds unless `tint_shim` depends on it, so
 # building target `tint_shim` pulls in only tint_api + tint_api_helpers and their
 # transitive deps (abseil + the linked SPIRV-Tools subset).
