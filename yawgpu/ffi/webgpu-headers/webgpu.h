@@ -662,6 +662,8 @@ typedef enum WGPUFeatureName {
     WGPUFeatureName_PrimitiveIndex = 0x00000015,
     WGPUFeatureName_TextureComponentSwizzle = 0x00000016,
     WGPUFeatureName_SubgroupSizeControl = 0x00000017,
+    WGPUFeatureName_TextureCompressionUnaligned = 0x00000018,
+    WGPUFeatureName_AtomicVec2uMinMax = 0x00000019,
     WGPUFeatureName_Force32 = 0x7FFFFFFF
 } WGPUFeatureName WGPU_ENUM_ATTRIBUTE;
 
@@ -1209,6 +1211,7 @@ typedef enum WGPUVertexFormat {
     WGPUVertexFormat_Sint32x4 = 0x00000027,
     WGPUVertexFormat_Unorm10_10_10_2 = 0x00000028,
     WGPUVertexFormat_Unorm8x4BGRA = 0x00000029,
+    WGPUVertexFormat_Snorm10_10_10_2 = 0x0000002A,
     WGPUVertexFormat_Force32 = 0x7FFFFFFF
 } WGPUVertexFormat WGPU_ENUM_ATTRIBUTE;
 
@@ -1254,6 +1257,9 @@ typedef enum WGPUWGSLLanguageFeatureName {
     WGPUWGSLLanguageFeatureName_TextureFormatsTier1 = 0x00000009,
     WGPUWGSLLanguageFeatureName_LinearIndexing = 0x0000000A,
     WGPUWGSLLanguageFeatureName_ImmediateAddressSpace = 0x0000000B,
+    WGPUWGSLLanguageFeatureName_BufferView = 0x0000000C,
+    WGPUWGSLLanguageFeatureName_SwizzleAssignment = 0x0000000D,
+    WGPUWGSLLanguageFeatureName_FragmentDepth = 0x0000000E,
     WGPUWGSLLanguageFeatureName_Force32 = 0x7FFFFFFF
 } WGPUWGSLLanguageFeatureName WGPU_ENUM_ATTRIBUTE;
 

@@ -4,7 +4,7 @@
 
 | Path (from `yawgpu/`) | Role |
 |---|---|
-| `webgpu-headers/webgpu.h` | Canonical WebGPU C header — the spec we implement (6766 lines) |
+| `webgpu-headers/webgpu.h` | Canonical WebGPU C header — the spec we implement (6774 lines) |
 | `dawn` | Behaviour spec + ported test source (`src/dawn/tests/unittests/validation`) |
 | `wgpu-native` | C ABI structure inspiration (bindgen rename trick, Arc handles, conv.rs) |
 | `mgpu` | Project layout + enum-dispatch HAL template + conventions |
@@ -101,10 +101,22 @@
 Record the `webgpu.h` upstream commit/version here once Phase 0 vendors or
 references it, so bindgen output is reproducible:
 
-- `webgpu.h`: vendored at `yawgpu/ffi/webgpu-headers/webgpu.h` (6768 lines),
+- `webgpu.h`: vendored at `yawgpu/ffi/webgpu-headers/webgpu.h` (6774 lines),
   byte-identical copy from `webgpu-headers` commit
-  `a11ef4462405c4506ad7284e5b1edeff2750bb54` (2026-06-24). Bound via
+  `a1dc77409bb2b8bd80540cbf4b8db219e123e909` (2026-09-28). Bound via
   `bindgen 0.72` in `yawgpu/build.rs`.
+  Re-vendored 2026-11-01 from `a11ef4462405c4506ad7284e5b1edeff2750bb54`
+  (2026-06-24). Between those two revisions the header gained exactly six
+  enumerators and **no new `WGPU_EXPORT` function** — the canonical function
+  set is unchanged at 202. All six are declared but **not implemented**:
+  `WGPUFeatureName_TextureCompressionUnaligned = 0x18` and
+  `WGPUFeatureName_AtomicVec2uMinMax = 0x19` route to `Feature::Other`, so
+  `wgpuAdapterHasFeature` reports `false` and `requestDevice` rejects them;
+  `WGPUVertexFormat_Snorm10_10_10_2 = 0x2A` is outside
+  `VertexFormat`'s known range, so pipeline creation rejects it; and
+  `WGPUWGSLLanguageFeatureName_BufferView = 0x0C`, `_SwizzleAssignment = 0x0D`,
+  and `_FragmentDepth = 0x0E` are absent from
+  `SUPPORTED_WGSL_LANGUAGE_FEATURES`, so they are not reported.
   Re-vendored 2026-07-09 from `673658bc2bd70ec39fc55ebe6bb0173cf6d0a603`
   (2026-05-07). Between those two revisions the header gained exactly two
   enumerators and **no new `WGPU_EXPORT` function** — the canonical function
