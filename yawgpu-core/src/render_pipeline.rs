@@ -196,7 +196,7 @@ impl VertexFormat {
             0x0000_0025 => VertexFormatInfo::new(8, FormatOutputClass::Sint),
             0x0000_0026 => VertexFormatInfo::new(12, FormatOutputClass::Sint),
             0x0000_0027 => VertexFormatInfo::new(16, FormatOutputClass::Sint),
-            0x0000_0028 | 0x0000_0029 => VertexFormatInfo::new(4, FormatOutputClass::Float),
+            0x0000_0028..=0x0000_002A => VertexFormatInfo::new(4, FormatOutputClass::Float),
             // Keep unknown future values conservative instead of guessing a smaller footprint.
             _ => VertexFormatInfo::new(16, FormatOutputClass::Float),
         }
@@ -509,6 +509,9 @@ pub(crate) struct RenderPipelineInner {
     pub(crate) hal: Option<HalRenderPipeline>,
     pub(crate) bind_group_layouts: Vec<Arc<BindGroupLayout>>,
     pub(crate) immediate_required_mask: ImmediateWrittenMask,
+    /// Shader-required sizes for buffer bindings the layout leaves unspecified,
+    /// keeping the larger of the vertex and fragment stages.
+    pub(crate) required_buffer_sizes: Vec<RequiredBufferSize>,
     pub(crate) framebuffer_fetch_color_slots: Vec<u32>,
     #[cfg(feature = "tiled")]
     #[allow(dead_code)]
@@ -556,23 +559,29 @@ impl RenderPipeline {
         resolved: Option<Result<ResolvedRenderPipelineParts, String>>,
         hal_device: Option<&HalDevice>,
     ) -> (Self, Option<String>) {
-        let (vertex_entry_name, fragment_entry_name, bind_group_layouts, immediate_required_mask) =
-            resolved.and_then(Result::ok).unwrap_or_else(|| {
-                (
-                    descriptor
-                        .vertex
-                        .shader
-                        .entry_point
-                        .clone()
-                        .unwrap_or_default(),
-                    descriptor
-                        .fragment
-                        .as_ref()
-                        .and_then(|fragment| fragment.shader.entry_point.clone()),
-                    Vec::new(),
-                    0,
-                )
-            });
+        let (
+            vertex_entry_name,
+            fragment_entry_name,
+            bind_group_layouts,
+            immediate_required_mask,
+            required_buffer_sizes,
+        ) = resolved.and_then(Result::ok).unwrap_or_else(|| {
+            (
+                descriptor
+                    .vertex
+                    .shader
+                    .entry_point
+                    .clone()
+                    .unwrap_or_default(),
+                descriptor
+                    .fragment
+                    .as_ref()
+                    .and_then(|fragment| fragment.shader.entry_point.clone()),
+                Vec::new(),
+                0,
+                Vec::new(),
+            )
+        });
         let metal_bindings = metal_buffer_binding_map(&bind_group_layouts);
         let vertex_buffer_bindings =
             metal_vertex_buffer_binding_map(&descriptor.vertex.buffers, &metal_bindings);
@@ -610,6 +619,7 @@ impl RenderPipeline {
                     hal,
                     bind_group_layouts,
                     immediate_required_mask,
+                    required_buffer_sizes,
                     framebuffer_fetch_color_slots,
                     #[cfg(feature = "tiled")]
                     subpass_compatibility: None,
@@ -632,25 +642,31 @@ impl RenderPipeline {
             pass_layout: Arc::clone(&descriptor.pass_layout),
             subpass_index: descriptor.subpass_index,
         };
-        let (vertex_entry_name, fragment_entry_name, bind_group_layouts, immediate_required_mask) =
-            resolved.and_then(Result::ok).unwrap_or_else(|| {
-                (
-                    descriptor
-                        .base
-                        .vertex
-                        .shader
-                        .entry_point
-                        .clone()
-                        .unwrap_or_default(),
-                    descriptor
-                        .base
-                        .fragment
-                        .as_ref()
-                        .and_then(|fragment| fragment.shader.entry_point.clone()),
-                    Vec::new(),
-                    0,
-                )
-            });
+        let (
+            vertex_entry_name,
+            fragment_entry_name,
+            bind_group_layouts,
+            immediate_required_mask,
+            required_buffer_sizes,
+        ) = resolved.and_then(Result::ok).unwrap_or_else(|| {
+            (
+                descriptor
+                    .base
+                    .vertex
+                    .shader
+                    .entry_point
+                    .clone()
+                    .unwrap_or_default(),
+                descriptor
+                    .base
+                    .fragment
+                    .as_ref()
+                    .and_then(|fragment| fragment.shader.entry_point.clone()),
+                Vec::new(),
+                0,
+                Vec::new(),
+            )
+        });
         let metal_bindings = metal_buffer_binding_map(&bind_group_layouts);
         let vertex_buffer_bindings =
             metal_vertex_buffer_binding_map(&descriptor.base.vertex.buffers, &metal_bindings);
@@ -705,6 +721,7 @@ impl RenderPipeline {
                     hal,
                     bind_group_layouts,
                     immediate_required_mask,
+                    required_buffer_sizes,
                     framebuffer_fetch_color_slots,
                     subpass_compatibility: Some(compatibility),
                     is_error,
@@ -741,6 +758,11 @@ impl RenderPipeline {
     /// Returns the required user-immediate 4-byte words for draw validation.
     pub(crate) fn immediate_required_mask(&self) -> ImmediateWrittenMask {
         self.inner.immediate_required_mask
+    }
+
+    /// Returns the shader-required buffer sizes checked at draw.
+    pub(crate) fn required_buffer_sizes(&self) -> &[RequiredBufferSize] {
+        &self.inner.required_buffer_sizes
     }
 
     /// Returns the HAL.
@@ -875,6 +897,7 @@ pub(crate) type ResolvedRenderPipelineParts = (
     Option<String>,
     Vec<Arc<BindGroupLayout>>,
     ImmediateWrittenMask,
+    Vec<RequiredBufferSize>,
 );
 
 pub(crate) fn resolve_render_pipeline_descriptor_for_source(
@@ -2209,6 +2232,7 @@ pub(crate) fn msl_vertex_format(format: VertexFormat) -> Result<frontend::MslVer
         0x0000_0027 => Ok(frontend::MslVertexFormat::Sint32x4),
         0x0000_0028 => Ok(frontend::MslVertexFormat::Unorm10_10_10_2),
         0x0000_0029 => Ok(frontend::MslVertexFormat::Unorm8x4Bgra),
+        0x0000_002A => Ok(frontend::MslVertexFormat::Snorm10_10_10_2),
         _ => Err("unsupported Metal vertex format".to_owned()),
     }
 }
@@ -2257,6 +2281,7 @@ pub(crate) fn hal_vertex_format(format: VertexFormat) -> HalVertexFormat {
         0x0000_0027 => HalVertexFormat::Sint32x4,
         0x0000_0028 => HalVertexFormat::Unorm10_10_10_2,
         0x0000_0029 => HalVertexFormat::Unorm8x4Bgra,
+        0x0000_002A => HalVertexFormat::Snorm10_10_10_2,
         _ => HalVertexFormat::Unsupported,
     }
 }
@@ -2367,12 +2392,17 @@ pub(crate) fn resolve_render_pipeline_descriptor(
         descriptor.vertex.buffer_count,
         limits,
     )?;
+    let required_buffer_sizes = required_buffer_sizes(
+        stage_bindings.iter().map(|stage| &stage.binding),
+        &bind_group_layouts,
+    );
 
     Ok((
         vertex_entry,
         fragment_entry,
         bind_group_layouts,
         immediate_required_mask,
+        required_buffer_sizes,
     ))
 }
 
@@ -2448,6 +2478,7 @@ pub(crate) fn resolve_shader_passthrough_render_pipeline_descriptor(
         fragment_entry,
         layout.bind_group_layouts().to_vec(),
         0,
+        Vec::new(),
     ))
 }
 
@@ -2508,8 +2539,8 @@ pub(crate) fn validate_vertex_state(
         }
 
         for attribute in &buffer.attributes {
-            // webgpu.h defines contiguous values from Uint8 through Unorm8x4BGRA.
-            if !(1..=0x29).contains(&attribute.format.raw()) {
+            // webgpu.h defines contiguous values from Uint8 through Snorm10_10_10_2.
+            if !(1..=0x2A).contains(&attribute.format.raw()) {
                 return Err("render pipeline vertex attribute format is invalid".to_owned());
             }
             let info = attribute.format.info();
@@ -2852,7 +2883,7 @@ pub(crate) fn validate_color_targets(
         None => false,
     };
     let mut color_formats = Vec::new();
-    let mut has_alpha_to_coverage_target = false;
+    let mut alpha_to_coverage_target_caps = None;
     for (index, target) in fragment.targets.iter().enumerate() {
         if target.format.is_undefined() {
             if target.blend.is_some() {
@@ -2894,8 +2925,8 @@ pub(crate) fn validate_color_targets(
         if target.blend.is_some() && !caps.is_blendable {
             return Err("render pipeline color target format must be blendable".to_owned());
         }
-        if index == 0 && caps.has_alpha {
-            has_alpha_to_coverage_target = true;
+        if index == 0 {
+            alpha_to_coverage_target_caps = Some(caps);
         }
 
         // Subpass pipelines accept both subpass-local and flat attachment-slot
@@ -2928,11 +2959,22 @@ pub(crate) fn validate_color_targets(
         color_formats.push(target.format);
     }
 
-    if descriptor.multisample.alpha_to_coverage_enabled && !has_alpha_to_coverage_target {
-        return Err(
-            "render pipeline alphaToCoverage requires color target[0] with an alpha channel"
-                .to_owned(),
-        );
+    if descriptor.multisample.alpha_to_coverage_enabled {
+        // Mirrors Dawn `ValidateFragmentState`: target 0 must exist, have an
+        // alpha channel, and be blendable. Integer formats have alpha but are
+        // not blendable, and Metal's API validation aborts on them.
+        let Some(caps) = alpha_to_coverage_target_caps.filter(|caps| caps.has_alpha) else {
+            return Err(
+                "render pipeline alphaToCoverage requires color target[0] with an alpha channel"
+                    .to_owned(),
+            );
+        };
+        if !caps.is_blendable {
+            return Err(
+                "render pipeline alphaToCoverage requires color target[0] to be blendable"
+                    .to_owned(),
+            );
+        }
     }
     let color_bytes = color_attachment_bytes_per_sample(color_formats)
         .ok_or_else(|| "render pipeline color target byte count overflows".to_owned())?;
@@ -3565,7 +3607,7 @@ override fragment_only: f32;
     #[test]
     fn audit_unknown_vertex_formats_are_rejected_at_pipeline_creation() {
         let device = noop_device();
-        for raw in [0, 0x2a, u32::MAX] {
+        for raw in [0, 0x2b, u32::MAX] {
             let mut descriptor = render_pipeline_descriptor(render_shader_module(&device));
             descriptor.vertex.buffer_count = 1;
             descriptor.vertex.buffers = vec![VertexBufferLayout {
@@ -3619,7 +3661,7 @@ override fragment_only: f32;
         );
         assert!(device.create_render_pipeline(descriptor).is_error());
 
-        // Integer targets have alpha but are not blendable.
+        // Integer targets have alpha but are not blendable (Block 119 R1).
         let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
             "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0); } @fragment fn fs() -> @location(0) vec4u { return vec4u(1u); }".to_owned())));
         let mut descriptor = render_pipeline_descriptor(module);
@@ -3627,15 +3669,47 @@ override fragment_only: f32;
         descriptor.multisample.alpha_to_coverage_enabled = true;
         descriptor.fragment.as_mut().unwrap().targets[0].format =
             TextureFormat::from_raw(TextureFormat::RGBA8_UINT);
-        assert!(validate_color_targets(
-            &descriptor,
-            Some("fs"),
-            device.limits(),
-            &device.features(),
-            None
-        )
-        .is_ok());
-        assert!(!device.create_render_pipeline(descriptor).is_error());
+        assert_eq!(
+            validate_color_targets(
+                &descriptor,
+                Some("fs"),
+                device.limits(),
+                &device.features(),
+                None
+            )
+            .unwrap_err(),
+            "render pipeline alphaToCoverage requires color target[0] to be blendable"
+        );
+        assert!(device.create_render_pipeline(descriptor).is_error());
+    }
+
+    /// Block 119 R1: blendability is judged against the device's enabled
+    /// features, so a float32 target needs `float32-blendable` to pass.
+    #[test]
+    fn alpha_to_coverage_accepts_blendable_alpha_targets_only() {
+        let device = noop_device();
+        let validate = |format: u32, features: &FeatureSet| {
+            let mut descriptor = render_pipeline_descriptor(render_shader_module(&device));
+            descriptor.multisample.count = 4;
+            descriptor.multisample.alpha_to_coverage_enabled = true;
+            descriptor.fragment.as_mut().expect("fragment").targets[0].format =
+                TextureFormat::from_raw(format);
+            validate_color_targets(&descriptor, Some("fs"), device.limits(), features, None)
+        };
+        let not_blendable =
+            "render pipeline alphaToCoverage requires color target[0] to be blendable";
+        let no_features = FeatureSet::default();
+
+        assert_eq!(validate(TextureFormat::RGBA8_UNORM, &no_features), Ok(()));
+        assert_eq!(
+            validate(TextureFormat::RGBA32_FLOAT, &no_features).unwrap_err(),
+            not_blendable
+        );
+        let float32_blendable = [Feature::Float32Blendable].into_iter().collect();
+        assert_eq!(
+            validate(TextureFormat::RGBA32_FLOAT, &float32_blendable),
+            Ok(())
+        );
     }
 
     use super::*;
@@ -3804,7 +3878,7 @@ fn fs() -> @location(0) vec4<f32> {
 
     #[test]
     fn vertex_format_from_raw_pins_known_zero_and_unknown_values() {
-        let known_values = 1..=0x29;
+        let known_values = 1..=0x2A;
         for raw in known_values {
             let format = VertexFormat::from_raw(raw);
             assert_eq!(format, VertexFormat::from_raw(raw));
@@ -3825,6 +3899,54 @@ fn fs() -> @location(0) vec4<f32> {
         assert_eq!(unknown.info().output_class, FormatOutputClass::Float);
     }
 
+    /// Block 119 R6: `snorm10-10-10-2` is an ungated 4-byte, 4-component
+    /// float format with 4-byte attribute alignment.
+    #[test]
+    fn snorm10_10_10_2_is_a_valid_ungated_vertex_format() {
+        let snorm = VertexFormat::from_raw(0x2A);
+        assert_eq!(snorm.info().byte_size, 4);
+        assert_eq!(snorm.info().output_class, FormatOutputClass::Float);
+        assert_eq!(
+            msl_vertex_format(snorm),
+            Ok(frontend::MslVertexFormat::Snorm10_10_10_2)
+        );
+        assert_eq!(
+            msl_vertex_format(VertexFormat::from_raw(0x2B)),
+            Err("unsupported Metal vertex format".to_owned())
+        );
+
+        let device = noop_device();
+        let attribute_descriptor = |offset| {
+            let mut descriptor = render_pipeline_descriptor(render_shader_module(&device));
+            descriptor.vertex.buffer_count = 1;
+            descriptor.vertex.buffers = vec![VertexBufferLayout {
+                used: true,
+                array_stride: 8,
+                step_mode: VertexStepMode::Vertex,
+                attributes: vec![VertexAttribute {
+                    format: snorm,
+                    offset,
+                    shader_location: 0,
+                }],
+            }];
+            descriptor
+        };
+        // No feature is requested on this device, so a pass here proves the
+        // format is ungated.
+        assert_eq!(
+            validate_vertex_state(&attribute_descriptor(4).vertex, "vs", device.limits()),
+            Ok(())
+        );
+        assert!(!device
+            .create_render_pipeline(attribute_descriptor(4))
+            .is_error());
+        assert_eq!(
+            validate_vertex_state(&attribute_descriptor(2).vertex, "vs", device.limits())
+                .unwrap_err(),
+            "render pipeline vertex attribute offset is not properly aligned"
+        );
+    }
+
     #[test]
     fn hal_vertex_format_maps_representative_full_set_formats() {
         let cases = [
@@ -3834,6 +3956,7 @@ fn fs() -> @location(0) vec4<f32> {
             (0x0000_0023, HalVertexFormat::Uint32x4),
             (0x0000_0028, HalVertexFormat::Unorm10_10_10_2),
             (0x0000_0029, HalVertexFormat::Unorm8x4Bgra),
+            (0x0000_002A, HalVertexFormat::Snorm10_10_10_2),
         ];
 
         for (raw, expected) in cases {

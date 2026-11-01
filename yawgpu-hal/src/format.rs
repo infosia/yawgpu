@@ -89,6 +89,8 @@ pub enum HalVertexFormat {
     Unorm10_10_10_2,
     /// Unorm8x4 BGRA variant.
     Unorm8x4Bgra,
+    /// Snorm10_10_10_2 variant.
+    Snorm10_10_10_2,
     /// Unsupported variant.
     Unsupported,
 }

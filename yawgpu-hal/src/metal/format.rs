@@ -340,6 +340,7 @@ pub(super) fn map_vertex_format(format: HalVertexFormat) -> Result<MTLVertexForm
         HalVertexFormat::Sint32x4 => Ok(MTLVertexFormat::Int4),
         HalVertexFormat::Unorm10_10_10_2 => Ok(MTLVertexFormat::UInt1010102Normalized),
         HalVertexFormat::Unorm8x4Bgra => Ok(MTLVertexFormat::UChar4Normalized_BGRA),
+        HalVertexFormat::Snorm10_10_10_2 => Ok(MTLVertexFormat::Int1010102Normalized),
         HalVertexFormat::Unsupported => Err(shader_error(
             "unsupported vertex format for Metal".to_owned(),
         )),
@@ -375,7 +376,8 @@ pub(super) fn vertex_format_byte_size(format: HalVertexFormat) -> u64 {
         | HalVertexFormat::Uint32
         | HalVertexFormat::Sint32
         | HalVertexFormat::Unorm10_10_10_2
-        | HalVertexFormat::Unorm8x4Bgra => 4,
+        | HalVertexFormat::Unorm8x4Bgra
+        | HalVertexFormat::Snorm10_10_10_2 => 4,
         HalVertexFormat::Uint16x4
         | HalVertexFormat::Sint16x4
         | HalVertexFormat::Unorm16x4
@@ -535,6 +537,10 @@ mod tests {
                 HalVertexFormat::Unorm8x4Bgra,
                 MTLVertexFormat::UChar4Normalized_BGRA,
             ),
+            (
+                HalVertexFormat::Snorm10_10_10_2,
+                MTLVertexFormat::Int1010102Normalized,
+            ),
         ];
 
         for (hal, metal) in cases {
@@ -552,6 +558,7 @@ mod tests {
             (HalVertexFormat::Uint32x4, 16),
             (HalVertexFormat::Unorm10_10_10_2, 4),
             (HalVertexFormat::Unorm8x4Bgra, 4),
+            (HalVertexFormat::Snorm10_10_10_2, 4),
         ];
 
         for (format, byte_size) in cases {

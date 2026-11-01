@@ -255,6 +255,11 @@ pub struct EntryPoint {
     /// const-expression or an override-expression. The resolved value is
     /// reported by [`Program::resolved_workgroup_info`].
     pub has_subgroup_size: bool,
+    /// Whether the compute entry point takes
+    /// `@builtin(global_invocation_index)`.
+    pub global_invocation_index_used: bool,
+    /// Whether the compute entry point takes `@builtin(workgroup_index)`.
+    pub workgroup_index_used: bool,
 }
 
 /// An entry point's override-resolved compute workgroup info (Tint's
@@ -906,6 +911,8 @@ pub enum VertexFormat {
     Unorm10_10_10_2 = 39,
     /// unorm8x4-bgra.
     Unorm8x4Bgra = 40,
+    /// snorm10-10-10-2.
+    Snorm10_10_10_2 = 41,
 }
 
 /// Vertex-buffer stepping mode used by Tint vertex pulling.
@@ -981,6 +988,8 @@ mod real {
         has_clip_distances: bool,
         has_subgroup_size: bool,
         clip_distances_size: u32,
+        global_invocation_index_used: bool,
+        workgroup_index_used: bool,
     }
 
     // ABI drift guard: mirrors the `static_assert`s on `YawgpuTintEntryPoint`
@@ -988,7 +997,7 @@ mod real {
     // updating the other, this fails to compile. See tint_shim.h's "Dawn rev
     // bump" checklist.
     const _: () = {
-        assert!(core::mem::size_of::<RawEntryPoint>() == 40);
+        assert!(core::mem::size_of::<RawEntryPoint>() == 48);
         assert!(core::mem::offset_of!(RawEntryPoint, name) == 0);
         assert!(core::mem::offset_of!(RawEntryPoint, stage) == 8);
         assert!(core::mem::offset_of!(RawEntryPoint, has_workgroup_size) == 9);
@@ -1007,6 +1016,8 @@ mod real {
         assert!(core::mem::offset_of!(RawEntryPoint, has_clip_distances) == 33);
         assert!(core::mem::offset_of!(RawEntryPoint, has_subgroup_size) == 34);
         assert!(core::mem::offset_of!(RawEntryPoint, clip_distances_size) == 36);
+        assert!(core::mem::offset_of!(RawEntryPoint, global_invocation_index_used) == 40);
+        assert!(core::mem::offset_of!(RawEntryPoint, workgroup_index_used) == 41);
     };
 
     impl EntryPoint {
@@ -1028,6 +1039,8 @@ mod real {
                 frag_position_used: raw.frag_position_used,
                 clip_distances_size: raw.has_clip_distances.then_some(raw.clip_distances_size),
                 has_subgroup_size: raw.has_subgroup_size,
+                global_invocation_index_used: raw.global_invocation_index_used,
+                workgroup_index_used: raw.workgroup_index_used,
             })
         }
     }
@@ -1846,6 +1859,8 @@ mod real {
                     has_clip_distances: false,
                     has_subgroup_size: false,
                     clip_distances_size: 0,
+                    global_invocation_index_used: false,
+                    workgroup_index_used: false,
                 };
                 // SAFETY: `raw` points to valid writable memory.
                 let ok = unsafe { yawgpu_tint_entry_point_get(self.raw, i, &mut raw) };
@@ -4735,6 +4750,165 @@ fn fs(@color(0) prev: vec4<f32>) -> @location(0) vec4<f32> {
         )
         .unwrap_err();
         assert!(!err.to_string().is_empty());
+    }
+
+    /// Block 119 R3: crosses the shim ABI, so this also pins the two trailing
+    /// `YawgpuTintEntryPoint` fields end to end.
+    #[test]
+    fn entry_points_reflect_linear_index_builtins() {
+        let wgsl = r#"
+requires linear_indexing;
+
+@compute @workgroup_size(1)
+fn neither() {}
+
+@compute @workgroup_size(1)
+fn global(@builtin(global_invocation_index) index: u32) { _ = index; }
+
+@compute @workgroup_size(1)
+fn workgroup(@builtin(workgroup_index) index: u32) { _ = index; }
+"#;
+        let program =
+            Program::parse(wgsl, false, false, false, false, false, false, &[10]).unwrap();
+        let entries = program.entry_points().unwrap();
+        let used = |name: &str| {
+            let entry = entries.iter().find(|entry| entry.name == name).unwrap();
+            (
+                entry.global_invocation_index_used,
+                entry.workgroup_index_used,
+            )
+        };
+
+        assert_eq!(used("neither"), (false, false));
+        assert_eq!(used("global"), (true, false));
+        assert_eq!(used("workgroup"), (false, true));
+    }
+
+    /// Block 119 R7: format ordinal 41 must reach Tint as `snorm10-10-10-2`
+    /// instead of falling through the shim's `kUint8` default. The sign-extending
+    /// `>> 22` is the snorm decode Tint's vertex pulling emits.
+    #[test]
+    fn vertex_msl_pulls_snorm10_10_10_2() {
+        let wgsl = r#"
+@vertex
+fn vs(@location(0) p: vec4f) -> @builtin(position) vec4f {
+  return p;
+}
+"#;
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
+        let pulled = |format| {
+            program
+                .generate_msl(
+                    "vs",
+                    &Bindings::default(),
+                    &[],
+                    true,
+                    false,
+                    &[VertexBuffer {
+                        slot: 0,
+                        metal_index: 0,
+                        array_stride: 4,
+                        step_mode: VertexStepMode::Vertex,
+                        attributes: vec![VertexAttribute {
+                            format,
+                            offset: 0,
+                            shader_location: 0,
+                        }],
+                    }],
+                    0xFFFF_FFFF,
+                    0,
+                )
+                .unwrap()
+                .source
+        };
+
+        let snorm = pulled(VertexFormat::Snorm10_10_10_2);
+        assert_ne!(snorm, pulled(VertexFormat::Unorm10_10_10_2));
+        assert_ne!(snorm, pulled(VertexFormat::Snorm8x4));
+        assert!(snorm.contains("int4(22"), "MSL:\n{snorm}");
+    }
+
+    /// Block 119 R8/R9: `buffer_view` (12) and `swizzle_assignment` (13) are
+    /// mapped by the shim and compile on all three backends; `fragment_depth`
+    /// (14) and unknown values are not mapped.
+    #[test]
+    fn language_features_allow_buffer_view_and_swizzle_assignment_only() {
+        let buffer_view = r#"
+requires buffer_view;
+
+@group(0) @binding(0) var<storage, read_write> data: buffer<32>;
+
+@compute @workgroup_size(1)
+fn cs() {
+  let view = bufferView<array<u32, 4>>(&data, 16);
+  view[0] = 1u;
+}
+"#;
+        let swizzle_assignment = r#"
+requires swizzle_assignment;
+
+@group(0) @binding(0) var<storage, read_write> data: vec4u;
+
+@compute @workgroup_size(1)
+fn cs() {
+  var value = vec4u(0u);
+  value.zx = vec2u(1u, 2u);
+  data = value;
+}
+"#;
+        for (wgsl, feature) in [(buffer_view, 12), (swizzle_assignment, 13)] {
+            let parse = |features: &[u32]| {
+                Program::parse(wgsl, false, false, false, false, false, false, features)
+            };
+            for rejected in [&[][..], &[14], &[0xFFFF]] {
+                assert!(parse(rejected).is_err(), "{rejected:?} allowed:\n{wgsl}");
+            }
+
+            let program = parse(&[feature]).unwrap();
+            assert_eq!(program.resource_bindings("cs").unwrap().len(), 1);
+            program
+                .generate_msl(
+                    "cs",
+                    &Bindings::default(),
+                    &[],
+                    true,
+                    false,
+                    &[],
+                    0xFFFF_FFFF,
+                    0,
+                )
+                .unwrap();
+            program
+                .generate_spirv(
+                    "cs",
+                    &Bindings::default(),
+                    &[],
+                    true,
+                    false,
+                    0,
+                    false,
+                    None,
+                    0,
+                    true,
+                )
+                .unwrap();
+            program
+                .generate_glsl("cs", &Bindings::default(), &[], None, None)
+                .unwrap();
+        }
+
+        let requires_fragment_depth = "requires fragment_depth;\n";
+        assert!(Program::parse(
+            requires_fragment_depth,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+        )
+        .is_err());
     }
 
     #[test]

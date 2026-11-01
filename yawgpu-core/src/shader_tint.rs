@@ -700,6 +700,22 @@ impl ReflectedModule {
         }))
     }
 
+    /// Returns the linear-index builtins `entry_point` uses. A name that is not
+    /// a compute entry point uses neither.
+    pub(crate) fn compute_linear_indexing(&self, entry_point: &str) -> ReflectedLinearIndexing {
+        self.raw_entry_points()
+            .iter()
+            .find(|entry| {
+                entry.name == entry_point && entry.stage == yawgpu_tint::PipelineStage::Compute
+            })
+            .map_or_else(ReflectedLinearIndexing::default, |entry| {
+                ReflectedLinearIndexing {
+                    global_invocation_index: entry.global_invocation_index_used,
+                    workgroup_index: entry.workgroup_index_used,
+                }
+            })
+    }
+
     /// Returns compute workgroup size after resolving pipeline constants.
     ///
     /// Short-circuits to the literal-size fast path
@@ -1199,6 +1215,7 @@ fn tint_vertex_format(format: MslVertexFormat) -> yawgpu_tint::VertexFormat {
         MslVertexFormat::Sint32x4 => yawgpu_tint::VertexFormat::Sint32x4,
         MslVertexFormat::Unorm10_10_10_2 => yawgpu_tint::VertexFormat::Unorm10_10_10_2,
         MslVertexFormat::Unorm8x4Bgra => yawgpu_tint::VertexFormat::Unorm8x4Bgra,
+        MslVertexFormat::Snorm10_10_10_2 => yawgpu_tint::VertexFormat::Snorm10_10_10_2,
     }
 }
 
@@ -3632,6 +3649,133 @@ fn cs(@builtin(global_invocation_index) index: u32) {
 "#,
         )
         .expect("packed_4x8 and linear_indexing are in yawgpu's supported WGSL set");
+    }
+
+    /// Block 119 R3: both builtins reflect independently, including through a
+    /// struct parameter, and a name that is not a compute entry uses neither.
+    #[test]
+    fn compute_linear_indexing_reflects_each_builtin() {
+        if !yawgpu_tint::HAVE_TINT {
+            return;
+        }
+
+        let module = parse_and_validate_wgsl(
+            r#"
+requires linear_indexing;
+
+struct Input {
+  @builtin(global_invocation_index) index: u32,
+}
+
+@compute @workgroup_size(1)
+fn neither() {}
+
+@compute @workgroup_size(1)
+fn global(input: Input) { _ = input.index; }
+
+@compute @workgroup_size(1)
+fn workgroup(@builtin(workgroup_index) index: u32) { _ = index; }
+
+@compute @workgroup_size(1)
+fn both(input: Input, @builtin(workgroup_index) index: u32) { _ = input.index; _ = index; }
+"#,
+        )
+        .unwrap();
+
+        let reflected = |global_invocation_index, workgroup_index| ReflectedLinearIndexing {
+            global_invocation_index,
+            workgroup_index,
+        };
+        assert_eq!(
+            module.compute_linear_indexing("neither"),
+            reflected(false, false)
+        );
+        assert_eq!(
+            module.compute_linear_indexing("global"),
+            reflected(true, false)
+        );
+        assert_eq!(
+            module.compute_linear_indexing("workgroup"),
+            reflected(false, true)
+        );
+        assert_eq!(
+            module.compute_linear_indexing("both"),
+            reflected(true, true)
+        );
+        assert_eq!(
+            module.compute_linear_indexing("missing"),
+            reflected(false, false)
+        );
+    }
+
+    /// Block 119 R8: both newly reported language features compile on all three
+    /// backends with the default supported set.
+    #[test]
+    fn supported_wgsl_language_features_allow_buffer_view_and_swizzle_assignment() {
+        if !yawgpu_tint::HAVE_TINT {
+            return;
+        }
+
+        let module = parse_and_validate_wgsl(
+            r#"
+requires buffer_view;
+requires swizzle_assignment;
+
+@group(0) @binding(0) var<storage, read_write> data: buffer<32>;
+
+@compute @workgroup_size(1)
+fn cs() {
+  let view = bufferView<array<u32, 4>>(&data, 16);
+  view[0] = 1u;
+
+  var value = vec4u(0u);
+  value.zx = vec2u(1u, 2u);
+  view[1] = value.x;
+}
+"#,
+        )
+        .expect("buffer_view and swizzle_assignment are in yawgpu's supported WGSL set");
+
+        let bindings = module.resource_bindings_for_entry("cs").unwrap();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].min_binding_size, 32);
+    }
+
+    /// Block 119 R5a: core's real GLES path, with its flat binding remap, keeps the
+    /// `tint_immediates` array the HAL's compute upload writes.
+    #[cfg(feature = "gles")]
+    #[test]
+    fn dispatch_indirect_validation_glsl_declares_compute_immediates() {
+        if !yawgpu_tint::HAVE_TINT {
+            return;
+        }
+        let module =
+            parse_and_validate_wgsl(crate::device::DISPATCH_INDIRECT_VALIDATION_WGSL).unwrap();
+
+        let generated = module
+            .generate_glsl("main", ShaderStage::Compute, &PipelineConstants::default())
+            .unwrap();
+
+        assert!(
+            generated
+                .source
+                .contains("layout(location = 0) uniform uint tint_immediates[4];"),
+            "GLSL:\n{}",
+            generated.source
+        );
+        assert!(generated.source.contains("layout(binding = 0, std430)"));
+        assert!(generated.source.contains("layout(binding = 1, std430)"));
+    }
+
+    /// Block 119 R9: the shim rejects a `requires` for `fragment_depth`, which
+    /// stays out of yawgpu's supported set.
+    #[test]
+    fn supported_wgsl_language_features_reject_fragment_depth() {
+        if !yawgpu_tint::HAVE_TINT {
+            return;
+        }
+
+        assert!(parse_and_validate_wgsl("requires fragment_depth;\n").is_err());
     }
 
     #[test]

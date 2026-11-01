@@ -70,7 +70,90 @@ pub(crate) struct ComputePipelineInner {
     pub(crate) hal: Option<HalComputePipeline>,
     pub(crate) bind_group_layouts: Vec<Arc<BindGroupLayout>>,
     pub(crate) immediate_required_mask: ImmediateWrittenMask,
+    /// Shader-required sizes for buffer bindings the layout leaves unspecified.
+    pub(crate) required_buffer_sizes: Vec<RequiredBufferSize>,
+    /// Invocations per workgroup counted by the linear index, or `None` when
+    /// the entry point uses no linear-index builtin.
+    pub(crate) linear_index_invocations: Option<u64>,
     pub(crate) is_error: bool,
+}
+
+/// Stores a shader-required size that is checked when the pipeline dispatches or
+/// draws, because the bind group layout entry has a `minBindingSize` of 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RequiredBufferSize {
+    pub(crate) group: u32,
+    pub(crate) binding: u32,
+    pub(crate) size: u64,
+}
+
+/// Returns the bindings whose shader-required size is checked at dispatch or
+/// draw, taking the maximum when several stages use one binding. Mirrors Dawn
+/// `GetBindGroupMinBufferSizes` and `PipelineBase`: a nonzero layout
+/// `minBindingSize` was already checked against the shader at pipeline creation
+/// and is skipped.
+pub(crate) fn required_buffer_sizes<'a>(
+    bindings: impl IntoIterator<Item = &'a frontend::ReflectedResourceBinding>,
+    bind_group_layouts: &[Arc<BindGroupLayout>],
+) -> Vec<RequiredBufferSize> {
+    let mut required = BTreeMap::<(u32, u32), u64>::new();
+    for binding in bindings {
+        let is_sized_buffer = matches!(
+            binding.kind,
+            frontend::ReflectedResourceBindingKind::Buffer(_)
+        ) && binding.min_binding_size > 0;
+        let layout_size_unspecified = usize::try_from(binding.group)
+            .ok()
+            .and_then(|group| bind_group_layouts.get(group))
+            .and_then(|layout| {
+                layout
+                    .entries()
+                    .iter()
+                    .find(|entry| entry.binding == binding.binding)
+            })
+            .is_some_and(|entry| {
+                matches!(
+                    entry.kind,
+                    Some(BindingLayoutKind::Buffer {
+                        min_binding_size: 0,
+                        ..
+                    })
+                )
+            });
+        if is_sized_buffer && layout_size_unspecified {
+            let size = required
+                .entry((binding.group, binding.binding))
+                .or_default();
+            *size = (*size).max(binding.min_binding_size);
+        }
+    }
+    required
+        .into_iter()
+        .map(|((group, binding), size)| RequiredBufferSize {
+            group,
+            binding,
+            size,
+        })
+        .collect()
+}
+
+/// Returns the invocations per workgroup the linear index counts, mirroring
+/// Dawn's `wgInvocations`: the workgroup size only for
+/// `global_invocation_index`, which numbers invocations; `workgroup_index`
+/// numbers workgroups, so it counts 1. `None` means no linear-index builtin.
+pub(crate) fn linear_index_invocations(
+    linear_indexing: frontend::ReflectedLinearIndexing,
+    workgroup_size: [u32; 3],
+) -> Option<u64> {
+    if linear_indexing.global_invocation_index {
+        Some(
+            workgroup_size
+                .iter()
+                .fold(1_u64, |total, &size| total.saturating_mul(u64::from(size))),
+        )
+    } else {
+        linear_indexing.workgroup_index.then_some(1)
+    }
 }
 
 /// Stores resolved compute workgroup data used by validation and backend submission.
@@ -168,6 +251,17 @@ impl ComputePipeline {
                 )
             });
         let metal_bindings = metal_buffer_binding_map(&bind_group_layouts);
+        let required_buffer_sizes = required_buffer_sizes(&bindings, &bind_group_layouts);
+        let linear_index_invocations = descriptor
+            .shader_module
+            .reflected()
+            .zip(workgroup)
+            .and_then(|(module, workgroup)| {
+                linear_index_invocations(
+                    module.compute_linear_indexing(&entry_name),
+                    workgroup.size,
+                )
+            });
         // Effective user-immediate budget for HAL codegen. Same shared
         // resolver the validation path wraps
         // (`resolve_compute_pipeline_immediate_size`); the auto arm's
@@ -206,6 +300,8 @@ impl ComputePipeline {
                     hal,
                     bind_group_layouts,
                     immediate_required_mask,
+                    required_buffer_sizes,
+                    linear_index_invocations,
                     is_error,
                 }),
             },
@@ -234,6 +330,16 @@ impl ComputePipeline {
     /// Returns the required user-immediate 4-byte words for dispatch validation.
     pub(crate) fn immediate_required_mask(&self) -> ImmediateWrittenMask {
         self.inner.immediate_required_mask
+    }
+
+    /// Returns the shader-required buffer sizes checked at dispatch.
+    pub(crate) fn required_buffer_sizes(&self) -> &[RequiredBufferSize] {
+        &self.inner.required_buffer_sizes
+    }
+
+    /// Returns the invocations per workgroup counted by the linear index.
+    pub(crate) fn linear_index_invocations(&self) -> Option<u64> {
+        self.inner.linear_index_invocations
     }
 
     /// Returns the HAL.
@@ -2507,6 +2613,106 @@ fn cs() {
         assert_eq!(
             validate_shader_binding_compat(&binding, layout_kind(2)),
             Err("compute pipeline layout buffer minBindingSize is too small".to_owned())
+        );
+    }
+
+    /// Block 119 R2: only a reflected buffer whose layout entry leaves
+    /// `minBindingSize` at 0 is deferred to dispatch.
+    #[test]
+    fn required_buffer_sizes_keep_only_unspecified_layout_sizes() {
+        let device = noop_device();
+        let buffer_entry = |binding, min_binding_size| BindGroupLayoutEntry {
+            binding,
+            visibility: crate::shader::SHADER_STAGE_COMPUTE,
+            binding_array_size: 0,
+            kind: Some(BindingLayoutKind::Buffer {
+                ty: BufferBindingType::Storage,
+                has_dynamic_offset: false,
+                min_binding_size,
+            }),
+        };
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![
+                buffer_entry(0, 0),
+                buffer_entry(1, 32),
+                buffer_entry(2, 0),
+                buffer_entry(3, 0),
+            ],
+            error: None,
+        }));
+        let reflected = |group, binding, min_binding_size| frontend::ReflectedResourceBinding {
+            group,
+            binding,
+            kind: frontend::ReflectedResourceBindingKind::Buffer(
+                frontend::ReflectedBufferType::Storage,
+            ),
+            min_binding_size,
+        };
+        let bindings = [
+            reflected(0, 0, 32),
+            reflected(0, 1, 32),
+            // No shader-side size: nothing to check.
+            reflected(0, 2, 0),
+            // Binding 3 is in the layout only; these two are not in it at all.
+            reflected(0, 4, 32),
+            reflected(1, 0, 32),
+        ];
+
+        assert_eq!(
+            required_buffer_sizes(&bindings, std::slice::from_ref(&layout)),
+            [RequiredBufferSize {
+                group: 0,
+                binding: 0,
+                size: 32
+            }]
+        );
+
+        // Block 119 R2a: a binding two stages use keeps the larger size, whichever
+        // stage comes first.
+        for sizes in [[16, 32], [32, 16]] {
+            let stages = sizes.map(|size| reflected(0, 0, size));
+            assert_eq!(
+                required_buffer_sizes(&stages, std::slice::from_ref(&layout)),
+                [RequiredBufferSize {
+                    group: 0,
+                    binding: 0,
+                    size: 32
+                }]
+            );
+        }
+    }
+
+    /// Block 119 R3/R4: only `global_invocation_index` counts the workgroup
+    /// size, and it wins when both builtins are used.
+    #[test]
+    fn linear_index_invocations_follow_the_builtins_used() {
+        let linear_indexing =
+            |global_invocation_index, workgroup_index| frontend::ReflectedLinearIndexing {
+                global_invocation_index,
+                workgroup_index,
+            };
+        let size = [2, 3, 4];
+
+        assert_eq!(
+            linear_index_invocations(linear_indexing(false, false), size),
+            None
+        );
+        assert_eq!(
+            linear_index_invocations(linear_indexing(false, true), size),
+            Some(1)
+        );
+        assert_eq!(
+            linear_index_invocations(linear_indexing(true, false), size),
+            Some(24)
+        );
+        assert_eq!(
+            linear_index_invocations(linear_indexing(true, true), size),
+            Some(24)
+        );
+        // A product past u64 saturates, so it still reads as out of range.
+        assert_eq!(
+            linear_index_invocations(linear_indexing(true, false), [u32::MAX; 3]),
+            Some(u64::MAX)
         );
     }
 

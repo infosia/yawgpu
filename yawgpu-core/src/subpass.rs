@@ -755,6 +755,7 @@ fn validate_subpass_draw_state(
 ) -> Result<(), String> {
     validate_subpass_bind_group_and_vertex_limits(state, limits)?;
     validate_pipeline_bind_groups(pipeline.bind_group_layouts(), &state.bind_groups, limits)?;
+    validate_required_buffer_sizes(pipeline.required_buffer_sizes(), &state.bind_groups)?;
     for (slot, layout) in pipeline.vertex_buffer_layouts().iter().enumerate() {
         if !layout.used {
             continue;
@@ -1543,6 +1544,95 @@ mod tests {
         let descriptor = valid_two_subpass_deferred_layout();
 
         assert_eq!(compute_subpass_color_slots(&descriptor, 2), Vec::new());
+    }
+
+    /// Block 119 R2: subpass draws have their own validator, which must apply the
+    /// same required-size check as a render pass draw.
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn subpass_draw_validates_required_buffer_size() {
+        let device = noop_device();
+        let layout =
+            Arc::new(device.create_subpass_pass_layout(valid_two_subpass_deferred_layout()));
+        let group_layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: crate::shader::SHADER_STAGE_FRAGMENT,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::Buffer {
+                    ty: BufferBindingType::ReadOnlyStorage,
+                    has_dynamic_offset: false,
+                    min_binding_size: 0,
+                }),
+            }],
+            error: None,
+        }));
+        let pipeline_layout = Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: vec![group_layout.clone()],
+            immediate_size: 0,
+            error: None,
+        }));
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "@group(0) @binding(0) var<storage> data: array<vec4u, 2>;
+@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0); }
+@fragment fn fs() -> @location(0) vec4f { _ = data[0]; return vec4f(1.0); }"
+                    .to_owned(),
+            )),
+        );
+        let mut base = render_pipeline_descriptor(module);
+        base.layout = RenderPipelineLayout::Explicit(pipeline_layout);
+        let pipeline = Arc::new(device.create_subpass_render_pipeline(
+            SubpassRenderPipelineDescriptor {
+                base,
+                pass_layout: Arc::clone(&layout),
+                subpass_index: 0,
+                error: None,
+            },
+        ));
+        assert!(!pipeline.is_error());
+
+        let draw_error = |size| {
+            let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+                usage: BufferUsage::STORAGE,
+                size,
+                mapped_at_creation: false,
+            }));
+            let group = Arc::new(device.create_bind_group(
+                group_layout.clone(),
+                vec![BindGroupEntry {
+                    binding: 0,
+                    resource: BindGroupResource::Buffer {
+                        buffer,
+                        device: Arc::new(device.clone()),
+                        offset: 0,
+                        size: u64::MAX,
+                    },
+                }],
+            ));
+            let encoder = device.create_command_encoder();
+            let (pass, error) = encoder.begin_subpass_render_pass(
+                &device,
+                subpass_descriptor(Arc::clone(&layout), &device),
+            );
+            assert_eq!(error, None);
+            assert_eq!(pass.set_pipeline(pipeline.clone()), None);
+            assert_eq!(
+                pass.set_bind_group(0, Some(group), Vec::new(), device.limits()),
+                None
+            );
+            let draw = pass.draw(3, 1, 0, 0, device.limits());
+            let _ = pass.end();
+            draw.or_else(|| encoder.finish().1)
+        };
+
+        assert_eq!(
+            draw_error(28).as_deref(),
+            Some(
+                "buffer bound with size 28 at group 0 binding 0 is too small: the pipeline requires at least 32 bytes"
+            )
+        );
+        assert_eq!(draw_error(32), None);
     }
 
     #[test]

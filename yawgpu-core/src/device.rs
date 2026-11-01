@@ -37,6 +37,17 @@ pub(crate) struct DeviceInner {
     /// ([`Device::from_hal`]) or on backends without `subgroup-size-control`.
     pub(crate) subgroup_size_control_caps: Option<HalSubgroupSizeControlCaps>,
     pub(crate) timestamp_pipeline: OnceLock<Result<Arc<ComputePipeline>, String>>,
+    /// Lazily created pipeline that validates indirect dispatch arguments.
+    pub(crate) dispatch_indirect_pipeline: OnceLock<Result<Arc<ComputePipeline>, String>>,
+    /// Lazily created buffer the validation pipeline writes checked arguments to.
+    /// Every indirect dispatch overwrites it just before reading it, and the GPU
+    /// runs them in order, so one buffer serves the whole device, as Dawn's
+    /// `scratchIndirectStorage` does. Only success is cached: a failed allocation
+    /// can be transient, so a later dispatch retries.
+    pub(crate) dispatch_indirect_buffer: OnceLock<Arc<Buffer>>,
+    /// One-shot failure for the next creation of `dispatch_indirect_buffer`.
+    #[cfg(test)]
+    pub(crate) dispatch_indirect_buffer_failure: Mutex<Option<String>>,
     pub(crate) hal: HalDevice,
     pub(crate) queue: Queue,
     pub(crate) error_sink: Mutex<ErrorSink>,
@@ -92,6 +103,10 @@ impl Device {
                 timestamp_period,
                 subgroup_size_control_caps,
                 timestamp_pipeline: OnceLock::new(),
+                dispatch_indirect_pipeline: OnceLock::new(),
+                dispatch_indirect_buffer: OnceLock::new(),
+                #[cfg(test)]
+                dispatch_indirect_buffer_failure: Mutex::new(None),
                 hal,
                 queue,
                 error_sink: Mutex::new(ErrorSink::default()),
@@ -600,6 +615,29 @@ impl Device {
     /// Creates a pipeline layout from the given bind group layouts.
     #[must_use]
     pub fn create_pipeline_layout(&self, descriptor: PipelineLayoutDescriptor) -> PipelineLayout {
+        self.create_pipeline_layout_with_limits(descriptor, self.limits())
+    }
+
+    /// Creates a layout for a yawgpu-owned pipeline, exempt from
+    /// `maxImmediateSize`. That limit bounds what users may ask for; internal
+    /// pipelines must work on GLES, which reports 0. Every other rule applies.
+    #[must_use]
+    pub(crate) fn create_internal_pipeline_layout(
+        &self,
+        descriptor: PipelineLayoutDescriptor,
+    ) -> PipelineLayout {
+        let limits = Limits {
+            max_immediate_size: descriptor.immediate_size,
+            ..self.limits()
+        };
+        self.create_pipeline_layout_with_limits(descriptor, limits)
+    }
+
+    fn create_pipeline_layout_with_limits(
+        &self,
+        descriptor: PipelineLayoutDescriptor,
+        limits: Limits,
+    ) -> PipelineLayout {
         if self.is_lost() {
             return PipelineLayout::new(
                 descriptor.bind_group_layouts,
@@ -611,7 +649,7 @@ impl Device {
             validate_pipeline_layout_descriptor(
                 &descriptor.bind_group_layouts,
                 descriptor.immediate_size,
-                self.limits(),
+                limits,
             )
         });
         let is_error = error.is_some();
@@ -918,7 +956,130 @@ fn main(@builtin(global_invocation_id) GlobalInvocationID : vec3u) {
     timestamps[high_index] = chunks[2] | (chunks[3] << 16u);
 }"#;
 
+/// Byte size of a `dispatchWorkgroupsIndirect` argument block.
+pub(crate) const DISPATCH_INDIRECT_SIZE: u64 = 12;
+
+/// Dawn's indirect dispatch validation shader, with parameters in immediates and
+/// without `enableValidation` and `duplicateNumWorkgroups`. Invalid counts become
+/// zero, so the dispatch that follows does nothing and raises no error.
+pub(crate) const DISPATCH_INDIRECT_VALIDATION_WGSL: &str = r#"requires immediate_address_space;
+
+struct Params {
+    maxComputeWorkgroupsPerDimension: u32,
+    clientOffsetInU32: u32,
+    linearIndexing: u32,
+    overflowValue: u32,
+}
+
+struct IndirectParams {
+    data: array<u32>
+}
+
+struct ValidatedParams {
+    data: array<u32>
+}
+
+var<immediate> params: Params;
+@group(0) @binding(0) var<storage, read_write> clientParams: IndirectParams;
+@group(0) @binding(1) var<storage, read_write> validatedParams: ValidatedParams;
+
+@compute @workgroup_size(1, 1, 1)
+fn main() {
+    var workgroups = vec3u(clientParams.data[params.clientOffsetInU32 + 0],
+                           clientParams.data[params.clientOffsetInU32 + 1],
+                           clientParams.data[params.clientOffsetInU32 + 2]);
+    var invalid = false;
+    if (max(workgroups.x, max(workgroups.y, workgroups.z)) > params.maxComputeWorkgroupsPerDimension) {
+        invalid = true;
+    } else if (params.linearIndexing > 0u) {
+        invalid |= workgroups.x > (params.overflowValue / workgroups.y);
+        let xy = workgroups.x * workgroups.y;
+        invalid |= xy > (params.overflowValue / workgroups.z);
+    }
+
+    if (invalid) {
+        workgroups = vec3u(0);
+    }
+    validatedParams.data[0] = workgroups.x;
+    validatedParams.data[1] = workgroups.y;
+    validatedParams.data[2] = workgroups.z;
+}"#;
+
 impl Device {
+    /// Returns the device's lazily initialized indirect dispatch validation
+    /// pipeline.
+    pub(crate) fn dispatch_indirect_pipeline(&self) -> Result<Arc<ComputePipeline>, String> {
+        self.inner
+            .dispatch_indirect_pipeline
+            .get_or_init(|| {
+                let shader = Arc::new(self.create_shader_module(ShaderModuleSource::Wgsl(
+                    DISPATCH_INDIRECT_VALIDATION_WGSL.to_owned(),
+                )));
+                if shader.is_error() {
+                    return Err("dispatch indirect validation shader creation failed".to_owned());
+                }
+                let entry = |binding| BindGroupLayoutEntry {
+                    binding,
+                    visibility: SHADER_STAGE_COMPUTE,
+                    binding_array_size: 0,
+                    kind: Some(BindingLayoutKind::Buffer {
+                        ty: BufferBindingType::Storage,
+                        has_dynamic_offset: false,
+                        min_binding_size: DISPATCH_INDIRECT_SIZE,
+                    }),
+                };
+                let bgl = Arc::new(self.create_bind_group_layout(BindGroupLayoutDescriptor {
+                    entries: vec![entry(0), entry(1)],
+                    error: None,
+                }));
+                let layout = Arc::new(self.create_internal_pipeline_layout(
+                    PipelineLayoutDescriptor {
+                        bind_group_layouts: vec![bgl],
+                        immediate_size: 16,
+                        error: None,
+                    },
+                ));
+                let pipeline = self.create_compute_pipeline_without_error_dispatch(
+                    ComputePipelineDescriptor {
+                        layout: ComputePipelineLayout::Explicit(layout),
+                        shader_module: shader,
+                        entry_point: Some("main".to_owned()),
+                        constants: Vec::new(),
+                        error: None,
+                    },
+                );
+                if pipeline.is_error() {
+                    return Err("dispatch indirect validation pipeline creation failed".to_owned());
+                }
+                Ok(Arc::new(pipeline))
+            })
+            .clone()
+    }
+
+    /// Returns the device's lazily initialized validated-arguments buffer.
+    pub(crate) fn dispatch_indirect_buffer(&self) -> Result<Arc<Buffer>, String> {
+        let slot = &self.inner.dispatch_indirect_buffer;
+        if let Some(buffer) = slot.get() {
+            return Ok(Arc::clone(buffer));
+        }
+        #[cfg(test)]
+        if let Some(message) = self.inner.dispatch_indirect_buffer_failure.lock().take() {
+            return Err(message);
+        }
+        // Created outside any lock because a failure can run the user's error
+        // callback. Racing threads may each create one, but all of them return
+        // the one stored first; the others are dropped unused.
+        let buffer = self.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE | BufferUsage::INDIRECT,
+            size: DISPATCH_INDIRECT_SIZE,
+            mapped_at_creation: false,
+        });
+        if buffer.is_error() {
+            return Err("dispatch indirect validation buffer creation failed".to_owned());
+        }
+        Ok(Arc::clone(slot.get_or_init(|| Arc::new(buffer))))
+    }
+
     /// Returns the device's lazily initialized timestamp conversion pipeline.
     pub(crate) fn timestamp_conversion_pipeline(&self) -> Result<Arc<ComputePipeline>, String> {
         self.inner
@@ -1096,6 +1257,197 @@ mod tests {
         let second = device.timestamp_conversion_pipeline().unwrap();
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(device.compute_pipeline_creation_count(), 1);
+    }
+
+    /// Block 119 R5a: the pipeline and buffer are created once, on first use.
+    #[test]
+    fn dispatch_indirect_pipeline_and_buffer_are_cached_per_device() {
+        let device = noop_device();
+        assert!(device.inner.dispatch_indirect_pipeline.get().is_none());
+        assert!(device.inner.dispatch_indirect_buffer.get().is_none());
+
+        let pipeline = device.dispatch_indirect_pipeline().unwrap();
+        assert!(Arc::ptr_eq(
+            &pipeline,
+            &device.dispatch_indirect_pipeline().unwrap()
+        ));
+        assert_eq!(device.compute_pipeline_creation_count(), 1);
+        assert!(!pipeline.is_error());
+
+        let buffer = device.dispatch_indirect_buffer().unwrap();
+        assert!(Arc::ptr_eq(
+            &buffer,
+            &device.dispatch_indirect_buffer().unwrap()
+        ));
+        assert_eq!(buffer.size(), DISPATCH_INDIRECT_SIZE);
+        assert!(buffer.usage().contains(BufferUsage::STORAGE));
+        assert!(buffer.usage().contains(BufferUsage::INDIRECT));
+    }
+
+    /// Block 119 R5a: threads racing to create the buffer all end up with the same
+    /// one, so no dispatch can read arguments another thread's pass did not write.
+    #[test]
+    fn dispatch_indirect_buffer_is_shared_by_racing_threads() {
+        const THREADS: usize = 8;
+        for _ in 0..16 {
+            let device = noop_device();
+            let barrier = std::sync::Barrier::new(THREADS);
+            let buffers = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..THREADS)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            barrier.wait();
+                            device.dispatch_indirect_buffer().unwrap()
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().unwrap())
+                    .collect::<Vec<_>>()
+            });
+
+            let stored = device.dispatch_indirect_buffer().unwrap();
+            assert!(buffers.iter().all(|buffer| Arc::ptr_eq(buffer, &stored)));
+        }
+    }
+
+    /// Block 119 R5a: Noop never generates backend code, so the shared shader is
+    /// compiled for each backend here.
+    #[test]
+    fn dispatch_indirect_validation_shader_compiles_for_every_backend() {
+        use yawgpu_tint::{Bindings, Program};
+
+        if !yawgpu_tint::HAVE_TINT {
+            return;
+        }
+        let bindings = Bindings::default();
+        let program = Program::parse(
+            DISPATCH_INDIRECT_VALIDATION_WGSL,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            SUPPORTED_WGSL_LANGUAGE_FEATURES,
+        )
+        .unwrap();
+
+        program
+            .generate_msl("main", &bindings, &[], true, false, &[], 0xFFFF_FFFF, 16)
+            .unwrap();
+        program
+            .generate_spirv(
+                "main",
+                &bindings,
+                &[],
+                true,
+                false,
+                0,
+                false,
+                None,
+                16,
+                true,
+            )
+            .unwrap();
+        let glsl = program
+            .generate_glsl("main", &bindings, &[], None, None)
+            .unwrap()
+            .source;
+
+        // Block 119 R5a: the contract the GLES compute upload relies on. Tint
+        // emits a plain uniform array, not a block, so it has a location and no
+        // binding; the HAL writes it one element at a time by name. `Params`
+        // decomposes in declaration order, one word per field.
+        assert!(
+            glsl.contains("layout(location = 0) uniform uint tint_immediates[4];"),
+            "GLSL:\n{glsl}"
+        );
+        for read in [
+            "workgroups.z)) > tint_immediates[0u])", // maxComputeWorkgroupsPerDimension
+            "(tint_immediates[1u] + 0u)",            // clientOffsetInU32
+            "if ((tint_immediates[2u] > 0u))",       // linearIndexing
+            "tint_div_u32(tint_immediates[3u], workgroups.y)", // overflowValue
+        ] {
+            assert!(glsl.contains(read), "missing `{read}` in GLSL:\n{glsl}");
+        }
+        assert!(!glsl.contains("tint_immediates[4u]"), "GLSL:\n{glsl}");
+    }
+
+    fn zero_immediate_limit_device() -> Device {
+        noop_device_with_limits(Limits {
+            max_immediate_size: 0,
+            ..Limits::DEFAULT
+        })
+    }
+
+    /// Block 119 R5a: the exemption is internal only. On a device reporting 0, as
+    /// GLES does, a user layout asking for immediates is still rejected.
+    #[test]
+    fn user_pipeline_layout_is_still_limited_by_max_immediate_size() {
+        let device = zero_immediate_limit_device();
+        let descriptor = |immediate_size| PipelineLayoutDescriptor {
+            bind_group_layouts: Vec::new(),
+            immediate_size,
+            error: None,
+        };
+
+        device.push_error_scope(ErrorFilter::Validation);
+        assert!(device.create_pipeline_layout(descriptor(16)).is_error());
+        let scoped = device
+            .pop_error_scope()
+            .expect("scope should exist")
+            .expect("an over-limit user layout raises a validation error");
+        assert_eq!(
+            scoped.message,
+            "pipeline layout immediateSize exceeds the device limit"
+        );
+
+        assert!(!device.create_pipeline_layout(descriptor(0)).is_error());
+    }
+
+    /// Block 119 R5a: an internal layout passes the same device, and keeps every
+    /// other rule.
+    #[test]
+    fn internal_pipeline_layout_is_exempt_only_from_max_immediate_size() {
+        let device = zero_immediate_limit_device();
+        let descriptor = |immediate_size| PipelineLayoutDescriptor {
+            bind_group_layouts: Vec::new(),
+            immediate_size,
+            error: None,
+        };
+
+        device.push_error_scope(ErrorFilter::Validation);
+        assert!(!device
+            .create_internal_pipeline_layout(descriptor(16))
+            .is_error());
+        assert_eq!(device.pop_error_scope(), Ok(None));
+
+        device.push_error_scope(ErrorFilter::Validation);
+        assert!(device
+            .create_internal_pipeline_layout(descriptor(6))
+            .is_error());
+        assert_eq!(
+            device
+                .pop_error_scope()
+                .expect("scope should exist")
+                .expect("a misaligned internal layout still fails")
+                .message,
+            "pipeline layout immediateSize must be a multiple of 4"
+        );
+    }
+
+    /// Block 119 R5a: the validation pipeline is created on a device reporting 0
+    /// without raising any device error.
+    #[test]
+    fn dispatch_indirect_pipeline_is_created_with_zero_immediate_limit() {
+        let device = zero_immediate_limit_device();
+
+        device.push_error_scope(ErrorFilter::Validation);
+        let pipeline = device.dispatch_indirect_pipeline().unwrap();
+        assert_eq!(device.pop_error_scope(), Ok(None));
+        assert!(!pipeline.is_error());
     }
 
     use super::*;

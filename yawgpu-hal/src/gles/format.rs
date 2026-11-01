@@ -652,6 +652,9 @@ pub(super) fn map_vertex_format(format: HalVertexFormat) -> Result<GlesVertexFor
             false,
         )),
         HalVertexFormat::Unorm8x4Bgra => Ok(gles_vertex_format_bgra()),
+        HalVertexFormat::Snorm10_10_10_2 => {
+            Ok(gles_vertex_format(4, glow::INT_2_10_10_10_REV, true, false))
+        }
         HalVertexFormat::Unsupported => Err(HalError::BufferOperationFailed {
             backend: BACKEND,
             message: "Unsupported vertex format requested",
@@ -1436,6 +1439,13 @@ mod tests {
         assert_eq!(packed.ty, glow::UNSIGNED_INT_2_10_10_10_REV);
         assert!(packed.normalized);
         assert!(!packed.integer);
+
+        let packed_snorm =
+            map_vertex_format(HalVertexFormat::Snorm10_10_10_2).expect("Snorm10_10_10_2 supported");
+        assert_eq!(packed_snorm.components, 4);
+        assert_eq!(packed_snorm.ty, glow::INT_2_10_10_10_REV);
+        assert!(packed_snorm.normalized);
+        assert!(!packed_snorm.integer);
 
         let bgra =
             map_vertex_format(HalVertexFormat::Unorm8x4Bgra).expect("Unorm8x4Bgra supported");

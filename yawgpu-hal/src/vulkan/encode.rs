@@ -6913,6 +6913,42 @@ mod tests {
             .contains(buffer_write_read_barrier_dst_stage_mask()));
     }
 
+    /// Block 119 R5c: the validated-arguments buffer alternates between a compute
+    /// write and an indirect read, and `vkCmdDispatchIndirect` reads at
+    /// `DRAW_INDIRECT`. Each direction needs its dependency: the post-dispatch
+    /// barrier publishes the write to the indirect read, and the barrier before a
+    /// writing pass makes the next write wait for that read. A client buffer that a
+    /// render pass wrote is now read by a compute shader, so that is covered too.
+    /// Pure flag math, no GPU.
+    #[test]
+    fn indirect_validation_barrier_scopes_order_compute_write_and_indirect_read() {
+        let post = compute_pass_post_dispatch_barrier_scopes();
+        assert!(post
+            .src_stages
+            .contains(vk::PipelineStageFlags::COMPUTE_SHADER));
+        assert!(post.src_access.contains(vk::AccessFlags::SHADER_WRITE));
+        assert!(post
+            .dst_stages
+            .contains(vk::PipelineStageFlags::DRAW_INDIRECT));
+        assert!(post
+            .dst_access
+            .contains(vk::AccessFlags::INDIRECT_COMMAND_READ));
+
+        let read_to_write = buffer_read_to_write_scopes();
+        assert!(read_to_write
+            .src_stages
+            .contains(vk::PipelineStageFlags::DRAW_INDIRECT));
+        assert!(read_to_write
+            .dst_stages
+            .contains(vk::PipelineStageFlags::COMPUTE_SHADER));
+
+        let render = render_pass_shader_write_scopes();
+        assert!(render
+            .dst_stages
+            .contains(vk::PipelineStageFlags::COMPUTE_SHADER));
+        assert!(render.dst_access.contains(vk::AccessFlags::SHADER_READ));
+    }
+
     /// Block 102 R3: two timestamps written around GPU work resolve to raw
     /// ticks that are both non-zero and strictly increasing.
     #[test]

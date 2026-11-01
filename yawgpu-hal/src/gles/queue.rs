@@ -390,6 +390,11 @@ fn submit_compute_pass(
     )?;
     unsafe {
         gl.use_program(Some(program));
+        for (location, word) in
+            compute_immediate_uploads(pipeline.immediate_locations(), &pass.immediate_data)
+        {
+            gl.uniform_1_u32(Some(location), word);
+        }
         apply_buffer_bindings(gl, &buffer_bindings);
         let texture_units = bind_combined_samplers(
             gl,
@@ -450,12 +455,17 @@ fn submit_compute_pass(
                 gl.bind_buffer(glow::DISPATCH_INDIRECT_BUFFER, None);
             }
         }
-        gl.memory_barrier(glow::ALL_BARRIER_BITS);
+        gl.memory_barrier(COMPUTE_DISPATCH_BARRIER_BITS);
         gl.use_program(None);
     }
 
     Ok(())
 }
+
+/// Issued after every dispatch. Includes `GL_COMMAND_BARRIER_BIT`, which publishes
+/// the indirect validation pass's storage write to the following
+/// `glDispatchComputeIndirect` (Block 119 R5c).
+const COMPUTE_DISPATCH_BARRIER_BITS: u32 = glow::ALL_BARRIER_BITS;
 
 fn binding_target(
     bindings: &[HalDescriptorBinding],
@@ -2273,6 +2283,24 @@ fn discard_render_pass_attachments(gl: &glow::Context, pass: &HalRenderPassComma
             gl.invalidate_framebuffer(glow::DRAW_FRAMEBUFFER, &attachments);
         }
     }
+}
+
+/// Pairs each word of a pass's immediates with its uniform location, skipping
+/// words the program does not have. Core packs immediates little-endian, as every
+/// other backend reads them. Runs for every dispatch: a program's uniforms persist,
+/// so a word left out would read a previous dispatch's value.
+fn compute_immediate_uploads<'a, T>(
+    locations: &'a [Option<T>],
+    immediate_data: &'a [u8],
+) -> impl Iterator<Item = (&'a T, u32)> {
+    locations
+        .iter()
+        .zip(immediate_data.as_chunks::<4>().0)
+        .filter_map(|(location, word)| {
+            location
+                .as_ref()
+                .map(|location| (location, u32::from_le_bytes(*word)))
+        })
 }
 
 // Uniforms are uint even though the depth values are f32. Tint bitcasts
@@ -10552,6 +10580,147 @@ mod tests {
             0,
             1,
         ));
+    }
+
+    /// Block 119 R5a: a compute program's immediates map word by word, little-endian,
+    /// and words it lacks are skipped.
+    #[test]
+    fn compute_immediate_uploads_pair_words_with_locations() {
+        let mut data = vec![0_u8; 64];
+        for (index, value) in [0x0102_0304_u32, 5, 1, u32::MAX].iter().enumerate() {
+            data[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        let collect = |locations: &[Option<u32>], data: &[u8]| {
+            compute_immediate_uploads(locations, data)
+                .map(|(location, word)| (*location, word))
+                .collect::<Vec<_>>()
+        };
+
+        // The validation pipeline: four words at locations 0..3.
+        let mut locations = vec![None; 16];
+        for (word, location) in locations.iter_mut().take(4).enumerate() {
+            *location = Some(word as u32);
+        }
+        assert_eq!(
+            collect(&locations, &data),
+            [(0, 0x0102_0304), (1, 5), (2, 1), (3, u32::MAX)]
+        );
+
+        // A word the driver optimized out keeps the others on their own words.
+        locations[1] = None;
+        assert_eq!(
+            collect(&locations, &data),
+            [(0, 0x0102_0304), (2, 1), (3, u32::MAX)]
+        );
+
+        // No immediates in the program, or none in the pass: nothing is written.
+        assert_eq!(collect(&[None; 16], &data), []);
+        assert_eq!(collect(&locations, &[]), []);
+    }
+
+    /// Block 119 R5a: reads the immediates back through a storage buffer, across two
+    /// dispatches so a stale upload fails. Needs a real GLES context, so it skips
+    /// without one.
+    #[test]
+    fn submit_compute_pass_uploads_immediates_to_tint_immediates() {
+        let Some(device) = gles_device_or_skip("GLES compute immediates test") else {
+            return;
+        };
+        let output = device
+            .create_buffer(
+                16,
+                crate::HalBufferUsage {
+                    storage: true,
+                    copy_src: true,
+                    ..crate::HalBufferUsage::default()
+                },
+            )
+            .expect("GLES compute immediates output buffer creation must succeed");
+        let pipeline = device
+            .create_compute_pipeline(
+                crate::HalShaderSource::Glsl {
+                    source: "#version 310 es\n\
+                             layout(location = 0) uniform uint tint_immediates[4];\n\
+                             layout(std430, binding = 0) buffer Out { uint values[4]; } out_buf;\n\
+                             layout(local_size_x = 1) in;\n\
+                             void main() {\n\
+                                 out_buf.values[0] = tint_immediates[0];\n\
+                                 out_buf.values[1] = tint_immediates[1];\n\
+                                 out_buf.values[2] = tint_immediates[2];\n\
+                                 out_buf.values[3] = tint_immediates[3];\n\
+                             }\n"
+                    .to_owned(),
+                    stage: crate::HalShaderStage::Compute,
+                    combined_samplers: Vec::new(),
+                    texture_metadata_slots: Vec::new(),
+                    binding_remaps: vec![crate::HalGlesBindingRemap::new(
+                        0,
+                        0,
+                        crate::HalGlesBindingClass::StorageBuffer,
+                        0,
+                    )],
+                    texture_metadata_ubo_binding: None,
+                },
+                "main",
+                (1, 1, 1),
+                &[HalDescriptorBinding {
+                    group: 0,
+                    binding: 0,
+                    kind: HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Storage),
+                }],
+            )
+            .expect("GLES compute immediates pipeline creation must succeed");
+
+        for words in [[7_u32, 11, 13, u32::MAX], [1, 2, 3, 4]] {
+            let mut immediate_data = vec![0_u8; 64];
+            for (bytes, word) in immediate_data.as_chunks_mut::<4>().0.iter_mut().zip(words) {
+                bytes.copy_from_slice(&word.to_le_bytes());
+            }
+            device
+                .queue()
+                .submit_copies(&[HalCopy::ComputePass(crate::HalComputePass {
+                    pipeline: HalComputePipeline::Gles(pipeline.clone()),
+                    bind_buffers: vec![crate::HalBoundBuffer {
+                        group: 0,
+                        binding: 0,
+                        metal_index: 0,
+                        vertex_metal_index: None,
+                        fragment_metal_index: None,
+                        buffer: HalBuffer::Gles(output.clone()),
+                        offset: 0,
+                        size: 16,
+                    }],
+                    bind_textures: Vec::new(),
+                    bind_samplers: Vec::new(),
+                    bind_external_textures: Vec::new(),
+                    immediate_data,
+                    dispatch: HalComputeDispatch::Direct {
+                        workgroups: (1, 1, 1),
+                    },
+                })])
+                .expect("compute pass with immediates must succeed");
+
+            let bytes = output
+                .read(0, 16)
+                .expect("reading compute immediates output must succeed");
+            let actual: Vec<u32> = bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|chunk| u32::from_ne_bytes(*chunk))
+                .collect();
+            assert_eq!(actual, words);
+        }
+    }
+
+    /// Block 119 R5c: the post-dispatch barrier must cover the indirect read of the
+    /// validated arguments.
+    #[test]
+    fn compute_dispatch_barrier_includes_command_barrier_bit() {
+        assert_eq!(
+            COMPUTE_DISPATCH_BARRIER_BITS & glow::COMMAND_BARRIER_BIT,
+            glow::COMMAND_BARRIER_BIT
+        );
     }
 
     #[test]

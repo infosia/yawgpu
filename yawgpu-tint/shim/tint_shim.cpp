@@ -427,7 +427,7 @@ static_assert(static_cast<uint8_t>(tint::inspector::Override::Type::kFloat16) ==
 // 64-bit ABIs, so these constants hold on every yawgpu target platform.
 // ---------------------------------------------------------------------------
 
-static_assert(sizeof(YawgpuTintEntryPoint) == 40, "YawgpuTintEntryPoint layout changed");
+static_assert(sizeof(YawgpuTintEntryPoint) == 48, "YawgpuTintEntryPoint layout changed");
 static_assert(offsetof(YawgpuTintEntryPoint, name) == 0, "YawgpuTintEntryPoint layout changed");
 static_assert(offsetof(YawgpuTintEntryPoint, stage) == 8, "YawgpuTintEntryPoint layout changed");
 static_assert(offsetof(YawgpuTintEntryPoint, has_workgroup_size) == 9,
@@ -458,6 +458,10 @@ static_assert(offsetof(YawgpuTintEntryPoint, has_clip_distances) == 33,
 static_assert(offsetof(YawgpuTintEntryPoint, has_subgroup_size) == 34,
               "YawgpuTintEntryPoint layout changed");
 static_assert(offsetof(YawgpuTintEntryPoint, clip_distances_size) == 36,
+              "YawgpuTintEntryPoint layout changed");
+static_assert(offsetof(YawgpuTintEntryPoint, global_invocation_index_used) == 40,
+              "YawgpuTintEntryPoint layout changed");
+static_assert(offsetof(YawgpuTintEntryPoint, workgroup_index_used) == 41,
               "YawgpuTintEntryPoint layout changed");
 
 static_assert(sizeof(YawgpuTintStageVariable) == 28, "YawgpuTintStageVariable layout changed");
@@ -1244,6 +1248,8 @@ tint::VertexFormat to_tint_vertex_format(uint8_t format) {
             return tint::VertexFormat::kUnorm10_10_10_2;
         case 40:
             return tint::VertexFormat::kUnorm8x4BGRA;
+        case 41:
+            return tint::VertexFormat::kSnorm10_10_10_2;
         default:
             return tint::VertexFormat::kUint8;
     }
@@ -1338,6 +1344,10 @@ std::optional<tint::wgsl::LanguageFeature> to_tint_language_feature(uint32_t fea
             return tint::wgsl::LanguageFeature::kLinearIndexing;
         case 11:
             return tint::wgsl::LanguageFeature::kImmediateAddressSpace;
+        case 12:
+            return tint::wgsl::LanguageFeature::kBufferView;
+        case 13:
+            return tint::wgsl::LanguageFeature::kSwizzleAssignment;
         default:
             return std::nullopt;
     }
@@ -1507,6 +1517,8 @@ void fill_entry_point(const tint::inspector::EntryPoint& ep,
     out->has_clip_distances = ep.clip_distances_size.has_value();
     out->has_subgroup_size = has_subgroup_size;
     out->clip_distances_size = ep.clip_distances_size.value_or(0);
+    out->global_invocation_index_used = ep.global_invocation_index_used;
+    out->workgroup_index_used = ep.workgroup_index_used;
 }
 
 // Maps a Tint diagnostic severity to the shim's outgoing

@@ -122,15 +122,15 @@ references it, so bindgen output is reproducible:
   Re-vendored 2026-11-01 from `a11ef4462405c4506ad7284e5b1edeff2750bb54`
   (2026-06-24). Between those two revisions the header gained exactly six
   enumerators and **no new `WGPU_EXPORT` function** — the canonical function
-  set is unchanged at 202. All six are declared but **not implemented**:
+  set is unchanged at 202. Block 119 implemented
+  `WGPUVertexFormat_Snorm10_10_10_2 = 0x2A`,
+  `WGPUWGSLLanguageFeatureName_BufferView = 0x0C`, and `_SwizzleAssignment = 0x0D`.
+  The other three are declared but **not implemented**:
   `WGPUFeatureName_TextureCompressionUnaligned = 0x18` and
   `WGPUFeatureName_AtomicVec2uMinMax = 0x19` route to `Feature::Other`, so
-  `wgpuAdapterHasFeature` reports `false` and `requestDevice` rejects them;
-  `WGPUVertexFormat_Snorm10_10_10_2 = 0x2A` is outside
-  `VertexFormat`'s known range, so pipeline creation rejects it; and
-  `WGPUWGSLLanguageFeatureName_BufferView = 0x0C`, `_SwizzleAssignment = 0x0D`,
-  and `_FragmentDepth = 0x0E` are absent from
-  `SUPPORTED_WGSL_LANGUAGE_FEATURES`, so they are not reported.
+  `wgpuAdapterHasFeature` reports `false` and `requestDevice` rejects them; and
+  `WGPUWGSLLanguageFeatureName_FragmentDepth = 0x0E` is absent from
+  `SUPPORTED_WGSL_LANGUAGE_FEATURES`, matching Dawn, so it is not reported.
   Re-vendored 2026-07-09 from `673658bc2bd70ec39fc55ebe6bb0173cf6d0a603`
   (2026-05-07). Between those two revisions the header gained exactly two
   enumerators and **no new `WGPU_EXPORT` function** — the canonical function

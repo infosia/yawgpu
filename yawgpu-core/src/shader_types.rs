@@ -233,6 +233,8 @@ pub(crate) enum MslVertexFormat {
     Unorm10_10_10_2,
     /// Unorm8x4 BGRA variant.
     Unorm8x4Bgra,
+    /// Snorm10_10_10_2 variant.
+    Snorm10_10_10_2,
 }
 
 /// Enumerates shader stage values.
@@ -269,6 +271,15 @@ pub(crate) struct ReflectedEntryPoint {
     pub name: String,
     /// Stage.
     pub stage: ShaderStage,
+}
+
+/// Stores the linear-index builtins a compute entry point uses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ReflectedLinearIndexing {
+    /// Whether the entry point takes `@builtin(global_invocation_index)`.
+    pub global_invocation_index: bool,
+    /// Whether the entry point takes `@builtin(workgroup_index)`.
+    pub workgroup_index: bool,
 }
 
 /// Enumerates reflected type scalar class values.

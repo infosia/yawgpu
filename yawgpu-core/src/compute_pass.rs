@@ -91,6 +91,9 @@ impl ComputePassEncoder {
             {
                 return Err("compute dispatch workgroup count exceeds the device limit".to_owned());
             }
+            if let Some(invocations) = pipeline.linear_index_invocations() {
+                validate_linear_index_range(invocations, x, y, z)?;
+            }
             self.inner.parent.record_compute_pass(ComputePassCommand {
                 pipeline,
                 bind_groups: state.bind_groups.clone(),
@@ -131,12 +134,27 @@ impl ComputePassEncoder {
             self.inner
                 .parent
                 .record_referenced_buffer(Arc::clone(&indirect_buffer));
+            // The counts are GPU data, so they are checked on the GPU. Usage
+            // scopes above stay against the client buffer; the validation command
+            // is internal and carries its own pipeline, bind group and immediates,
+            // so the pass's state is untouched.
+            let (validation, validated_buffer) =
+                self.inner.parent.dispatch_indirect_validation_command(
+                    indirect_buffer,
+                    indirect_offset,
+                    pipeline.linear_index_invocations(),
+                    limits,
+                )?;
+            self.inner
+                .parent
+                .record_referenced_buffer(Arc::clone(&validated_buffer));
+            self.inner.parent.record_compute_pass(validation);
             self.inner.parent.record_compute_pass(ComputePassCommand {
                 pipeline,
                 bind_groups: state.bind_groups.clone(),
                 dispatch: ComputeDispatch::Indirect {
-                    buffer: indirect_buffer,
-                    offset: indirect_offset,
+                    buffer: validated_buffer,
+                    offset: 0,
                 },
                 immediate_data: state.immediate_data.clone(),
             });
@@ -179,7 +197,12 @@ pub(crate) fn validate_compute_dispatch_state(
     if pipeline.is_error() {
         return Err("compute dispatch requires a valid compute pipeline".to_owned());
     }
-    validate_pipeline_bind_groups_memoized(state, pipeline.bind_group_layouts(), limits)?;
+    validate_pipeline_bind_groups_memoized(
+        state,
+        pipeline.bind_group_layouts(),
+        pipeline.required_buffer_sizes(),
+        limits,
+    )?;
     let (buffer_uses, texture_uses) =
         collect_usage_scope(pipeline.bind_group_layouts(), &state.bind_groups)?;
     validate_resource_usage_scope(&buffer_uses, &texture_uses)?;
@@ -188,6 +211,34 @@ pub(crate) fn validate_compute_dispatch_state(
         state.immediate_data_written,
     )?;
     Ok((pipeline, buffer_uses))
+}
+
+/// Rejects a direct dispatch whose linear index would not fit in a `u32`.
+/// `workgroup_invocations` is 1 for `workgroup_index`, which numbers workgroups.
+/// Mirrors Dawn `ComputePassEncoder::APIDispatchWorkgroups`, which also rejects
+/// on either partial product, so a zero count does not excuse the other factor.
+fn validate_linear_index_range(
+    workgroup_invocations: u64,
+    x: u32,
+    y: u32,
+    z: u32,
+) -> Result<(), String> {
+    let max = u64::from(u32::MAX);
+    let invocations_and_x = workgroup_invocations.checked_mul(u64::from(x));
+    let y_and_z = u64::from(y) * u64::from(z);
+    let in_range = invocations_and_x.is_some_and(|invocations_and_x| {
+        invocations_and_x <= max
+            && y_and_z <= max
+            // Both factors are at most `u32::MAX`, so this cannot wrap.
+            && invocations_and_x * y_and_z <= max
+    });
+    if in_range {
+        Ok(())
+    } else {
+        Err(format!(
+            "compute dispatch ({x}, {y}, {z}) with {workgroup_invocations} indexed invocations per workgroup exceeds the unsigned 32-bit linear index range"
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -480,7 +531,7 @@ fn cs() { output[0] = input[0]; }
         let (command_buffer, error) = encoder.finish();
         assert_eq!(error, None);
         assert!(!command_buffer.is_error());
-        assert_eq!(command_buffer.command_ops().len(), 2);
+        assert_eq!(command_buffer.command_ops().len(), 3);
         let CommandExecution::ComputePass(command) = &command_buffer.command_ops()[0] else {
             panic!("expected direct compute pass command");
         };
@@ -490,12 +541,24 @@ fn cs() { output[0] = input[0]; }
                 workgroups: (1, 1, 1)
             }
         ));
+        // Block 119 R5a: the client buffer feeds the validation command, and the
+        // user's dispatch reads the validated copy.
         let CommandExecution::ComputePass(command) = &command_buffer.command_ops()[1] else {
+            panic!("expected indirect validation command");
+        };
+        assert!(Arc::ptr_eq(
+            &validation_binding(command, 0).0,
+            &indirect_for_dispatch
+        ));
+        let CommandExecution::ComputePass(command) = &command_buffer.command_ops()[2] else {
             panic!("expected indirect compute pass command");
         };
         match &command.dispatch {
             ComputeDispatch::Indirect { buffer, offset } => {
-                assert!(Arc::ptr_eq(buffer, &indirect_for_dispatch));
+                assert!(Arc::ptr_eq(
+                    buffer,
+                    &device.dispatch_indirect_buffer().unwrap()
+                ));
                 assert_eq!(*offset, 0);
             }
             ComputeDispatch::Direct { .. } => panic!("expected indirect dispatch"),
@@ -543,6 +606,688 @@ fn cs() { output[0] = input[0]; }
             };
             assert_eq!(workgroups, expected);
         }
+    }
+
+    fn required_size_group(
+        device: &Device,
+        layout_min_binding_size: u64,
+        ty: BufferBindingType,
+        buffer_size: u64,
+        offset: u64,
+        size: u64,
+    ) -> (Arc<ComputePipeline>, Arc<BindGroup>) {
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: SHADER_STAGE_COMPUTE,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::Buffer {
+                    ty,
+                    has_dynamic_offset: false,
+                    min_binding_size: layout_min_binding_size,
+                }),
+            }],
+            error: None,
+        }));
+        let pipeline_layout = Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: vec![layout.clone()],
+            immediate_size: 0,
+            error: None,
+        }));
+        let declaration = match ty {
+            BufferBindingType::Uniform => "var<uniform>",
+            BufferBindingType::Storage => "var<storage, read_write>",
+            _ => "var<storage, read>",
+        };
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(format!(
+                "@group(0) @binding(0) {declaration} data: array<vec4u, 2>;\n\
+             @compute @workgroup_size(1) fn cs() {{ _ = data[0]; }}"
+            ))),
+        );
+        let pipeline = Arc::new(device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Explicit(pipeline_layout),
+            shader_module: module,
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        }));
+        assert!(!pipeline.is_error());
+        let usage = match ty {
+            BufferBindingType::Uniform => BufferUsage::UNIFORM,
+            _ => BufferUsage::STORAGE,
+        };
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage,
+            size: buffer_size,
+            mapped_at_creation: false,
+        }));
+        let group = Arc::new(device.create_bind_group(
+            layout,
+            vec![BindGroupEntry {
+                binding: 0,
+                resource: BindGroupResource::Buffer {
+                    buffer,
+                    device: Arc::new(device.clone()),
+                    offset,
+                    size,
+                },
+            }],
+        ));
+        assert!(!group.is_error());
+        (pipeline, group)
+    }
+
+    fn dispatch_error(
+        device: &Device,
+        pipeline: Arc<ComputePipeline>,
+        group: Option<Arc<BindGroup>>,
+        indirect: bool,
+        counts: (u32, u32, u32),
+        limits: Limits,
+    ) -> Option<String> {
+        let encoder = device.create_command_encoder();
+        let (pass, error) = encoder.begin_compute_pass(None);
+        assert_eq!(error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        if let Some(group) = group {
+            assert_eq!(
+                pass.set_bind_group(0, Some(group), Vec::new(), limits),
+                None
+            );
+        }
+        if indirect {
+            assert_eq!(
+                pass.dispatch_workgroups_indirect(noop_indirect_buffer(device), 0, limits),
+                None
+            );
+        } else {
+            assert_eq!(
+                pass.dispatch_workgroups(counts.0, counts.1, counts.2, limits),
+                None
+            );
+        }
+        assert_eq!(pass.end(), None);
+        let (commands, error) = encoder.finish();
+        assert_eq!(commands.is_error(), error.is_some());
+        error
+    }
+
+    /// Block 119 R2: with `minBindingSize` 0, the shader-required size is checked
+    /// at dispatch for each buffer type and surfaces at encoder finish.
+    #[test]
+    fn compute_dispatch_validates_shader_required_buffer_size() {
+        let device = noop_device();
+        let too_small = "buffer bound with size 28 at group 0 binding 0 is too small: the pipeline requires at least 32 bytes";
+        for ty in [
+            BufferBindingType::Uniform,
+            BufferBindingType::Storage,
+            BufferBindingType::ReadOnlyStorage,
+        ] {
+            let dispatch = |buffer_size, indirect| {
+                let (pipeline, group) =
+                    required_size_group(&device, 0, ty, buffer_size, 0, u64::MAX);
+                dispatch_error(
+                    &device,
+                    pipeline,
+                    Some(group),
+                    indirect,
+                    (1, 1, 1),
+                    device.limits(),
+                )
+            };
+            assert_eq!(dispatch(28, false).as_deref(), Some(too_small));
+            assert_eq!(dispatch(32, false), None);
+            assert_eq!(dispatch(36, false), None);
+            // Indirect dispatch shares the dispatch-state validation.
+            assert_eq!(dispatch(28, true).as_deref(), Some(too_small));
+            assert_eq!(dispatch(32, true), None);
+        }
+    }
+
+    /// Block 119 R2: the checked size is the bound range, not the buffer's size.
+    #[test]
+    fn compute_dispatch_required_buffer_size_measures_the_bound_range() {
+        let device = noop_device();
+        let dispatch = |buffer_size, offset, size| {
+            let (pipeline, group) = required_size_group(
+                &device,
+                0,
+                BufferBindingType::Storage,
+                buffer_size,
+                offset,
+                size,
+            );
+            dispatch_error(
+                &device,
+                pipeline,
+                Some(group),
+                false,
+                (1, 1, 1),
+                device.limits(),
+            )
+        };
+
+        assert!(dispatch(1024, 0, 28).is_some());
+        assert_eq!(dispatch(1024, 0, 32), None);
+        // Offset 256 leaves 28 and 32 bytes of the whole-size binding.
+        assert!(dispatch(284, 256, u64::MAX).is_some());
+        assert_eq!(dispatch(288, 256, u64::MAX), None);
+    }
+
+    /// Block 119 R2: a nonzero layout `minBindingSize` is checked at pipeline and
+    /// bind group creation instead, so dispatch adds nothing for it.
+    #[test]
+    fn compute_dispatch_skips_required_size_for_nonzero_min_binding_size() {
+        let device = noop_device();
+        let (pipeline, group) =
+            required_size_group(&device, 32, BufferBindingType::Storage, 32, 0, u64::MAX);
+
+        assert!(pipeline.required_buffer_sizes().is_empty());
+        assert_eq!(
+            dispatch_error(
+                &device,
+                pipeline,
+                Some(group),
+                false,
+                (1, 1, 1),
+                device.limits()
+            ),
+            None
+        );
+    }
+
+    fn linear_index_pipeline(device: &Device, builtin: Option<&str>) -> Arc<ComputePipeline> {
+        let parameter =
+            builtin.map_or_else(String::new, |name| format!("@builtin({name}) index: u32"));
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(format!(
+                "requires linear_indexing;\n\
+             @compute @workgroup_size(3, 5, 17) fn cs({parameter}) {{}}"
+            ))),
+        );
+        let pipeline = Arc::new(device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Auto,
+            shader_module: module,
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        }));
+        assert!(!pipeline.is_error());
+        pipeline
+    }
+
+    fn linear_index_error(
+        device: &Device,
+        pipeline: &Arc<ComputePipeline>,
+        counts: (u32, u32, u32),
+    ) -> Option<String> {
+        let limits = Limits {
+            max_compute_workgroups_per_dimension: u32::MAX,
+            ..device.limits()
+        };
+        dispatch_error(device, pipeline.clone(), None, false, counts, limits)
+    }
+
+    /// Block 119 R4: 255 invocations per workgroup; 255 * 257 * 65537 is exactly
+    /// `u32::MAX`, and the workgroup size counts for this builtin.
+    #[test]
+    fn compute_dispatch_global_invocation_index_range() {
+        if !yawgpu_tint::HAVE_TINT {
+            return;
+        }
+        let device = noop_device();
+        let pipeline = linear_index_pipeline(&device, Some("global_invocation_index"));
+
+        assert_eq!(pipeline.linear_index_invocations(), Some(255));
+        assert_eq!(
+            linear_index_error(&device, &pipeline, (65537, 257, 1)),
+            None
+        );
+        assert_eq!(
+            linear_index_error(&device, &pipeline, (257, 65537, 1)),
+            None
+        );
+        assert_eq!(
+            linear_index_error(&device, &pipeline, (1, 257, 65537)),
+            None
+        );
+        // One workgroup over: 255 * 16843010 = u32::MAX + 255.
+        assert_eq!(
+            linear_index_error(&device, &pipeline, (16843010, 1, 1)).as_deref(),
+            Some(
+                "compute dispatch (16843010, 1, 1) with 255 indexed invocations per workgroup exceeds the unsigned 32-bit linear index range"
+            )
+        );
+        assert!(linear_index_error(&device, &pipeline, (1, 16843010, 1)).is_some());
+        assert!(linear_index_error(&device, &pipeline, (1, 1, 16843010)).is_some());
+    }
+
+    /// Block 119 R4: `workgroup_index` numbers workgroups, so the workgroup size
+    /// does not count: a dispatch that would overflow with it is accepted.
+    #[test]
+    fn compute_dispatch_workgroup_index_range() {
+        if !yawgpu_tint::HAVE_TINT {
+            return;
+        }
+        let device = noop_device();
+        let pipeline = linear_index_pipeline(&device, Some("workgroup_index"));
+
+        assert_eq!(pipeline.linear_index_invocations(), Some(1));
+        assert_eq!(
+            linear_index_error(&device, &pipeline, (65537, 65535, 1)),
+            None
+        );
+        assert_eq!(
+            linear_index_error(&device, &pipeline, (u32::MAX, 1, 1)),
+            None
+        );
+        assert!(linear_index_error(&device, &pipeline, (65536, 65536, 1)).is_some());
+        assert!(linear_index_error(&device, &pipeline, (1, 65536, 65536)).is_some());
+    }
+
+    /// Block 119 R4: a pipeline using neither builtin has no range to enforce.
+    #[test]
+    fn compute_dispatch_without_linear_indexing_ignores_the_range() {
+        let device = noop_device();
+        let pipeline = linear_index_pipeline(&device, None);
+
+        assert_eq!(pipeline.linear_index_invocations(), None);
+        for counts in [(65537, 257, 1), (16843010, 1, 1), (65536, 65536, 1)] {
+            assert_eq!(linear_index_error(&device, &pipeline, counts), None);
+        }
+    }
+
+    /// Block 119 R4: mirrors Dawn's partial-product checks, so no intermediate
+    /// wraps at the extremes, and a zero count does not excuse the other factor.
+    #[test]
+    fn linear_index_range_checks_partial_products() {
+        let error =
+            |invocations, x, y, z| validate_linear_index_range(invocations, x, y, z).is_err();
+
+        assert!(!error(1, u32::MAX, 1, 1));
+        assert!(!error(1, 1, u32::MAX, 1));
+        assert!(error(2, u32::MAX, 1, 1));
+        assert!(error(1, u32::MAX, u32::MAX, u32::MAX));
+        // A wrapped 2^32 * 2^32 product would read as 0.
+        assert!(error(1, 65536, 65536, 65536));
+        assert!(error(u64::MAX, 2, 1, 1));
+        assert!(error(u64::MAX, u32::MAX, u32::MAX, u32::MAX));
+        // Partial products are checked even though these totals are 0.
+        assert!(error(1, 0, 65536, 65536));
+        assert!(error(65536, 65536, 0, 1));
+        assert!(!error(1, 0, 65535, 65535));
+    }
+
+    fn indirect_client_buffer(device: &Device, size: u64) -> Arc<Buffer> {
+        Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::INDIRECT,
+            size,
+            mapped_at_creation: false,
+        }))
+    }
+
+    /// Records one indirect dispatch per offset and returns the finished buffer.
+    fn indirect_commands(
+        device: &Device,
+        pipeline: Arc<ComputePipeline>,
+        client: &Arc<Buffer>,
+        offsets: &[u64],
+    ) -> crate::command_encoder::CommandBuffer {
+        let encoder = device.create_command_encoder();
+        let (pass, error) = encoder.begin_compute_pass(None);
+        assert_eq!(error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        for &offset in offsets {
+            assert_eq!(
+                pass.dispatch_workgroups_indirect(client.clone(), offset, device.limits()),
+                None
+            );
+        }
+        assert_eq!(pass.end(), None);
+        let (commands, error) = encoder.finish();
+        assert_eq!(error, None);
+        commands
+    }
+
+    fn validation_immediates(command: &ComputePassCommand) -> [u32; 4] {
+        assert_eq!(command.immediate_data.len(), MAX_IMMEDIATE_DATA_BYTES);
+        let words = command.immediate_data.as_chunks::<4>().0;
+        std::array::from_fn(|index| u32::from_le_bytes(words[index]))
+    }
+
+    fn validation_binding(command: &ComputePassCommand, binding: u32) -> (Arc<Buffer>, u64, u64) {
+        let group = &command.bind_groups[&0].group;
+        let entry = group
+            .entries()
+            .iter()
+            .find(|entry| entry.binding == binding)
+            .unwrap();
+        let BindGroupResource::Buffer {
+            buffer,
+            offset,
+            size,
+            ..
+        } = &entry.resource
+        else {
+            panic!("expected a buffer binding");
+        };
+        (buffer.clone(), *offset, *size)
+    }
+
+    fn compute_commands(commands: &[CommandExecution]) -> Vec<&ComputePassCommand> {
+        commands
+            .iter()
+            .map(|command| {
+                let CommandExecution::ComputePass(pass) = command else {
+                    panic!("expected a compute pass command");
+                };
+                pass
+            })
+            .collect()
+    }
+
+    /// Block 119 R5/R5a: a validation command runs first, then the user's dispatch
+    /// reads the validated-arguments buffer at offset 0. The linear-indexing
+    /// immediates follow the builtin the user pipeline uses.
+    #[test]
+    fn indirect_dispatch_records_validation_then_indirect_on_internal_buffer() {
+        if !yawgpu_tint::HAVE_TINT {
+            return;
+        }
+        let device = noop_device();
+        let max = device.limits().max_compute_workgroups_per_dimension;
+        // The pipelines use workgroup_size(3, 5, 17): 255 invocations.
+        for (builtin, linear_indexing, overflow_value) in [
+            (None, 0, u32::MAX),
+            (Some("global_invocation_index"), 1, u32::MAX / 255),
+            (Some("workgroup_index"), 1, u32::MAX),
+        ] {
+            let pipeline = linear_index_pipeline(&device, builtin);
+            let client = indirect_client_buffer(&device, 12);
+            let buffer = indirect_commands(&device, pipeline.clone(), &client, &[0]);
+            let validated = device.dispatch_indirect_buffer().unwrap();
+
+            let [validation, dispatch] = compute_commands(buffer.command_ops())[..] else {
+                panic!("expected a validation command and a dispatch");
+            };
+            assert!(Arc::ptr_eq(
+                &validation.pipeline,
+                &device.dispatch_indirect_pipeline().unwrap()
+            ));
+            assert!(matches!(
+                validation.dispatch,
+                ComputeDispatch::Direct {
+                    workgroups: (1, 1, 1)
+                }
+            ));
+            assert_eq!(
+                validation_immediates(validation),
+                [max, 0, linear_indexing, overflow_value],
+                "{builtin:?}"
+            );
+            let (source, offset, size) = validation_binding(validation, 0);
+            assert!(Arc::ptr_eq(&source, &client));
+            assert_eq!((offset, size), (0, 12));
+            let (target, offset, size) = validation_binding(validation, 1);
+            assert!(Arc::ptr_eq(&target, &validated));
+            assert_eq!((offset, size), (0, 12));
+
+            assert!(Arc::ptr_eq(&dispatch.pipeline, &pipeline));
+            let ComputeDispatch::Indirect { buffer, offset } = &dispatch.dispatch else {
+                panic!("expected an indirect dispatch");
+            };
+            assert!(Arc::ptr_eq(buffer, &validated));
+            assert_eq!(*offset, 0);
+        }
+    }
+
+    /// Block 119 R5a: the binding offset is aligned down to
+    /// `minStorageBufferOffsetAlignment` (256 on Noop) and the rest becomes a word
+    /// offset, with the binding grown to still reach the arguments.
+    #[test]
+    fn indirect_dispatch_aligns_client_binding_offset() {
+        let device = noop_device();
+        let client = indirect_client_buffer(&device, 1024);
+
+        for (client_offset, binding_offset, binding_size, words) in [
+            (0, 0, 12, 0),
+            (4, 0, 16, 1),
+            (20, 0, 32, 5),
+            (252, 0, 264, 63),
+            (256, 256, 12, 0),
+            (276, 256, 32, 5),
+        ] {
+            let buffer = indirect_commands(
+                &device,
+                noop_compute_pipeline(&device),
+                &client,
+                &[client_offset],
+            );
+            let commands = compute_commands(buffer.command_ops());
+            let (_, offset, size) = validation_binding(commands[0], 0);
+            assert_eq!((offset, size), (binding_offset, binding_size));
+            assert_eq!(validation_immediates(commands[0])[1], words);
+            // The validated buffer is always read from its start.
+            assert!(matches!(
+                commands[1].dispatch,
+                ComputeDispatch::Indirect { offset: 0, .. }
+            ));
+        }
+    }
+
+    /// Block 119 R5c: every dispatch in a pass gets its own validation command, so
+    /// none of them reads an earlier dispatch's arguments.
+    #[test]
+    fn repeated_indirect_dispatches_each_revalidate() {
+        let device = noop_device();
+        let client = indirect_client_buffer(&device, 1024);
+        let pipeline = noop_compute_pipeline(&device);
+
+        let buffer = indirect_commands(&device, pipeline, &client, &[0, 12, 24]);
+        let commands = compute_commands(buffer.command_ops());
+
+        assert_eq!(commands.len(), 6);
+        for (pair, word) in commands.as_chunks::<2>().0.iter().zip([0, 3, 6]) {
+            assert!(matches!(pair[0].dispatch, ComputeDispatch::Direct { .. }));
+            assert_eq!(validation_immediates(pair[0])[1], word);
+            assert!(matches!(pair[1].dispatch, ComputeDispatch::Indirect { .. }));
+        }
+    }
+
+    /// Block 119 R5b: the validation command leaves the pass's state alone, so the
+    /// user's dispatch keeps its own immediates and the next dispatch still works.
+    #[test]
+    fn indirect_dispatch_leaves_user_state_untouched() {
+        let device = noop_device();
+        let pipeline = noop_compute_pipeline(&device);
+        let bind_group = empty_bind_group(&device);
+        let client = indirect_client_buffer(&device, 12);
+        let encoder = device.create_command_encoder();
+        let (pass, error) = encoder.begin_compute_pass(None);
+        assert_eq!(error, None);
+        assert_eq!(pass.set_pipeline(pipeline.clone()), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(bind_group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.set_immediates(0, &[7, 0, 0, 0], device.limits()), None);
+        assert_eq!(
+            pass.dispatch_workgroups_indirect(client, 0, device.limits()),
+            None
+        );
+        assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
+        assert_eq!(pass.end(), None);
+        let (buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+
+        let commands = compute_commands(buffer.command_ops());
+        assert_eq!(commands.len(), 3);
+        for command in &commands[1..] {
+            assert!(Arc::ptr_eq(&command.pipeline, &pipeline));
+            assert_eq!(command.immediate_data[0], 7);
+        }
+    }
+
+    /// Block 119 R5a: indirect dispatch works on a device reporting
+    /// `maxImmediateSize` 0, as GLES does, and still delivers its immediates.
+    #[test]
+    fn indirect_dispatch_records_validation_with_zero_immediate_limit() {
+        let device = noop_device_with_limits(Limits {
+            max_immediate_size: 0,
+            ..Limits::DEFAULT
+        });
+        let client = indirect_client_buffer(&device, 12);
+        let buffer = indirect_commands(&device, noop_compute_pipeline(&device), &client, &[0]);
+
+        let commands = compute_commands(buffer.command_ops());
+        assert_eq!(commands.len(), 2);
+        assert_eq!(
+            validation_immediates(commands[0])[0],
+            Limits::DEFAULT.max_compute_workgroups_per_dimension
+        );
+    }
+
+    /// Block 119 R5a: failing to create either internal object invalidates the
+    /// encoder and records nothing, as the timestamp path does.
+    #[test]
+    fn indirect_dispatch_internal_creation_failure_invalidates_encoder() {
+        let dispatch = |device: &Device| {
+            let client = indirect_client_buffer(device, 12);
+            let encoder = device.create_command_encoder();
+            let (pass, error) = encoder.begin_compute_pass(None);
+            assert_eq!(error, None);
+            assert_eq!(pass.set_pipeline(noop_compute_pipeline(device)), None);
+            assert_eq!(
+                pass.dispatch_workgroups_indirect(client, 0, device.limits()),
+                None
+            );
+            assert_eq!(pass.end(), None);
+            encoder.finish()
+        };
+
+        let device = noop_device();
+        device
+            .inner
+            .dispatch_indirect_pipeline
+            .set(Err("injected pipeline failure".to_owned()))
+            .unwrap();
+        let (buffer, error) = dispatch(&device);
+        assert_eq!(error.as_deref(), Some("injected pipeline failure"));
+        assert!(buffer.is_error());
+        assert!(buffer.command_ops().is_empty());
+
+        let device = noop_device();
+        *device.inner.dispatch_indirect_buffer_failure.lock() =
+            Some("injected buffer failure".to_owned());
+        let (buffer, error) = dispatch(&device);
+        assert_eq!(error.as_deref(), Some("injected buffer failure"));
+        assert!(buffer.is_error());
+        assert!(buffer.command_ops().is_empty());
+
+        // Block 119 R5a: a failed buffer creation is not cached, so a later
+        // dispatch on the same device retries and succeeds.
+        assert!(device.inner.dispatch_indirect_buffer.get().is_none());
+        let (buffer, error) = dispatch(&device);
+        assert_eq!(error, None);
+        assert_eq!(buffer.command_ops().len(), 2);
+        assert!(device.inner.dispatch_indirect_buffer.get().is_some());
+    }
+
+    /// Block 119 R5b: the usage scope still sees the client buffer, and the check
+    /// runs before any internal object is created.
+    #[test]
+    fn indirect_dispatch_usage_conflict_on_client_buffer_still_errors() {
+        let device = noop_device();
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: SHADER_STAGE_COMPUTE,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::Buffer {
+                    ty: BufferBindingType::Storage,
+                    has_dynamic_offset: false,
+                    min_binding_size: 4,
+                }),
+            }],
+            error: None,
+        }));
+        let pipeline_layout = Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: vec![layout.clone()],
+            immediate_size: 0,
+            error: None,
+        }));
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "@group(0) @binding(0) var<storage, read_write> data: array<u32>;
+             @compute @workgroup_size(1) fn cs() { data[0] = 1u; }"
+                    .to_owned(),
+            )),
+        );
+        let pipeline = Arc::new(device.create_compute_pipeline(ComputePipelineDescriptor {
+            layout: ComputePipelineLayout::Explicit(pipeline_layout),
+            shader_module: module,
+            entry_point: Some("cs".to_owned()),
+            constants: Vec::new(),
+            error: None,
+        }));
+        let client = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE | BufferUsage::INDIRECT,
+            size: 64,
+            mapped_at_creation: false,
+        }));
+        let group = Arc::new(device.create_bind_group(
+            layout,
+            vec![BindGroupEntry {
+                binding: 0,
+                resource: BindGroupResource::Buffer {
+                    buffer: client.clone(),
+                    device: Arc::new(device.clone()),
+                    offset: 0,
+                    size: 64,
+                },
+            }],
+        ));
+        let encoder = device.create_command_encoder();
+        let (pass, error) = encoder.begin_compute_pass(None);
+        assert_eq!(error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(
+            pass.dispatch_workgroups_indirect(client, 0, device.limits()),
+            None
+        );
+        assert_eq!(pass.end(), None);
+
+        let (buffer, error) = encoder.finish();
+        assert_eq!(
+            error.as_deref(),
+            Some("usage scope cannot read and write or write the same buffer range twice")
+        );
+        assert!(buffer.is_error());
+        assert!(device.inner.dispatch_indirect_pipeline.get().is_none());
+    }
+
+    /// Block 119 R5b: both the client and the validated buffer stay referenced, so
+    /// each stays alive and a destroyed client buffer is still caught at submit.
+    #[test]
+    fn indirect_dispatch_references_client_and_internal_buffers() {
+        let device = noop_device();
+        let client = indirect_client_buffer(&device, 12);
+        let buffer = indirect_commands(&device, noop_compute_pipeline(&device), &client, &[0]);
+        let validated = device.dispatch_indirect_buffer().unwrap();
+
+        let referenced = &buffer.inner.referenced_buffers;
+        assert!(referenced.iter().any(|buffer| Arc::ptr_eq(buffer, &client)));
+        assert!(referenced
+            .iter()
+            .any(|buffer| Arc::ptr_eq(buffer, &validated)));
+
+        client.destroy();
+        assert!(device.queue().submit(&[Arc::new(buffer)]).is_some());
     }
 
     /// Block 94 S1 happy path: `SetImmediates` within the Noop device's

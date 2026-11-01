@@ -94,6 +94,12 @@ typedef struct {
      * struct size is unchanged. */
     bool has_subgroup_size;
     uint32_t clip_distances_size;
+    /* Whether the compute entry point takes @builtin(global_invocation_index)
+     * or @builtin(workgroup_index) (Block 119 R3); mirrors the fields of the
+     * same names on tint::inspector::EntryPoint. Dispatch range validation
+     * reads them. */
+    bool global_invocation_index_used;
+    bool workgroup_index_used;
 } YawgpuTintEntryPoint;
 
 YAWGPU_TINT_API size_t yawgpu_tint_entry_point_count(const YawgpuTintProgram*);

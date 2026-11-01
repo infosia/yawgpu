@@ -734,6 +734,28 @@ mod tests {
                 native::WGPUBool::from(true)
             );
             assert!(values.contains(&native::WGPUWGSLLanguageFeatureName_ImmediateAddressSpace));
+            // Block 119 R8: reported through both entry points.
+            for reported in [
+                native::WGPUWGSLLanguageFeatureName_BufferView,
+                native::WGPUWGSLLanguageFeatureName_SwizzleAssignment,
+            ] {
+                assert!(values.contains(&reported));
+                assert_eq!(
+                    wgpuInstanceHasWGSLLanguageFeature(instance, reported),
+                    native::WGPUBool::from(true)
+                );
+            }
+            // Block 119 R9: `fragment_depth` and unknown values stay unreported.
+            for unreported in [
+                native::WGPUWGSLLanguageFeatureName_FragmentDepth,
+                0xFFFF as native::WGPUWGSLLanguageFeatureName,
+            ] {
+                assert!(!values.contains(&unreported));
+                assert_eq!(
+                    wgpuInstanceHasWGSLLanguageFeature(instance, unreported),
+                    native::WGPUBool::from(false)
+                );
+            }
 
             wgpuSupportedWGSLLanguageFeaturesFreeMembers(features);
             wgpuInstanceRelease(instance);

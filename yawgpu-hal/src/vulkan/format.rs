@@ -159,8 +159,11 @@ pub(super) fn map_buffer_usage(usage: HalBufferUsage) -> vk::BufferUsageFlags {
     if usage.storage {
         flags |= vk::BufferUsageFlags::STORAGE_BUFFER;
     }
+    // Block 119 R5c: indirect dispatch arguments are validated by an internal
+    // compute pass that binds the client buffer as a storage buffer, which mirrors
+    // Dawn's `kInternalStorageBuffer` on Indirect buffers.
     if usage.indirect {
-        flags |= vk::BufferUsageFlags::INDIRECT_BUFFER;
+        flags |= vk::BufferUsageFlags::INDIRECT_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFER;
     }
     // Block 102 R3: a query-resolve destination is written by the resolve copy
     // (transfer-dst, already on the baseline above) and then bound as a
@@ -218,6 +221,7 @@ pub(super) fn map_vertex_format(format: HalVertexFormat) -> Result<vk::Format, H
         HalVertexFormat::Sint32x4 => Ok(vk::Format::R32G32B32A32_SINT),
         HalVertexFormat::Unorm10_10_10_2 => Ok(vk::Format::A2B10G10R10_UNORM_PACK32),
         HalVertexFormat::Unorm8x4Bgra => Ok(vk::Format::B8G8R8A8_UNORM),
+        HalVertexFormat::Snorm10_10_10_2 => Ok(vk::Format::A2B10G10R10_SNORM_PACK32),
         HalVertexFormat::Unsupported => Err(shader_error("unsupported vertex format")),
     }
 }
@@ -283,6 +287,19 @@ mod tests {
         assert!(flags.contains(vk::BufferUsageFlags::TRANSFER_SRC));
         assert!(flags.contains(vk::BufferUsageFlags::TRANSFER_DST));
         assert!(!flags.contains(vk::BufferUsageFlags::STORAGE_BUFFER));
+    }
+
+    /// Block 119 R5c: the indirect validation pass binds an Indirect buffer as a
+    /// storage buffer, even when the client asked for no storage usage.
+    #[test]
+    fn indirect_buffers_get_storage_usage() {
+        let flags = map_buffer_usage(HalBufferUsage {
+            indirect: true,
+            ..HalBufferUsage::default()
+        });
+
+        assert!(flags.contains(vk::BufferUsageFlags::INDIRECT_BUFFER));
+        assert!(flags.contains(vk::BufferUsageFlags::STORAGE_BUFFER));
     }
 
     /// Block 102 R3: the timestamp conversion pass binds a resolve
@@ -529,6 +546,10 @@ mod tests {
                 vk::Format::A2B10G10R10_UNORM_PACK32,
             ),
             (HalVertexFormat::Unorm8x4Bgra, vk::Format::B8G8R8A8_UNORM),
+            (
+                HalVertexFormat::Snorm10_10_10_2,
+                vk::Format::A2B10G10R10_SNORM_PACK32,
+            ),
         ];
 
         for (hal, vk) in cases {

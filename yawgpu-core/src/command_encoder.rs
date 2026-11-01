@@ -855,6 +855,99 @@ impl CommandEncoder {
         })
     }
 
+    /// Builds the compute command that copies indirect dispatch arguments from
+    /// `client` to the device's validated-arguments buffer, zeroing them when they
+    /// are invalid, and returns that buffer. Mirrors Dawn
+    /// `ComputePassEncoder::TransformIndirectDispatchBuffer`.
+    ///
+    /// `linear_index_invocations` is the user pipeline's
+    /// [`ComputePipeline::linear_index_invocations`].
+    pub(crate) fn dispatch_indirect_validation_command(
+        &self,
+        client: Arc<Buffer>,
+        client_offset: u64,
+        linear_index_invocations: Option<u64>,
+        limits: Limits,
+    ) -> Result<(ComputePassCommand, Arc<Buffer>), String> {
+        let device = self
+            .inner
+            .device
+            .as_ref()
+            .ok_or_else(|| "indirect dispatch validation requires a device".to_owned())?;
+        let pipeline = device.dispatch_indirect_pipeline()?;
+        let validated = device.dispatch_indirect_buffer()?;
+        let layout = pipeline
+            .inner
+            .bind_group_layouts
+            .first()
+            .ok_or_else(|| "indirect dispatch validation layout is missing".to_owned())?
+            .clone();
+
+        // The binding offset must honour the storage alignment; the shader adds
+        // back the remainder as a word index.
+        let remainder = client_offset
+            .checked_rem(u64::from(limits.min_storage_buffer_offset_alignment))
+            .unwrap_or(0);
+        let client_offset_in_words = u32::try_from(remainder / 4)
+            .map_err(|_| "indirect dispatch offset remainder is too large".to_owned())?;
+        let buffer_entry = |binding, buffer, offset, size| crate::BindGroupEntry {
+            binding,
+            resource: crate::BindGroupResource::Buffer {
+                buffer,
+                device: Arc::new(device.clone()),
+                offset,
+                size,
+            },
+        };
+        let group = device.create_internal_bind_group(
+            layout,
+            vec![
+                buffer_entry(
+                    0,
+                    client,
+                    client_offset - remainder,
+                    crate::device::DISPATCH_INDIRECT_SIZE + remainder,
+                ),
+                buffer_entry(
+                    1,
+                    Arc::clone(&validated),
+                    0,
+                    crate::device::DISPATCH_INDIRECT_SIZE,
+                ),
+            ],
+        )?;
+
+        let overflow_value = linear_index_invocations.map_or(u32::MAX, |invocations| {
+            u32::try_from(u64::from(u32::MAX) / invocations.max(1)).unwrap_or(u32::MAX)
+        });
+        let mut immediate_data = vec![0; MAX_IMMEDIATE_DATA_BYTES];
+        for (bytes, value) in immediate_data.as_chunks_mut::<4>().0.iter_mut().zip([
+            limits.max_compute_workgroups_per_dimension,
+            client_offset_in_words,
+            u32::from(linear_index_invocations.is_some()),
+            overflow_value,
+        ]) {
+            bytes.copy_from_slice(&value.to_le_bytes());
+        }
+        Ok((
+            ComputePassCommand {
+                pipeline,
+                bind_groups: BTreeMap::from([(
+                    0,
+                    BoundBindGroup {
+                        group: Arc::new(group),
+                        dynamic_offsets: Vec::new(),
+                    },
+                )]),
+                dispatch: ComputeDispatch::Direct {
+                    workgroups: (1, 1, 1),
+                },
+                immediate_data,
+            },
+            validated,
+        ))
+    }
+
     /// Records a buffer-to-texture copy after validating layout, sizes, and usages.
     pub fn copy_buffer_to_texture(
         &self,

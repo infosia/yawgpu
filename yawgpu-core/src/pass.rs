@@ -853,7 +853,12 @@ pub(crate) fn validate_render_draw_base_state(
         return Err("render pass draw requires a valid render pipeline".to_owned());
     }
     validate_draw_time_bind_groups_plus_vertex_buffers(state, limits)?;
-    validate_pipeline_bind_groups_memoized(state, pipeline.bind_group_layouts(), limits)?;
+    validate_pipeline_bind_groups_memoized(
+        state,
+        pipeline.bind_group_layouts(),
+        pipeline.required_buffer_sizes(),
+        limits,
+    )?;
     debug_assert_eq!(
         pipeline.vertex_buffer_layouts().len(),
         pipeline.required_vertex_buffer_count()
@@ -1727,13 +1732,19 @@ pub(crate) fn validate_pipeline_bind_groups(
     validate_writable_binding_aliasing(required_layouts, bound_groups)
 }
 
+/// Validates bind groups, redoing the checks that depend only on pipeline and
+/// bind group identity when one of those changed. Required buffer sizes are such
+/// a check, as in Dawn's lazy `BindGroups` aspect: a binding's size does not
+/// depend on its dynamic offset.
 pub(crate) fn validate_pipeline_bind_groups_memoized(
     state: &mut PassEncoderState,
     required_layouts: &[Arc<BindGroupLayout>],
+    required_buffer_sizes: &[RequiredBufferSize],
     limits: Limits,
 ) -> Result<(), String> {
     if state.pipeline_bind_group_compatibility_dirty {
         validate_pipeline_bind_groups(required_layouts, &state.bind_groups, limits)?;
+        validate_required_buffer_sizes(required_buffer_sizes, &state.bind_groups)?;
         state.pipeline_bind_group_compatibility_dirty = false;
         state.writable_binding_aliasing_dirty = false;
         return Ok(());
@@ -1742,6 +1753,47 @@ pub(crate) fn validate_pipeline_bind_groups_memoized(
     if state.writable_binding_aliasing_dirty {
         validate_writable_binding_aliasing(required_layouts, &state.bind_groups)?;
         state.writable_binding_aliasing_dirty = false;
+    }
+    Ok(())
+}
+
+/// Validates each bound buffer against the size the pipeline's shader requires.
+/// Bind group compatibility is validated first, so a missing group or entry
+/// cannot be reached here and has nothing to check.
+pub(crate) fn validate_required_buffer_sizes(
+    required_sizes: &[RequiredBufferSize],
+    bound_groups: &BTreeMap<u32, BoundBindGroup>,
+) -> Result<(), String> {
+    for required in required_sizes {
+        let Some(BindGroupResource::Buffer {
+            buffer,
+            offset,
+            size,
+            ..
+        }) = bound_groups
+            .get(&required.group)
+            .and_then(|bound| {
+                bound
+                    .group
+                    .entries()
+                    .iter()
+                    .find(|entry| entry.binding == required.binding)
+            })
+            .map(|entry| &entry.resource)
+        else {
+            continue;
+        };
+        let bound_size = if *size == u64::MAX {
+            buffer.size().saturating_sub(*offset)
+        } else {
+            *size
+        };
+        if bound_size < required.size {
+            return Err(format!(
+                "buffer bound with size {bound_size} at group {} binding {} is too small: the pipeline requires at least {} bytes",
+                required.group, required.binding, required.size
+            ));
+        }
     }
     Ok(())
 }
@@ -3061,6 +3113,7 @@ mod tests {
             validate_pipeline_bind_groups_memoized(
                 &mut state,
                 std::slice::from_ref(&layout),
+                &[],
                 device.limits(),
             ),
             Ok(())
@@ -3089,6 +3142,7 @@ mod tests {
             validate_pipeline_bind_groups_memoized(
                 &mut state,
                 std::slice::from_ref(&layout),
+                &[],
                 device.limits(),
             ),
             Err("bind group dynamic offset is not aligned".to_owned())

@@ -197,6 +197,17 @@ pub(crate) fn empty_bind_group(device: &Device) -> Arc<BindGroup> {
     Arc::new(device.create_bind_group(layout, Vec::new()))
 }
 
+/// Returns a Noop device with exactly `limits`.
+pub(crate) fn noop_device_with_limits(limits: Limits) -> Device {
+    Device::from_hal(
+        hal_noop_device(),
+        limits,
+        crate::device::FeatureSet::new(),
+        "",
+        "",
+    )
+}
+
 /// Returns noop indirect buffer.
 pub(crate) fn noop_indirect_buffer(device: &Device) -> Arc<Buffer> {
     Arc::new(device.create_buffer(BufferDescriptor {

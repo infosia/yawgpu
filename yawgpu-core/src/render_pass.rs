@@ -1033,6 +1033,369 @@ fn fs() -> @location(0) vec4f {
         );
     }
 
+    #[derive(Debug, Clone, Copy)]
+    enum RequiredSizeDraw {
+        Direct,
+        Indexed,
+        Indirect,
+        IndexedIndirect,
+    }
+
+    const REQUIRED_SIZE_DRAWS: [RequiredSizeDraw; 4] = [
+        RequiredSizeDraw::Direct,
+        RequiredSizeDraw::Indexed,
+        RequiredSizeDraw::Indirect,
+        RequiredSizeDraw::IndexedIndirect,
+    ];
+
+    /// `vs` uses `vertex_vec4s` and `fs` uses `fragment_vec4s` vec4u elements of
+    /// one binding, through two variables; 0 leaves that stage unused.
+    fn required_size_shader(vertex_vec4s: u32, fragment_vec4s: u32) -> String {
+        let variable = |name: &str, count: u32| {
+            if count == 0 {
+                String::new()
+            } else {
+                format!("@group(0) @binding(0) var<storage> {name}: array<vec4u, {count}>;")
+            }
+        };
+        let touch = |name: &str, count: u32| {
+            if count == 0 {
+                String::new()
+            } else {
+                format!("_ = {name}[0];")
+            }
+        };
+        format!(
+            "{} {}
+@vertex fn vs() -> @builtin(position) vec4f {{ {} return vec4f(0.0); }}
+@fragment fn fs() -> @location(0) vec4f {{ {} return vec4f(1.0); }}",
+            variable("vertex_data", vertex_vec4s),
+            variable("fragment_data", fragment_vec4s),
+            touch("vertex_data", vertex_vec4s),
+            touch("fragment_data", fragment_vec4s),
+        )
+    }
+
+    fn required_size_pipeline(
+        device: &Device,
+        wgsl: &str,
+        layout_min_binding_size: u64,
+    ) -> (Arc<RenderPipeline>, Arc<BindGroupLayout>) {
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: crate::shader::SHADER_STAGE_VERTEX
+                    | crate::shader::SHADER_STAGE_FRAGMENT,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::Buffer {
+                    ty: crate::BufferBindingType::ReadOnlyStorage,
+                    has_dynamic_offset: false,
+                    min_binding_size: layout_min_binding_size,
+                }),
+            }],
+            error: None,
+        }));
+        let pipeline_layout = Arc::new(device.create_pipeline_layout(
+            crate::PipelineLayoutDescriptor {
+                bind_group_layouts: vec![layout.clone()],
+                immediate_size: 0,
+                error: None,
+            },
+        ));
+        let module =
+            Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(wgsl.to_owned())));
+        let mut descriptor = render_pipeline_descriptor(module);
+        descriptor.layout = RenderPipelineLayout::Explicit(pipeline_layout);
+        let pipeline = Arc::new(device.create_render_pipeline(descriptor));
+        assert!(!pipeline.is_error());
+        (pipeline, layout)
+    }
+
+    fn required_size_group(
+        device: &Device,
+        layout: Arc<BindGroupLayout>,
+        size: u64,
+    ) -> Arc<BindGroup> {
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE,
+            size,
+            mapped_at_creation: false,
+        }));
+        let group = Arc::new(device.create_bind_group(
+            layout,
+            vec![BindGroupEntry {
+                binding: 0,
+                resource: BindGroupResource::Buffer {
+                    buffer,
+                    device: Arc::new(device.clone()),
+                    offset: 0,
+                    size: u64::MAX,
+                },
+            }],
+        ));
+        assert!(!group.is_error());
+        group
+    }
+
+    fn required_size_index_buffer(device: &Device) -> Arc<Buffer> {
+        Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::INDEX,
+            size: 16,
+            mapped_at_creation: false,
+        }))
+    }
+
+    fn required_size_pass_error(
+        device: &Device,
+        pipeline: &Arc<RenderPipeline>,
+        group: &Arc<BindGroup>,
+        draw: RequiredSizeDraw,
+    ) -> Option<String> {
+        let limits = device.limits();
+        let encoder = device.create_command_encoder();
+        let (pass, error) = encoder.begin_render_pass(&noop_render_pass_descriptor(
+            noop_render_attachment(device),
+            None,
+        ));
+        assert_eq!(error, None);
+        assert_eq!(pass.set_pipeline(pipeline.clone()), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(group.clone()), Vec::new(), limits),
+            None
+        );
+        assert_eq!(
+            pass.set_index_buffer(
+                required_size_index_buffer(device),
+                Some(IndexFormat::Uint16),
+                0,
+                16
+            ),
+            None
+        );
+        let indirect = noop_indirect_buffer(device);
+        let result = match draw {
+            RequiredSizeDraw::Direct => pass.draw(3, 1, 0, 0, limits),
+            RequiredSizeDraw::Indexed => pass.draw_indexed(3, 1, 0, 0, 0, limits),
+            RequiredSizeDraw::Indirect => pass.draw_indirect(indirect, 0, limits),
+            RequiredSizeDraw::IndexedIndirect => pass.draw_indexed_indirect(indirect, 0, limits),
+        };
+        assert_eq!(result, None);
+        assert_eq!(pass.end(), None);
+        encoder.finish().1
+    }
+
+    fn required_size_bundle(
+        device: &Device,
+        pipeline: &Arc<RenderPipeline>,
+        group: &Arc<BindGroup>,
+        draw: RequiredSizeDraw,
+    ) -> (crate::RenderBundle, Option<String>) {
+        let limits = device.limits();
+        let (encoder, error) = crate::render_bundle::RenderBundleEncoder::new(
+            render_bundle_encoder_descriptor(),
+            limits,
+            device.features(),
+        );
+        assert_eq!(error, None);
+        assert_eq!(encoder.set_pipeline(pipeline.clone()), None);
+        assert_eq!(
+            encoder.set_bind_group(0, Some(group.clone()), Vec::new(), limits),
+            None
+        );
+        assert_eq!(
+            encoder.set_index_buffer(
+                required_size_index_buffer(device),
+                Some(IndexFormat::Uint16),
+                0,
+                16
+            ),
+            None
+        );
+        let indirect = noop_indirect_buffer(device);
+        let result = match draw {
+            RequiredSizeDraw::Direct => encoder.draw(3, 1, 0, 0, limits),
+            RequiredSizeDraw::Indexed => encoder.draw_indexed(3, 1, 0, 0, 0, limits),
+            RequiredSizeDraw::Indirect => encoder.draw_indirect(indirect, 0, limits),
+            RequiredSizeDraw::IndexedIndirect => encoder.draw_indexed_indirect(indirect, 0, limits),
+        };
+        assert_eq!(result, None);
+        encoder.finish()
+    }
+
+    /// Runs one shader through every draw variant, in a pass and in a bundle.
+    fn assert_required_size(wgsl: &str, required: u64) {
+        let device = noop_device();
+        let (pipeline, layout) = required_size_pipeline(&device, wgsl, 0);
+        assert_eq!(pipeline.required_buffer_sizes().len(), 1);
+        assert_eq!(pipeline.required_buffer_sizes()[0].size, required);
+        let too_small = required_size_group(&device, layout.clone(), required - 4);
+        let exact = required_size_group(&device, layout, required);
+        let message = format!(
+            "buffer bound with size {} at group 0 binding 0 is too small: the pipeline requires at least {required} bytes",
+            required - 4
+        );
+
+        for draw in REQUIRED_SIZE_DRAWS {
+            assert_eq!(
+                required_size_pass_error(&device, &pipeline, &too_small, draw).as_deref(),
+                Some(message.as_str()),
+                "{draw:?} in a render pass"
+            );
+            assert_eq!(
+                required_size_pass_error(&device, &pipeline, &exact, draw),
+                None,
+                "{draw:?} in a render pass"
+            );
+
+            let (bundle, error) = required_size_bundle(&device, &pipeline, &too_small, draw);
+            assert_eq!(
+                error.as_deref(),
+                Some(message.as_str()),
+                "{draw:?} in a bundle"
+            );
+            assert!(bundle.is_error());
+
+            let (bundle, error) = required_size_bundle(&device, &pipeline, &exact, draw);
+            assert_eq!(error, None, "{draw:?} in a bundle");
+            assert!(!bundle.is_error());
+        }
+    }
+
+    /// Block 119 R2: a binding only the vertex stage uses is checked at draw.
+    #[test]
+    fn render_draw_validates_required_buffer_size_for_vertex_only_use() {
+        assert_required_size(&required_size_shader(2, 0), 32);
+    }
+
+    /// Block 119 R2: a binding only the fragment stage uses is checked at draw.
+    #[test]
+    fn render_draw_validates_required_buffer_size_for_fragment_only_use() {
+        assert_required_size(&required_size_shader(0, 2), 32);
+    }
+
+    /// Block 119 R2a: the required size is the larger of the two stages, in either
+    /// order, so a buffer that satisfies only the smaller stage is rejected.
+    #[test]
+    fn render_draw_required_buffer_size_is_the_maximum_across_stages() {
+        assert_required_size(&required_size_shader(1, 2), 32);
+        assert_required_size(&required_size_shader(2, 1), 32);
+    }
+
+    /// Block 119 R2a: the `buffer_view` shape of the CTS render cases, where one
+    /// variable has no fixed type and each stage views a different amount of it.
+    #[test]
+    fn render_draw_required_buffer_size_covers_buffer_view() {
+        assert_required_size(
+            r"requires buffer_view;
+@group(0) @binding(0) var<storage> data: buffer;
+@vertex fn vs() -> @builtin(position) vec4f {
+  _ = bufferView<array<u32, 2>>(&data, 0);
+  return vec4f(0.0);
+}
+@fragment fn fs() -> @location(0) vec4f {
+  _ = bufferView<array<u32, 4>>(&data, 0);
+  return vec4f(1.0);
+}",
+            16,
+        );
+    }
+
+    /// Block 119 R2: a nonzero layout `minBindingSize` is checked earlier, at
+    /// pipeline and bind group creation, so draw adds nothing for it.
+    #[test]
+    fn render_draw_skips_required_size_for_nonzero_min_binding_size() {
+        let device = noop_device();
+        let (pipeline, layout) = required_size_pipeline(&device, &required_size_shader(2, 2), 32);
+        let group = required_size_group(&device, layout, 32);
+
+        assert!(pipeline.required_buffer_sizes().is_empty());
+        for draw in REQUIRED_SIZE_DRAWS {
+            assert_eq!(
+                required_size_pass_error(&device, &pipeline, &group, draw),
+                None
+            );
+            assert_eq!(
+                required_size_bundle(&device, &pipeline, &group, draw).1,
+                None
+            );
+        }
+    }
+
+    /// Block 119 R2: the check is memoized on pipeline and bind group identity, so
+    /// changing either one after a passing draw must redo it.
+    #[test]
+    fn render_draw_rechecks_required_size_when_pipeline_or_group_changes() {
+        let device = noop_device();
+        let (small_pipeline, layout) =
+            required_size_pipeline(&device, &required_size_shader(1, 1), 0);
+        let (large_pipeline, large_layout) =
+            required_size_pipeline(&device, &required_size_shader(2, 2), 0);
+        let small_for_small = required_size_group(&device, layout, 16);
+        let small_for_large = required_size_group(&device, large_layout.clone(), 16);
+        let large = required_size_group(&device, large_layout, 32);
+        let limits = device.limits();
+
+        for (first, second, expect_error) in [
+            (
+                (&large_pipeline, &large),
+                (&large_pipeline, &small_for_large),
+                true,
+            ),
+            (
+                (&small_pipeline, &small_for_small),
+                (&large_pipeline, &small_for_large),
+                true,
+            ),
+            ((&large_pipeline, &large), (&large_pipeline, &large), false),
+        ] {
+            let encoder = device.create_command_encoder();
+            let (pass, error) = encoder.begin_render_pass(&noop_render_pass_descriptor(
+                noop_render_attachment(&device),
+                None,
+            ));
+            assert_eq!(error, None);
+            for (pipeline, group) in [first, second] {
+                assert_eq!(pass.set_pipeline(pipeline.clone()), None);
+                assert_eq!(
+                    pass.set_bind_group(0, Some(group.clone()), Vec::new(), limits),
+                    None
+                );
+                assert_eq!(pass.draw(3, 1, 0, 0, limits), None);
+            }
+            assert_eq!(pass.end(), None);
+            assert_eq!(encoder.finish().1.is_some(), expect_error);
+        }
+    }
+
+    /// Block 119 R2a: as in Dawn, a bundle draw is validated when it is encoded,
+    /// against the bundle's own bind groups, so executing a passing bundle is not
+    /// affected by a too-small group bound on the pass.
+    #[test]
+    fn render_bundle_required_buffer_size_uses_the_bundles_own_bind_groups() {
+        let device = noop_device();
+        let (pipeline, layout) = required_size_pipeline(&device, &required_size_shader(2, 2), 0);
+        let exact = required_size_group(&device, layout.clone(), 32);
+        let too_small = required_size_group(&device, layout, 28);
+        let (bundle, error) =
+            required_size_bundle(&device, &pipeline, &exact, RequiredSizeDraw::Direct);
+        assert_eq!(error, None);
+
+        let encoder = device.create_command_encoder();
+        let (pass, error) = encoder.begin_render_pass(&noop_render_pass_descriptor(
+            noop_render_attachment(&device),
+            None,
+        ));
+        assert_eq!(error, None);
+        assert_eq!(pass.set_pipeline(pipeline), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(too_small), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.execute_bundles(&[Arc::new(bundle)]), None);
+        assert_eq!(pass.end(), None);
+        assert_eq!(encoder.finish().1, None);
+    }
+
     #[test]
     fn render_draw_and_bundle_reject_overlapping_writable_bindings() {
         let device = noop_device();

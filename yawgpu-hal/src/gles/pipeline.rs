@@ -17,6 +17,14 @@ use crate::{
 const FIRST_INSTANCE_UNIFORM_NAME: &str = "tint_immediates[0]";
 const FRAG_DEPTH_MIN_UNIFORM_NAME: &str = "tint_immediates[1]";
 const FRAG_DEPTH_MAX_UNIFORM_NAME: &str = "tint_immediates[2]";
+/// Most words a compute `tint_immediates` array can hold: the 64-byte limit on
+/// the immediates a pass carries.
+const MAX_COMPUTE_IMMEDIATE_WORDS: usize = 16;
+
+/// Returns the element name of word `word` of Tint's immediates uniform array.
+fn immediate_uniform_name(word: usize) -> String {
+    format!("tint_immediates[{word}]")
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct GlesResolvedCombinedSampler {
@@ -45,6 +53,9 @@ struct GlesComputePipelineInner {
     texture_metadata_slots: Vec<HalTextureMetadataSlot>,
     binding_remaps: Vec<HalGlesBindingRemap>,
     texture_metadata_ubo_binding: Option<u32>,
+    /// One entry per immediate word. `None` for a word the program does not have,
+    /// so a program without immediates uploads nothing.
+    immediate_locations: Vec<Option<glow::UniformLocation>>,
 }
 
 impl Drop for GlesComputePipelineInner {
@@ -91,6 +102,11 @@ impl GlesComputePipeline {
         let program = build_compute_program(&device, &source)?;
         let combined_samplers =
             resolve_combined_samplers(&device, program, &resource_bindings.combined_samplers)?;
+        let immediate_locations = device.with_current_context(|gl| unsafe {
+            (0..MAX_COMPUTE_IMMEDIATE_WORDS)
+                .map(|word| gl.get_uniform_location(program, &immediate_uniform_name(word)))
+                .collect()
+        })?;
         Ok(Self {
             inner: Arc::new(GlesComputePipelineInner {
                 device,
@@ -101,6 +117,7 @@ impl GlesComputePipeline {
                 texture_metadata_slots: resource_bindings.texture_metadata_slots,
                 binding_remaps: resource_bindings.binding_remaps,
                 texture_metadata_ubo_binding: resource_bindings.texture_metadata_ubo_binding,
+                immediate_locations,
             }),
         })
     }
@@ -116,6 +133,11 @@ impl GlesComputePipeline {
     #[must_use]
     pub(super) fn bindings(&self) -> &[HalDescriptorBinding] {
         &self.inner.bindings
+    }
+
+    #[must_use]
+    pub(super) fn immediate_locations(&self) -> &[Option<glow::UniformLocation>] {
+        &self.inner.immediate_locations
     }
 
     #[must_use]
@@ -884,6 +906,13 @@ mod tests {
     #[test]
     fn first_instance_uniform_name_matches_tint_immediate_array_element_zero() {
         assert_eq!(FIRST_INSTANCE_UNIFORM_NAME, "tint_immediates[0]");
+        // Block 119 R5a: compute immediates use the same array, element by element.
+        assert_eq!(immediate_uniform_name(0), FIRST_INSTANCE_UNIFORM_NAME);
+        assert_eq!(immediate_uniform_name(2), FRAG_DEPTH_MAX_UNIFORM_NAME);
+        assert_eq!(
+            immediate_uniform_name(MAX_COMPUTE_IMMEDIATE_WORDS - 1),
+            "tint_immediates[15]"
+        );
     }
 
     fn stencil_face_state() -> crate::HalStencilFaceState {
