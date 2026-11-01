@@ -1,7 +1,7 @@
 # Block 119 — CTS d116bcc findings F-161 to F-164
 
 Status: **COMPLETE (2026-11-01)**. Phase Review: 0 CRITICAL, 0 MAJOR, 4 MINOR; m1-m3
-fixed, m4 recorded as R5d. GLES behaviour is unverified on a real driver.
+fixed, m4 recorded as R5d. Verified on Metal, Linux native Vulkan, and Linux GLES.
 Source: user request (2026-11-01); webgpu-native-cts `docs/FINDINGS.md` F-161 to
 F-164, from the sweep at CTS `d116bcc` on yawgpu `ea67149`. All four were
 re-measured at `ea67149` before this block was written, and each reproduces.
