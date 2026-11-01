@@ -4,10 +4,10 @@ use std::sync::Arc;
 use yawgpu_hal::{
     HalBackend, HalBlendComponent, HalBlendFactor, HalBlendOperation, HalBlendState,
     HalColorTargetState, HalCompareFunction, HalCullMode, HalDepthStencilState,
-    HalDescriptorBinding, HalDescriptorBindingKind, HalDevice, HalFrontFace, HalMslImmediates,
-    HalPrimitiveTopology, HalRenderPipeline, HalRenderPipelineDescriptor, HalShaderSource,
-    HalStencilFaceState, HalStencilOperation, HalVertexAttribute, HalVertexBufferLayout,
-    HalVertexFormat, HalVertexStepMode,
+    HalDescriptorBinding, HalDescriptorBindingKind, HalDevice, HalFrontFace, HalPrimitiveTopology,
+    HalRenderPipeline, HalRenderPipelineDescriptor, HalShaderSource, HalStencilFaceState,
+    HalStencilOperation, HalVertexAttribute, HalVertexBufferLayout, HalVertexFormat,
+    HalVertexStepMode,
 };
 
 use crate::adapter::Feature;
@@ -1508,43 +1508,20 @@ pub(crate) fn select_render_shader_source(
             };
             // Collect metal indices in the same order as vertex_buffer_mappings
             // passed to shader codegen (i.e. the order of msl_vertex_buffers).
-            // These are the metal buffer slot ids for the `buffer_sizeN` fields
-            // appended after storage-array size fields in `_mslBufferSizes`.
+            // Their sizes follow the storage sizes in the vertex immediate block.
             let vertex_buffer_metal_indices: Vec<u32> =
                 msl_vertex_buffers.iter().map(|b| b.metal_index).collect();
-            // Vertex never carries the frag-depth clamp -- its block is just
-            // the user-immediate prefix when the vertex entry point uses any
-            // immediates.
-            let vertex_immediates = vertex
-                .immediate_slot
-                .map(|slot| HalMslImmediates::new(slot, user_immediate_size, None));
-            // Fragment's block appends the 8-byte clamp range right after
-            // the user prefix when this pipeline clamps frag_depth (Block
-            // 94 "Immediates block layout"); `frag_depth_clamp_slot` and
-            // `immediate_slot` are always the same value when both are
-            // `Some` (same combined block, same Metal slot).
-            let fragment_immediates = fragment.as_ref().and_then(|fragment| {
-                fragment.immediate_slot.map(|slot| {
-                    let frag_depth_clamp_offset = fragment
-                        .frag_depth_clamp_slot
-                        .is_some()
-                        .then_some(user_immediate_size);
-                    let block_size =
-                        frag_depth_clamp_offset.map_or(user_immediate_size, |offset| offset + 8);
-                    HalMslImmediates::new(slot, block_size, frag_depth_clamp_offset)
-                })
-            });
+            let vertex_immediates = vertex.hal_immediates(user_immediate_size);
+            let fragment_immediates = fragment
+                .as_ref()
+                .and_then(|fragment| fragment.hal_immediates(user_immediate_size));
             Ok((
                 HalShaderSource::MslStagesWithBufferSizes {
                     vertex: vertex.source,
                     fragment: fragment.as_ref().map(|fragment| fragment.source.clone()),
-                    vertex_buffer_sizes_slot: vertex.buffer_sizes_slot,
                     vertex_buffer_size_bindings: hal_msl_buffer_size_bindings(
                         &vertex.buffer_size_bindings,
                     ),
-                    fragment_buffer_sizes_slot: fragment
-                        .as_ref()
-                        .and_then(|fragment| fragment.buffer_sizes_slot),
                     fragment_buffer_size_bindings: hal_msl_buffer_size_bindings(
                         fragment
                             .as_ref()
@@ -5635,7 +5612,73 @@ fn fs() -> @builtin(frag_depth) f32 {
         let fragment_immediates =
             fragment_immediates.expect("fragment references pc and clamps frag_depth");
         assert_eq!(fragment_immediates.frag_depth_clamp_offset, Some(16));
-        assert_eq!(fragment_immediates.block_size, 16 + 8);
+        assert_eq!(fragment_immediates.user_size, 16);
+        // 16 user + 8 clamp + 4 non-constant zero, rounded up to 16.
+        assert_eq!(fragment_immediates.block_size, 32);
+        assert_eq!(fragment_immediates.buffer_sizes_offset, None);
+    }
+
+    /// Block 118 R4: per-stage blocks. A fragment stage that only clamps gets
+    /// a block with no sizes, while a vertex stage with storage sizes gets a
+    /// sizes-only block: each stage's layout comes from its own generation.
+    #[test]
+    fn select_render_shader_source_metal_stages_get_independent_immediate_blocks() {
+        let device = noop_device();
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r#"
+struct Data { values: array<u32> }
+@group(0) @binding(0) var<storage, read> data: Data;
+
+@vertex
+fn vs() -> @builtin(position) vec4<f32> {
+  return vec4<f32>(f32(arrayLength(&data.values)), 0.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs() -> @builtin(frag_depth) f32 {
+  return 0.5;
+}
+"#
+                .to_owned(),
+            )),
+        );
+        let descriptor = render_pipeline_descriptor(module);
+
+        let (source, ..) = select_render_shader_source(
+            HalBackend::Metal,
+            &descriptor,
+            "vs",
+            Some("fs"),
+            &[],
+            &[],
+            &[],
+            false,
+            &[],
+            true,
+        )
+        .expect("render pipeline should select Metal MSL");
+
+        let HalShaderSource::MslStagesWithBufferSizes {
+            vertex_immediates,
+            fragment_immediates,
+            vertex_buffer_size_bindings,
+            fragment_buffer_size_bindings,
+            ..
+        } = source
+        else {
+            panic!("Metal backend must select MslStagesWithBufferSizes");
+        };
+        assert_eq!(vertex_buffer_size_bindings.len(), 1);
+        assert!(fragment_buffer_size_bindings.is_empty());
+        let vertex_immediates = vertex_immediates.expect("vertex stage has buffer sizes");
+        assert_eq!(vertex_immediates.buffer_sizes_offset, Some(4));
+        assert_eq!(vertex_immediates.frag_depth_clamp_offset, None);
+        assert_eq!(vertex_immediates.block_size, 16);
+        let fragment_immediates = fragment_immediates.expect("fragment stage clamps frag_depth");
+        assert_eq!(fragment_immediates.buffer_sizes_offset, None);
+        assert_eq!(fragment_immediates.frag_depth_clamp_offset, Some(0));
+        assert_eq!(fragment_immediates.block_size, 16);
     }
 
     #[cfg(feature = "shader-passthrough")]

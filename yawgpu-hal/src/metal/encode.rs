@@ -823,8 +823,6 @@ pub(super) fn encode_compute_pass(
     for binding in &pass.bind_buffers {
         encode_compute_buffer(encoder, binding)?;
     }
-    encode_compute_buffer_sizes(encoder, pipeline, &pass.bind_buffers)?;
-    encode_compute_immediates(encoder, pipeline, &pass.immediate_data)?;
     for binding in &pass.bind_textures {
         encode_compute_texture(encoder, binding)?;
     }
@@ -834,6 +832,11 @@ pub(super) fn encode_compute_pass(
     for binding in &pass.bind_samplers {
         encode_compute_sampler(encoder, binding)?;
     }
+    // Must stay the last binding written (Block 118 R7a). The immediate slot
+    // chooser only sees resources this entry point references, but every layout
+    // entry is bound above, so an unreferenced external texture's params buffer
+    // can share the block's slot.
+    encode_compute_immediates(encoder, pipeline, &pass.immediate_data, &pass.bind_buffers)?;
     match &pass.dispatch {
         HalComputeDispatch::Direct { workgroups } => {
             // WebGPU: a dispatch with any zero workgroup count does nothing,
@@ -862,62 +865,61 @@ pub(super) fn encode_compute_pass(
     Ok(())
 }
 
-fn encode_compute_buffer_sizes(
-    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
-    pipeline: &MetalComputePipeline,
-    buffers: &[HalBoundBuffer],
-) -> Result<(), HalError> {
-    let Some(slot) = pipeline.buffer_sizes_slot else {
-        return Ok(());
-    };
-    let mut sizes = msl_buffer_sizes(&pipeline.buffer_size_bindings, buffers)?;
-    pad_msl_buffer_sizes(&mut sizes)?;
-    if sizes.is_empty() {
-        return Ok(());
-    }
-    unsafe {
-        encoder.setBytes_length_atIndex(
-            NonNull::new(sizes.as_ptr().cast_mut().cast())
-                .ok_or_else(|| buffer_error("MSL buffer sizes data is missing"))?,
-            sizes.len() * std::mem::size_of::<u32>(),
-            to_ns(u64::from(slot))?,
-        );
-    }
-    Ok(())
-}
-
-/// Composes the combined Metal immediates block for one shader stage
-/// (Block 94 S2) via the backend-shared
-/// [`crate::immediates::compose_immediates_block`]: user immediate bytes
-/// first, the fragment frag-depth clamp range (from the pass viewport,
-/// defaulting to the full `[0.0, 1.0]` range) at
-/// `immediates.frag_depth_clamp_offset` when present. Mirrors Dawn's
-/// `RenderImmediates`/`ComputeImmediates` layout (`ImmediatesLayoutMTL.h`).
+/// Composes the Metal immediate block for one shader stage, the single path
+/// every encoder delivers through. The layout is `ImmediatesLayoutMTL.h` with
+/// the buffer sizes appended (Dawn's `ImmediateTracker::Apply`):
+///
+/// - user bytes at `[0, immediates.user_size)`, via the backend-shared
+///   [`crate::immediates::compose_immediates_block`];
+/// - the frag-depth clamp range at `immediates.frag_depth_clamp_offset` when
+///   present, from the pass viewport, defaulting to the full `[0.0, 1.0]`;
+/// - the non-constant-zero word, which stays 0 because the block starts
+///   zero-filled and nothing writes it;
+/// - `sizes` at `immediates.buffer_sizes_offset` when present.
 fn compose_metal_immediates_block(
     user_data: &[u8],
     immediates: HalMslImmediates,
     viewport: Option<HalViewport>,
-) -> Vec<u8> {
+    sizes: &[u32],
+) -> Result<Vec<u8>, HalError> {
     let range = viewport.map_or([0.0f32, 1.0], |viewport| {
         [viewport.min_depth, viewport.max_depth]
     });
-    crate::immediates::compose_immediates_block(
+    let mut block = crate::immediates::compose_immediates_block(
         user_data,
+        immediates.user_size,
         immediates.block_size,
         immediates.frag_depth_clamp_offset,
         range,
-    )
+    );
+    if let Some(offset) = immediates.buffer_sizes_offset {
+        let offset = offset as usize;
+        let end = sizes
+            .len()
+            .checked_mul(std::mem::size_of::<u32>())
+            .and_then(|len| len.checked_add(offset))
+            .ok_or_else(|| buffer_error("MSL buffer sizes length overflows"))?;
+        let target = block
+            .get_mut(offset..end)
+            .ok_or_else(|| buffer_error("MSL buffer sizes exceed the immediate block"))?;
+        for (bytes, size) in target.as_chunks_mut::<4>().0.iter_mut().zip(sizes) {
+            *bytes = size.to_ne_bytes();
+        }
+    }
+    Ok(block)
 }
 
 fn encode_compute_immediates(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     pipeline: &MetalComputePipeline,
     immediate_data: &[u8],
+    buffers: &[HalBoundBuffer],
 ) -> Result<(), HalError> {
     let Some(immediates) = pipeline.immediates else {
         return Ok(());
     };
-    let block = compose_metal_immediates_block(immediate_data, immediates, None);
+    let sizes = msl_buffer_sizes(&pipeline.buffer_size_bindings, buffers)?;
+    let block = compose_metal_immediates_block(immediate_data, immediates, None, &sizes)?;
     unsafe {
         encoder.setBytes_length_atIndex(
             NonNull::new(block.as_ptr().cast_mut().cast())
@@ -1055,7 +1057,8 @@ fn per_stage_slots(
     }
 }
 
-/// Collects storage-buffer sizes and pads them to Tint's `uint4` array layout.
+/// Collects storage-buffer sizes in binding order. Each entry is one `u32` of
+/// the immediate block's `array<u32, N>`.
 fn msl_buffer_sizes(
     size_bindings: &[HalMslBufferSizeBinding],
     buffers: &[HalBoundBuffer],
@@ -1072,16 +1075,6 @@ fn msl_buffer_sizes(
             msl_buffer_size_u32(size)
         })
         .collect()
-}
-
-/// Zero-pads size slots to whole `uint4` elements, leaving empty arrays empty.
-fn pad_msl_buffer_sizes(sizes: &mut Vec<u32>) -> Result<(), HalError> {
-    let padded_len = sizes
-        .len()
-        .checked_next_multiple_of(4)
-        .ok_or_else(|| buffer_error("MSL buffer sizes length overflows"))?;
-    sizes.resize(padded_len, 0);
-    Ok(())
 }
 
 fn msl_buffer_size_u32(size: u64) -> Result<u32, HalError> {
@@ -1622,13 +1615,14 @@ fn encode_metal_stream_draw(
     let Some(crate::HalRenderPipeline::Metal(pipeline)) = &state.pipeline else {
         return Err(shader_error("render draw has no Metal pipeline".to_owned()));
     };
-    encode_render_buffer_sizes(
+    encode_render_immediates(
         encoder,
         pipeline,
+        &state.immediate_data,
+        state.viewport,
         &state.bind_buffers,
         &state.vertex_buffers,
     )?;
-    encode_render_immediates(encoder, pipeline, &state.immediate_data, state.viewport)?;
     encode_render_draw(
         encoder,
         state.index_buffer.as_ref(),
@@ -1672,8 +1666,9 @@ pub(super) fn encode_subpass_render_pass(
             // (`validate_subpass_pipeline_has_no_immediates`, Block 94
             // Phase Review MAJOR 2) -- so no pipeline reaching this path
             // reads user immediates and the empty snapshot is never
-            // observable. Only the internal frag-depth clamp range (which
-            // reads no user bytes) can still be composed and delivered.
+            // observable. The internal frag-depth clamp range and buffer
+            // sizes read no user bytes, so they are still composed and
+            // delivered.
             immediate_data: &[],
         };
         encode_render_state(encoder, &state)?;
@@ -1757,8 +1752,14 @@ fn encode_render_state(
     for binding in state.bind_buffers {
         encode_render_bind_buffer(encoder, binding)?;
     }
-    encode_render_buffer_sizes(encoder, pipeline, state.bind_buffers, state.vertex_buffers)?;
-    encode_render_immediates(encoder, pipeline, state.immediate_data, state.viewport)?;
+    encode_render_immediates(
+        encoder,
+        pipeline,
+        state.immediate_data,
+        state.viewport,
+        state.bind_buffers,
+        state.vertex_buffers,
+    )?;
     for binding in state.bind_textures {
         encode_render_bind_texture(encoder, binding)?;
     }
@@ -1795,11 +1796,10 @@ fn mtl_cull_mode(cull_mode: HalCullMode) -> MTLCullMode {
     }
 }
 
-/// Composes the full vertex-stage `_mslBufferSizes` array.
+/// Composes the vertex-stage buffer sizes.
 ///
-/// Layout Tint emits:
-///   [storage-array sizes …] [buffer_sizeN per vertex_buffer_metal_indices entry]
-/// followed by zero padding to whole `uint4` elements.
+/// Order, matching the size indices the shim gives Tint:
+///   [storage-array sizes …] [one size per vertex_buffer_metal_indices entry]
 ///
 /// `bind_buffers` supplies the bind-group buffers (storage-array entries).
 /// `vertex_buffers` supplies the vertex-attribute buffers; each entry in
@@ -1829,76 +1829,30 @@ fn compose_vertex_stage_sizes(
             .unwrap_or(0);
         sizes.push(u32::try_from(effective_size).unwrap_or(u32::MAX));
     }
-    pad_msl_buffer_sizes(&mut sizes)?;
     Ok(sizes)
 }
 
-/// Composes the vertex-stage `_mslBufferSizes` array and writes it via
-/// `setVertexBytes`, then composes the fragment-stage array and writes it via
-/// `setFragmentBytes`.
-///
-/// The vertex-stage slot is forced when vertex buffers exist, so `sizes` will
-/// be non-empty in that case.  See [`compose_vertex_stage_sizes`] for the exact
-/// layout.
-fn encode_render_buffer_sizes(
+/// Delivers the vertex- and/or fragment-stage immediate block for one draw.
+/// Delivered unconditionally per draw (no dirty tracking) at each stage's own
+/// Metal slot; a stage that needs no block (`pipeline.
+/// {vertex,fragment}_immediates == None`) is skipped entirely.
+fn encode_render_immediates(
     encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
     pipeline: &MetalRenderPipeline,
+    immediate_data: &[u8],
+    viewport: Option<HalViewport>,
     bind_buffers: &[HalBoundBuffer],
     vertex_buffers: &[HalBoundBuffer],
 ) -> Result<(), HalError> {
-    if let Some(slot) = pipeline.vertex_buffer_sizes_slot {
+    if let Some(immediates) = pipeline.vertex_immediates {
         let sizes = compose_vertex_stage_sizes(
             &pipeline.vertex_buffer_size_bindings,
             bind_buffers,
             &pipeline.vertex_buffer_metal_indices,
             vertex_buffers,
         )?;
-        if !sizes.is_empty() {
-            unsafe {
-                encoder.setVertexBytes_length_atIndex(
-                    NonNull::new(sizes.as_ptr().cast_mut().cast())
-                        .ok_or_else(|| buffer_error("MSL vertex buffer sizes data is missing"))?,
-                    sizes.len() * std::mem::size_of::<u32>(),
-                    to_ns(u64::from(slot))?,
-                );
-            }
-        }
-    }
-    if let Some(slot) = pipeline.fragment_buffer_sizes_slot {
-        let mut sizes = msl_buffer_sizes(&pipeline.fragment_buffer_size_bindings, bind_buffers)?;
-        pad_msl_buffer_sizes(&mut sizes)?;
-        if !sizes.is_empty() {
-            unsafe {
-                encoder.setFragmentBytes_length_atIndex(
-                    NonNull::new(sizes.as_ptr().cast_mut().cast())
-                        .ok_or_else(|| buffer_error("MSL fragment buffer sizes data is missing"))?,
-                    sizes.len() * std::mem::size_of::<u32>(),
-                    to_ns(u64::from(slot))?,
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Delivers the vertex- and/or fragment-stage combined immediates block for
-/// one draw (Block 94 S2). Delivered unconditionally per draw (no dirty
-/// tracking, mirroring the pre-S2 clamp-only delivery this absorbs) at each
-/// stage's own Metal slot; a stage with no immediates (`pipeline.
-/// {vertex,fragment}_immediates == None`) is skipped entirely. Replaces the
-/// old `encode_render_frag_depth_clamp`, which only ever delivered the bare
-/// 8-byte clamp range at the fragment stage -- clamp-only pipelines still
-/// get exactly that (the composed block is just `[0, 8)` = the clamp range
-/// when there is no user-immediate prefix).
-fn encode_render_immediates(
-    encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
-    pipeline: &MetalRenderPipeline,
-    immediate_data: &[u8],
-    viewport: Option<HalViewport>,
-) -> Result<(), HalError> {
-    if let Some(immediates) = pipeline.vertex_immediates {
         // Vertex stage never carries the frag-depth clamp.
-        let block = compose_metal_immediates_block(immediate_data, immediates, None);
+        let block = compose_metal_immediates_block(immediate_data, immediates, None, &sizes)?;
         unsafe {
             encoder.setVertexBytes_length_atIndex(
                 NonNull::new(block.as_ptr().cast_mut().cast())
@@ -1909,7 +1863,8 @@ fn encode_render_immediates(
         }
     }
     if let Some(immediates) = pipeline.fragment_immediates {
-        let block = compose_metal_immediates_block(immediate_data, immediates, viewport);
+        let sizes = msl_buffer_sizes(&pipeline.fragment_buffer_size_bindings, bind_buffers)?;
+        let block = compose_metal_immediates_block(immediate_data, immediates, viewport, &sizes)?;
         unsafe {
             encoder.setFragmentBytes_length_atIndex(
                 NonNull::new(block.as_ptr().cast_mut().cast())
@@ -3216,20 +3171,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn pad_msl_buffer_sizes_pads_to_uint4_elements() {
-        for (slots, expected) in [
-            (0, vec![]),
-            (1, vec![240, 0, 0, 0]),
-            (4, vec![240; 4]),
-            (5, vec![240, 240, 240, 240, 240, 0, 0, 0]),
-        ] {
-            let mut sizes = vec![240; slots];
-            pad_msl_buffer_sizes(&mut sizes).expect("padding");
-            assert_eq!(sizes, expected);
-        }
-    }
-
     /// `compose_vertex_stage_sizes` places storage-array sizes first, then vertex
     /// buffer effective sizes (buffer.size - offset) in metal_index order.
     #[test]
@@ -3253,7 +3194,7 @@ mod tests {
         )
         .expect("compose must succeed");
 
-        assert_eq!(sizes, vec![240u32, 1024u32, 0, 0]);
+        assert_eq!(sizes, vec![240u32, 1024u32]);
     }
 
     /// Missing vertex-buffer binding (no matching metal_index) contributes 0.
@@ -3267,7 +3208,7 @@ mod tests {
         )
         .expect("compose must succeed");
 
-        assert_eq!(sizes, vec![0u32; 4]);
+        assert_eq!(sizes, vec![0u32]);
     }
 
     /// Vertex buffer sizes are appended AFTER any storage-array sizes.
@@ -3289,7 +3230,7 @@ mod tests {
         )
         .expect("compose must succeed");
 
-        assert_eq!(sizes, vec![0, 64, 0, 0]);
+        assert_eq!(sizes, vec![0, 64]);
     }
 
     /// Effective size saturates at u32::MAX for a very large buffer.
@@ -3303,7 +3244,7 @@ mod tests {
             compose_vertex_stage_sizes(&[], &[], &vertex_buffer_metal_indices, &vertex_buffers)
                 .expect("compose must succeed");
 
-        assert_eq!(sizes, vec![u32::MAX, 0, 0, 0]);
+        assert_eq!(sizes, vec![u32::MAX]);
     }
 
     #[test]
@@ -3458,16 +3399,20 @@ mod tests {
         ));
     }
 
-    /// User-only block (no frag-depth clamp): the composed block is exactly
-    /// `block_size` bytes copied from the front of `user_data`.
+    /// User-only block (no frag-depth clamp): the user prefix is copied, the
+    /// rest of the snapshot is not, and the non-constant-zero word stays 0.
     #[test]
     fn compose_metal_immediates_block_copies_user_prefix_when_no_clamp() {
-        let user_data: Vec<u8> = (0..64u8).collect();
-        let immediates = HalMslImmediates::new(30, 16, None);
+        let user_data: Vec<u8> = (1..=64u8).collect();
+        let immediates = HalMslImmediates::new(30, 32, 16, None, None);
 
-        let block = compose_metal_immediates_block(&user_data, immediates, None);
+        let block =
+            compose_metal_immediates_block(&user_data, immediates, None, &[]).expect("compose");
 
-        assert_eq!(block, user_data[0..16]);
+        assert_eq!(block.len(), 32);
+        assert_eq!(&block[0..16], &user_data[0..16]);
+        assert_eq!(&block[16..20], &[0u8; 4], "non-constant zero must be 0");
+        assert_eq!(&block[20..], &[0u8; 12]);
     }
 
     /// User + clamp: user bytes occupy `[0, frag_depth_clamp_offset)`, the
@@ -3477,8 +3422,8 @@ mod tests {
     /// `RenderImmediates` layout: user prefix, then `ClampFragDepthArgs`).
     #[test]
     fn compose_metal_immediates_block_appends_clamp_range_after_user_prefix() {
-        let user_data: Vec<u8> = (0..64u8).collect();
-        let immediates = HalMslImmediates::new(30, 24, Some(16));
+        let user_data: Vec<u8> = (1..=64u8).collect();
+        let immediates = HalMslImmediates::new(30, 32, 16, Some(16), None);
         let viewport = HalViewport {
             x: 0.0,
             y: 0.0,
@@ -3488,21 +3433,22 @@ mod tests {
             max_depth: 0.75,
         };
 
-        let block = compose_metal_immediates_block(&user_data, immediates, Some(viewport));
+        let block = compose_metal_immediates_block(&user_data, immediates, Some(viewport), &[])
+            .expect("compose");
 
-        assert_eq!(block.len(), 24);
+        assert_eq!(block.len(), 32);
         assert_eq!(&block[0..16], &user_data[0..16]);
         assert_eq!(&block[16..20], &0.25f32.to_ne_bytes());
         assert_eq!(&block[20..24], &0.75f32.to_ne_bytes());
+        assert_eq!(&block[24..], &[0u8; 8], "non-constant zero must be 0");
     }
 
     /// A clamp-only pipeline (no user immediates reserved,
-    /// `frag_depth_clamp_offset == Some(0)`) composes exactly the bare
-    /// 8-byte clamp range -- the pre-Block-94 behaviour
-    /// `encode_render_frag_depth_clamp` used to deliver on its own.
+    /// `frag_depth_clamp_offset == Some(0)`) gets the clamp range at the
+    /// start of the block.
     #[test]
-    fn compose_metal_immediates_block_clamp_only_pipeline_yields_bare_range() {
-        let immediates = HalMslImmediates::new(30, 8, Some(0));
+    fn compose_metal_immediates_block_clamp_only_pipeline_puts_range_at_block_start() {
+        let immediates = HalMslImmediates::new(30, 16, 0, Some(0), None);
         let viewport = HalViewport {
             x: 0.0,
             y: 0.0,
@@ -3512,23 +3458,79 @@ mod tests {
             max_depth: 0.9,
         };
 
-        let block = compose_metal_immediates_block(&[], immediates, Some(viewport));
+        let block =
+            compose_metal_immediates_block(&[], immediates, Some(viewport), &[]).expect("compose");
 
-        assert_eq!(block.len(), 8);
+        assert_eq!(block.len(), 16);
         assert_eq!(&block[0..4], &0.1f32.to_ne_bytes());
         assert_eq!(&block[4..8], &0.9f32.to_ne_bytes());
     }
 
     /// No viewport override at draw time falls back to the full depth range
-    /// `[0.0, 1.0]`, matching the pre-S2 `encode_render_frag_depth_clamp`
-    /// default.
+    /// `[0.0, 1.0]`.
     #[test]
     fn compose_metal_immediates_block_defaults_clamp_range_without_viewport() {
-        let immediates = HalMslImmediates::new(30, 8, Some(0));
+        let immediates = HalMslImmediates::new(30, 16, 0, Some(0), None);
 
-        let block = compose_metal_immediates_block(&[], immediates, None);
+        let block = compose_metal_immediates_block(&[], immediates, None, &[]).expect("compose");
 
         assert_eq!(&block[0..4], &0.0f32.to_ne_bytes());
         assert_eq!(&block[4..8], &1.0f32.to_ne_bytes());
+    }
+
+    /// Sizes-only stage (R4): no user bytes and no clamp, yet the block
+    /// carries the sizes after the non-constant-zero word.
+    #[test]
+    fn compose_metal_immediates_block_sizes_only_stage() {
+        let immediates = HalMslImmediates::new(30, 16, 0, None, Some(4));
+
+        let block =
+            compose_metal_immediates_block(&[], immediates, None, &[240, 1024]).expect("compose");
+
+        assert_eq!(block.len(), 16);
+        assert_eq!(&block[0..4], &[0u8; 4], "non-constant zero must be 0");
+        assert_eq!(&block[4..8], &240u32.to_ne_bytes());
+        assert_eq!(&block[8..12], &1024u32.to_ne_bytes());
+    }
+
+    /// Subpass-style delivery (R7): an empty user snapshot still gets the
+    /// clamp range and the sizes, and the reserved user region reads as 0.
+    #[test]
+    fn compose_metal_immediates_block_empty_user_data_still_delivers_clamp_and_sizes() {
+        let immediates = HalMslImmediates::new(30, 32, 8, Some(8), Some(20));
+        let viewport = HalViewport {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            min_depth: 0.25,
+            max_depth: 0.75,
+        };
+
+        let block = compose_metal_immediates_block(&[], immediates, Some(viewport), &[77])
+            .expect("compose");
+
+        assert_eq!(&block[0..8], &[0u8; 8]);
+        assert_eq!(&block[8..12], &0.25f32.to_ne_bytes());
+        assert_eq!(&block[12..16], &0.75f32.to_ne_bytes());
+        assert_eq!(&block[16..20], &[0u8; 4], "non-constant zero must be 0");
+        assert_eq!(&block[20..24], &77u32.to_ne_bytes());
+    }
+
+    /// Sizes that do not fit the block are an error, not a panic.
+    #[test]
+    fn compose_metal_immediates_block_rejects_sizes_past_block_end() {
+        let immediates = HalMslImmediates::new(30, 16, 0, None, Some(4));
+
+        let error = compose_metal_immediates_block(&[], immediates, None, &[1, 2, 3, 4])
+            .expect_err("sizes past the block end must be rejected");
+
+        assert!(matches!(
+            error,
+            HalError::BufferOperationFailed {
+                backend: "metal",
+                message: "MSL buffer sizes exceed the immediate block"
+            }
+        ));
     }
 }

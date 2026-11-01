@@ -449,10 +449,9 @@ impl ReflectedModule {
     ///
     /// `user_immediate_size` is the owning pipeline layout's reserved
     /// user-immediate byte budget (Block 94, `layout.immediate_size`,
-    /// 0..=64); it sets where any pipeline-internal immediates would be
-    /// appended after the user prefix (compute pipelines have none today,
-    /// but the offset must still be layout-consistent, see
-    /// `yawgpu_tint::Program::generate_msl`'s doc comment).
+    /// 0..=64); it sets where the pipeline-internal immediates are appended
+    /// after the user prefix (for compute, the non-constant-zero word and any
+    /// buffer sizes; see `yawgpu_tint::Program::generate_msl`'s doc comment).
     pub(crate) fn generate_msl(
         &self,
         entry_name: &str,
@@ -568,27 +567,12 @@ impl ReflectedModule {
                 &self.resource_bindings_for_entry(entry_name)?,
                 subpass_color_slots,
             )?;
-            let binding_buffer_sizes_slot = msl_buffer_sizes_slot(binding_map)?;
-            let buffer_sizes_slot = if tint_vertex_buffers.is_empty() {
-                binding_buffer_sizes_slot
-            } else {
-                let max_vertex_metal_index = tint_vertex_buffers
-                    .iter()
-                    .map(|buffer| buffer.metal_index)
-                    .max()
-                    .unwrap_or(0);
-                binding_buffer_sizes_slot.max(max_vertex_metal_index.saturating_add(1))
-            };
-            if buffer_sizes_slot > u32::from(u8::MAX) {
-                return Err("MSL generated buffer slot exceeds the supported slot range".to_owned());
-            }
             let output = self
                 .program
                 .generate_msl(
                     entry_name,
                     &bindings,
                     &override_values(pipeline_constants),
-                    buffer_sizes_slot,
                     // The wrapper takes `robust` (robustness ENABLED), which is the
                     // negation of this fn's `disable_robustness`.
                     !disable_robustness,
@@ -609,12 +593,11 @@ impl ReflectedModule {
             Ok(GeneratedMsl {
                 source: output.source,
                 entry_point: output.entry_point,
-                buffer_sizes_slot: (!buffer_size_bindings.is_empty()
-                    || !tint_vertex_buffers.is_empty())
-                .then_some(buffer_sizes_slot),
                 buffer_size_bindings,
-                frag_depth_clamp_slot: output.frag_depth_clamp_slot,
+                frag_depth_clamp_offset: output.frag_depth_clamp_offset,
                 immediate_slot: output.immediate_slot,
+                immediate_block_size: output.immediate_block_size,
+                buffer_sizes_offset: output.buffer_sizes_offset,
                 workgroup_memory_sizes: output
                     .workgroup_allocations
                     .iter()
@@ -1503,24 +1486,6 @@ fn hal_texture_metadata_slots(
             })
         })
         .collect()
-}
-
-fn msl_buffer_sizes_slot(binding_map: &MslBindingMap) -> Result<u32, String> {
-    let next_slot = binding_map
-        .resources
-        .iter()
-        .filter_map(|binding| match binding.kind {
-            MslResourceBindingKind::Buffer => Some(binding.metal_index),
-            MslResourceBindingKind::ExternalTexture => binding.ext_params_buffer_slot,
-            _ => None,
-        })
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1);
-    if next_slot > u32::from(u8::MAX) {
-        return Err("MSL generated buffer slot exceeds the supported slot range".to_owned());
-    }
-    Ok(next_slot)
 }
 
 fn reflected_resource_binding(
@@ -2951,7 +2916,10 @@ fn main() {}
 
         assert_eq!(generated.entry_point, "tint_main");
         assert!(generated.source.contains("kernel void tint_main"));
-        assert_eq!(generated.frag_depth_clamp_slot, None);
+        assert_eq!(generated.immediate_slot, None);
+        assert_eq!(generated.immediate_block_size, 0);
+        assert_eq!(generated.frag_depth_clamp_offset, None);
+        assert_eq!(generated.buffer_sizes_offset, None);
     }
 
     #[test]
@@ -2991,7 +2959,6 @@ fn cs() {
             )
             .unwrap();
 
-        assert_eq!(generated.buffer_sizes_slot, Some(4));
         assert_eq!(
             generated.buffer_size_bindings,
             vec![MslBufferSizeBinding {
@@ -2999,9 +2966,15 @@ fn cs() {
                 binding: 0,
             }]
         );
-        assert!(generated
-            .source
-            .contains("tint_storage_buffer_sizes [[buffer(4)]]"));
+        // The sizes travel in the immediate block: sizes-only stage, one size
+        // after the non-constant-zero word, and the slot avoids the user
+        // binding at 3.
+        assert_eq!(generated.buffer_sizes_offset, Some(4));
+        assert_eq!(generated.immediate_block_size, 16);
+        let slot = generated.immediate_slot.expect("immediate slot");
+        assert_ne!(slot, 3);
+        assert!(generated.source.contains("tint_storage_buffer_sizes"));
+        assert!(generated.source.contains(&format!("[[buffer({slot})]]")));
     }
 
     #[test]
@@ -3044,8 +3017,12 @@ fn vs(i: VIn) -> @builtin(position) vec4<f32> {
             )
             .unwrap();
 
-        assert!(generated.buffer_sizes_slot.is_some());
-        assert!(generated.buffer_sizes_slot.unwrap() > vertex_metal_index);
+        assert_eq!(generated.buffer_sizes_offset, Some(4));
+        let slot = generated.immediate_slot.expect("immediate slot");
+        assert_ne!(
+            slot, vertex_metal_index,
+            "the block must not share a slot with a vertex-pulling buffer"
+        );
     }
 
     #[test]

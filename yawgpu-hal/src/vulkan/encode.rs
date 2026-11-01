@@ -1929,6 +1929,9 @@ pub(super) fn encode_compute_pass(
         if let Some(immediates) = pipeline.inner.immediates {
             let block = crate::immediates::compose_immediates_block(
                 &pass.immediate_data,
+                immediates
+                    .depth_range_offset
+                    .unwrap_or(immediates.block_size),
                 immediates.block_size,
                 immediates.depth_range_offset,
                 [0.0, 1.0],
@@ -4191,6 +4194,9 @@ fn prepare_vulkan_render_draw(
     if let Some(immediates) = pipeline.inner.immediates {
         let block = crate::immediates::compose_immediates_block(
             &state.immediate_data,
+            immediates
+                .depth_range_offset
+                .unwrap_or(immediates.block_size),
             immediates.block_size,
             immediates.depth_range_offset,
             [state.viewport.min_depth, state.viewport.max_depth],

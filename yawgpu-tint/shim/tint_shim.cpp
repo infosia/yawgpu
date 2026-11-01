@@ -63,6 +63,7 @@
 #include "src/tint/lang/wgsl/sem/variable.h"
 #include "src/tint/utils/containers/hashmap.h"
 #include "src/tint/utils/containers/unique_vector.h"
+#include "src/tint/utils/math/math.h"
 #include "src/tint/utils/rtti/switch.h"
 
 #include "tint_shim.h"
@@ -608,27 +609,33 @@ static_assert(offsetof(YawgpuTintVertexBuffer, attributes) == 16,
 static_assert(offsetof(YawgpuTintVertexBuffer, n_attributes) == 24,
               "YawgpuTintVertexBuffer layout changed");
 
-static_assert(sizeof(YawgpuTintMslOutput) == 72, "YawgpuTintMslOutput layout changed");
+static_assert(sizeof(YawgpuTintMslOutput) == 80, "YawgpuTintMslOutput layout changed");
 static_assert(offsetof(YawgpuTintMslOutput, msl) == 0, "YawgpuTintMslOutput layout changed");
 static_assert(offsetof(YawgpuTintMslOutput, entry_point) == 8,
               "YawgpuTintMslOutput layout changed");
-static_assert(offsetof(YawgpuTintMslOutput, needs_storage_buffer_sizes) == 16,
+static_assert(offsetof(YawgpuTintMslOutput, buffer_size_bindings) == 16,
               "YawgpuTintMslOutput layout changed");
-static_assert(offsetof(YawgpuTintMslOutput, buffer_size_bindings) == 24,
+static_assert(offsetof(YawgpuTintMslOutput, n_buffer_size_bindings) == 24,
               "YawgpuTintMslOutput layout changed");
-static_assert(offsetof(YawgpuTintMslOutput, n_buffer_size_bindings) == 32,
+static_assert(offsetof(YawgpuTintMslOutput, workgroup_allocations) == 32,
               "YawgpuTintMslOutput layout changed");
-static_assert(offsetof(YawgpuTintMslOutput, workgroup_allocations) == 40,
+static_assert(offsetof(YawgpuTintMslOutput, n_workgroup_allocations) == 40,
               "YawgpuTintMslOutput layout changed");
-static_assert(offsetof(YawgpuTintMslOutput, n_workgroup_allocations) == 48,
+static_assert(offsetof(YawgpuTintMslOutput, has_frag_depth_clamp) == 48,
               "YawgpuTintMslOutput layout changed");
-static_assert(offsetof(YawgpuTintMslOutput, has_frag_depth_clamp) == 56,
+static_assert(offsetof(YawgpuTintMslOutput, frag_depth_clamp_slot) == 52,
               "YawgpuTintMslOutput layout changed");
-static_assert(offsetof(YawgpuTintMslOutput, frag_depth_clamp_slot) == 60,
+static_assert(offsetof(YawgpuTintMslOutput, frag_depth_clamp_offset) == 56,
               "YawgpuTintMslOutput layout changed");
-static_assert(offsetof(YawgpuTintMslOutput, uses_immediates) == 64,
+static_assert(offsetof(YawgpuTintMslOutput, uses_immediates) == 60,
               "YawgpuTintMslOutput layout changed");
-static_assert(offsetof(YawgpuTintMslOutput, immediate_slot) == 68,
+static_assert(offsetof(YawgpuTintMslOutput, immediate_slot) == 64,
+              "YawgpuTintMslOutput layout changed");
+static_assert(offsetof(YawgpuTintMslOutput, immediate_block_size) == 68,
+              "YawgpuTintMslOutput layout changed");
+static_assert(offsetof(YawgpuTintMslOutput, has_buffer_sizes) == 72,
+              "YawgpuTintMslOutput layout changed");
+static_assert(offsetof(YawgpuTintMslOutput, buffer_sizes_offset) == 76,
               "YawgpuTintMslOutput layout changed");
 static_assert(sizeof(YawgpuTintCombinedSampler) == 32,
               "YawgpuTintCombinedSampler layout changed");
@@ -873,27 +880,73 @@ struct DepthRawReadTransform {
             // Unexpected result shape; leave it untouched.
             return;
         }
-        auto* swizzle = b.Swizzle(ty.f32(), nullptr, tint::Vector<uint32_t, 1>{0u});
+        // Built directly rather than through `Builder::Swizzle`, which needs a
+        // non-null object to run its constant evaluator and returns a `Value*`.
+        // The object operand is wired up below, after the replace-all, so the
+        // swizzle does not end up consuming itself.
+        auto* swizzle = b.ir.CreateInstruction<tint::core::ir::Swizzle>(
+            b.InstructionResult(ty.f32()), nullptr, tint::Vector<uint32_t, 1>{0u});
         res->ReplaceAllUsesWith(swizzle->Result());
         swizzle->InsertAfter(call);
         swizzle->SetOperand(tint::core::ir::Swizzle::kObjectOperandOffset, res);
         res->SetType(ty.vec4f());
     }
 
+    // Depth `textureSampleLevel` takes an `i32`/`u32` level; the sampled overload
+    // takes `f32`, and the IR validator rejects anything else. The depth overloads
+    // are (t, s, coords, level[, offset]) and, for 2d_array and cube_array,
+    // (t, s, coords, array_index, level[, offset]), so the level position depends
+    // only on whether the texture is arrayed.
+    void ConvertLevelToF32(tint::core::ir::CoreBuiltinCall* call) {
+        auto args = call->Args();
+        auto* texture = args[0]->Type()->As<tint::core::type::Texture>();
+        if (texture == nullptr) {
+            // Unexpected argument shape; leave it untouched.
+            return;
+        }
+        const bool arrayed = texture->Dim() == tint::core::type::TextureDimension::k2dArray ||
+                             texture->Dim() == tint::core::type::TextureDimension::kCubeArray;
+        const size_t level_index = arrayed ? 4u : 3u;
+        if (level_index >= args.size()) {
+            return;
+        }
+        auto* level = args[level_index];
+        if (!level->Type()->Is<tint::core::type::I32>() &&
+            !level->Type()->Is<tint::core::type::U32>()) {
+            return;
+        }
+        b.InsertBefore(call, [&] { call->SetArg(level_index, b.Convert(ty.f32(), level)); });
+    }
+
+    // Depth `textureGather` has no component argument, but the sampled overload
+    // requires one. A depth texture has a single component, so gather component 0.
+    // Rewriting the operands is safe while UpdateUses iterates, because
+    // `ForEachUseUnsorted` walks a copy of the use list.
+    void PrependGatherComponent(tint::core::ir::CoreBuiltinCall* call) {
+        tint::Vector<tint::core::ir::Value*, 6> args{b.Constant(tint::core::u32(0))};
+        for (auto* arg : call->Args()) {
+            args.Push(arg);
+        }
+        call->SetOperands(std::move(args));
+    }
+
     void FixBuiltinCall(tint::core::ir::CoreBuiltinCall* call) {
         switch (call->Func()) {
-            case tint::core::BuiltinFn::kTextureSample:
             case tint::core::BuiltinFn::kTextureSampleLevel:
+                ConvertLevelToF32(call);
+                SwizzleResultToScalar(call);
+                break;
+            case tint::core::BuiltinFn::kTextureSample:
             case tint::core::BuiltinFn::kTextureSampleBias:
             case tint::core::BuiltinFn::kTextureSampleGrad:
             case tint::core::BuiltinFn::kTextureLoad:
                 SwizzleResultToScalar(call);
                 break;
             case tint::core::BuiltinFn::kTextureGather:
-                // WGSL depth-gather takes no component arg and already returns
-                // `vec4<f32>`; a sampled gather is also `vec4<f32>`. Leave it
-                // unchanged: once the var is sampled, TexturePolyfill stops
-                // adding the `refz` and emits a plain `textureGather`.
+                // Both overloads return `vec4<f32>`, so only the arguments change.
+                // Once the var is sampled, TexturePolyfill stops adding the `refz`
+                // and emits a plain `textureGather`.
+                PrependGatherComponent(call);
                 break;
             default:
                 // kTextureDimensions / kTextureNumLevels / kTextureNumSamples /
@@ -1311,11 +1364,8 @@ const tint::core::ir::Function* find_ir_entry_point(const tint::core::ir::Module
 tint::msl::writer::ArrayLengthOptions generate_array_length_from_constants(
     tint::core::ir::Module& ir,
     const std::string& ep_name,
-    uint32_t buffer_sizes_slot,
     std::vector<tint::BindingPoint>& ordered_bindings) {
-    tint::msl::writer::ArrayLengthOptions options{
-        .ubo_binding = buffer_sizes_slot,
-    };
+    tint::msl::writer::ArrayLengthOptions options;
 
     const tint::core::ir::Function* ep_func = find_ir_entry_point(ir, ep_name);
     if (ep_func == nullptr) {
@@ -1354,14 +1404,26 @@ void mark_used_buffer_bindings(const tint::BindingMap& map, std::vector<bool>& u
     }
 }
 
-std::optional<tint::BindingPoint> choose_immediate_binding_point(const tint::Bindings& bindings,
-                                                                 uint32_t buffer_sizes_slot) {
-    std::vector<bool> used(256, false);
-    if (buffer_sizes_slot < used.size()) {
-        used[buffer_sizes_slot] = true;
-    }
+// Metal's per-stage buffer argument table holds 31 entries, [[buffer(0)]]
+// through [[buffer(30)]] (Dawn's kMetalBufferTableSize).
+constexpr uint32_t kMetalBufferTableSize = 31;
+
+// Must run after vertex-pulling buffers are added to `bindings.storage`: they
+// share the stage's buffer table, and a draw binds them after the immediates.
+std::optional<tint::BindingPoint> choose_immediate_binding_point(const tint::Bindings& bindings) {
+    std::vector<bool> used(kMetalBufferTableSize, false);
     mark_used_buffer_bindings(bindings.uniform, used);
     mark_used_buffer_bindings(bindings.storage, used);
+    for (const auto& entry : bindings.external_texture) {
+        // The params buffer of an external texture lives in the buffer table too.
+        if (const auto* multiplanar =
+                std::get_if<tint::ExternalMultiplanarTexture>(&entry.second)) {
+            if (multiplanar->metadata.group == 0 &&
+                multiplanar->metadata.binding < used.size()) {
+                used[multiplanar->metadata.binding] = true;
+            }
+        }
+    }
 
     for (uint32_t binding = 0; binding < used.size(); ++binding) {
         if (!used[binding]) {
@@ -1369,6 +1431,44 @@ std::optional<tint::BindingPoint> choose_immediate_binding_point(const tint::Bin
         }
     }
     return std::nullopt;
+}
+
+// Layout of the per-stage MSL immediate block, in Dawn's order
+// (ImmediatesLayoutMTL.h, then the sizes at GetImmediateBufferSizesByteOffset):
+//
+//   user immediates    0                    user_immediate_size (layout budget)
+//   frag-depth clamp   user_immediate_size  8, iff the entry uses frag_depth
+//   non-constant zero  next                 4, always
+//   buffer sizes       next                 4 * num_buffer_sizes, iff > 0
+//
+// The sizes member is a plain array<u32, N>, so there is no vec4 padding, but
+// `block_size` is rounded up to 16 bytes: Metal requires the setBytes length to
+// cover the MSL struct, whose size is rounded up to its largest member alignment
+// (Dawn's kSetBytesAlignment).
+struct MslImmediateLayout {
+    uint32_t frag_depth_clamp_offset = 0;
+    uint32_t non_constant_zero_offset = 0;
+    uint32_t buffer_sizes_offset = 0;
+    uint32_t block_size = 0;
+};
+
+MslImmediateLayout compute_msl_immediate_layout(uint32_t user_immediate_size,
+                                                bool has_frag_depth_clamp,
+                                                uint32_t num_buffer_sizes) {
+    constexpr uint32_t kElementSize = 4;
+    constexpr uint32_t kSetBytesAlignment = 16;
+    MslImmediateLayout layout;
+    uint32_t next = user_immediate_size;
+    layout.frag_depth_clamp_offset = next;
+    if (has_frag_depth_clamp) {
+        next += 2 * kElementSize;
+    }
+    layout.non_constant_zero_offset = next;
+    next += kElementSize;
+    layout.buffer_sizes_offset = next;
+    next += kElementSize * num_buffer_sizes;
+    layout.block_size = tint::RoundUp(kSetBytesAlignment, next);
+    return layout;
 }
 
 uint32_t* dup_binding_pairs(const std::vector<tint::BindingPoint>& bindings) {
@@ -2082,7 +2182,6 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
                               const YawgpuTintBindings* bindings,
                               const YawgpuTintOverrideValue* ov,
                               size_t n_ov,
-                              uint32_t buffer_sizes_slot,
                               bool disable_robustness,
                               bool emit_vertex_point_size,
                               const YawgpuTintVertexBuffer* vertex_buffers,
@@ -2097,15 +2196,18 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
     if (out != nullptr) {
         out->msl = nullptr;
         out->entry_point = nullptr;
-        out->needs_storage_buffer_sizes = false;
         out->buffer_size_bindings = nullptr;
         out->n_buffer_size_bindings = 0;
         out->workgroup_allocations = nullptr;
         out->n_workgroup_allocations = 0;
         out->has_frag_depth_clamp = false;
         out->frag_depth_clamp_slot = 0;
+        out->frag_depth_clamp_offset = 0;
         out->uses_immediates = false;
         out->immediate_slot = 0;
+        out->immediate_block_size = 0;
+        out->has_buffer_sizes = false;
+        out->buffer_sizes_offset = 0;
     }
     MslOutputGuard out_guard(out);
     try {
@@ -2139,44 +2241,9 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
                     e.color_slot;
             }
         }
-        options.immediate_binding_point =
-            choose_immediate_binding_point(options.bindings, buffer_sizes_slot);
-        const tint::inspector::EntryPoint* ep_info = find_entry_point(program, entry_point.c_str());
-        const bool has_frag_depth_clamp =
-            ep_info != nullptr && ep_info->frag_depth_used &&
-            options.immediate_binding_point.has_value();
-        uint32_t frag_depth_clamp_slot = 0;
-        if (has_frag_depth_clamp) {
-            // Dawn (dawn/native/metal/RenderPipelineMTL.mm:383-384,
-            // ImmediatesLayout.h's GetImmediateByteOffsetInPipeline) appends
-            // ClampFragDepthArgs immediately after the FULL layout-reserved
-            // user-immediate region -- `user_immediate_size`, the pipeline
-            // layout's `immediateSize` -- not after this entry point's own
-            // (possibly smaller) declared `var<immediate>` usage. Tint's
-            // PrepareImmediateData (prepare_immediate_data.cc) only requires
-            // the offset to be >= the end of the actual user member, so a
-            // gap between the entry's real usage and `user_immediate_size`
-            // is valid (implicit padding); this keeps the clamp offset
-            // stable across pipelines that reserve the same layout budget
-            // regardless of how much of it a given entry point touches.
-            // 4 == Dawn's kImmediateElementByteSize (dawn/common/Constants.h)
-            // -- the immediate block's word granularity; not referenced here
-            // since this shim links Tint only, not dawn::common.
-            options.depth_range_offsets = tint::msl::writer::Options::RangeOffsets{
-                /*min=*/user_immediate_size, /*max=*/user_immediate_size + 4u};
-            frag_depth_clamp_slot = options.immediate_binding_point->binding;
-        }
-        const bool entry_has_user_immediates =
-            ep_info != nullptr && ep_info->immediate_data_size > 0;
-        const bool uses_immediates = (entry_has_user_immediates || has_frag_depth_clamp) &&
-                                     options.immediate_binding_point.has_value();
-        uint32_t immediate_slot = 0;
-        if (uses_immediates) {
-            immediate_slot = options.immediate_binding_point->binding;
-        }
         std::vector<tint::BindingPoint> ordered_size_bindings;
-        options.array_length_from_constants = generate_array_length_from_constants(
-            ir.Get(), entry_point, buffer_sizes_slot, ordered_size_bindings);
+        options.array_length_from_constants =
+            generate_array_length_from_constants(ir.Get(), entry_point, ordered_size_bindings);
         const auto num_storage = static_cast<uint32_t>(ordered_size_bindings.size());
         if (n_vertex_buffers > 0) {
             if (vertex_buffers == nullptr) {
@@ -2219,6 +2286,44 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
             }
             options.vertex_pulling_config = std::move(config);
         }
+
+        const tint::inspector::EntryPoint* ep_info = find_entry_point(program, entry_point.c_str());
+        const bool has_frag_depth_clamp = ep_info != nullptr && ep_info->frag_depth_used;
+        const bool entry_has_user_immediates =
+            ep_info != nullptr && ep_info->immediate_data_size > 0;
+        const auto num_buffer_sizes = num_storage + static_cast<uint32_t>(n_vertex_buffers);
+        const bool has_buffer_sizes = num_buffer_sizes > 0;
+        const bool uses_immediates =
+            entry_has_user_immediates || has_frag_depth_clamp || has_buffer_sizes;
+
+        options.immediate_binding_point = choose_immediate_binding_point(options.bindings);
+        if (uses_immediates && !options.immediate_binding_point.has_value()) {
+            set_error_string(err, "no free Metal buffer slot for the MSL immediate block");
+            return false;
+        }
+
+        // Internal members follow the FULL layout-reserved user-immediate region
+        // (`user_immediate_size`, the pipeline layout's `immediateSize`), not this
+        // entry point's own possibly smaller `var<immediate>` usage, matching Dawn
+        // (GetImmediateByteOffsetInPipeline). Tint's PrepareImmediateData only
+        // requires each offset to be past the previous member, so a gap between the
+        // entry's real usage and `user_immediate_size` is valid padding, and the
+        // offsets stay stable across pipelines reserving the same budget.
+        const MslImmediateLayout layout = compute_msl_immediate_layout(
+            user_immediate_size, has_frag_depth_clamp, num_buffer_sizes);
+        // Mandatory on every generation: Tint always declares this member, and its
+        // default offset of 0 collides with user immediates. No yawgpu option
+        // references it from the shader yet, but it is part of the block either way.
+        options.non_constant_zero_offset = layout.non_constant_zero_offset;
+        if (has_frag_depth_clamp) {
+            options.depth_range_offsets = tint::msl::writer::Options::RangeOffsets{
+                /*min=*/layout.frag_depth_clamp_offset,
+                /*max=*/layout.frag_depth_clamp_offset + 4u};
+        }
+        if (has_buffer_sizes) {
+            options.array_length_from_constants.buffer_sizes_offset = layout.buffer_sizes_offset;
+        }
+
         auto override_cfg = make_override_config(program, ov, n_ov);
         if (override_cfg != tint::Success) {
             set_error(err, override_cfg.Failure());
@@ -2241,11 +2346,20 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
             set_error_string(err, "failed to allocate MSL entry point output");
             return false;
         }
-        out->needs_storage_buffer_sizes = result->needs_storage_buffer_sizes;
-        out->has_frag_depth_clamp = has_frag_depth_clamp;
-        out->frag_depth_clamp_slot = frag_depth_clamp_slot;
-        out->uses_immediates = uses_immediates;
-        out->immediate_slot = immediate_slot;
+        if (uses_immediates) {
+            out->uses_immediates = true;
+            out->immediate_slot = options.immediate_binding_point->binding;
+            out->immediate_block_size = layout.block_size;
+        }
+        if (has_frag_depth_clamp) {
+            out->has_frag_depth_clamp = true;
+            out->frag_depth_clamp_slot = options.immediate_binding_point->binding;
+            out->frag_depth_clamp_offset = layout.frag_depth_clamp_offset;
+        }
+        if (has_buffer_sizes) {
+            out->has_buffer_sizes = true;
+            out->buffer_sizes_offset = layout.buffer_sizes_offset;
+        }
         out->buffer_size_bindings = dup_binding_pairs(ordered_size_bindings);
         out->n_buffer_size_bindings = ordered_size_bindings.size();
         if (!ordered_size_bindings.empty() && out->buffer_size_bindings == nullptr) {

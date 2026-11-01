@@ -142,21 +142,28 @@ pub struct MslOutput {
     pub source: String,
     /// Generated MSL entry point name.
     pub entry_point: String,
-    /// Whether the generated MSL needs a storage-buffer-size table.
-    pub needs_storage_buffer_sizes: bool,
-    /// Ordered storage bindings whose byte lengths populate the size table.
+    /// Ordered storage bindings whose byte lengths populate the buffer-size
+    /// member of the immediate block; vertex-pulling buffers follow them.
     pub buffer_size_bindings: Vec<MslBufferSizeBinding>,
     /// Per-index threadgroup memory allocation sizes (compute).
     pub workgroup_allocations: Vec<u32>,
     /// MSL buffer slot of the frag-depth clamp immediate block, if this fragment entry point writes frag_depth.
     pub frag_depth_clamp_slot: Option<u32>,
-    /// MSL buffer slot of the combined immediates block (user immediates,
-    /// plus the frag-depth clamp range when present), when this entry point
-    /// uses any immediates (user `var<immediate>` data or the frag-depth
-    /// clamp). `None` when the entry point uses no immediates at all.
-    /// Always equal to `frag_depth_clamp_slot` when the latter is `Some`
-    /// (same combined block, same slot).
+    /// Byte offset of the frag-depth clamp range within the immediate block,
+    /// when this fragment entry point writes frag_depth.
+    pub frag_depth_clamp_offset: Option<u32>,
+    /// MSL buffer slot of the combined immediate block, when this entry point
+    /// needs it: user `var<immediate>` data, the frag-depth clamp, or buffer
+    /// sizes. `None` when it needs none of those. Always equal to
+    /// `frag_depth_clamp_slot` when the latter is `Some` (same combined
+    /// block, same slot).
     pub immediate_slot: Option<u32>,
+    /// Bytes to deliver at `immediate_slot`, rounded up to 16 so the delivery
+    /// covers the MSL struct. Zero when `immediate_slot` is `None`.
+    pub immediate_block_size: u32,
+    /// Byte offset of the `array<u32, N>` buffer-size member within the
+    /// immediate block, when `N > 0`.
+    pub buffer_sizes_offset: Option<u32>,
 }
 
 /// GLSL generator output.
@@ -1296,31 +1303,37 @@ mod real {
     struct RawMslOutput {
         msl: *mut c_char,
         entry_point: *mut c_char,
-        needs_storage_buffer_sizes: bool,
         buffer_size_bindings: *mut u32,
         n_buffer_size_bindings: usize,
         workgroup_allocations: *mut u32,
         n_workgroup_allocations: usize,
         has_frag_depth_clamp: bool,
         frag_depth_clamp_slot: u32,
+        frag_depth_clamp_offset: u32,
         uses_immediates: bool,
         immediate_slot: u32,
+        immediate_block_size: u32,
+        has_buffer_sizes: bool,
+        buffer_sizes_offset: u32,
     }
 
     // ABI drift guard: mirrors `YawgpuTintMslOutput`'s static_asserts.
     const _: () = {
-        assert!(core::mem::size_of::<RawMslOutput>() == 72);
+        assert!(core::mem::size_of::<RawMslOutput>() == 80);
         assert!(core::mem::offset_of!(RawMslOutput, msl) == 0);
         assert!(core::mem::offset_of!(RawMslOutput, entry_point) == 8);
-        assert!(core::mem::offset_of!(RawMslOutput, needs_storage_buffer_sizes) == 16);
-        assert!(core::mem::offset_of!(RawMslOutput, buffer_size_bindings) == 24);
-        assert!(core::mem::offset_of!(RawMslOutput, n_buffer_size_bindings) == 32);
-        assert!(core::mem::offset_of!(RawMslOutput, workgroup_allocations) == 40);
-        assert!(core::mem::offset_of!(RawMslOutput, n_workgroup_allocations) == 48);
-        assert!(core::mem::offset_of!(RawMslOutput, has_frag_depth_clamp) == 56);
-        assert!(core::mem::offset_of!(RawMslOutput, frag_depth_clamp_slot) == 60);
-        assert!(core::mem::offset_of!(RawMslOutput, uses_immediates) == 64);
-        assert!(core::mem::offset_of!(RawMslOutput, immediate_slot) == 68);
+        assert!(core::mem::offset_of!(RawMslOutput, buffer_size_bindings) == 16);
+        assert!(core::mem::offset_of!(RawMslOutput, n_buffer_size_bindings) == 24);
+        assert!(core::mem::offset_of!(RawMslOutput, workgroup_allocations) == 32);
+        assert!(core::mem::offset_of!(RawMslOutput, n_workgroup_allocations) == 40);
+        assert!(core::mem::offset_of!(RawMslOutput, has_frag_depth_clamp) == 48);
+        assert!(core::mem::offset_of!(RawMslOutput, frag_depth_clamp_slot) == 52);
+        assert!(core::mem::offset_of!(RawMslOutput, frag_depth_clamp_offset) == 56);
+        assert!(core::mem::offset_of!(RawMslOutput, uses_immediates) == 60);
+        assert!(core::mem::offset_of!(RawMslOutput, immediate_slot) == 64);
+        assert!(core::mem::offset_of!(RawMslOutput, immediate_block_size) == 68);
+        assert!(core::mem::offset_of!(RawMslOutput, has_buffer_sizes) == 72);
+        assert!(core::mem::offset_of!(RawMslOutput, buffer_sizes_offset) == 76);
     };
 
     #[repr(C)]
@@ -1475,7 +1488,6 @@ mod real {
             bindings: *const RawBindings<'_>,
             ov: *const RawOverrideValue,
             n_ov: usize,
-            buffer_sizes_slot: u32,
             disable_robustness: bool,
             emit_vertex_point_size: bool,
             vertex_buffers: *const RawVertexBuffer,
@@ -2031,20 +2043,21 @@ mod real {
         /// `user_immediate_size` is the owning pipeline layout's reserved
         /// user-immediate byte budget (`PipelineLayout.immediateSize`, 0..=64,
         /// Block 94) -- NOT this entry point's own smaller reflected
-        /// `immediate_data_size`. It sets the byte boundary after which any
-        /// pipeline-internal immediates (currently only the fragment
-        /// frag-depth clamp range) are appended, mirroring Dawn's
+        /// `immediate_data_size`. It sets the byte boundary after which the
+        /// pipeline-internal immediates are appended (frag-depth clamp range,
+        /// non-constant zero, buffer sizes), mirroring Dawn's
         /// `GetImmediateByteOffsetInPipeline` (`ImmediatesLayout.h`), which
-        /// places `ClampFragDepthArgs` after the full layout-reserved user
-        /// region rather than after the entry point's own (possibly smaller)
-        /// declared usage.
+        /// places them after the full layout-reserved user region rather than
+        /// after the entry point's own (possibly smaller) declared usage. A
+        /// budget narrower than the entry's real usage fails generation. So
+        /// does a stage that needs the immediate block when no Metal buffer
+        /// slot is free.
         #[allow(clippy::too_many_arguments)]
         pub fn generate_msl(
             &self,
             entry_point: &str,
             bindings: &Bindings,
             overrides: &[OverrideValue],
-            buffer_sizes_slot: u32,
             robust: bool,
             emit_vertex_point_size: bool,
             vertex_buffers: &[VertexBuffer],
@@ -2058,15 +2071,18 @@ mod real {
             let mut out = RawMslOutput {
                 msl: ptr::null_mut(),
                 entry_point: ptr::null_mut(),
-                needs_storage_buffer_sizes: false,
                 buffer_size_bindings: ptr::null_mut(),
                 n_buffer_size_bindings: 0,
                 workgroup_allocations: ptr::null_mut(),
                 n_workgroup_allocations: 0,
                 has_frag_depth_clamp: false,
                 frag_depth_clamp_slot: 0,
+                frag_depth_clamp_offset: 0,
                 uses_immediates: false,
                 immediate_slot: 0,
+                immediate_block_size: 0,
+                has_buffer_sizes: false,
+                buffer_sizes_offset: 0,
             };
             let mut err = ptr::null_mut();
             // SAFETY: all pointers are valid for the duration of the call.
@@ -2077,7 +2093,6 @@ mod real {
                     &raw_bindings,
                     raw_overrides.as_ptr(),
                     raw_overrides.len(),
-                    buffer_sizes_slot,
                     !robust,
                     emit_vertex_point_size,
                     raw_vertex_buffers.as_ptr(),
@@ -2120,15 +2135,21 @@ mod real {
             let frag_depth_clamp_slot = out
                 .has_frag_depth_clamp
                 .then_some(out.frag_depth_clamp_slot);
+            let frag_depth_clamp_offset = out
+                .has_frag_depth_clamp
+                .then_some(out.frag_depth_clamp_offset);
             let immediate_slot = out.uses_immediates.then_some(out.immediate_slot);
+            let buffer_sizes_offset = out.has_buffer_sizes.then_some(out.buffer_sizes_offset);
             Ok(MslOutput {
                 source: msl_guard.into_string(),
                 entry_point: entry_point_guard.into_string(),
-                needs_storage_buffer_sizes: out.needs_storage_buffer_sizes,
                 buffer_size_bindings,
                 workgroup_allocations,
                 frag_depth_clamp_slot,
+                frag_depth_clamp_offset,
                 immediate_slot,
+                immediate_block_size: out.immediate_block_size,
+                buffer_sizes_offset,
             })
         }
 
@@ -2552,7 +2573,6 @@ mod stub {
             _entry_point: &str,
             _bindings: &Bindings,
             _overrides: &[OverrideValue],
-            _buffer_sizes_slot: u32,
             _robust: bool,
             _emit_vertex_point_size: bool,
             _vertex_buffers: &[VertexBuffer],
@@ -3040,7 +3060,7 @@ fn main() {
         .unwrap();
         let bindings = Bindings::default();
         let msl = program
-            .generate_msl("cs", &bindings, &[], 0, true, false, &[], 0xFFFF_FFFF, 0)
+            .generate_msl("cs", &bindings, &[], true, false, &[], 0xFFFF_FFFF, 0)
             .unwrap();
         assert!(msl.source.contains("kernel"), "MSL:\n{}", msl.source);
         let spirv = program
@@ -3319,6 +3339,33 @@ fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
         assert!(glsl.contains(").x"), "expected an .x swizzle: {glsl}");
     }
 
+    // Block 118 R8: `SwizzleResultToScalar` on an overload that exists for
+    // both depth and sampled textures, so the rewrite reaches the GLSL output.
+    #[test]
+    fn generate_glsl_depth_sample_swizzles_result_to_scalar() {
+        let wgsl = r#"
+@group(0) @binding(0) var t: texture_depth_2d;
+@group(0) @binding(1) var s: sampler;
+
+@fragment
+fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+  let d = textureSample(t, s, uv);
+  return vec4f(d, d, d, 1.0);
+}
+"#;
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
+        let glsl = program
+            .generate_glsl("fs", &Bindings::default(), &[], None, None)
+            .unwrap()
+            .source;
+        assert!(glsl.contains("sampler2D "), "expected sampler2D: {glsl}");
+        assert!(
+            !glsl.contains("sampler2DShadow"),
+            "must not shadow-compare: {glsl}"
+        );
+        assert!(glsl.contains(").x"), "expected an .x swizzle: {glsl}");
+    }
+
     // Depth `textureGather` (no component arg, returns vec4f) must lower to a
     // plain `textureGather` on a `sampler2D` with no `refz` comparison arg.
     #[test]
@@ -3346,6 +3393,204 @@ fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
             glsl.contains("textureGather("),
             "expected textureGather(): {glsl}"
         );
+    }
+
+    /// Generates GLSL for a fragment entry point reading `body`, with `uv`,
+    /// `dir`, and flat integer `idx`, `lvl_u`, `lvl_i` inputs in scope, so
+    /// tests can use both constant and non-constant arguments.
+    fn depth_raw_read_glsl(texture_type: &str, body: &str) -> String {
+        let wgsl = format!(
+            r#"
+@group(0) @binding(0) var t: {texture_type};
+@group(0) @binding(1) var s: sampler;
+
+@fragment
+fn fs(
+  @location(0) uv: vec2f,
+  @location(1) dir: vec3f,
+  @location(2) @interpolate(flat) idx: u32,
+  @location(3) @interpolate(flat) lvl_u: u32,
+  @location(4) @interpolate(flat) lvl_i: i32,
+) -> @location(0) vec4f {{
+{body}
+}}
+"#
+        );
+        let program = Program::parse(&wgsl, false, false, false, false, false, false, &[]).unwrap();
+        let glsl = program
+            .generate_glsl("fs", &Bindings::default(), &[], None, None)
+            .unwrap_or_else(|err| panic!("{err:?}\nWGSL:\n{wgsl}"))
+            .source;
+        assert!(!glsl.contains("Shadow"), "must not shadow-compare: {glsl}");
+        glsl
+    }
+
+    /// Splits the arguments of the first `name(...)` call in `glsl`.
+    fn glsl_call_args(glsl: &str, name: &str) -> Vec<String> {
+        let needle = format!("{name}(");
+        let start = glsl
+            .find(&needle)
+            .unwrap_or_else(|| panic!("no {name} call: {glsl}"))
+            + needle.len();
+        let mut args = vec![String::new()];
+        let mut depth = 0u32;
+        for c in glsl[start..].chars() {
+            match c {
+                ')' if depth == 0 => return args.iter().map(|a| a.trim().to_owned()).collect(),
+                ',' if depth == 0 => {
+                    args.push(String::new());
+                    continue;
+                }
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            args.last_mut().unwrap().push(c);
+        }
+        panic!("unterminated {name} call: {glsl}");
+    }
+
+    /// Resolves `arg` through a `float <arg> = <init>;` declaration, which is
+    /// how the printer hoists a conversion it cannot inline.
+    fn resolve_float_local(glsl: &str, arg: &str) -> String {
+        let declaration = format!("float {arg} = ");
+        glsl.lines()
+            .find_map(|line| line.trim().strip_prefix(declaration.as_str()))
+            .map_or_else(
+                || arg.to_owned(),
+                |init| init.trim_end_matches(';').to_owned(),
+            )
+    }
+
+    // Block 118 R11: every depth `textureSampleLevel` overload reaches a float
+    // LOD at the right argument, for constant and non-constant `u32`/`i32`
+    // levels. The array index shares the level's type, so asserting the coords
+    // too catches a conversion applied to the wrong argument.
+    #[test]
+    fn generate_glsl_depth_sample_level_passes_float_lod_for_every_overload() {
+        let levels = [
+            ("2u", "2.0f"),
+            ("3i", "3.0f"),
+            ("lvl_u", "float(lvl_u)"),
+            ("lvl_i", "float(lvl_i)"),
+            ("lvl_u + 1u", "float((lvl_u + 1u))"),
+        ];
+        // (texture, arguments before the level, after it, GLSL fn, GLSL coords)
+        let overloads = [
+            ("texture_depth_2d", "uv", "", "textureLod", "uv"),
+            (
+                "texture_depth_2d",
+                "uv",
+                ", vec2i(1, 2)",
+                "textureLodOffset",
+                "uv",
+            ),
+            (
+                "texture_depth_2d_array",
+                "uv, idx",
+                "",
+                "textureLod",
+                "vec3(uv, float(idx))",
+            ),
+            (
+                "texture_depth_2d_array",
+                "uv, idx",
+                ", vec2i(1, 2)",
+                "textureLodOffset",
+                "vec3(uv, float(idx))",
+            ),
+            ("texture_depth_cube", "dir", "", "textureLod", "dir"),
+            (
+                "texture_depth_cube_array",
+                "dir, idx",
+                "",
+                "textureLod",
+                "vec4(dir, float(idx))",
+            ),
+        ];
+        for (texture_type, before, after, glsl_fn, coords) in overloads {
+            for (level, lod) in levels {
+                let glsl = depth_raw_read_glsl(
+                    texture_type,
+                    &format!(
+                        "  let d = textureSampleLevel(t, s, {before}, {level}{after});\n  return vec4f(d);"
+                    ),
+                );
+                let args = glsl_call_args(&glsl, glsl_fn);
+                assert_eq!(args[1], coords, "{texture_type} {level}: {glsl}");
+                assert_eq!(
+                    resolve_float_local(&glsl, &args[2]),
+                    lod,
+                    "{texture_type} {level}: {glsl}"
+                );
+                assert_eq!(args.len(), if after.is_empty() { 3 } else { 4 }, "{glsl}");
+                assert!(
+                    glsl.contains(").x"),
+                    "the result must still be swizzled to a scalar: {glsl}"
+                );
+            }
+        }
+    }
+
+    // Block 118 R11: every depth `textureGather` overload keeps its arguments
+    // and gathers component 0, with no `refz` comparison argument.
+    #[test]
+    fn generate_glsl_depth_gather_uses_component_zero_for_every_overload() {
+        let overloads = [
+            ("texture_depth_2d", "uv", "textureGather", vec!["uv", "0"]),
+            (
+                "texture_depth_2d",
+                "uv, vec2i(1, 2)",
+                "textureGatherOffset",
+                vec!["uv", "ivec2(1, 2)", "0"],
+            ),
+            (
+                "texture_depth_2d_array",
+                "uv, idx",
+                "textureGather",
+                vec!["vec3(uv, float(idx))", "0"],
+            ),
+            (
+                "texture_depth_2d_array",
+                "uv, idx, vec2i(1, 2)",
+                "textureGatherOffset",
+                vec!["vec3(uv, float(idx))", "ivec2(1, 2)", "0"],
+            ),
+            (
+                "texture_depth_cube",
+                "dir",
+                "textureGather",
+                vec!["dir", "0"],
+            ),
+            (
+                "texture_depth_cube_array",
+                "dir, idx",
+                "textureGather",
+                vec!["vec4(dir, float(idx))", "0"],
+            ),
+        ];
+        for (texture_type, arguments, glsl_fn, expected) in overloads {
+            let glsl = depth_raw_read_glsl(
+                texture_type,
+                &format!("  return textureGather(t, s, {arguments});"),
+            );
+            let args = glsl_call_args(&glsl, glsl_fn);
+            assert_eq!(args[1..], expected, "{texture_type} {arguments}: {glsl}");
+        }
+    }
+
+    // Block 118 R11: all uses of one depth var are rewritten, whichever order
+    // the use list visits them in.
+    #[test]
+    fn generate_glsl_depth_gather_and_sample_level_share_one_texture() {
+        let glsl = depth_raw_read_glsl(
+            "texture_depth_2d",
+            "  let g = textureGather(t, s, uv);\n  let d = textureSampleLevel(t, s, uv, lvl_u);\n  return g + vec4f(d) + vec4f(f32(textureNumLevels(t)));",
+        );
+
+        assert_eq!(glsl_call_args(&glsl, "textureGather")[1..], ["uv", "0"]);
+        let args = glsl_call_args(&glsl, "textureLod");
+        assert_eq!(resolve_float_local(&glsl, &args[2]), "float(lvl_u)");
     }
 
     // A depth texture used by a COMPARISON builtin (`textureSampleCompare`) is
@@ -3838,7 +4083,6 @@ fn cs() {
                 "cs",
                 &Bindings::default(),
                 &[],
-                9,
                 true,
                 false,
                 &[],
@@ -3847,12 +4091,22 @@ fn cs() {
             )
             .unwrap();
         assert!(
-            msl.source
-                .contains("tint_storage_buffer_sizes [[buffer(9)]]"),
+            msl.source.contains("tint_storage_buffer_sizes"),
             "MSL:\n{}",
             msl.source
         );
-        assert!(msl.needs_storage_buffer_sizes);
+        // A sizes-only stage has no separate sizes binding: everything goes
+        // through the immediate block at the reported slot.
+        let slot = msl
+            .immediate_slot
+            .expect("sizes-only stage needs the block");
+        assert!(
+            msl.source.contains(&format!("[[buffer({slot})]]")),
+            "MSL:\n{}",
+            msl.source
+        );
+        assert_eq!(msl.buffer_sizes_offset, Some(4));
+        assert_eq!(msl.immediate_block_size, 16);
         assert_eq!(
             msl.buffer_size_bindings,
             vec![MslBufferSizeBinding {
@@ -3878,7 +4132,6 @@ fn cs() {
                 "cs",
                 &Bindings::default(),
                 &[],
-                0,
                 true,
                 false,
                 &[],
@@ -3906,7 +4159,7 @@ fn cs() {
         let bindings = Bindings::default();
         for ep in ["vs", "fs"] {
             let msl = program
-                .generate_msl(ep, &bindings, &[], 0, true, false, &[], 0xFFFF_FFFF, 0)
+                .generate_msl(ep, &bindings, &[], true, false, &[], 0xFFFF_FFFF, 0)
                 .unwrap();
             assert!(!msl.source.is_empty());
             let spirv = program
@@ -3939,7 +4192,6 @@ fn cs() {
                 "fs",
                 &Bindings::default(),
                 &[],
-                0,
                 true,
                 false,
                 &[],
@@ -4002,7 +4254,6 @@ fn cs() {
                     ..Bindings::default()
                 },
                 &[],
-                0,
                 true,
                 false,
                 &[],
@@ -4031,7 +4282,6 @@ fn cs() {
             "fs",
             &Bindings::default(),
             &[],
-            0,
             true,
             false,
             &[],
@@ -4505,7 +4755,6 @@ fn vs(i: VIn) -> @builtin(position) vec4f {
                 "vs",
                 &Bindings::default(),
                 &[],
-                1,
                 true,
                 false,
                 &[],
@@ -4519,7 +4768,6 @@ fn vs(i: VIn) -> @builtin(position) vec4f {
                 "vs",
                 &Bindings::default(),
                 &[],
-                1,
                 true,
                 false,
                 &[VertexBuffer {
@@ -4563,7 +4811,6 @@ fn fs() -> @location(0) vec4f {
                 "fs",
                 &Bindings::default(),
                 &[],
-                0,
                 true,
                 false,
                 &[],
@@ -4573,7 +4820,7 @@ fn fs() -> @location(0) vec4f {
             .unwrap()
             .source;
         let masked_msl = program
-            .generate_msl("fs", &Bindings::default(), &[], 0, true, false, &[], 0x1, 0)
+            .generate_msl("fs", &Bindings::default(), &[], true, false, &[], 0x1, 0)
             .unwrap()
             .source;
 
@@ -4604,7 +4851,6 @@ fn fs() -> @builtin(frag_depth) f32 {
                 "fs",
                 &Bindings::default(),
                 &[],
-                0,
                 true,
                 false,
                 &[],
@@ -4633,7 +4879,6 @@ fn fs() -> @location(0) vec4f {
                 "fs",
                 &Bindings::default(),
                 &[],
-                0,
                 true,
                 false,
                 &[],
@@ -4669,7 +4914,6 @@ fn cs() {
                 "cs",
                 &Bindings::default(),
                 &[],
-                0,
                 true,
                 false,
                 &[],
@@ -4722,7 +4966,6 @@ fn fs() -> @builtin(frag_depth) f32 {
                 "fs",
                 &Bindings::default(),
                 &[],
-                0,
                 true,
                 false,
                 &[],
@@ -4755,7 +4998,6 @@ fn fs() -> @builtin(frag_depth) f32 {
             "fs",
             &Bindings::default(),
             &[],
-            0,
             true,
             false,
             &[],
@@ -4773,6 +5015,382 @@ fn fs() -> @builtin(frag_depth) f32 {
             matches!(collision_err, TintError::Codegen(ref message) if message.contains("overlap")),
             "expected an offset-overlap codegen error, got: {collision_err:?}"
         );
+    }
+
+    const FULL_SAMPLE_MASK: u32 = 0xFFFF_FFFF;
+
+    /// A storage binding with a runtime-sized array read through
+    /// `arrayLength`, so the entry point needs one buffer size.
+    const RUNTIME_ARRAY_DECL: &str = r#"
+struct Data { values: array<u32> }
+@group(0) @binding(0) var<storage, read_write> data: Data;
+"#;
+
+    fn parse_with_immediates(wgsl: &str) -> Program {
+        Program::parse(wgsl, false, false, false, false, false, false, &[11]).unwrap()
+    }
+
+    fn generate_with_budget(
+        program: &Program,
+        entry_point: &str,
+        user_immediate_size: u32,
+    ) -> Result<MslOutput, TintError> {
+        program.generate_msl(
+            entry_point,
+            &Bindings::default(),
+            &[],
+            true,
+            false,
+            &[],
+            FULL_SAMPLE_MASK,
+            user_immediate_size,
+        )
+    }
+
+    /// Block 118 R1: the sizes follow user immediates and the non-constant
+    /// zero word, the user region is the layout budget rather than the
+    /// entry's usage, and the block rounds up to 16 for `setBytes`.
+    #[test]
+    fn msl_immediate_layout_compute_offsets_with_and_without_user_immediates() {
+        let wgsl = format!(
+            "{RUNTIME_ARRAY_DECL}\n@compute @workgroup_size(1)\nfn cs() {{ data.values[0] = arrayLength(&data.values); }}"
+        );
+        let program = parse_with_immediates(&wgsl);
+
+        for (budget, sizes_offset, block_size) in [
+            (0, 4, 16),
+            (4, 8, 16),
+            (8, 12, 16),
+            (12, 16, 32),
+            (16, 20, 32),
+            (64, 68, 80),
+        ] {
+            let msl = generate_with_budget(&program, "cs", budget).unwrap();
+            assert_eq!(
+                msl.buffer_sizes_offset,
+                Some(sizes_offset),
+                "budget {budget}"
+            );
+            assert_eq!(msl.immediate_block_size, block_size, "budget {budget}");
+            assert_eq!(msl.frag_depth_clamp_offset, None);
+        }
+    }
+
+    /// Block 118 R1: with the clamp, the order is user region, clamp pair,
+    /// non-constant zero, sizes.
+    #[test]
+    fn msl_immediate_layout_fragment_offsets_with_clamp() {
+        let wgsl = format!(
+            "{RUNTIME_ARRAY_DECL}\n@fragment\nfn fs() -> @builtin(frag_depth) f32 {{ return f32(arrayLength(&data.values)); }}"
+        );
+        let program = parse_with_immediates(&wgsl);
+
+        let msl = generate_with_budget(&program, "fs", 0).unwrap();
+        assert_eq!(msl.frag_depth_clamp_offset, Some(0));
+        assert_eq!(msl.buffer_sizes_offset, Some(12));
+        assert_eq!(msl.immediate_block_size, 16);
+
+        let msl = generate_with_budget(&program, "fs", 16).unwrap();
+        assert_eq!(msl.frag_depth_clamp_offset, Some(16));
+        assert_eq!(msl.buffer_sizes_offset, Some(28));
+        assert_eq!(msl.immediate_block_size, 32);
+    }
+
+    /// Block 118 R1/R2: a user immediate at offset 0 no longer collides with
+    /// the mandatory non-constant-zero member, with or without sizes, and a
+    /// budget wider than the entry's usage is valid padding.
+    #[test]
+    fn msl_immediate_layout_user_immediates_do_not_overlap_internal_members() {
+        let wgsl = format!(
+            r#"requires immediate_address_space;
+var<immediate> params : vec4f;
+{RUNTIME_ARRAY_DECL}
+@compute @workgroup_size(1)
+fn with_sizes() {{ data.values[0] = u32(params.x) + arrayLength(&data.values); }}
+
+@compute @workgroup_size(1)
+fn user_only() {{ let v = params; _ = v; }}
+"#
+        );
+        let program = parse_with_immediates(&wgsl);
+
+        let msl = generate_with_budget(&program, "with_sizes", 32).unwrap();
+        assert_eq!(msl.buffer_sizes_offset, Some(36));
+        assert_eq!(msl.immediate_block_size, 48);
+
+        let msl = generate_with_budget(&program, "user_only", 16).unwrap();
+        assert!(msl.immediate_slot.is_some());
+        assert_eq!(msl.buffer_sizes_offset, None);
+        assert_eq!(msl.immediate_block_size, 32);
+    }
+
+    /// Block 118 R4/R5: "needs sizes" is `N > 0`, and a stage needing nothing
+    /// reports no block.
+    #[test]
+    fn msl_immediate_layout_absent_when_stage_needs_no_block() {
+        let program = Program::parse(
+            compute_wgsl(),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+
+        let msl = generate_with_budget(&program, "cs", 0).unwrap();
+
+        assert_eq!(msl.immediate_slot, None);
+        assert_eq!(msl.immediate_block_size, 0);
+        assert_eq!(msl.buffer_sizes_offset, None);
+        assert!(
+            !msl.source.contains("tint_immediate"),
+            "MSL:\n{}",
+            msl.source
+        );
+    }
+
+    /// Block 118 R3: storage bindings keep their reported order and index,
+    /// and vertex-pulling buffers follow at `num_storage + i`.
+    #[test]
+    fn msl_buffer_sizes_order_storage_then_vertex_pulling() {
+        let wgsl = r#"
+struct Data { values: array<u32> }
+@group(0) @binding(0) var<storage, read> first: Data;
+@group(0) @binding(1) var<storage, read> second: Data;
+
+@vertex
+fn vs(@location(0) p: vec4f) -> @builtin(position) vec4f {
+  let n = arrayLength(&second.values) + arrayLength(&first.values);
+  return p + vec4f(f32(n));
+}
+"#;
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
+        let vertex_buffer = |slot, metal_index| VertexBuffer {
+            slot,
+            metal_index,
+            array_stride: 16,
+            step_mode: VertexStepMode::Vertex,
+            attributes: if slot == 0 {
+                vec![VertexAttribute {
+                    format: VertexFormat::Float32x4,
+                    offset: 0,
+                    shader_location: 0,
+                }]
+            } else {
+                Vec::new()
+            },
+        };
+
+        let msl = program
+            .generate_msl(
+                "vs",
+                &Bindings::default(),
+                &[],
+                true,
+                false,
+                &[vertex_buffer(0, 5), vertex_buffer(1, 6)],
+                FULL_SAMPLE_MASK,
+                0,
+            )
+            .unwrap();
+
+        assert_eq!(msl.buffer_size_bindings.len(), 2);
+        // N = 2 storage + 2 vertex: 4 + 4 * 4 rounds up to 32.
+        assert_eq!(msl.buffer_sizes_offset, Some(4));
+        assert_eq!(msl.immediate_block_size, 32);
+        assert!(
+            msl.source
+                .contains("array<uint, 4> tint_storage_buffer_sizes"),
+            "MSL:\n{}",
+            msl.source
+        );
+        // The used vertex buffer is at index `num_storage + 0`.
+        assert!(
+            msl.source.contains("tint_storage_buffer_sizes[2u] / 4u"),
+            "MSL:\n{}",
+            msl.source
+        );
+    }
+
+    /// Block 118 R4: vertex pulling alone needs the block, and the block must
+    /// not take the buffer slot the vertex buffer is bound to.
+    #[test]
+    fn msl_vertex_pulling_only_stage_gets_block_away_from_vertex_buffer_slot() {
+        let wgsl = r#"
+@vertex
+fn vs(@location(0) p: vec4f) -> @builtin(position) vec4f {
+  return p;
+}
+"#;
+        let program = Program::parse(wgsl, false, false, false, false, false, false, &[]).unwrap();
+
+        let msl = program
+            .generate_msl(
+                "vs",
+                &Bindings::default(),
+                &[],
+                true,
+                false,
+                &[VertexBuffer {
+                    slot: 0,
+                    metal_index: 0,
+                    array_stride: 16,
+                    step_mode: VertexStepMode::Vertex,
+                    attributes: vec![VertexAttribute {
+                        format: VertexFormat::Float32x4,
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                }],
+                FULL_SAMPLE_MASK,
+                0,
+            )
+            .unwrap();
+
+        assert_eq!(msl.immediate_slot, Some(1));
+        assert_eq!(msl.buffer_sizes_offset, Some(4));
+        assert_eq!(msl.immediate_block_size, 16);
+    }
+
+    /// The params buffer of an external texture occupies a buffer slot, so
+    /// the block must avoid it.
+    #[test]
+    fn msl_immediate_slot_avoids_external_texture_params_slot() {
+        let wgsl = format!(
+            "{RUNTIME_ARRAY_DECL}\n@group(0) @binding(1) var ext: texture_external;\n@compute @workgroup_size(1)\nfn cs() {{ data.values[0] = arrayLength(&data.values) + textureDimensions(ext).x; }}"
+        );
+        let program = Program::parse(&wgsl, false, false, false, false, false, false, &[]).unwrap();
+        let bindings = Bindings {
+            storage: vec![BindingRemap {
+                group: 0,
+                binding: 0,
+                dst_group: 0,
+                dst_binding: 1,
+            }],
+            external_texture: vec![ExternalTextureRemap {
+                group: 0,
+                binding: 1,
+                plane0_slot: 0,
+                plane1_slot: 1,
+                params_slot: 0,
+            }],
+            ..Bindings::default()
+        };
+
+        let msl = program
+            .generate_msl("cs", &bindings, &[], true, false, &[], FULL_SAMPLE_MASK, 0)
+            .unwrap();
+
+        assert_eq!(msl.immediate_slot, Some(2));
+    }
+
+    /// `n` uniform bindings at `@group(0) @binding(i)`, remapped to Metal
+    /// buffer slot `i`, all referenced by `{prefix}_use()`.
+    fn full_buffer_table(n: u32) -> (String, Bindings) {
+        let mut wgsl = String::new();
+        let mut body = String::new();
+        let mut uniform = Vec::new();
+        for i in 0..n {
+            wgsl.push_str(&format!(
+                "@group(0) @binding({i}) var<uniform> u{i}: vec4f;\n"
+            ));
+            body.push_str(&format!("  sum += u{i};\n"));
+            uniform.push(BindingRemap {
+                group: 0,
+                binding: i,
+                dst_group: 0,
+                dst_binding: i,
+            });
+        }
+        wgsl.push_str(&format!(
+            "fn sum_all() -> vec4f {{\n  var sum = vec4f();\n{body}  return sum;\n}}\n"
+        ));
+        (
+            wgsl,
+            Bindings {
+                uniform,
+                ..Bindings::default()
+            },
+        )
+    }
+
+    /// Block 118 R4: a stage needing the block with every Metal buffer slot
+    /// taken fails cleanly, for each reason it can need the block.
+    #[test]
+    fn msl_immediate_block_without_free_slot_is_a_clean_error() {
+        let (decls, bindings) = full_buffer_table(31);
+        let sources = [
+            (
+                "needs_sizes",
+                format!(
+                    "{decls}struct Data {{ values: array<u32> }}\n@group(1) @binding(0) var<storage, read_write> data: Data;\n@compute @workgroup_size(1)\nfn needs_sizes() {{ data.values[0] = u32(sum_all().x) + arrayLength(&data.values); }}"
+                ),
+                0,
+            ),
+            (
+                "needs_user",
+                format!(
+                    "requires immediate_address_space;\nvar<immediate> params: vec4f;\n{decls}@compute @workgroup_size(1)\nfn needs_user() {{ let v = params + sum_all(); _ = v; }}"
+                ),
+                16,
+            ),
+            (
+                "needs_clamp",
+                format!(
+                    "{decls}@fragment\nfn needs_clamp() -> @builtin(frag_depth) f32 {{ return sum_all().x; }}"
+                ),
+                0,
+            ),
+        ];
+        for (entry_point, wgsl, budget) in sources {
+            let program = parse_with_immediates(&wgsl);
+
+            let result = program.generate_msl(
+                entry_point,
+                &bindings,
+                &[],
+                true,
+                false,
+                &[],
+                FULL_SAMPLE_MASK,
+                budget,
+            );
+
+            let Err(TintError::Codegen(message)) = result else {
+                panic!("{entry_point} must fail without a free buffer slot");
+            };
+            assert!(
+                message.contains("no free Metal buffer slot"),
+                "{entry_point}: {message}"
+            );
+        }
+    }
+
+    /// Block 118 R4: a full buffer table is fine for a stage that needs no
+    /// block, and one free slot is enough for a stage that does.
+    #[test]
+    fn msl_immediate_block_uses_last_free_slot() {
+        let (decls, bindings) = full_buffer_table(31);
+        let wgsl =
+            format!("{decls}@compute @workgroup_size(1)\nfn cs() {{ let v = sum_all(); _ = v; }}");
+        let program = parse_with_immediates(&wgsl);
+        let msl = program
+            .generate_msl("cs", &bindings, &[], true, false, &[], FULL_SAMPLE_MASK, 0)
+            .unwrap();
+        assert_eq!(msl.immediate_slot, None);
+
+        let (decls, bindings) = full_buffer_table(30);
+        let wgsl = format!(
+            "{decls}@fragment\nfn fs() -> @builtin(frag_depth) f32 {{ return sum_all().x; }}"
+        );
+        let program = parse_with_immediates(&wgsl);
+        let msl = program
+            .generate_msl("fs", &bindings, &[], true, false, &[], FULL_SAMPLE_MASK, 0)
+            .unwrap();
+        assert_eq!(msl.immediate_slot, Some(30));
     }
 
     #[test]
@@ -4933,7 +5551,6 @@ fn cs() {}
                     name: "x".to_owned(),
                     value: 2.0,
                 }],
-                0,
                 true,
                 false,
                 &[],
@@ -4950,7 +5567,6 @@ fn cs() {}
                     name: "x".to_owned(),
                     value: 5.0,
                 }],
-                0,
                 true,
                 false,
                 &[],
@@ -5016,7 +5632,7 @@ fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
         };
 
         let msl = program
-            .generate_msl("fs", &bindings, &[], 2, true, false, &[], 0xFFFF_FFFF, 0)
+            .generate_msl("fs", &bindings, &[], true, false, &[], 0xFFFF_FFFF, 0)
             .unwrap();
         assert!(!msl.source.is_empty(), "MSL was empty");
         assert!(msl.source.contains("sampler"), "MSL:\n{}", msl.source);
@@ -5051,7 +5667,6 @@ fn cs() { _ = u.value; }
                 "cs",
                 &default_bindings,
                 &[],
-                0,
                 true,
                 false,
                 &[],
@@ -5061,7 +5676,7 @@ fn cs() { _ = u.value; }
             .unwrap()
             .source;
         let remapped_msl = program
-            .generate_msl("cs", &remapped, &[], 0, true, false, &[], 0xFFFF_FFFF, 0)
+            .generate_msl("cs", &remapped, &[], true, false, &[], 0xFFFF_FFFF, 0)
             .unwrap()
             .source;
         assert!(remapped_msl.contains("[[buffer(7)]]"), "{remapped_msl}");
@@ -5234,7 +5849,6 @@ fn cs() {
                 "cs",
                 &Bindings::default(),
                 &[],
-                0,
                 true,
                 false,
                 &[],
@@ -5464,7 +6078,7 @@ var<workgroup> b: array<u32, 3072>;
     /// resolves whatever the pipeline constant says and reports it as-is, so
     /// the power-of-two / non-zero rule has to be enforced by yawgpu-core.
     #[test]
-    fn resolved_workgroup_info_reports_override_driven_subgroup_size_unchecked() {
+    fn resolved_workgroup_info_rejects_invalid_override_subgroup_size() {
         // Const-expression: Tint enforces the rule at parse time.
         for bad in ["6", "0"] {
             let wgsl = format!(
@@ -5515,10 +6129,26 @@ fn cs() {}
             Some(4)
         );
         assert_eq!(resolve(2.0).unwrap(), Some(2));
-        // Neither a non-power-of-two nor a zero override value is rejected by
-        // Tint during override substitution.
-        assert_eq!(resolve(6.0).unwrap(), Some(6));
-        assert_eq!(resolve(0.0).unwrap(), Some(0));
+        // Block 118 R12: Tint rejects a non-zero non-power-of-two override value
+        // during substitution.
+        for value in [3.0, 6.0] {
+            let Err(TintError::Codegen(message)) = resolve(value) else {
+                panic!("sg = {value} must fail during override substitution");
+            };
+            assert!(
+                message.contains("@subgroup_size value must be a power of two"),
+                "{message}"
+            );
+        }
+        // Zero passes substitution's power-of-two check, but the IR validator
+        // that follows rejects it.
+        let Err(TintError::Codegen(message)) = resolve(0.0) else {
+            panic!("sg = 0 must fail after override substitution");
+        };
+        assert!(
+            message.contains("@subgroup_size param must be greater than 0"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -5557,7 +6187,6 @@ fn cs() {}
                 "cs",
                 &Bindings::default(),
                 &[],
-                0,
                 true,
                 false,
                 &[],
@@ -5610,7 +6239,6 @@ fn cs() {
                     "cs",
                     &Bindings::default(),
                     &[],
-                    9,
                     true,
                     false,
                     &[],
@@ -5623,10 +6251,9 @@ fn cs() {
         let second = generate_msl(&program);
         assert_eq!(first.source, second.source);
         assert_eq!(first.entry_point, second.entry_point);
-        assert_eq!(
-            first.needs_storage_buffer_sizes,
-            second.needs_storage_buffer_sizes
-        );
+        assert_eq!(first.immediate_slot, second.immediate_slot);
+        assert_eq!(first.immediate_block_size, second.immediate_block_size);
+        assert_eq!(first.buffer_sizes_offset, second.buffer_sizes_offset);
         assert_eq!(first.buffer_size_bindings, second.buffer_size_bindings);
         assert_eq!(first.workgroup_allocations, second.workgroup_allocations);
         assert_eq!(first.frag_depth_clamp_slot, second.frag_depth_clamp_slot);
@@ -5704,7 +6331,6 @@ fn fs(in: VsOut) -> @location(0) vec4f {
                     "vs",
                     &Bindings::default(),
                     &[],
-                    1,
                     true,
                     false,
                     &vertex_buffers,
@@ -5767,7 +6393,6 @@ fn cs() {}
                     "cs",
                     &Bindings::default(),
                     &overrides,
-                    0,
                     true,
                     false,
                     &[],
@@ -5814,7 +6439,6 @@ fn cs() {}
                 "cs",
                 &Bindings::default(),
                 &overrides,
-                0,
                 true,
                 false,
                 &[],
@@ -5851,7 +6475,6 @@ fn cs() {
                     "cs",
                     &Bindings::default(),
                     &[],
-                    0,
                     true,
                     false,
                     &[],

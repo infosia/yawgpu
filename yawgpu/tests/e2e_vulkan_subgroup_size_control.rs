@@ -176,8 +176,8 @@ fn vulkan_subgroup_size_validation_errors() {
             expect_pipeline_error(device, &errors, &rule2, &[], "allowed range");
         }
 
-        // Rule 4: an override-driven S that is not a power of two. Tint does
-        // not check this after override substitution; core must.
+        // Rule 4: an override-driven S that is not a power of two. Tint rejects
+        // this during override substitution, ahead of core's backstop.
         let rule4 = "enable subgroups;\nenable subgroup_size_control;\n\
                      override sg: u32 = 32u;\n\
                      @compute @workgroup_size(96) @subgroup_size(sg)\nfn main() {}\n";

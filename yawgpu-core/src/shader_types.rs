@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use yawgpu_hal::HalMslImmediates;
+
 /// Stores binding metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct MslBindingMap {
@@ -57,21 +59,40 @@ pub(crate) struct GeneratedMsl {
     pub source: String,
     /// Entry point.
     pub entry_point: String,
-    /// Reserved MSL buffer slot for `_mslBufferSizes`.
-    pub buffer_sizes_slot: Option<u32>,
-    /// Bindings whose byte lengths populate `_mslBufferSizes`.
+    /// Bindings whose byte lengths populate the buffer sizes in the immediate
+    /// block; vertex-pulling buffers follow them.
     pub buffer_size_bindings: Vec<MslBufferSizeBinding>,
-    /// Reserved fragment immediate slot for the frag-depth clamp range.
-    pub frag_depth_clamp_slot: Option<u32>,
-    /// Reserved MSL buffer slot of the combined immediates block (user
-    /// immediates, plus the frag-depth clamp range when present) for this
-    /// stage, when it uses any immediates. `None` when this stage uses no
-    /// immediates at all. Always equal to `frag_depth_clamp_slot` when the
-    /// latter is `Some` (Block 94).
+    /// Byte offset of the frag-depth clamp range within the immediate block.
+    pub frag_depth_clamp_offset: Option<u32>,
+    /// Reserved MSL buffer slot of the combined immediate block for this
+    /// stage, when it needs one: user immediates, the frag-depth clamp, or
+    /// buffer sizes.
     pub immediate_slot: Option<u32>,
+    /// Bytes to deliver at `immediate_slot`. Zero when that is `None`.
+    pub immediate_block_size: u32,
+    /// Byte offset of the buffer sizes within the immediate block, when this
+    /// stage has any.
+    pub buffer_sizes_offset: Option<u32>,
     /// Per-index threadgroup allocation sizes from Tint's workgroup_allocations,
     /// rounded up to a multiple of 16 for Metal.
     pub workgroup_memory_sizes: Vec<u32>,
+}
+
+impl GeneratedMsl {
+    /// Returns the HAL delivery descriptor for this stage's immediate block,
+    /// or `None` when the stage needs no block. `user_immediate_size` is the
+    /// pipeline layout's reserved user-immediate budget.
+    pub(crate) fn hal_immediates(&self, user_immediate_size: u32) -> Option<HalMslImmediates> {
+        self.immediate_slot.map(|slot| {
+            HalMslImmediates::new(
+                slot,
+                self.immediate_block_size,
+                user_immediate_size,
+                self.frag_depth_clamp_offset,
+                self.buffer_sizes_offset,
+            )
+        })
+    }
 }
 
 /// Stores generated shader source for generated GLSL.
@@ -484,6 +505,40 @@ pub(crate) enum ReflectedOverrideValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn generated_msl() -> GeneratedMsl {
+        GeneratedMsl {
+            source: String::new(),
+            entry_point: String::new(),
+            buffer_size_bindings: Vec::new(),
+            frag_depth_clamp_offset: None,
+            immediate_slot: None,
+            immediate_block_size: 0,
+            buffer_sizes_offset: None,
+            workgroup_memory_sizes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn hal_immediates_is_none_when_stage_needs_no_block() {
+        assert_eq!(generated_msl().hal_immediates(16), None);
+    }
+
+    #[test]
+    fn hal_immediates_carries_the_reported_layout() {
+        let generated = GeneratedMsl {
+            frag_depth_clamp_offset: Some(16),
+            immediate_slot: Some(2),
+            immediate_block_size: 48,
+            buffer_sizes_offset: Some(28),
+            ..generated_msl()
+        };
+
+        assert_eq!(
+            generated.hal_immediates(16),
+            Some(HalMslImmediates::new(2, 48, 16, Some(16), Some(28)))
+        );
+    }
 
     #[test]
     fn shader_stage_public_variants_are_distinct() {

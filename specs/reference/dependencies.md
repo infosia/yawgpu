@@ -23,6 +23,20 @@
   cd third_party/dawn && python3 tools/fetch_dawn_dependencies.py
   ```
   Without the submodule, `yawgpu-tint` compiles as a non-functional stub.
+
+  **Pin.** `third_party/dawn` tracks fork branch `feature/tiled-v20261030`: the
+  fork's TBDR commits rebased on Dawn release `v20261030.184100`. Each rebase gets a
+  new branch rather than a force push, so older yawgpu commits stay buildable.
+  `feature/tiled` keeps the previous pin. Rebase steps are in the fork's
+  `docs/tint/tbdr-fork-conventions.md`; the bump record is
+  `specs/blocks/118-dawn-v20261030-bump.md`.
+
+  **Bumping an existing checkout.** `tools/fetch_dawn_dependencies.py` does not move
+  shallow-cloned dependencies: they have no `origin`, so its `git fetch origin` fails
+  and nothing reports it. After changing the pin, compare `git status third_party`
+  and fetch each dependency at its gitlink SHA from its `.gitmodules` URL. Touching
+  a file in `yawgpu-tint/shim/` is also needed, because Cargo does not watch the
+  Dawn sources themselves.
   (Tint replaced the earlier naga frontend, which was consumed from an
   `infosia/wgpu` git fork; that fork and the `naga` crate dependency are no longer
   used.)

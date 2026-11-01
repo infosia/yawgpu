@@ -7,15 +7,14 @@ use crate::metal::format::vertex_format_byte_size;
 pub struct MetalComputePipeline {
     pub(super) inner: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     pub(super) workgroup_size: (u32, u32, u32),
-    pub(super) buffer_sizes_slot: Option<u32>,
     pub(super) buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
     /// Per-argument threadgroup memory allocation sizes (bytes, rounded to a
     /// multiple of 16). Mirrors `wg_memory_sizes` in wgpu-hal/metal/device.rs.
     /// The compute encoder calls `setThreadgroupMemoryLength:atIndex:` for each
     /// entry in this vec before every dispatch.
     pub(super) workgroup_memory_sizes: Vec<u32>,
-    /// Compute-stage immediates delivery metadata (Block 94 S2). `None` when
-    /// the compute entry point uses no `var<immediate>` data.
+    /// Compute-stage immediate block metadata. `None` when the entry point
+    /// needs no block (no `var<immediate>` data and no buffer sizes).
     pub(super) immediates: Option<HalMslImmediates>,
 }
 
@@ -26,7 +25,6 @@ impl std::fmt::Debug for MetalComputePipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MetalComputePipeline")
             .field("workgroup_size", &self.workgroup_size)
-            .field("buffer_sizes_slot", &self.buffer_sizes_slot)
             .field("workgroup_memory_sizes", &self.workgroup_memory_sizes)
             .finish()
     }
@@ -49,23 +47,19 @@ pub struct MetalRenderPipeline {
     pub(super) depth_bias: i32,
     pub(super) depth_bias_slope_scale: f32,
     pub(super) depth_bias_clamp: f32,
-    pub(super) vertex_buffer_sizes_slot: Option<u32>,
     pub(super) vertex_buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
-    pub(super) fragment_buffer_sizes_slot: Option<u32>,
     pub(super) fragment_buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
-    /// Vertex-stage immediates delivery metadata (Block 94 S2). `None` when
-    /// the vertex entry point uses no `var<immediate>` data.
+    /// Vertex-stage immediate block metadata. `None` when the vertex entry
+    /// point needs no block.
     pub(super) vertex_immediates: Option<HalMslImmediates>,
-    /// Fragment-stage immediates delivery metadata (Block 94 S2); also
-    /// covers the frag-depth clamp range when this pipeline clamps
-    /// frag_depth. `None` when the fragment entry point uses no immediates
-    /// and does not clamp frag_depth.
+    /// Fragment-stage immediate block metadata; also covers the frag-depth
+    /// clamp range when this pipeline clamps frag_depth. `None` when the
+    /// fragment entry point needs no block.
     pub(super) fragment_immediates: Option<HalMslImmediates>,
     /// Metal buffer indices for vertex buffers in `vertex_buffer_mappings` order.
-    /// These correspond to the `buffer_sizeN` fields that Tint's MSL codegen appends
-    /// after the storage-array size fields inside `_mslBufferSizes`.  The encoder
-    /// fills these slots with effective vertex-buffer byte sizes before every draw
-    /// so that Tint's vertex-pulling OOB guards compare against real values.
+    /// Their sizes follow the storage sizes in the vertex immediate block. The
+    /// encoder fills them with effective vertex-buffer byte sizes before every
+    /// draw so that Tint's vertex-pulling OOB guards compare against real values.
     pub(super) vertex_buffer_metal_indices: Vec<u32>,
 }
 
@@ -87,7 +81,6 @@ pub(super) fn create_compute_pipeline(
     msl_source: &str,
     entry_point: &str,
     workgroup_size: (u32, u32, u32),
-    buffer_sizes_slot: Option<u32>,
     buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
     workgroup_memory_sizes: Vec<u32>,
     immediates: Option<HalMslImmediates>,
@@ -112,7 +105,6 @@ pub(super) fn create_compute_pipeline(
         Ok(MetalComputePipeline {
             inner,
             workgroup_size,
-            buffer_sizes_slot,
             buffer_size_bindings,
             workgroup_memory_sizes,
             immediates,
@@ -259,9 +251,7 @@ pub(super) fn create_render_pipeline(
             depth_bias,
             depth_bias_slope_scale,
             depth_bias_clamp,
-            vertex_buffer_sizes_slot: size_metadata.vertex_slot,
             vertex_buffer_size_bindings: size_metadata.vertex_bindings,
-            fragment_buffer_sizes_slot: size_metadata.fragment_slot,
             fragment_buffer_size_bindings: size_metadata.fragment_bindings,
             vertex_immediates: size_metadata.vertex_immediates,
             fragment_immediates: size_metadata.fragment_immediates,
@@ -393,9 +383,7 @@ type RenderFunctions = (
 );
 
 struct RenderSizeMetadata {
-    vertex_slot: Option<u32>,
     vertex_bindings: Vec<HalMslBufferSizeBinding>,
-    fragment_slot: Option<u32>,
     fragment_bindings: Vec<HalMslBufferSizeBinding>,
     vertex_immediates: Option<HalMslImmediates>,
     fragment_immediates: Option<HalMslImmediates>,
@@ -406,27 +394,21 @@ struct RenderSizeMetadata {
 fn render_size_metadata(shader: &HalShaderSource) -> RenderSizeMetadata {
     match shader {
         HalShaderSource::MslStagesWithBufferSizes {
-            vertex_buffer_sizes_slot,
             vertex_buffer_size_bindings,
-            fragment_buffer_sizes_slot,
             fragment_buffer_size_bindings,
             vertex_immediates,
             fragment_immediates,
             vertex_buffer_metal_indices,
             ..
         } => RenderSizeMetadata {
-            vertex_slot: *vertex_buffer_sizes_slot,
             vertex_bindings: vertex_buffer_size_bindings.clone(),
-            fragment_slot: *fragment_buffer_sizes_slot,
             fragment_bindings: fragment_buffer_size_bindings.clone(),
             vertex_immediates: *vertex_immediates,
             fragment_immediates: *fragment_immediates,
             vertex_buffer_metal_indices: vertex_buffer_metal_indices.clone(),
         },
         _ => RenderSizeMetadata {
-            vertex_slot: None,
             vertex_bindings: Vec::new(),
-            fragment_slot: None,
             fragment_bindings: Vec::new(),
             vertex_immediates: None,
             fragment_immediates: None,
@@ -625,9 +607,7 @@ mod tests {
         let shader = HalShaderSource::MslStagesWithBufferSizes {
             vertex: "vertex Out v(In in [[stage_in]]) { return {}; }".to_owned(),
             fragment: None,
-            vertex_buffer_sizes_slot: None,
             vertex_buffer_size_bindings: Vec::new(),
-            fragment_buffer_sizes_slot: None,
             fragment_buffer_size_bindings: Vec::new(),
             vertex_immediates: None,
             fragment_immediates: None,
@@ -647,9 +627,7 @@ mod tests {
         let shader = HalShaderSource::MslStagesWithBufferSizes {
             vertex: String::new(),
             fragment: None,
-            vertex_buffer_sizes_slot: None,
             vertex_buffer_size_bindings: Vec::new(),
-            fragment_buffer_sizes_slot: None,
             fragment_buffer_size_bindings: Vec::new(),
             vertex_immediates: None,
             fragment_immediates: None,

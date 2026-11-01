@@ -251,6 +251,229 @@ fn metal_external_texture_rgba_passthrough_round_trips() {
     }
 }
 
+const UNREFERENCED_EXTERNAL_SHADER: &str =
+    "@group(0) @binding(1) var<storage, read_write> data: array<u32>;\n\
+\n\
+@compute @workgroup_size(1)\n\
+fn main() {\n\
+  let count = arrayLength(&data);\n\
+  data[0] = count;\n\
+  data[count - 1u] = 0xABCDu;\n\
+}\n";
+
+/// Block 118 R7a. The layout binds an external texture the shader never
+/// references, so the immediate-slot chooser cannot see its params buffer. The
+/// compute encoder must write the immediate block after that buffer, otherwise
+/// the buffer replaces the block and `arrayLength` reads params bytes.
+#[test]
+#[ignore = "manual real-backend test"]
+fn metal_compute_unreferenced_external_texture_keeps_buffer_sizes() {
+    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+        return;
+    }
+
+    const STORAGE_SIZE: u64 = 64;
+    const ELEMENT_COUNT: u32 = 16;
+
+    unsafe {
+        let instance = create_metal_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+
+        let source = create_texture(
+            device,
+            native::WGPUTextureUsage_TextureBinding | native::WGPUTextureUsage_CopyDst,
+            native::WGPUTextureFormat_RGBA8Unorm,
+        );
+        write_solid_pixel(queue, source, &SRC_RGBA);
+        let plane0 = create_default_view(source);
+        let descriptor = YaWGPUExternalTextureDescriptor {
+            plane0,
+            plane1: std::ptr::null_mut(),
+            format: YAWGPU_EXTERNAL_TEXTURE_FORMAT_RGBA,
+            cropOrigin: YaWGPUOrigin2D { x: 0, y: 0 },
+            cropSize: YaWGPUExtent2D {
+                width: WIDTH,
+                height: HEIGHT,
+            },
+            apparentSize: YaWGPUExtent2D {
+                width: WIDTH,
+                height: HEIGHT,
+            },
+            doYuvToRgbConversionOnly: 1,
+            yuvToRgbConversionMatrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            srcTransferFunctionParameters: [0.0; 7],
+            dstTransferFunctionParameters: [0.0; 7],
+            gamutConversionMatrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            mirrored: 0,
+            rotation: YAWGPU_EXTERNAL_TEXTURE_ROTATION_ROTATE_0_DEGREES,
+        };
+        let external = yawgpu::yawgpuDeviceCreateExternalTexture(device, &descriptor);
+        assert!(!external.is_null(), "{errors:?}");
+
+        let mut external_layout = native::WGPUExternalTextureBindingLayout {
+            chain: native::WGPUChainedStruct {
+                next: std::ptr::null_mut(),
+                sType: native::WGPUSType_ExternalTextureBindingLayout,
+            },
+        };
+        let mut external_entry: native::WGPUBindGroupLayoutEntry = std::mem::zeroed();
+        external_entry.nextInChain = (&mut external_layout.chain) as *mut native::WGPUChainedStruct;
+        external_entry.binding = 0;
+        external_entry.visibility = native::WGPUShaderStage_Compute;
+        let mut storage_entry: native::WGPUBindGroupLayoutEntry = std::mem::zeroed();
+        storage_entry.binding = 1;
+        storage_entry.visibility = native::WGPUShaderStage_Compute;
+        storage_entry.buffer.type_ = native::WGPUBufferBindingType_Storage;
+        let layout_entries = [external_entry, storage_entry];
+        let bind_group_layout = yawgpu::wgpuDeviceCreateBindGroupLayout(
+            device,
+            &native::WGPUBindGroupLayoutDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: empty_string_view(),
+                entryCount: layout_entries.len(),
+                entries: layout_entries.as_ptr(),
+            },
+        );
+        assert!(!bind_group_layout.is_null(), "{errors:?}");
+        let pipeline_layout = yawgpu::wgpuDeviceCreatePipelineLayout(
+            device,
+            &native::WGPUPipelineLayoutDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: empty_string_view(),
+                bindGroupLayoutCount: 1,
+                bindGroupLayouts: &bind_group_layout,
+                immediateSize: 0,
+            },
+        );
+        assert!(!pipeline_layout.is_null(), "{errors:?}");
+
+        let module = create_wgsl_module(device, UNREFERENCED_EXTERNAL_SHADER);
+        let pipeline = yawgpu::wgpuDeviceCreateComputePipeline(
+            device,
+            &native::WGPUComputePipelineDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: empty_string_view(),
+                layout: pipeline_layout,
+                compute: native::WGPUComputeState {
+                    nextInChain: std::ptr::null_mut(),
+                    module,
+                    entryPoint: string_view("main"),
+                    constantCount: 0,
+                    constants: std::ptr::null(),
+                },
+            },
+        );
+        assert!(!pipeline.is_null(), "{errors:?}");
+
+        let storage = create_buffer(
+            device,
+            STORAGE_SIZE,
+            native::WGPUBufferUsage_Storage | native::WGPUBufferUsage_CopySrc,
+        );
+        let readback = create_buffer(
+            device,
+            STORAGE_SIZE,
+            native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+        );
+
+        let mut external_binding = native::WGPUExternalTextureBindingEntry {
+            chain: native::WGPUChainedStruct {
+                next: std::ptr::null_mut(),
+                sType: native::WGPUSType_ExternalTextureBindingEntry,
+            },
+            externalTexture: external,
+        };
+        let bind_entries = [
+            native::WGPUBindGroupEntry {
+                nextInChain: (&mut external_binding.chain) as *mut native::WGPUChainedStruct,
+                binding: 0,
+                buffer: std::ptr::null_mut(),
+                offset: 0,
+                size: 0,
+                sampler: std::ptr::null_mut(),
+                textureView: std::ptr::null_mut(),
+            },
+            native::WGPUBindGroupEntry {
+                nextInChain: std::ptr::null_mut(),
+                binding: 1,
+                buffer: storage,
+                offset: 0,
+                size: STORAGE_SIZE,
+                sampler: std::ptr::null_mut(),
+                textureView: std::ptr::null_mut(),
+            },
+        ];
+        let bind_group = yawgpu::wgpuDeviceCreateBindGroup(
+            device,
+            &native::WGPUBindGroupDescriptor {
+                nextInChain: std::ptr::null_mut(),
+                label: empty_string_view(),
+                layout: bind_group_layout,
+                entryCount: bind_entries.len(),
+                entries: bind_entries.as_ptr(),
+            },
+        );
+        assert!(!bind_group.is_null(), "{errors:?}");
+
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        let pass = yawgpu::wgpuCommandEncoderBeginComputePass(encoder, std::ptr::null());
+        yawgpu::wgpuComputePassEncoderSetPipeline(pass, pipeline);
+        yawgpu::wgpuComputePassEncoderSetBindGroup(pass, 0, bind_group, 0, std::ptr::null());
+        yawgpu::wgpuComputePassEncoderDispatchWorkgroups(pass, 1, 1, 1);
+        yawgpu::wgpuComputePassEncoderEnd(pass);
+        yawgpu::wgpuComputePassEncoderRelease(pass);
+        yawgpu::wgpuCommandEncoderCopyBufferToBuffer(
+            encoder,
+            storage,
+            0,
+            readback,
+            0,
+            STORAGE_SIZE,
+        );
+        let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+        yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+        yawgpu::wgpuCommandBufferRelease(command_buffer);
+        yawgpu::wgpuCommandEncoderRelease(encoder);
+
+        let bytes = read_buffer(instance, readback, 0, STORAGE_SIZE as usize);
+        assert!(
+            errors.lock().expect("error lock").is_empty(),
+            "device error: {:?}",
+            errors.lock().expect("error lock")
+        );
+        let words: Vec<u32> = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| u32::from_le_bytes(*word))
+            .collect();
+        assert_eq!(words[0], ELEMENT_COUNT, "arrayLength: {words:?}");
+        assert_eq!(
+            words[ELEMENT_COUNT as usize - 1],
+            0xABCD,
+            "last element: {words:?}"
+        );
+
+        yawgpu::wgpuBindGroupRelease(bind_group);
+        yawgpu::wgpuComputePipelineRelease(pipeline);
+        yawgpu::wgpuShaderModuleRelease(module);
+        yawgpu::wgpuPipelineLayoutRelease(pipeline_layout);
+        yawgpu::wgpuBindGroupLayoutRelease(bind_group_layout);
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuBufferRelease(storage);
+        yawgpu::wgpuExternalTextureRelease(external);
+        yawgpu::wgpuTextureViewRelease(plane0);
+        yawgpu::wgpuTextureRelease(source);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
 /// Renders a fullscreen triangle whose fragment shader `textureLoad`s the given
 /// external texture into an RGBA8Unorm target, then reads back texel (0,0).
 /// Releases only the resources it creates (output, pipeline, bind group, readback);

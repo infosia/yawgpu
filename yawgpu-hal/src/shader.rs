@@ -4,13 +4,12 @@
 pub enum HalShaderSource {
     /// Msl variant.
     Msl(String),
-    /// MSL source with `_mslBufferSizes` binding metadata.
+    /// MSL source with immediate-block and buffer-size metadata.
     MslWithBufferSizes {
         /// MSL source.
         source: String,
-        /// Reserved buffer slot for `_mslBufferSizes`.
-        buffer_sizes_slot: Option<u32>,
-        /// Bindings whose byte lengths populate `_mslBufferSizes`.
+        /// Bindings whose byte lengths populate the buffer sizes in the
+        /// immediate block.
         buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
         /// Per-argument threadgroup memory allocation sizes (bytes, already
         /// rounded up to a multiple of 16) for compute shaders that use
@@ -18,9 +17,9 @@ pub enum HalShaderSource {
         /// `setThreadgroupMemoryLength:atIndex:` for each entry before dispatch.
         /// Empty when the compute shader has no workgroup variables.
         workgroup_memory_sizes: Vec<u32>,
-        /// Compute-stage immediates delivery metadata (Block 94 S2), when
-        /// the compute entry point uses `var<immediate>` user data. `None`
-        /// when the entry point declares no immediates.
+        /// Compute-stage immediate block delivery metadata, when the entry
+        /// point needs the block (`var<immediate>` user data or buffer
+        /// sizes). `None` when it needs neither.
         immediates: Option<HalMslImmediates>,
     },
     /// Per-stage MSL render sources.
@@ -30,38 +29,33 @@ pub enum HalShaderSource {
         /// Optional fragment stage MSL source.
         fragment: Option<String>,
     },
-    /// Per-stage MSL render sources with `_mslBufferSizes` binding metadata.
+    /// Per-stage MSL render sources with immediate-block and buffer-size
+    /// metadata.
     MslStagesWithBufferSizes {
         /// Vertex stage MSL source.
         vertex: String,
         /// Optional fragment stage MSL source.
         fragment: Option<String>,
-        /// Reserved vertex-stage buffer slot for `_mslBufferSizes`.
-        vertex_buffer_sizes_slot: Option<u32>,
-        /// Vertex-stage bindings whose byte lengths populate `_mslBufferSizes`.
+        /// Vertex-stage bindings whose byte lengths populate the buffer sizes
+        /// in the vertex immediate block.
         vertex_buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
-        /// Reserved fragment-stage buffer slot for `_mslBufferSizes`.
-        fragment_buffer_sizes_slot: Option<u32>,
-        /// Fragment-stage bindings whose byte lengths populate `_mslBufferSizes`.
+        /// Fragment-stage bindings whose byte lengths populate the buffer
+        /// sizes in the fragment immediate block.
         fragment_buffer_size_bindings: Vec<HalMslBufferSizeBinding>,
-        /// Vertex-stage immediates delivery metadata (Block 94 S2), when the
-        /// vertex entry point uses `var<immediate>` user data. `None` when
-        /// the vertex entry point declares no immediates.
+        /// Vertex-stage immediate block delivery metadata, when the vertex
+        /// entry point needs the block (`var<immediate>` user data, storage
+        /// sizes, or vertex-pulling sizes). `None` when it needs none.
         vertex_immediates: Option<HalMslImmediates>,
-        /// Fragment-stage immediates delivery metadata (Block 94 S2). Also
-        /// carries the frag-depth clamp range offset within the block when
-        /// this pipeline clamps frag_depth -- absorbs the old
-        /// `fragment_frag_depth_clamp_slot` (a clamp-only pipeline still
-        /// gets `Some` here, with `frag_depth_clamp_offset` set and no user
-        /// immediates). `None` when the fragment entry point uses no
-        /// immediates and does not clamp frag_depth.
+        /// Fragment-stage immediate block delivery metadata. Also carries
+        /// the frag-depth clamp range offset when this pipeline clamps
+        /// frag_depth. `None` when the fragment entry point needs no block.
         fragment_immediates: Option<HalMslImmediates>,
         /// Metal buffer indices for vertex buffers, in the same order as
-        /// `vertex_buffer_mappings` passed to Tint's MSL codegen. These correspond to
-        /// the `buffer_sizeN` fields appended after the storage-array size fields
-        /// inside `_mslBufferSizes`; the HAL encoder must write the effective byte
-        /// size (buffer.size − bind_offset) of each bound vertex buffer into those
-        /// fields so Tint's vertex-pulling OOB guards compare against real data.
+        /// `vertex_buffer_mappings` passed to Tint's MSL codegen. Their sizes
+        /// follow the storage sizes in the vertex immediate block; the HAL
+        /// encoder writes the effective byte size (buffer.size − bind_offset)
+        /// of each bound vertex buffer so Tint's vertex-pulling OOB guards
+        /// compare against real data.
         vertex_buffer_metal_indices: Vec<u32>,
     },
     /// Spir v variant.
@@ -190,37 +184,49 @@ impl HalMslBufferSizeBinding {
     }
 }
 
-/// Metal immediates delivery descriptor for one shader stage (Block 94 S2):
-/// where to bind the combined immediates block and how large it is. Mirrors
-/// Dawn's `ImmediatesLayout.h` layout -- user immediate bytes first
-/// (`[0, block_size)`, or `[0, frag_depth_clamp_offset)` when the clamp
-/// range is also present), with pipeline-internal constants (currently only
-/// the fragment frag-depth clamp range) appended directly after.
+/// Metal immediates delivery descriptor for one shader stage: where to bind
+/// the combined immediate block and how it is laid out. Mirrors Dawn's
+/// `ImmediatesLayoutMTL.h`: user immediate bytes at `[0, user_size)`, then
+/// the frag-depth clamp range when present, a non-constant-zero word that is
+/// always 0, and the buffer sizes when present. The offsets come from
+/// `yawgpu-tint`, which computes the layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct HalMslImmediates {
     /// Metal buffer slot the combined block is delivered to via
     /// `set{Vertex,Fragment}Bytes` / `setBytes`.
     pub slot: u32,
-    /// Total block size in bytes delivered to this stage: the pipeline
-    /// layout's reserved user-immediate budget, plus 8 bytes when this
-    /// stage also carries the frag-depth clamp range.
+    /// Total block size in bytes delivered to this stage.
     pub block_size: u32,
+    /// Bytes of user immediates at the start of the block: the pipeline
+    /// layout's reserved user-immediate budget.
+    pub user_size: u32,
     /// Byte offset of the 8-byte frag-depth clamp range
     /// (`[min_depth, max_depth]`, both `f32`) within the block, when this
     /// stage clamps frag_depth. Always `None` for vertex and compute
     /// stages.
     pub frag_depth_clamp_offset: Option<u32>,
+    /// Byte offset of the `array<u32, N>` buffer sizes within the block,
+    /// when this stage has any (`N > 0`).
+    pub buffer_sizes_offset: Option<u32>,
 }
 
 impl HalMslImmediates {
     /// Creates a new Metal immediates delivery descriptor.
     #[must_use]
-    pub fn new(slot: u32, block_size: u32, frag_depth_clamp_offset: Option<u32>) -> Self {
+    pub fn new(
+        slot: u32,
+        block_size: u32,
+        user_size: u32,
+        frag_depth_clamp_offset: Option<u32>,
+        buffer_sizes_offset: Option<u32>,
+    ) -> Self {
         Self {
             slot,
             block_size,
+            user_size,
             frag_depth_clamp_offset,
+            buffer_sizes_offset,
         }
     }
 }
@@ -259,23 +265,23 @@ mod tests {
     fn hal_shader_source_msl_buffer_size_metadata_round_trips() {
         let source = HalShaderSource::MslWithBufferSizes {
             source: "kernel void main0() {}".to_owned(),
-            buffer_sizes_slot: Some(3),
             buffer_size_bindings: vec![HalMslBufferSizeBinding::new(1, 2)],
             workgroup_memory_sizes: vec![32, 16],
-            immediates: Some(HalMslImmediates::new(4, 16, None)),
+            immediates: Some(HalMslImmediates::new(4, 16, 0, None, Some(4))),
         };
 
         assert!(matches!(
             source,
             HalShaderSource::MslWithBufferSizes {
                 source,
-                buffer_sizes_slot: Some(3),
                 buffer_size_bindings,
                 workgroup_memory_sizes,
                 immediates: Some(HalMslImmediates {
                     slot: 4,
                     block_size: 16,
+                    user_size: 0,
                     frag_depth_clamp_offset: None,
+                    buffer_sizes_offset: Some(4),
                 }),
             } if source == "kernel void main0() {}"
                 && buffer_size_bindings == [HalMslBufferSizeBinding::new(1, 2)]
@@ -288,12 +294,10 @@ mod tests {
         let source = HalShaderSource::MslStagesWithBufferSizes {
             vertex: "vertex_src".to_owned(),
             fragment: Some("fragment_src".to_owned()),
-            vertex_buffer_sizes_slot: Some(7),
             vertex_buffer_size_bindings: vec![HalMslBufferSizeBinding::new(0, 1)],
-            fragment_buffer_sizes_slot: None,
             fragment_buffer_size_bindings: Vec::new(),
             vertex_immediates: None,
-            fragment_immediates: Some(HalMslImmediates::new(30, 72, Some(64))),
+            fragment_immediates: Some(HalMslImmediates::new(30, 80, 64, Some(64), None)),
             vertex_buffer_metal_indices: vec![3, 5],
         };
 
@@ -302,15 +306,15 @@ mod tests {
             HalShaderSource::MslStagesWithBufferSizes {
                 vertex,
                 fragment,
-                vertex_buffer_sizes_slot: Some(7),
                 vertex_buffer_size_bindings,
-                fragment_buffer_sizes_slot: None,
                 fragment_buffer_size_bindings,
                 vertex_immediates: None,
                 fragment_immediates: Some(HalMslImmediates {
                     slot: 30,
-                    block_size: 72,
+                    block_size: 80,
+                    user_size: 64,
                     frag_depth_clamp_offset: Some(64),
+                    buffer_sizes_offset: None,
                 }),
                 vertex_buffer_metal_indices,
             } if vertex == "vertex_src"
@@ -323,14 +327,16 @@ mod tests {
 
     #[test]
     fn hal_msl_immediates_new_round_trips_fields() {
-        let immediates = HalMslImmediates::new(30, 72, Some(64));
+        let immediates = HalMslImmediates::new(30, 96, 64, Some(64), Some(76));
 
         assert_eq!(
             immediates,
             HalMslImmediates {
                 slot: 30,
-                block_size: 72,
+                block_size: 96,
+                user_size: 64,
                 frag_depth_clamp_offset: Some(64),
+                buffer_sizes_offset: Some(76),
             }
         );
     }

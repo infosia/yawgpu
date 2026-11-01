@@ -132,23 +132,15 @@ impl MetalDevice {
         workgroup_size: (u32, u32, u32),
         _bindings: &[HalDescriptorBinding],
     ) -> Result<MetalComputePipeline, HalError> {
-        let (
-            msl_source,
-            buffer_sizes_slot,
-            buffer_size_bindings,
-            workgroup_memory_sizes,
-            immediates,
-        ) = match shader {
-            HalShaderSource::Msl(source) => (source, None, Vec::new(), Vec::new(), None),
+        let (msl_source, buffer_size_bindings, workgroup_memory_sizes, immediates) = match shader {
+            HalShaderSource::Msl(source) => (source, Vec::new(), Vec::new(), None),
             HalShaderSource::MslWithBufferSizes {
                 source,
-                buffer_sizes_slot,
                 buffer_size_bindings,
                 workgroup_memory_sizes,
                 immediates,
             } => (
                 source,
-                buffer_sizes_slot,
                 buffer_size_bindings,
                 workgroup_memory_sizes,
                 immediates,
@@ -164,7 +156,6 @@ impl MetalDevice {
             &msl_source,
             entry_point,
             workgroup_size,
-            buffer_sizes_slot,
             buffer_size_bindings,
             workgroup_memory_sizes,
             immediates,
@@ -371,7 +362,6 @@ kernel void cs(
         .to_owned();
         let shader = HalShaderSource::MslWithBufferSizes {
             source,
-            buffer_sizes_slot: None,
             buffer_size_bindings: Vec::new(),
             workgroup_memory_sizes: vec![32, 16],
             immediates: None,

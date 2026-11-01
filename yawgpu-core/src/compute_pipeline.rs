@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use yawgpu_hal::{
     HalBackend, HalBufferBindingKind, HalComputePipeline, HalDescriptorBinding,
-    HalDescriptorBindingKind, HalDevice, HalMslBufferSizeBinding, HalMslImmediates,
-    HalShaderSource, HalStorageTextureAccess, HalSubgroupSizeControlCaps,
+    HalDescriptorBindingKind, HalDevice, HalMslBufferSizeBinding, HalShaderSource,
+    HalStorageTextureAccess, HalSubgroupSizeControlCaps,
 };
 
 use crate::bind_group_layout::*;
@@ -390,13 +390,10 @@ pub(crate) fn select_compute_shader_source(
                 &pipeline_constants,
                 user_immediate_size,
             )?;
-            let immediates = generated
-                .immediate_slot
-                .map(|slot| HalMslImmediates::new(slot, user_immediate_size, None));
+            let immediates = generated.hal_immediates(user_immediate_size);
             Ok((
                 HalShaderSource::MslWithBufferSizes {
                     source: generated.source,
-                    buffer_sizes_slot: generated.buffer_sizes_slot,
                     buffer_size_bindings: hal_msl_buffer_size_bindings(
                         &generated.buffer_size_bindings,
                     ),
@@ -1224,8 +1221,9 @@ pub(crate) fn resolve_compute_workgroup(
 /// R4), returning the size the HAL must require.
 ///
 /// Rules run in Dawn order after the workgroup-size limit checks:
-/// 4 (power of two / non-zero; Tint enforces it only for const-expressions,
-/// not for override-driven values), then 1 (`x % S == 0`, Dawn
+/// 4 (power of two / non-zero; a backstop, since Tint now rejects both
+/// non-zero non-power-of-two and zero override values while resolving the
+/// workgroup info, Block 118), then 1 (`x % S == 0`, Dawn
 /// `ValidateComputeStageWorkgroupSize`), 2 (`S` within the explicit range),
 /// and 3 (`x·y·z / S <= maxComputeWorkgroupSubgroups`; Dawn
 /// `ShaderModuleVk.cpp`). The rules are backend-independent.
@@ -2338,11 +2336,13 @@ fn cs() {
                 r#"
 requires immediate_address_space;
 
-var<immediate> big : array<vec4u, 5>;
+struct Big { a: vec4u, b: vec4u, c: vec4u, d: vec4u, e: vec4u }
+
+var<immediate> big : Big;
 
 @compute @workgroup_size(1)
 fn cs() {
-  let v = big[0];
+  let v = big.a;
   _ = v;
 }
 "#
@@ -2674,10 +2674,9 @@ fn cs() {
 
     /// Block 94 S2: a compute entry point using a user `var<immediate>`
     /// threads `HalMslImmediates` from Tint's reflection into
-    /// `HalShaderSource::MslWithBufferSizes` -- compute pipelines have no
-    /// pipeline-internal immediates, so `block_size` equals the layout's
-    /// reserved `user_immediate_size` verbatim and
-    /// `frag_depth_clamp_offset` is always `None`.
+    /// `HalShaderSource::MslWithBufferSizes`. The block is the layout's
+    /// reserved `user_immediate_size` plus the non-constant-zero word,
+    /// rounded up to 16, and `frag_depth_clamp_offset` is always `None`.
     #[test]
     fn select_compute_shader_source_metal_threads_immediate_metadata_to_hal_shader_source() {
         let device = noop_device();
@@ -2714,10 +2713,57 @@ fn cs() {
             panic!("Metal backend must select MslWithBufferSizes");
         };
         let immediates = immediates.expect("compute entry point references params");
-        assert_eq!(immediates.block_size, 16);
+        assert_eq!(immediates.user_size, 16);
+        assert_eq!(immediates.block_size, 32);
         assert_eq!(immediates.frag_depth_clamp_offset, None);
+        assert_eq!(immediates.buffer_sizes_offset, None);
         assert_eq!(entry, "tint_cs");
         assert!(bindings.is_empty());
+    }
+
+    /// Block 118 R4: a sizes-only compute stage still gets an immediate
+    /// block, with the sizes after the non-constant-zero word.
+    #[test]
+    fn select_compute_shader_source_metal_sizes_only_stage_gets_immediate_block() {
+        let device = noop_device();
+        let module = device.create_shader_module(ShaderModuleSource::Wgsl(
+            r#"
+struct Data { values: array<u32> }
+@group(0) @binding(0) var<storage, read_write> data: Data;
+
+@compute @workgroup_size(1)
+fn cs() {
+  data.values[0] = arrayLength(&data.values);
+}
+"#
+            .to_owned(),
+        ));
+
+        let (source, ..) = select_compute_shader_source(
+            HalBackend::Metal,
+            &module,
+            "cs",
+            &[],
+            &[],
+            false,
+            0,
+            true,
+        )
+        .expect("compute pipeline should select Metal MSL");
+
+        let HalShaderSource::MslWithBufferSizes {
+            buffer_size_bindings,
+            immediates,
+            ..
+        } = source
+        else {
+            panic!("Metal backend must select MslWithBufferSizes");
+        };
+        let immediates = immediates.expect("a stage with buffer sizes needs the block");
+        assert_eq!(buffer_size_bindings.len(), 1);
+        assert_eq!(immediates.user_size, 0);
+        assert_eq!(immediates.buffer_sizes_offset, Some(4));
+        assert_eq!(immediates.block_size, 16);
     }
 
     /// Block 94 S3 Vulkan counterpart of the Metal threading test above: a
@@ -4108,17 +4154,22 @@ fn test() {{
         let message = create_subgroup_size_pipeline(&device, &wgsl, sg_constant(8.0))
             .expect("sg = 8 is outside [4, 4]");
         assert!(message.contains("not in the allowed range"), "{message}");
-        // Tint does not reject a non-power-of-two / zero override value, so
-        // core rule 4 does (before rule 1: 8 % 6 != 0 would also fail).
+        // Tint rejects a non-zero non-power-of-two override value during
+        // substitution, with its own message (Block 118 R12).
         let message = create_subgroup_size_pipeline(&device, &wgsl, sg_constant(6.0))
             .expect("sg = 6 is not a power of two");
         assert_eq!(
             message,
-            "subgroup_size attribute (6) must be a power of two greater than zero"
+            "error: @subgroup_size value must be a power of two"
         );
+        // Zero is rejected by Tint's IR validator, so it does not reach core
+        // rule 4 either. The rule's own test calls it directly.
         let message = create_subgroup_size_pipeline(&device, &wgsl, sg_constant(0.0))
             .expect("sg = 0 is not a power of two");
-        assert!(message.contains("must be a power of two"), "{message}");
+        assert_eq!(
+            message,
+            "error: @subgroup_size param must be greater than 0"
+        );
     }
 
     #[test]
