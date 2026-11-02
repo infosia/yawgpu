@@ -30,6 +30,7 @@ impl From<&PipelineConstants> for CanonicalConstants {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct MslCodegenKey {
+    workarounds: yawgpu_tint::MslWorkarounds,
     entry_point: String,
     binding_map: MslBindingMap,
     constants: CanonicalConstants,
@@ -43,6 +44,7 @@ struct MslCodegenKey {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SpirvCodegenKey {
+    workarounds: yawgpu_tint::SpirvWorkarounds,
     entry_point: String,
     constants: CanonicalConstants,
     vulkan_memory_model: bool,
@@ -322,8 +324,16 @@ impl ReflectedModule {
         polyfill_pixel_center: Option<u32>,
         user_immediate_size: u32,
         use_storage_input_output_16: bool,
+        workarounds: yawgpu_hal::HalShaderWorkarounds,
     ) -> Result<Vec<u32>, String> {
+        let workarounds = yawgpu_tint::SpirvWorkarounds {
+            polyfill_bool_vec_dynamic_store: workarounds.polyfill_bool_vec_dynamic_store,
+            replace_workgroup_atomic_store_with_exchange: workarounds
+                .replace_workgroup_atomic_store_with_exchange,
+            replace_unsigned_compare_zero: workarounds.replace_unsigned_compare_zero,
+        };
         let key = SpirvCodegenKey {
+            workarounds,
             entry_point: entry_name.to_owned(),
             constants: CanonicalConstants::from(pipeline_constants),
             vulkan_memory_model,
@@ -354,6 +364,7 @@ impl ReflectedModule {
                 polyfill_pixel_center,
                 user_immediate_size,
                 use_storage_input_output_16,
+                workarounds,
             )
             .map_err(|e| e.to_string());
         cache.insert(key, generated.clone());
@@ -458,6 +469,7 @@ impl ReflectedModule {
         binding_map: &MslBindingMap,
         pipeline_constants: &PipelineConstants,
         user_immediate_size: u32,
+        workarounds: yawgpu_hal::HalShaderWorkarounds,
     ) -> Result<GeneratedMsl, String> {
         // Robustness ENABLED (disable_robustness = false): WebGPU requires
         // out-of-bounds safety in compute shaders too.
@@ -471,6 +483,7 @@ impl ReflectedModule {
             false,
             0xFFFF_FFFF,
             user_immediate_size,
+            workarounds,
         )
     }
 
@@ -486,6 +499,7 @@ impl ReflectedModule {
         force_point_size: bool,
         pipeline_constants: &PipelineConstants,
         user_immediate_size: u32,
+        workarounds: yawgpu_hal::HalShaderWorkarounds,
     ) -> Result<GeneratedMsl, String> {
         // `force_point_size` makes Tint emit `[[point_size]] = 1.0` (point-list
         // topology requires it on Metal).
@@ -499,6 +513,7 @@ impl ReflectedModule {
             force_point_size,
             0xFFFF_FFFF,
             user_immediate_size,
+            workarounds,
         )
     }
 
@@ -514,6 +529,7 @@ impl ReflectedModule {
         pipeline_constants: &PipelineConstants,
         sample_mask: u32,
         user_immediate_size: u32,
+        workarounds: yawgpu_hal::HalShaderWorkarounds,
     ) -> Result<GeneratedMsl, String> {
         self.generate_stage_msl(
             entry_name,
@@ -525,6 +541,7 @@ impl ReflectedModule {
             false,
             sample_mask,
             user_immediate_size,
+            workarounds,
         )
     }
 
@@ -540,8 +557,14 @@ impl ReflectedModule {
         emit_vertex_point_size: bool,
         fixed_sample_mask: u32,
         user_immediate_size: u32,
+        workarounds: yawgpu_hal::HalShaderWorkarounds,
     ) -> Result<GeneratedMsl, String> {
+        let workarounds = yawgpu_tint::MslWorkarounds {
+            fix_u32_div_mod: workarounds.fix_u32_div_mod,
+            polyfill_bool_vec_dynamic_store: workarounds.polyfill_bool_vec_dynamic_store,
+        };
         let key = MslCodegenKey {
+            workarounds,
             entry_point: entry_name.to_owned(),
             binding_map: binding_map.clone(),
             constants: CanonicalConstants::from(pipeline_constants),
@@ -580,6 +603,7 @@ impl ReflectedModule {
                     &tint_vertex_buffers,
                     fixed_sample_mask,
                     user_immediate_size,
+                    workarounds,
                 )
                 .map_err(|e| e.to_string())?;
             let buffer_size_bindings = output
@@ -1830,6 +1854,49 @@ fn reflected_override(override_: yawgpu_tint::Override) -> ReflectedOverride {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn codegen_workaround_flags_each_cause_a_cache_miss() {
+        let module = parse_and_validate_wgsl("@compute @workgroup_size(1) fn cs() {}").unwrap();
+        let constants = PipelineConstants::default();
+        let bindings = MslBindingMap {
+            resources: Vec::new(),
+        };
+        let mut msl_flags = [yawgpu_hal::HalShaderWorkarounds::default(); 3];
+        msl_flags[1].fix_u32_div_mod = true;
+        msl_flags[2].polyfill_bool_vec_dynamic_store = true;
+        for (i, flags) in msl_flags.into_iter().enumerate() {
+            for _ in 0..2 {
+                module
+                    .generate_msl("cs", &bindings, &constants, 0, flags)
+                    .unwrap();
+                assert_eq!(module.codegen_miss_count(), i + 1);
+            }
+        }
+        let mut spirv_flags = [yawgpu_hal::HalShaderWorkarounds::default(); 4];
+        spirv_flags[1].polyfill_bool_vec_dynamic_store = true;
+        spirv_flags[2].replace_workgroup_atomic_store_with_exchange = true;
+        spirv_flags[3].replace_unsigned_compare_zero = true;
+        for (i, flags) in spirv_flags.into_iter().enumerate() {
+            for _ in 0..2 {
+                module
+                    .generate_spirv(
+                        "cs",
+                        ShaderStage::Compute,
+                        &constants,
+                        false,
+                        0,
+                        false,
+                        None,
+                        0,
+                        true,
+                        flags,
+                    )
+                    .unwrap();
+                assert_eq!(module.codegen_miss_count(), 3 + i + 1);
+            }
+        }
+    }
+
+    #[test]
     fn phase_review_m5_override_lookup_memoizes_success_errors_and_concurrent_calls() {
         let module = std::sync::Arc::new(parse_and_validate_wgsl("override x: u32 = 1; @compute @workgroup_size(x) fn cs() {} @compute @workgroup_size(1) fn other() {}").unwrap());
         let workers: Vec<_> = (0..8)
@@ -1891,6 +1958,7 @@ mod tests {
                     None,
                     0,
                     enabled,
+                    Default::default(),
                 )
                 .unwrap();
             let mut i = 5;
@@ -1943,16 +2011,16 @@ fn cs() {}
         let binding_map = empty_msl_binding_map();
 
         let first = module
-            .generate_msl("cs", &binding_map, &constants, 0)
+            .generate_msl("cs", &binding_map, &constants, 0, Default::default())
             .unwrap();
         let second = module
-            .generate_msl("cs", &binding_map, &constants, 0)
+            .generate_msl("cs", &binding_map, &constants, 0, Default::default())
             .unwrap();
         assert_eq!(first, second);
         assert_eq!(module.codegen_miss_count(), 1);
 
         let _ = module
-            .generate_msl("cs", &binding_map, &constants, 4)
+            .generate_msl("cs", &binding_map, &constants, 4, Default::default())
             .unwrap();
         assert_eq!(module.codegen_miss_count(), 2);
     }
@@ -1975,8 +2043,12 @@ fn cs() {
         let xy = PipelineConstants::from_iter([("x".to_owned(), 3.0), ("y".to_owned(), 4.0)]);
         let yx = PipelineConstants::from_iter([("y".to_owned(), 4.0), ("x".to_owned(), 3.0)]);
 
-        let first = module.generate_msl("cs", &binding_map, &xy, 0).unwrap();
-        let second = module.generate_msl("cs", &binding_map, &yx, 0).unwrap();
+        let first = module
+            .generate_msl("cs", &binding_map, &xy, 0, Default::default())
+            .unwrap();
+        let second = module
+            .generate_msl("cs", &binding_map, &yx, 0, Default::default())
+            .unwrap();
         assert_eq!(first, second);
         assert_eq!(module.codegen_miss_count(), 1);
     }
@@ -2008,8 +2080,12 @@ fn cs() {
         let one = PipelineConstants::from_iter([("x".to_owned(), 1.0)]);
         let two = PipelineConstants::from_iter([("x".to_owned(), 2.0)]);
 
-        let first = module.generate_msl("cs", &binding_map, &one, 0).unwrap();
-        let second = module.generate_msl("cs", &binding_map, &two, 0).unwrap();
+        let first = module
+            .generate_msl("cs", &binding_map, &one, 0, Default::default())
+            .unwrap();
+        let second = module
+            .generate_msl("cs", &binding_map, &two, 0, Default::default())
+            .unwrap();
         assert_ne!(first.source, second.source);
         assert_eq!(module.codegen_miss_count(), 2);
     }
@@ -2027,10 +2103,10 @@ fn cs() {}
         let constants = PipelineConstants::default();
 
         let first = module
-            .generate_msl("missing", &binding_map, &constants, 0)
+            .generate_msl("missing", &binding_map, &constants, 0, Default::default())
             .unwrap_err();
         let second = module
-            .generate_msl("missing", &binding_map, &constants, 0)
+            .generate_msl("missing", &binding_map, &constants, 0, Default::default())
             .unwrap_err();
         assert_eq!(first, second);
         assert_eq!(module.codegen_miss_count(), 1);
@@ -2062,10 +2138,26 @@ fn vs(@location(0) p: vec4<f32>) -> @builtin(position) vec4<f32> {
         }];
 
         let first = module
-            .generate_render_vertex_msl("vs", &binding_map, &vertex_buffers, false, &constants, 0)
+            .generate_render_vertex_msl(
+                "vs",
+                &binding_map,
+                &vertex_buffers,
+                false,
+                &constants,
+                0,
+                Default::default(),
+            )
             .unwrap();
         let second = module
-            .generate_render_vertex_msl("vs", &binding_map, &vertex_buffers, false, &constants, 0)
+            .generate_render_vertex_msl(
+                "vs",
+                &binding_map,
+                &vertex_buffers,
+                false,
+                &constants,
+                0,
+                Default::default(),
+            )
             .unwrap();
         assert_eq!(first, second);
         assert_eq!(module.codegen_miss_count(), 1);
@@ -2073,7 +2165,15 @@ fn vs(@location(0) p: vec4<f32>) -> @builtin(position) vec4<f32> {
         let mut changed = vertex_buffers.clone();
         changed[0].attributes[0].offset = 4;
         let _ = module
-            .generate_render_vertex_msl("vs", &binding_map, &changed, false, &constants, 0)
+            .generate_render_vertex_msl(
+                "vs",
+                &binding_map,
+                &changed,
+                false,
+                &constants,
+                0,
+                Default::default(),
+            )
             .unwrap();
         assert_eq!(module.codegen_miss_count(), 2);
     }
@@ -2093,16 +2193,40 @@ fn fs() -> @builtin(sample_mask) u32 {
         let binding_map = empty_msl_binding_map();
 
         let all = module
-            .generate_render_fragment_msl("fs", &binding_map, &[], &constants, 0xFFFF_FFFF, 0)
+            .generate_render_fragment_msl(
+                "fs",
+                &binding_map,
+                &[],
+                &constants,
+                0xFFFF_FFFF,
+                0,
+                Default::default(),
+            )
             .unwrap();
         let narrow = module
-            .generate_render_fragment_msl("fs", &binding_map, &[], &constants, 0xF, 0)
+            .generate_render_fragment_msl(
+                "fs",
+                &binding_map,
+                &[],
+                &constants,
+                0xF,
+                0,
+                Default::default(),
+            )
             .unwrap();
         assert_ne!(all.source, narrow.source);
         assert_eq!(module.codegen_miss_count(), 2);
 
         let repeat = module
-            .generate_render_fragment_msl("fs", &binding_map, &[], &constants, 0xF, 0)
+            .generate_render_fragment_msl(
+                "fs",
+                &binding_map,
+                &[],
+                &constants,
+                0xF,
+                0,
+                Default::default(),
+            )
             .unwrap();
         assert_eq!(narrow, repeat);
         assert_eq!(module.codegen_miss_count(), 2);
@@ -2130,6 +2254,7 @@ fn cs() {}
                 None,
                 0,
                 true,
+                Default::default(),
             )
             .unwrap();
         let second = module
@@ -2143,6 +2268,7 @@ fn cs() {}
                 None,
                 0,
                 true,
+                Default::default(),
             )
             .unwrap();
         assert_eq!(first, second);
@@ -2159,6 +2285,7 @@ fn cs() {}
                 None,
                 0,
                 true,
+                Default::default(),
             )
             .unwrap();
         assert_eq!(module.codegen_miss_count(), 2);
@@ -2666,6 +2793,7 @@ fn fs() -> @location(0) vec4<f32> {
                 &PipelineConstants::default(),
                 0xFFFF_FFFF,
                 0,
+                Default::default(),
             )
             .unwrap();
 
@@ -2694,6 +2822,7 @@ fn fs() -> @location(0) vec4<f32> {
                 &PipelineConstants::default(),
                 0xFFFF_FFFF,
                 0,
+                Default::default(),
             )
             .expect_err("input attachment MSL generation should require a color-slot map");
         assert!(!err.is_empty());
@@ -2928,6 +3057,7 @@ fn main() {}
                 },
                 &PipelineConstants::default(),
                 0,
+                Default::default(),
             )
             .unwrap();
 
@@ -2973,6 +3103,7 @@ fn cs() {
                 },
                 &PipelineConstants::default(),
                 0,
+                Default::default(),
             )
             .unwrap();
 
@@ -3031,6 +3162,7 @@ fn vs(i: VIn) -> @builtin(position) vec4<f32> {
                 false,
                 &PipelineConstants::default(),
                 0,
+                Default::default(),
             )
             .unwrap();
 
@@ -3061,6 +3193,7 @@ fn cs() {}
             None,
             0,
             true,
+            Default::default(),
         )
         .unwrap();
         assert_eq!(compute.first().copied(), Some(0x0723_0203));
@@ -3097,6 +3230,7 @@ fn fs() -> @location(0) vec4<f32> {
                 None,
                 0,
                 true,
+                Default::default(),
             )
             .unwrap();
         let fragment = render
@@ -3110,6 +3244,7 @@ fn fs() -> @location(0) vec4<f32> {
                 None,
                 0,
                 true,
+                Default::default(),
             )
             .unwrap();
         assert_eq!(vertex.first().copied(), Some(0x0723_0203));
@@ -3201,6 +3336,7 @@ fn cs() {
                     None,
                     0,
                     true,
+                    Default::default(),
                 )
                 .unwrap();
             assert_eq!(spirv.first().copied(), Some(0x0723_0203));
@@ -3567,6 +3703,7 @@ fn cs() {
                 },
                 &PipelineConstants::default(),
                 0,
+                Default::default(),
             )
             .unwrap();
 
@@ -3622,6 +3759,7 @@ fn cs() {
                 },
                 &PipelineConstants::default(),
                 0,
+                Default::default(),
             )
             .unwrap();
 

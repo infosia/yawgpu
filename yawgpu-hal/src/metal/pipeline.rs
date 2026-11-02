@@ -14,7 +14,7 @@ pub struct MetalComputePipeline {
     /// entry in this vec before every dispatch.
     pub(super) workgroup_memory_sizes: Vec<u32>,
     /// Compute-stage immediate block metadata. `None` when the entry point
-    /// needs no block (no `var<immediate>` data and no buffer sizes).
+    /// needs no user data, buffer sizes, or non-constant-zero workaround.
     pub(super) immediates: Option<HalMslImmediates>,
 }
 

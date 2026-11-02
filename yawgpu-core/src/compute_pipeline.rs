@@ -429,6 +429,7 @@ pub(crate) fn create_hal_compute_pipeline(
         hal_device.vulkan_memory_model(),
         user_immediate_size,
         hal_device.vulkan_storage_input_output16(),
+        hal_device.shader_workarounds(),
     ) {
         Ok(selection) => selection,
         Err(message) => return (None, Some(message)),
@@ -450,8 +451,7 @@ pub(crate) fn create_hal_compute_pipeline(
 ///
 /// `user_immediate_size` is the owning pipeline layout's reserved
 /// user-immediate byte budget (Block 94, `layout.immediate_size`, 0..=64).
-/// Compute pipelines have no pipeline-internal immediates today, so the
-/// Metal immediates block (when present) is exactly this many bytes.
+/// Metal appends internal non-constant-zero and buffer-size data after this region.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn select_compute_shader_source(
     backend: HalBackend,
@@ -462,6 +462,7 @@ pub(crate) fn select_compute_shader_source(
     vulkan_memory_model: bool,
     user_immediate_size: u32,
     use_storage_input_output_16: bool,
+    workarounds: yawgpu_hal::HalShaderWorkarounds,
 ) -> Result<(HalShaderSource, String, Vec<HalDescriptorBinding>), String> {
     let pipeline_constants = pipeline_constant_map(constants);
     match backend {
@@ -495,6 +496,7 @@ pub(crate) fn select_compute_shader_source(
                 &msl_binding_map,
                 &pipeline_constants,
                 user_immediate_size,
+                workarounds,
             )?;
             let immediates = generated.hal_immediates(user_immediate_size);
             Ok((
@@ -545,6 +547,7 @@ pub(crate) fn select_compute_shader_source(
                 None,
                 user_immediate_size,
                 use_storage_input_output_16,
+                workarounds,
             )?;
             Ok((
                 HalShaderSource::SpirV(spirv),
@@ -2853,9 +2856,18 @@ fn cs() {
             "@compute @workgroup_size(2, 1, 1) fn cs() {}".to_owned(),
         ));
 
-        let (source, entry, bindings) =
-            select_compute_shader_source(HalBackend::Gles, &wgsl, "cs", &[], &[], false, 0, true)
-                .expect("WGSL should generate GLES GLSL");
+        let (source, entry, bindings) = select_compute_shader_source(
+            HalBackend::Gles,
+            &wgsl,
+            "cs",
+            &[],
+            &[],
+            false,
+            0,
+            true,
+            Default::default(),
+        )
+        .expect("WGSL should generate GLES GLSL");
 
         let HalShaderSource::Glsl {
             source,
@@ -2912,6 +2924,7 @@ fn cs() {
             false,
             16,
             true,
+            Default::default(),
         )
         .expect("compute pipeline with a user immediate should select Metal MSL");
 
@@ -2925,6 +2938,47 @@ fn cs() {
         assert_eq!(immediates.buffer_sizes_offset, None);
         assert_eq!(entry, "tint_cs");
         assert!(bindings.is_empty());
+    }
+
+    #[test]
+    fn select_compute_shader_source_metal_workaround_alone_delivers_immediates() {
+        let device = noop_device();
+        let module = device.create_shader_module(ShaderModuleSource::Wgsl(
+            r#"
+var<workgroup> sink: atomic<u32>;
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) {
+    atomicStore(&sink, i / 3u + i % 3u);
+}
+"#
+            .to_owned(),
+        ));
+        for enabled in [false, true] {
+            let mut flags = yawgpu_hal::HalShaderWorkarounds::default();
+            flags.fix_u32_div_mod = enabled;
+            let (source, _, bindings) = select_compute_shader_source(
+                HalBackend::Metal,
+                &module,
+                "cs",
+                &[],
+                &[],
+                false,
+                0,
+                true,
+                flags,
+            )
+            .expect("generate compute MSL on Noop");
+            assert!(bindings.is_empty());
+            assert!(matches!(source,
+                HalShaderSource::MslWithBufferSizes {
+                    source, buffer_size_bindings, immediates, ..
+                } if buffer_size_bindings.is_empty()
+                    && source.contains("tint_non_constant_zero") == enabled
+                    && immediates.is_some() == enabled
+                    && immediates.is_none_or(|block| block.user_size == 0
+                        && block.block_size > 0 && block.buffer_sizes_offset.is_none()
+                        && block.frag_depth_clamp_offset.is_none())
+            ));
+        }
     }
 
     /// Block 118 R4: a sizes-only compute stage still gets an immediate
@@ -2954,6 +3008,7 @@ fn cs() {
             false,
             0,
             true,
+            Default::default(),
         )
         .expect("compute pipeline should select Metal MSL");
 
@@ -3004,6 +3059,7 @@ fn cs() {
             false,
             16,
             true,
+            Default::default(),
         )
         .expect("compute pipeline with a user immediate should select Vulkan SPIR-V");
 
@@ -3051,7 +3107,13 @@ fn cs() {
     fn select_compute_shader_source_rejects_external_texture_on_vulkan() {
         let device = noop_device();
         let wgsl = device.create_shader_module(ShaderModuleSource::Wgsl(
-            "@compute @workgroup_size(1) fn cs() {}".to_owned(),
+            r#"
+var<workgroup> sink: atomic<u32>;
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) {
+    atomicStore(&sink, i / 3u + i % 3u);
+}
+"#
+            .to_owned(),
         ));
         let external = [MetalBufferBinding {
             group: 0,
@@ -3073,6 +3135,7 @@ fn cs() {
             false,
             0,
             true,
+            Default::default(),
         )
         .expect_err("Vulkan must reject external textures");
         assert_eq!(
@@ -3555,6 +3618,7 @@ fn cs() {
             false,
             0,
             true,
+            Default::default(),
         )
         .expect_err("SPIR-V passthrough must reject Metal");
 
@@ -3578,6 +3642,7 @@ fn cs() {
             false,
             0,
             true,
+            Default::default(),
         )
         .expect("SPIR-V passthrough should select Vulkan source");
 
@@ -3670,6 +3735,7 @@ fn cs() {
             false,
             0,
             true,
+            Default::default(),
         )
         .expect_err("MSL passthrough must reject Vulkan");
 

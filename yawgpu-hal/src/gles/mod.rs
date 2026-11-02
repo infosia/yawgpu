@@ -87,3 +87,33 @@ pub(super) fn rebuild_hal_error(error: &crate::HalError) -> crate::HalError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "manual real-backend test"]
+    fn hal_device_shader_workarounds_gles_returns_all_false() {
+        // GlesDevice owns a live GL context, so it has no device-free constructor.
+        let device = GlesInstance::new().and_then(|instance| {
+            instance
+                .enumerate_adapters()
+                .into_iter()
+                .next()
+                .ok_or(crate::HalError::BackendUnavailable { backend: BACKEND })?
+                .create_device()
+        });
+        let device = match device {
+            Ok(device) => crate::HalDevice::Gles(device),
+            Err(error) => {
+                eprintln!("skipping: GLES device unavailable: {error:?}");
+                return;
+            }
+        };
+        assert_eq!(
+            device.shader_workarounds(),
+            crate::HalShaderWorkarounds::default()
+        );
+    }
+}

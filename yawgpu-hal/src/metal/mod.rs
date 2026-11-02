@@ -510,7 +510,25 @@ impl MetalAdapter {
             mock_blit: std::sync::OnceLock::new(),
             serialize_timestamps: self.device.supportsFamily(MTLGPUFamily::Apple8),
         });
+        #[cfg(target_os = "macos")]
+        let os_at_least_26_6_1 = objc2_foundation::NSProcessInfo::processInfo()
+            .isOperatingSystemAtLeastVersion(objc2_foundation::NSOperatingSystemVersion {
+                majorVersion: crate::shader_workarounds::METAL_U32_DIV_MOD_FIXED_VERSION.0,
+                minorVersion: crate::shader_workarounds::METAL_U32_DIV_MOD_FIXED_VERSION.1,
+                patchVersion: crate::shader_workarounds::METAL_U32_DIV_MOD_FIXED_VERSION.2,
+            });
+        #[cfg(not(target_os = "macos"))]
+        let os_at_least_26_6_1 = false;
+        let forced = std::env::var("YAWGPU_FORCE_SHADER_WORKAROUNDS").ok();
+        let shader_workarounds = crate::HalShaderWorkarounds::for_metal(
+            cfg!(target_os = "macos"),
+            self.gpu_family().is_apple(),
+            self.name.to_ascii_lowercase().contains("intel"),
+            os_at_least_26_6_1,
+        )
+        .with_forced(crate::HalShaderWorkarounds::parse_forced(forced.as_deref()));
         Ok(MetalDevice {
+            shader_workarounds,
             timestamp_resources: timestamp_resources.clone(),
             device: self.device.clone(),
             allocations: AtomicU64::new(0),
@@ -664,6 +682,20 @@ pub use texture::{MetalSampler, MetalTexture};
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "manual real-backend test"]
+    fn forced_shader_workarounds_reach_metal_device() {
+        let _lock = crate::shader_workarounds::FORCE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("YAWGPU_FORCE_SHADER_WORKAROUNDS", "fix_u32_div_mod");
+        let device = test_helpers::metal_device_or_skip();
+        std::env::remove_var("YAWGPU_FORCE_SHADER_WORKAROUNDS");
+        let Some(device) = device else { return };
+        let device = crate::HalDevice::Metal(device);
+        assert!(device.shader_workarounds().fix_u32_div_mod);
+    }
+
     use super::*;
 
     #[test]

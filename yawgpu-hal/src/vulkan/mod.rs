@@ -1094,7 +1094,16 @@ impl VulkanAdapter {
         };
         // Query the device property limit for anisotropy so create_sampler can clamp.
         let max_sampler_anisotropy = device_properties.limits.max_sampler_anisotropy;
+        let forced = std::env::var("YAWGPU_FORCE_SHADER_WORKAROUNDS").ok();
+        let shader_workarounds = crate::HalShaderWorkarounds::for_vulkan(
+            device_properties.vendor_id,
+            device_properties.driver_version,
+            cfg!(target_os = "android"),
+            cfg!(target_os = "windows"),
+        )
+        .with_forced(crate::HalShaderWorkarounds::parse_forced(forced.as_deref()));
         let inner = Arc::new(VulkanDeviceInner {
+            shader_workarounds,
             _instance: Arc::clone(&self.instance),
             device,
             physical_device: self.physical_device,
@@ -1735,6 +1744,23 @@ pub use texture::{VulkanSampler, VulkanTexture};
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "manual real-backend test"]
+    fn forced_shader_workarounds_reach_vulkan_device() {
+        let _lock = crate::shader_workarounds::FORCE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var(
+            "YAWGPU_FORCE_SHADER_WORKAROUNDS",
+            "replace_unsigned_compare_zero",
+        );
+        let device = test_helpers::vulkan_device_or_skip();
+        std::env::remove_var("YAWGPU_FORCE_SHADER_WORKAROUNDS");
+        let Some(device) = device else { return };
+        let device = crate::HalDevice::Vulkan(device);
+        assert!(device.shader_workarounds().replace_unsigned_compare_zero);
+    }
+
     #[test]
     fn audit_e11_only_cpu_physical_devices_are_fallback_adapters() {
         assert!(is_fallback_device_type(vk::PhysicalDeviceType::CPU));

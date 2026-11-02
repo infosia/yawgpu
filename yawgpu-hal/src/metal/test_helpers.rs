@@ -15,6 +15,25 @@ pub(crate) fn metal_device() -> MetalDevice {
     adapter.create_device().expect("create Metal device")
 }
 
+/// Returns a real Metal device, or skips when the backend is unavailable.
+pub(crate) fn metal_device_or_skip() -> Option<MetalDevice> {
+    let device = MetalInstance::new().and_then(|instance| {
+        instance
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .ok_or(crate::HalError::BackendUnavailable { backend: "metal" })?
+            .create_device()
+    });
+    match device {
+        Ok(device) => Some(device),
+        Err(error) => {
+            eprintln!("skipping: metal device unavailable: {error:?}");
+            None
+        }
+    }
+}
+
 /// Returns texture descriptor.
 pub(crate) fn texture_descriptor() -> HalTextureDescriptor {
     HalTextureDescriptor {

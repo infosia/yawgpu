@@ -39,6 +39,9 @@ mod format;
 mod immediates;
 mod present;
 mod shader;
+mod shader_workarounds;
+
+pub use shader_workarounds::HalShaderWorkarounds;
 
 pub use command::{
     HalBoundBuffer, HalBoundExternalTexture, HalBoundIndexBuffer, HalBoundIndirectBuffer,
@@ -759,6 +762,19 @@ impl HalDevice {
             Self::Metal(_) => HalBackend::Metal,
             #[cfg(feature = "gles")]
             Self::Gles(_) => HalBackend::Gles,
+        }
+    }
+
+    /// Returns the Tint driver workarounds cached at device creation.
+    #[must_use = "forward the selected workarounds to shader generation"]
+    pub fn shader_workarounds(&self) -> HalShaderWorkarounds {
+        match self {
+            #[cfg(feature = "metal")]
+            Self::Metal(device) => device.shader_workarounds,
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(device) => device.shader_workarounds(),
+            #[allow(unreachable_patterns)]
+            _ => HalShaderWorkarounds::default(),
         }
     }
 
@@ -1853,6 +1869,13 @@ mod tests {
     fn audit_t4_noop_does_not_enable_vulkan_storage_io16() -> Result<(), HalError> {
         let device = noop_device()?;
         assert!(!device.vulkan_storage_input_output16());
+        Ok(())
+    }
+
+    #[test]
+    fn hal_device_shader_workarounds_noop_returns_all_false() -> Result<(), HalError> {
+        let device = noop_device()?;
+        assert_eq!(device.shader_workarounds(), HalShaderWorkarounds::default());
         Ok(())
     }
 

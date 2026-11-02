@@ -17,6 +17,28 @@
 //! declarations) was duplicated verbatim between the two `cfg` arms.
 #![warn(missing_docs)]
 
+/// Driver workarounds consumed by the MSL writer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[must_use]
+pub struct MslWorkarounds {
+    /// Inject a non-constant zero into unsigned divide and modulo.
+    pub fix_u32_div_mod: bool,
+    /// Polyfill dynamically indexed boolean-vector stores.
+    pub polyfill_bool_vec_dynamic_store: bool,
+}
+
+/// Driver workarounds consumed by the SPIR-V writer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[must_use]
+pub struct SpirvWorkarounds {
+    /// Polyfill dynamically indexed boolean-vector stores.
+    pub polyfill_bool_vec_dynamic_store: bool,
+    /// Replace workgroup atomic stores with atomic exchanges.
+    pub replace_workgroup_atomic_store_with_exchange: bool,
+    /// Replace unsigned comparisons against zero.
+    pub replace_unsigned_compare_zero: bool,
+}
+
 /// Whether this build links the Tint backend.
 pub const HAVE_TINT: bool = cfg!(have_tint);
 
@@ -153,8 +175,8 @@ pub struct MslOutput {
     /// when this fragment entry point writes frag_depth.
     pub frag_depth_clamp_offset: Option<u32>,
     /// MSL buffer slot of the combined immediate block, when this entry point
-    /// needs it: user `var<immediate>` data, the frag-depth clamp, or buffer
-    /// sizes. `None` when it needs none of those. Always equal to
+    /// needs it: user `var<immediate>` data, the frag-depth clamp, buffer
+    /// sizes, or the unsigned divide/modulo workaround. `None` otherwise. Equal to
     /// `frag_depth_clamp_slot` when the latter is `Some` (same combined
     /// block, same slot).
     pub immediate_slot: Option<u32>,
@@ -1502,6 +1524,8 @@ mod real {
             ov: *const RawOverrideValue,
             n_ov: usize,
             disable_robustness: bool,
+            fix_u32_div_mod: bool,
+            polyfill_bool_vec_dynamic_store: bool,
             emit_vertex_point_size: bool,
             vertex_buffers: *const RawVertexBuffer,
             n_vertex_buffers: usize,
@@ -1517,6 +1541,9 @@ mod real {
             ov: *const RawOverrideValue,
             n_ov: usize,
             disable_robustness: bool,
+            polyfill_bool_vec_dynamic_store: bool,
+            replace_workgroup_atomic_store_with_exchange: bool,
+            replace_unsigned_compare_zero: bool,
             use_vulkan_memory_model: bool,
             use_storage_input_output_16: bool,
             framebuffer_fetch_descriptor_set: u32,
@@ -2055,6 +2082,11 @@ mod real {
 
         /// Generates MSL for `entry_point`.
         ///
+        /// `workarounds` selects device-specific Tint writer fixes. In particular,
+        /// `fix_u32_div_mod` sets the shim's `uses_immediates` for every entry point,
+        /// yielding an `immediate_slot` and nonzero `immediate_block_size` even
+        /// without user immediates, frag-depth clamp, buffer sizes, or division.
+        ///
         /// `user_immediate_size` is the owning pipeline layout's reserved
         /// user-immediate byte budget (`PipelineLayout.immediateSize`, 0..=64,
         /// Block 94) -- NOT this entry point's own smaller reflected
@@ -2078,6 +2110,7 @@ mod real {
             vertex_buffers: &[VertexBuffer],
             fixed_sample_mask: u32,
             user_immediate_size: u32,
+            workarounds: MslWorkarounds,
         ) -> Result<MslOutput, TintError> {
             let ep = cstring(entry_point, "entry point").map_err(TintError::Codegen)?;
             let raw_bindings = bindings.as_raw();
@@ -2109,6 +2142,8 @@ mod real {
                     raw_overrides.as_ptr(),
                     raw_overrides.len(),
                     !robust,
+                    workarounds.fix_u32_div_mod,
+                    workarounds.polyfill_bool_vec_dynamic_store,
                     emit_vertex_point_size,
                     raw_vertex_buffers.as_ptr(),
                     raw_vertex_buffers.len(),
@@ -2169,6 +2204,8 @@ mod real {
         }
 
         /// Generates SPIR-V words for `entry_point`.
+        /// `workarounds` selects device-specific Tint writer fixes for boolean
+        /// vector stores, workgroup atomic stores, and unsigned zero comparisons.
         /// `use_storage_input_output_16` permits 16-bit stage IO; disable it
         /// when the Vulkan device did not enable `storageInputOutput16`.
         ///
@@ -2193,6 +2230,7 @@ mod real {
             polyfill_pixel_center: Option<u32>,
             user_immediate_size: u32,
             use_storage_input_output_16: bool,
+            workarounds: SpirvWorkarounds,
         ) -> Result<Vec<u32>, TintError> {
             let ep = cstring(entry_point, "entry point").map_err(TintError::Codegen)?;
             let raw_bindings = bindings.as_raw();
@@ -2209,6 +2247,9 @@ mod real {
                     raw_overrides.as_ptr(),
                     raw_overrides.len(),
                     !robust,
+                    workarounds.polyfill_bool_vec_dynamic_store,
+                    workarounds.replace_workgroup_atomic_store_with_exchange,
+                    workarounds.replace_unsigned_compare_zero,
                     use_vulkan_memory_model,
                     use_storage_input_output_16,
                     framebuffer_fetch_descriptor_set,
@@ -2582,6 +2623,11 @@ mod stub {
         }
 
         /// Generates MSL for `entry_point`.
+        ///
+        /// `workarounds` selects device-specific Tint writer fixes. In particular,
+        /// `fix_u32_div_mod` sets the shim's `uses_immediates` for every entry point,
+        /// yielding an `immediate_slot` and nonzero `immediate_block_size` even
+        /// without user immediates, frag-depth clamp, buffer sizes, or division.
         #[allow(clippy::too_many_arguments)]
         pub fn generate_msl(
             &self,
@@ -2593,11 +2639,14 @@ mod stub {
             _vertex_buffers: &[VertexBuffer],
             _fixed_sample_mask: u32,
             _user_immediate_size: u32,
+            _workarounds: MslWorkarounds,
         ) -> Result<MslOutput, TintError> {
             Err(TintError::Unavailable)
         }
 
         /// Generates SPIR-V words for `entry_point`.
+        /// `workarounds` selects device-specific Tint writer fixes for boolean
+        /// vector stores, workgroup atomic stores, and unsigned zero comparisons.
         #[allow(clippy::too_many_arguments)]
         pub fn generate_spirv(
             &self,
@@ -2611,6 +2660,7 @@ mod stub {
             _polyfill_pixel_center: Option<u32>,
             _user_immediate_size: u32,
             _use_storage_input_output_16: bool,
+            _workarounds: SpirvWorkarounds,
         ) -> Result<Vec<u32>, TintError> {
             Err(TintError::Unavailable)
         }
@@ -2676,6 +2726,250 @@ pub use stub::initialize;
 
 #[cfg(all(test, have_tint))]
 mod tests {
+    // Each operation stays observable through storage so the writer must lower it.
+    const WORKAROUNDS_WGSL: &str = r#"
+@group(0) @binding(0) var<storage, read_write> result: array<u32, 4>;
+var<workgroup> counter: atomic<u32>;
+@compute @workgroup_size(1)
+fn cs(@builtin(local_invocation_index) index: u32) {
+    var v = vec4<bool>(false);
+    v[index % 4u] = true;
+    atomicStore(&counter, index);
+    result[0] = select(0u, 1u, v.x);
+    result[1] = index / 3u;
+    result[2] = index % 3u;
+    result[3] = select(atomicLoad(&counter), 42u, index == 0u);
+}
+"#;
+
+    fn workaround_msl(program: &Program, entry: &str, flags: MslWorkarounds) -> MslOutput {
+        program
+            .generate_msl(
+                entry,
+                &Bindings::default(),
+                &[],
+                true,
+                false,
+                &[],
+                u32::MAX,
+                0,
+                flags,
+            )
+            .unwrap()
+    }
+
+    fn workaround_spirv(program: &Program, flags: SpirvWorkarounds) -> Vec<u32> {
+        program
+            .generate_spirv(
+                "cs",
+                &Bindings::default(),
+                &[],
+                true,
+                false,
+                0,
+                false,
+                None,
+                0,
+                true,
+                flags,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn msl_workarounds_default_and_each_flag() {
+        let program = Program::parse(
+            WORKAROUNDS_WGSL,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        // FixU32DivMod reads the immediate in the function body; the declaration
+        // alone would not prove that arithmetic actually uses the workaround.
+        // PolyfillBoolVectorDynamicStores selects whole vectors using lane IDs.
+        for flags in [
+            MslWorkarounds::default(),
+            MslWorkarounds {
+                fix_u32_div_mod: true,
+                ..Default::default()
+            },
+            MslWorkarounds {
+                polyfill_bool_vec_dynamic_store: true,
+                ..Default::default()
+            },
+        ] {
+            let output = workaround_msl(&program, "cs", flags);
+            assert_eq!(
+                output.source.contains(".tint_non_constant_zero"),
+                flags.fix_u32_div_mod,
+                "{}",
+                output.source
+            );
+            assert_eq!(
+                output.source.contains("uint4(0u, 1u, 2u, 3u)"),
+                flags.polyfill_bool_vec_dynamic_store,
+                "{}",
+                output.source
+            );
+        }
+    }
+
+    // Walk instruction boundaries, so operand words cannot masquerade as opcodes.
+    fn spirv_instructions(words: &[u32]) -> Vec<&[u32]> {
+        assert_eq!(words[0], 0x0723_0203);
+        let mut instructions = Vec::new();
+        let mut offset = 5;
+        while offset < words.len() {
+            let count = (words[offset] >> 16) as usize;
+            assert!(count > 0 && offset + count <= words.len());
+            instructions.push(&words[offset..offset + count]);
+            offset += count;
+        }
+        instructions
+    }
+
+    #[test]
+    fn spirv_workarounds_default_and_each_flag() {
+        let program = Program::parse(
+            WORKAROUNDS_WGSL,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        for flags in [
+            SpirvWorkarounds::default(),
+            SpirvWorkarounds {
+                polyfill_bool_vec_dynamic_store: true,
+                ..Default::default()
+            },
+            SpirvWorkarounds {
+                replace_workgroup_atomic_store_with_exchange: true,
+                ..Default::default()
+            },
+            SpirvWorkarounds {
+                replace_unsigned_compare_zero: true,
+                ..Default::default()
+            },
+        ] {
+            let words = workaround_spirv(&program, flags);
+            let instructions = spirv_instructions(&words);
+            let has_opcode = |opcode| instructions.iter().any(|inst| inst[0] & 0xffff == opcode);
+            // BuiltinPolyfill changes workgroup atomicStore to OpAtomicExchange.
+            assert_eq!(
+                has_opcode(229),
+                flags.replace_workgroup_atomic_store_with_exchange
+            );
+            assert_eq!(
+                has_opcode(228),
+                !flags.replace_workgroup_atomic_store_with_exchange
+            );
+
+            // The bool-store transform is called from spirv/writer/raise/raise.cc.
+            // It emits a bool-vector OpIEqual and OpSelect, unlike a dynamic
+            // component store. Match the result type to avoid scalar comparisons
+            // introduced by workgroup initialization or the source's zero test.
+            let bool_type = instructions
+                .iter()
+                .find(|inst| inst[0] & 0xffff == 20)
+                .expect("OpTypeBool")[1];
+            let bool_vectors: Vec<_> = instructions
+                .iter()
+                .filter(|inst| inst[0] & 0xffff == 23 && inst[2] == bool_type)
+                .map(|inst| inst[1])
+                .collect();
+            for opcode in [170, 169] {
+                // OpIEqual, OpSelect
+                assert_eq!(
+                    instructions.iter().any(|inst| {
+                        inst[0] & 0xffff == opcode && bool_vectors.contains(&inst[1])
+                    }),
+                    flags.polyfill_bool_vec_dynamic_store
+                );
+            }
+
+            // ReplaceUnsignedCompareZero changes the source's u32 == 0 into
+            // u32 < 1. Follow the condition selecting 42, avoiding unrelated
+            // OpULessThan instructions from workgroup initialization/robustness.
+            let forty_two = instructions
+                .iter()
+                .find(|inst| inst[0] & 0xffff == 43 && inst[3] == 42)
+                .expect("OpConstant 42")[2];
+            let condition = instructions
+                .iter()
+                .find(|inst| inst[0] & 0xffff == 169 && inst[4] == forty_two)
+                .expect("OpSelect of 42")[3];
+            let comparison = instructions
+                .iter()
+                .find(|inst| matches!(inst[0] & 0xffff, 170 | 176) && inst[2] == condition)
+                .expect("zero comparison feeding the select");
+            assert_eq!(
+                comparison[0] & 0xffff == 176,
+                flags.replace_unsigned_compare_zero
+            );
+            assert_eq!(
+                comparison[0] & 0xffff == 170,
+                !flags.replace_unsigned_compare_zero
+            );
+        }
+    }
+
+    #[test]
+    fn msl_fix_u32_div_mod_delivers_zero_without_other_immediate_needs() {
+        let program = Program::parse(
+            r#"
+@compute @workgroup_size(1) fn cs() {}
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+    return vec4f(f32(i / 3u), f32(i % 3u), 0, 1);
+}
+@fragment fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
+    let i = u32(p.x);
+    return vec4f(f32(i / 3u), f32(i % 3u), 0, 1);
+}
+"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        for entry in ["cs", "vs", "fs"] {
+            let off = workaround_msl(&program, entry, MslWorkarounds::default());
+            assert!(off.immediate_slot.is_none());
+            assert_eq!(off.immediate_block_size, 0);
+            let on = workaround_msl(
+                &program,
+                entry,
+                MslWorkarounds {
+                    fix_u32_div_mod: true,
+                    ..Default::default()
+                },
+            );
+            // immediate_slot is the Rust projection of the shim's uses_immediates.
+            assert!(on.immediate_slot.is_some());
+            assert!(on.immediate_block_size >= 4);
+            if entry != "cs" {
+                assert!(
+                    on.source.contains("tint_non_constant_zero"),
+                    "{}",
+                    on.source
+                );
+            }
+        }
+    }
+
     #[test]
     fn audit_t4_spirv_f16_io_capability_follows_device_option() {
         let source = "enable f16; @fragment fn fs(@location(0) x: vec4<f16>) -> @location(0) vec4<f32> { return vec4<f32>(x); }";
@@ -2693,6 +2987,7 @@ mod tests {
                     None,
                     0,
                     enabled,
+                    Default::default(),
                 )
                 .unwrap();
             let mut i = 5;
@@ -3075,15 +3370,49 @@ fn main() {
         .unwrap();
         let bindings = Bindings::default();
         let msl = program
-            .generate_msl("cs", &bindings, &[], true, false, &[], 0xFFFF_FFFF, 0)
+            .generate_msl(
+                "cs",
+                &bindings,
+                &[],
+                true,
+                false,
+                &[],
+                0xFFFF_FFFF,
+                0,
+                Default::default(),
+            )
             .unwrap();
         assert!(msl.source.contains("kernel"), "MSL:\n{}", msl.source);
         let spirv = program
-            .generate_spirv("cs", &bindings, &[], true, false, 0, false, None, 0, true)
+            .generate_spirv(
+                "cs",
+                &bindings,
+                &[],
+                true,
+                false,
+                0,
+                false,
+                None,
+                0,
+                true,
+                Default::default(),
+            )
             .unwrap();
         assert_eq!(spirv.first().copied(), Some(0x0723_0203));
         let spirv_with_vulkan_memory_model = program
-            .generate_spirv("cs", &bindings, &[], true, true, 0, false, None, 0, true)
+            .generate_spirv(
+                "cs",
+                &bindings,
+                &[],
+                true,
+                true,
+                0,
+                false,
+                None,
+                0,
+                true,
+                Default::default(),
+            )
             .unwrap();
         assert_eq!(
             spirv_with_vulkan_memory_model.first().copied(),
@@ -4071,6 +4400,7 @@ fn main() {
                 None,
                 0,
                 true,
+                Default::default(),
             )
             .unwrap_err();
         assert!(!err.to_string().is_empty());
@@ -4103,6 +4433,7 @@ fn cs() {
                 &[],
                 0xFFFF_FFFF,
                 0,
+                Default::default(),
             )
             .unwrap();
         assert!(
@@ -4152,6 +4483,7 @@ fn cs() {
                 &[],
                 0xFFFF_FFFF,
                 0,
+                Default::default(),
             )
             .unwrap();
         assert!(
@@ -4174,11 +4506,33 @@ fn cs() {
         let bindings = Bindings::default();
         for ep in ["vs", "fs"] {
             let msl = program
-                .generate_msl(ep, &bindings, &[], true, false, &[], 0xFFFF_FFFF, 0)
+                .generate_msl(
+                    ep,
+                    &bindings,
+                    &[],
+                    true,
+                    false,
+                    &[],
+                    0xFFFF_FFFF,
+                    0,
+                    Default::default(),
+                )
                 .unwrap();
             assert!(!msl.source.is_empty());
             let spirv = program
-                .generate_spirv(ep, &bindings, &[], true, false, 0, false, None, 0, true)
+                .generate_spirv(
+                    ep,
+                    &bindings,
+                    &[],
+                    true,
+                    false,
+                    0,
+                    false,
+                    None,
+                    0,
+                    true,
+                    Default::default(),
+                )
                 .unwrap();
             assert_eq!(spirv.first().copied(), Some(0x0723_0203));
         }
@@ -4212,6 +4566,7 @@ fn cs() {
                 &[],
                 0xFFFF_FFFF,
                 0,
+                Default::default(),
             )
             .unwrap();
         assert!(msl.source.contains("[[color(0)]]"), "MSL:\n{}", msl.source);
@@ -4228,6 +4583,7 @@ fn cs() {
                 None,
                 0,
                 true,
+                Default::default(),
             )
             .unwrap();
         assert!(!spirv.is_empty());
@@ -4274,6 +4630,7 @@ fn cs() {
                 &[],
                 0xFFFF_FFFF,
                 0,
+                Default::default(),
             )
             .unwrap();
         assert!(msl.source.contains("[[color(0)]]"), "MSL:\n{}", msl.source);
@@ -4302,6 +4659,7 @@ fn cs() {
             &[],
             0xFFFF_FFFF,
             0,
+            Default::default(),
         ) {
             Ok(_) => panic!("expected input attachment MSL generation to fail without color slot"),
             Err(err) => err,
@@ -4378,6 +4736,7 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
                 None,
                 0,
                 true,
+                Default::default(),
             )
             .unwrap();
         let with = program
@@ -4392,6 +4751,7 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
                 Some(1),
                 0,
                 true,
+                Default::default(),
             )
             .unwrap();
         assert_eq!(without.first().copied(), Some(0x0723_0203));
@@ -4458,6 +4818,7 @@ fn cs() {
                 Some(1),
                 16,
                 true,
+                Default::default(),
             )
             .unwrap();
         assert_eq!(spirv.first().copied(), Some(0x0723_0203));
@@ -4476,6 +4837,7 @@ fn cs() {
             Some(1),
             0,
             true,
+            Default::default(),
         );
         let Err(collision_err) = collision else {
             panic!(
@@ -4504,6 +4866,7 @@ fn cs() {
                 None,
                 16,
                 true,
+                Default::default(),
             )
             .unwrap();
         assert_eq!(compute.first().copied(), Some(0x0723_0203));
@@ -4535,6 +4898,7 @@ fn cs() {
                 None,
                 0,
                 true,
+                Default::default(),
             )
             .unwrap();
         assert!(!spirv.is_empty());
@@ -4566,6 +4930,7 @@ fn cs() {
             None,
             0,
             true,
+            Default::default(),
         ) {
             Ok(_) => panic!("expected multisampled input attachment generation to fail"),
             Err(err) => err,
@@ -4617,6 +4982,7 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
                 None,
                 0,
                 true,
+                Default::default(),
             )
             .unwrap();
         assert!(!spirv.is_empty());
@@ -4675,6 +5041,7 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
                 None,
                 0,
                 true,
+                Default::default(),
             )
             .unwrap();
         assert_eq!(vertex.first().copied(), Some(0x0723_0203));
@@ -4693,6 +5060,7 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
                 None,
                 0,
                 true,
+                Default::default(),
             )
             .is_err());
     }
@@ -4817,6 +5185,7 @@ fn vs(@location(0) p: vec4f) -> @builtin(position) vec4f {
                     }],
                     0xFFFF_FFFF,
                     0,
+                    Default::default(),
                 )
                 .unwrap()
                 .source
@@ -4876,6 +5245,7 @@ fn cs() {
                     &[],
                     0xFFFF_FFFF,
                     0,
+                    Default::default(),
                 )
                 .unwrap();
             program
@@ -4890,6 +5260,7 @@ fn cs() {
                     None,
                     0,
                     true,
+                    Default::default(),
                 )
                 .unwrap();
             program
@@ -4934,6 +5305,7 @@ fn vs(i: VIn) -> @builtin(position) vec4f {
                 &[],
                 0xFFFF_FFFF,
                 0,
+                Default::default(),
             )
             .unwrap()
             .source;
@@ -4957,6 +5329,7 @@ fn vs(i: VIn) -> @builtin(position) vec4f {
                 }],
                 0xFFFF_FFFF,
                 0,
+                Default::default(),
             )
             .unwrap()
             .source;
@@ -4990,11 +5363,22 @@ fn fs() -> @location(0) vec4f {
                 &[],
                 0xFFFF_FFFF,
                 0,
+                Default::default(),
             )
             .unwrap()
             .source;
         let masked_msl = program
-            .generate_msl("fs", &Bindings::default(), &[], true, false, &[], 0x1, 0)
+            .generate_msl(
+                "fs",
+                &Bindings::default(),
+                &[],
+                true,
+                false,
+                &[],
+                0x1,
+                0,
+                Default::default(),
+            )
             .unwrap()
             .source;
 
@@ -5030,6 +5414,7 @@ fn fs() -> @builtin(frag_depth) f32 {
                 &[],
                 0xFFFF_FFFF,
                 0,
+                Default::default(),
             )
             .unwrap();
         assert!(frag_depth_msl.frag_depth_clamp_slot.is_some());
@@ -5058,6 +5443,7 @@ fn fs() -> @location(0) vec4f {
                 &[],
                 0xFFFF_FFFF,
                 0,
+                Default::default(),
             )
             .unwrap();
         assert_eq!(color_msl.frag_depth_clamp_slot, None);
@@ -5093,6 +5479,7 @@ fn cs() {
                 &[],
                 0xFFFF_FFFF,
                 16,
+                Default::default(),
             )
             .unwrap();
 
@@ -5145,6 +5532,7 @@ fn fs() -> @builtin(frag_depth) f32 {
                 &[],
                 0xFFFF_FFFF,
                 16,
+                Default::default(),
             )
             .unwrap();
 
@@ -5177,6 +5565,7 @@ fn fs() -> @builtin(frag_depth) f32 {
             &[],
             0xFFFF_FFFF,
             0,
+            Default::default(),
         );
         let Err(collision_err) = collision_result else {
             panic!(
@@ -5218,6 +5607,7 @@ struct Data { values: array<u32> }
             &[],
             FULL_SAMPLE_MASK,
             user_immediate_size,
+            Default::default(),
         )
     }
 
@@ -5368,6 +5758,7 @@ fn vs(@location(0) p: vec4f) -> @builtin(position) vec4f {
                 &[vertex_buffer(0, 5), vertex_buffer(1, 6)],
                 FULL_SAMPLE_MASK,
                 0,
+                Default::default(),
             )
             .unwrap();
 
@@ -5421,6 +5812,7 @@ fn vs(@location(0) p: vec4f) -> @builtin(position) vec4f {
                 }],
                 FULL_SAMPLE_MASK,
                 0,
+                Default::default(),
             )
             .unwrap();
 
@@ -5455,7 +5847,17 @@ fn vs(@location(0) p: vec4f) -> @builtin(position) vec4f {
         };
 
         let msl = program
-            .generate_msl("cs", &bindings, &[], true, false, &[], FULL_SAMPLE_MASK, 0)
+            .generate_msl(
+                "cs",
+                &bindings,
+                &[],
+                true,
+                false,
+                &[],
+                FULL_SAMPLE_MASK,
+                0,
+                Default::default(),
+            )
             .unwrap();
 
         assert_eq!(msl.immediate_slot, Some(2));
@@ -5531,6 +5933,7 @@ fn vs(@location(0) p: vec4f) -> @builtin(position) vec4f {
                 &[],
                 FULL_SAMPLE_MASK,
                 budget,
+                Default::default(),
             );
 
             let Err(TintError::Codegen(message)) = result else {
@@ -5552,7 +5955,17 @@ fn vs(@location(0) p: vec4f) -> @builtin(position) vec4f {
             format!("{decls}@compute @workgroup_size(1)\nfn cs() {{ let v = sum_all(); _ = v; }}");
         let program = parse_with_immediates(&wgsl);
         let msl = program
-            .generate_msl("cs", &bindings, &[], true, false, &[], FULL_SAMPLE_MASK, 0)
+            .generate_msl(
+                "cs",
+                &bindings,
+                &[],
+                true,
+                false,
+                &[],
+                FULL_SAMPLE_MASK,
+                0,
+                Default::default(),
+            )
             .unwrap();
         assert_eq!(msl.immediate_slot, None);
 
@@ -5562,7 +5975,17 @@ fn vs(@location(0) p: vec4f) -> @builtin(position) vec4f {
         );
         let program = parse_with_immediates(&wgsl);
         let msl = program
-            .generate_msl("fs", &bindings, &[], true, false, &[], FULL_SAMPLE_MASK, 0)
+            .generate_msl(
+                "fs",
+                &bindings,
+                &[],
+                true,
+                false,
+                &[],
+                FULL_SAMPLE_MASK,
+                0,
+                Default::default(),
+            )
             .unwrap();
         assert_eq!(msl.immediate_slot, Some(30));
     }
@@ -5730,6 +6153,7 @@ fn cs() {}
                 &[],
                 0xFFFF_FFFF,
                 0,
+                Default::default(),
             )
             .unwrap()
             .source;
@@ -5746,6 +6170,7 @@ fn cs() {}
                 &[],
                 0xFFFF_FFFF,
                 0,
+                Default::default(),
             )
             .unwrap()
             .source;
@@ -5806,7 +6231,17 @@ fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
         };
 
         let msl = program
-            .generate_msl("fs", &bindings, &[], true, false, &[], 0xFFFF_FFFF, 0)
+            .generate_msl(
+                "fs",
+                &bindings,
+                &[],
+                true,
+                false,
+                &[],
+                0xFFFF_FFFF,
+                0,
+                Default::default(),
+            )
             .unwrap();
         assert!(!msl.source.is_empty(), "MSL was empty");
         assert!(msl.source.contains("sampler"), "MSL:\n{}", msl.source);
@@ -5846,11 +6281,22 @@ fn cs() { _ = u.value; }
                 &[],
                 0xFFFF_FFFF,
                 0,
+                Default::default(),
             )
             .unwrap()
             .source;
         let remapped_msl = program
-            .generate_msl("cs", &remapped, &[], true, false, &[], 0xFFFF_FFFF, 0)
+            .generate_msl(
+                "cs",
+                &remapped,
+                &[],
+                true,
+                false,
+                &[],
+                0xFFFF_FFFF,
+                0,
+                Default::default(),
+            )
             .unwrap()
             .source;
         assert!(remapped_msl.contains("[[buffer(7)]]"), "{remapped_msl}");
@@ -5868,10 +6314,23 @@ fn cs() { _ = u.value; }
                 None,
                 0,
                 true,
+                Default::default(),
             )
             .unwrap();
         let remapped_spv = program
-            .generate_spirv("cs", &remapped, &[], true, false, 0, false, None, 0, true)
+            .generate_spirv(
+                "cs",
+                &remapped,
+                &[],
+                true,
+                false,
+                0,
+                false,
+                None,
+                0,
+                true,
+                Default::default(),
+            )
             .unwrap();
         assert_ne!(default_spv, remapped_spv);
         assert!(spirv_has_binding_decoration(&remapped_spv, 7));
@@ -6028,6 +6487,7 @@ fn cs() {
                 &[],
                 0xFFFF_FFFF,
                 0,
+                Default::default(),
             )
             .unwrap();
         assert!(msl.source.contains("kernel"));
@@ -6366,6 +6826,7 @@ fn cs() {}
                 &[],
                 0xFFFF_FFFF,
                 0,
+                Default::default(),
             )
             .unwrap();
         assert!(msl.source.contains("kernel"));
@@ -6418,6 +6879,7 @@ fn cs() {
                     &[],
                     0xFFFF_FFFF,
                     0,
+                    Default::default(),
                 )
                 .unwrap()
         };
@@ -6450,6 +6912,7 @@ fn cs() {
                     None,
                     0,
                     true,
+                    Default::default(),
                 )
                 .unwrap()
         };
@@ -6510,6 +6973,7 @@ fn fs(in: VsOut) -> @location(0) vec4f {
                     &vertex_buffers,
                     0xFFFF_FFFF,
                     0,
+                    Default::default(),
                 )
                 .unwrap()
         };
@@ -6535,6 +6999,7 @@ fn fs(in: VsOut) -> @location(0) vec4f {
                         None,
                         0,
                         true,
+                        Default::default(),
                     )
                     .unwrap()
             };
@@ -6572,6 +7037,7 @@ fn cs() {}
                     &[],
                     0xFFFF_FFFF,
                     0,
+                    Default::default(),
                 )
                 .unwrap()
         };
@@ -6618,6 +7084,7 @@ fn cs() {}
                 &[],
                 0xFFFF_FFFF,
                 0,
+                Default::default(),
             )
             .unwrap();
         // x=8, y=2, z=1 (override x=8 applied) -> total threads = 16.
@@ -6654,6 +7121,7 @@ fn cs() {
                     &[],
                     0xFFFF_FFFF,
                     0,
+                    Default::default(),
                 )
                 .unwrap()
         };
@@ -6676,6 +7144,7 @@ fn cs() {
                     None,
                     0,
                     true,
+                    Default::default(),
                 )
                 .unwrap()
         };

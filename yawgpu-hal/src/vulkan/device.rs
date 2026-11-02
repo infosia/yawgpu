@@ -2,6 +2,7 @@ use super::*;
 
 /// Holds shared state for the vulkan device handle.
 pub(super) struct VulkanDeviceInner {
+    pub(super) shader_workarounds: crate::HalShaderWorkarounds,
     pub(super) _instance: Arc<VulkanInstanceInner>,
     pub(super) device: ash::Device,
     pub(super) physical_device: vk::PhysicalDevice,
@@ -90,6 +91,10 @@ pub struct VulkanDevice {
 }
 
 impl VulkanDevice {
+    pub(crate) fn shader_workarounds(&self) -> crate::HalShaderWorkarounds {
+        self.inner.shader_workarounds
+    }
+
     pub(crate) fn storage_input_output16(&self) -> bool {
         self.inner.storage_input_output16
     }

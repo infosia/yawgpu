@@ -65,8 +65,8 @@ pub(crate) struct GeneratedMsl {
     /// Byte offset of the frag-depth clamp range within the immediate block.
     pub frag_depth_clamp_offset: Option<u32>,
     /// Reserved MSL buffer slot of the combined immediate block for this
-    /// stage, when it needs one: user immediates, the frag-depth clamp, or
-    /// buffer sizes.
+    /// stage, when it needs one: user immediates, the frag-depth clamp,
+    /// buffer sizes, or the non-constant zero forced by `fix_u32_div_mod`.
     pub immediate_slot: Option<u32>,
     /// Bytes to deliver at `immediate_slot`. Zero when that is `None`.
     pub immediate_block_size: u32,

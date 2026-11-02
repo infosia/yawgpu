@@ -308,7 +308,7 @@ typedef struct {
     bool has_frag_depth_clamp;          /* true if this fragment EP writes frag_depth */
     uint32_t frag_depth_clamp_slot;     /* MSL buffer index of the immediate block (valid iff has_frag_depth_clamp) */
     uint32_t frag_depth_clamp_offset;   /* byte offset of the min/max depth pair in the block (valid iff has_frag_depth_clamp) */
-    bool uses_immediates;               /* true if this EP needs the immediate block: user var<immediate> data, the frag-depth clamp, or buffer sizes */
+    bool uses_immediates;               /* true if this EP needs the immediate block: user var<immediate> data, the frag-depth clamp, buffer sizes, or fix_u32_div_mod (even without a div/mod) */
     uint32_t immediate_slot;            /* MSL buffer index of the immediate block (valid iff uses_immediates) */
     uint32_t immediate_block_size;      /* bytes to deliver at immediate_slot, rounded up to 16 (valid iff uses_immediates) */
     bool has_buffer_sizes;              /* true if the block carries an array<u32, N> of buffer sizes, N > 0 */
@@ -354,6 +354,8 @@ YAWGPU_TINT_API bool yawgpu_tint_generate_msl(const YawgpuTintProgram*,
                               const YawgpuTintOverrideValue* ov,
                               size_t n_ov,
                               bool disable_robustness,
+                              bool fix_u32_div_mod,
+                              bool polyfill_bool_vec_dynamic_store,
                               bool emit_vertex_point_size,
                               const YawgpuTintVertexBuffer* vertex_buffers,
                               size_t n_vertex_buffers,
@@ -376,6 +378,9 @@ YAWGPU_TINT_API bool yawgpu_tint_generate_spirv(const YawgpuTintProgram*,
                                 const YawgpuTintOverrideValue* ov,
                                 size_t n_ov,
                                 bool disable_robustness,
+                                bool polyfill_bool_vec_dynamic_store,
+                                bool replace_workgroup_atomic_store_with_exchange,
+                                bool replace_unsigned_compare_zero,
                                 bool use_vulkan_memory_model,
                                 bool use_storage_input_output_16,
                                 uint32_t framebuffer_fetch_descriptor_set,

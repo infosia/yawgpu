@@ -1013,6 +1013,7 @@ fn create_hal_render_pipeline_with_subpass_color_slots(
             hal_device.vulkan_memory_model(),
             bind_group_layouts,
             hal_device.vulkan_storage_input_output16(),
+            hal_device.shader_workarounds(),
         ) {
             Ok(selection) => selection,
             Err(message) => return (None, Some(message)),
@@ -1158,6 +1159,7 @@ fn create_hal_non_vulkan_subpass_render_pipeline(
             hal_device.vulkan_memory_model(),
             bind_group_layouts,
             hal_device.vulkan_storage_input_output16(),
+            hal_device.shader_workarounds(),
         ) {
             Ok(selection) => selection,
             Err(message) => return (None, Some(message)),
@@ -1211,6 +1213,7 @@ fn create_hal_vulkan_subpass_render_pipeline(
             hal_device.vulkan_memory_model(),
             bind_group_layouts,
             hal_device.vulkan_storage_input_output16(),
+            hal_device.shader_workarounds(),
         ) {
             Ok(selection) => selection,
             Err(message) => return (None, Some(message)),
@@ -1401,6 +1404,7 @@ pub(crate) fn select_render_shader_source(
     vulkan_memory_model: bool,
     bind_group_layouts: &[Arc<BindGroupLayout>],
     use_storage_input_output_16: bool,
+    workarounds: yawgpu_hal::HalShaderWorkarounds,
 ) -> Result<
     (
         HalShaderSource,
@@ -1497,6 +1501,7 @@ pub(crate) fn select_render_shader_source(
                 force_point_size,
                 &vertex_pipeline_constants,
                 user_immediate_size,
+                workarounds,
             )?;
             let fragment = match (
                 fragment,
@@ -1520,6 +1525,7 @@ pub(crate) fn select_render_shader_source(
                         fragment_pipeline_constants,
                         descriptor.multisample.mask,
                         user_immediate_size,
+                        workarounds,
                     )?)
                 }
                 (None, None, None) => None,
@@ -1660,6 +1666,7 @@ pub(crate) fn select_render_shader_source(
                 polyfill_pixel_center,
                 user_immediate_size,
                 use_storage_input_output_16,
+                workarounds,
             )?;
             let fragment_color_slots = match (fragment, fragment_entry_name) {
                 (Some(fragment), Some(fragment_entry_name)) => fragment
@@ -1689,6 +1696,7 @@ pub(crate) fn select_render_shader_source(
                         polyfill_pixel_center,
                         user_immediate_size,
                         use_storage_input_output_16,
+                        workarounds,
                     )?)
                 }
                 (None, None) => None,
@@ -5647,6 +5655,7 @@ fn fs() -> @location(0) vec4<f32> {
             false,
             &[],
             true,
+            Default::default(),
         )
         .expect("separate WGSL modules should generate per-stage MSL");
 
@@ -5714,6 +5723,7 @@ fn fs() -> @builtin(frag_depth) f32 {
             false,
             &[],
             true,
+            Default::default(),
         )
         .expect("render pipeline with a user immediate should select Metal MSL");
 
@@ -5739,6 +5749,61 @@ fn fs() -> @builtin(frag_depth) f32 {
         // 16 user + 8 clamp + 4 non-constant zero, rounded up to 16.
         assert_eq!(fragment_immediates.block_size, 32);
         assert_eq!(fragment_immediates.buffer_sizes_offset, None);
+    }
+
+    #[test]
+    fn select_render_shader_source_metal_workaround_alone_delivers_immediates() {
+        let device = noop_device();
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                r#"
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+    return vec4f(f32(i / 3u), f32(i % 3u), 0, 1);
+}
+@fragment fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
+    let i = u32(p.x);
+    return vec4f(f32(i / 3u), f32(i % 3u), 0, 1);
+}
+"#
+                .to_owned(),
+            )),
+        );
+        let descriptor = render_pipeline_descriptor(module);
+        assert!(descriptor.vertex.buffers.is_empty());
+        for enabled in [false, true] {
+            let mut flags = yawgpu_hal::HalShaderWorkarounds::default();
+            flags.fix_u32_div_mod = enabled;
+            let (source, _, _, bindings) = select_render_shader_source(
+                HalBackend::Metal,
+                &descriptor,
+                "vs",
+                Some("fs"),
+                &[],
+                &[],
+                &[],
+                false,
+                &[],
+                true,
+                flags,
+            )
+            .expect("generate render MSL on Noop");
+            assert!(bindings.is_empty());
+            assert!(matches!(source,
+                HalShaderSource::MslStagesWithBufferSizes {
+                    vertex, fragment: Some(fragment), vertex_immediates,
+                    fragment_immediates, vertex_buffer_size_bindings,
+                    fragment_buffer_size_bindings, ..
+                } if vertex_buffer_size_bindings.is_empty()
+                    && fragment_buffer_size_bindings.is_empty()
+                    && [&vertex, &fragment].iter().all(|source|
+                        source.contains("tint_non_constant_zero") == enabled)
+                    && [vertex_immediates, fragment_immediates].iter().all(|block|
+                        block.is_some() == enabled && block.is_none_or(|block|
+                            block.user_size == 0 && block.block_size > 0
+                            && block.buffer_sizes_offset.is_none()
+                            && block.frag_depth_clamp_offset.is_none()))
+            ));
+        }
     }
 
     /// Block 118 R4: per-stage blocks. A fragment stage that only clamps gets
@@ -5779,6 +5844,7 @@ fn fs() -> @builtin(frag_depth) f32 {
             false,
             &[],
             true,
+            Default::default(),
         )
         .expect("render pipeline should select Metal MSL");
 
@@ -6248,6 +6314,7 @@ fn fs() -> @builtin(frag_depth) f32 {
             false,
             &[],
             true,
+            Default::default(),
         )
         .expect("MSL passthrough should select Metal MSL stages");
 
@@ -6278,6 +6345,7 @@ fn fs() -> @builtin(frag_depth) f32 {
             false,
             &[],
             true,
+            Default::default(),
         )
         .expect_err("MSL passthrough must reject Vulkan");
 
@@ -6301,6 +6369,7 @@ fn fs() -> @builtin(frag_depth) f32 {
             false,
             &[],
             true,
+            Default::default(),
         )
         .expect("SPIR-V passthrough should select Vulkan SPIR-V stages");
 
@@ -6331,6 +6400,7 @@ fn fs() -> @builtin(frag_depth) f32 {
             false,
             &[],
             true,
+            Default::default(),
         )
         .expect_err("SPIR-V passthrough must reject Metal");
 
@@ -6374,6 +6444,7 @@ fn fs() -> @builtin(frag_depth) f32 {
             false,
             &[],
             true,
+            Default::default(),
         )
         .expect("WGSL should generate GLES GLSL stages");
 
@@ -6865,6 +6936,7 @@ fn fs() -> @builtin(frag_depth) f32 {
             false,
             &[],
             true,
+            Default::default(),
         )
         .expect_err("Vulkan must reject external textures");
         assert_eq!(

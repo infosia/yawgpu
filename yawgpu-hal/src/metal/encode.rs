@@ -1666,8 +1666,8 @@ pub(super) fn encode_subpass_render_pass(
             // (`validate_subpass_pipeline_has_no_immediates`, Block 94
             // Phase Review MAJOR 2) -- so no pipeline reaching this path
             // reads user immediates and the empty snapshot is never
-            // observable. The internal frag-depth clamp range and buffer
-            // sizes read no user bytes, so they are still composed and
+            // observable. Internal frag-depth clamp, non-constant zero,
+            // and buffer sizes read no user bytes, so they are composed and
             // delivered.
             immediate_data: &[],
         };

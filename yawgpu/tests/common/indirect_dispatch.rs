@@ -435,7 +435,7 @@ impl Session {
     }
 }
 
-unsafe fn read_buffer(
+pub(crate) unsafe fn read_buffer(
     instance: native::WGPUInstance,
     buffer: native::WGPUBuffer,
     len: usize,
@@ -459,7 +459,7 @@ unsafe fn read_buffer(
     bytes
 }
 
-unsafe fn create_buffer(
+pub(crate) unsafe fn create_buffer(
     device: native::WGPUDevice,
     size: u64,
     usage: native::WGPUBufferUsage,
@@ -476,7 +476,10 @@ unsafe fn create_buffer(
     buffer
 }
 
-unsafe fn create_wgsl_module(device: native::WGPUDevice, source: &str) -> native::WGPUShaderModule {
+pub(crate) unsafe fn create_wgsl_module(
+    device: native::WGPUDevice,
+    source: &str,
+) -> native::WGPUShaderModule {
     let mut wgsl = native::WGPUShaderSourceWGSL {
         chain: native::WGPUChainedStruct {
             next: std::ptr::null_mut(),
@@ -493,7 +496,7 @@ unsafe fn create_wgsl_module(device: native::WGPUDevice, source: &str) -> native
     module
 }
 
-unsafe fn create_instance(select: u32) -> native::WGPUInstance {
+pub(crate) unsafe fn create_instance(select: u32) -> native::WGPUInstance {
     let mut backend = YaWGPUInstanceBackendSelect {
         chain: native::WGPUChainedStruct {
             next: std::ptr::null_mut(),
@@ -512,7 +515,7 @@ unsafe fn create_instance(select: u32) -> native::WGPUInstance {
     instance
 }
 
-unsafe fn request_adapter(instance: native::WGPUInstance) -> native::WGPUAdapter {
+pub(crate) unsafe fn request_adapter(instance: native::WGPUInstance) -> native::WGPUAdapter {
     let mut adapter: native::WGPUAdapter = std::ptr::null();
     let callback_info = native::WGPURequestAdapterCallbackInfo {
         nextInChain: std::ptr::null_mut(),
@@ -527,7 +530,7 @@ unsafe fn request_adapter(instance: native::WGPUInstance) -> native::WGPUAdapter
     adapter
 }
 
-unsafe fn request_device(
+pub(crate) unsafe fn request_device(
     instance: native::WGPUInstance,
     adapter: native::WGPUAdapter,
     features: &[native::WGPUFeatureName],
@@ -559,7 +562,7 @@ unsafe fn request_device(
     device
 }
 
-unsafe fn install_error_capture(
+pub(crate) unsafe fn install_error_capture(
     device: native::WGPUDevice,
 ) -> Arc<Mutex<Vec<yawgpu_core::DeviceError>>> {
     let errors = Arc::new(Mutex::new(Vec::new()));
@@ -602,14 +605,14 @@ unsafe extern "C" fn map_callback(
     *(userdata1 as *mut native::WGPUMapAsyncStatus) = status;
 }
 
-fn string_view(text: &str) -> native::WGPUStringView {
+pub(crate) fn string_view(text: &str) -> native::WGPUStringView {
     native::WGPUStringView {
         data: text.as_ptr().cast(),
         length: text.len(),
     }
 }
 
-fn empty_string_view() -> native::WGPUStringView {
+pub(crate) fn empty_string_view() -> native::WGPUStringView {
     native::WGPUStringView {
         data: std::ptr::null(),
         length: 0,

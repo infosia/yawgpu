@@ -2,6 +2,7 @@ use super::*;
 
 /// Stores metal device data used by validation and backend submission.
 pub struct MetalDevice {
+    pub(crate) shader_workarounds: crate::HalShaderWorkarounds,
     pub(super) device: Retained<ProtocolObject<dyn MTLDevice>>,
     pub(super) allocations: AtomicU64,
     pub(super) queue: MetalQueue,

@@ -1335,7 +1335,17 @@ mod tests {
         .unwrap();
 
         program
-            .generate_msl("main", &bindings, &[], true, false, &[], 0xFFFF_FFFF, 16)
+            .generate_msl(
+                "main",
+                &bindings,
+                &[],
+                true,
+                false,
+                &[],
+                0xFFFF_FFFF,
+                16,
+                Default::default(),
+            )
             .unwrap();
         program
             .generate_spirv(
@@ -1349,6 +1359,7 @@ mod tests {
                 None,
                 16,
                 true,
+                Default::default(),
             )
             .unwrap();
         let glsl = program

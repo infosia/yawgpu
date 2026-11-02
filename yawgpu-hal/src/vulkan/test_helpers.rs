@@ -15,6 +15,25 @@ pub(crate) fn vulkan_device() -> VulkanDevice {
     adapter.create_device().expect("create Vulkan device")
 }
 
+/// Returns a real Vulkan device, or skips when the backend is unavailable.
+pub(crate) fn vulkan_device_or_skip() -> Option<VulkanDevice> {
+    let device = VulkanInstance::new().and_then(|instance| {
+        instance
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .ok_or(crate::HalError::BackendUnavailable { backend: "vulkan" })?
+            .create_device()
+    });
+    match device {
+        Ok(device) => Some(device),
+        Err(error) => {
+            eprintln!("skipping: vulkan device unavailable: {error:?}");
+            None
+        }
+    }
+}
+
 /// Returns texture usage.
 pub(crate) fn texture_usage() -> HalTextureUsage {
     HalTextureUsage {

@@ -2195,6 +2195,8 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
                               const YawgpuTintOverrideValue* ov,
                               size_t n_ov,
                               bool disable_robustness,
+                              bool fix_u32_div_mod,
+                              bool polyfill_bool_vec_dynamic_store,
                               bool emit_vertex_point_size,
                               const YawgpuTintVertexBuffer* vertex_buffers,
                               size_t n_vertex_buffers,
@@ -2238,6 +2240,8 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
         options.entry_point_name = entry_point;
         options.remapped_entry_point_name = remapped_entry_point;
         options.disable_robustness = disable_robustness;
+        options.workarounds.fix_u32_div_mod = fix_u32_div_mod;
+        options.workarounds.polyfill_bool_vec_dynamic_store = polyfill_bool_vec_dynamic_store;
         // Point-list topology on Metal requires every vertex to set [[point_size]];
         // Tint emits it (= 1.0) when asked. yawgpu threads this from the render
         // pipeline's force_point_size.
@@ -2306,7 +2310,7 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
         const auto num_buffer_sizes = num_storage + static_cast<uint32_t>(n_vertex_buffers);
         const bool has_buffer_sizes = num_buffer_sizes > 0;
         const bool uses_immediates =
-            entry_has_user_immediates || has_frag_depth_clamp || has_buffer_sizes;
+            entry_has_user_immediates || has_frag_depth_clamp || has_buffer_sizes || fix_u32_div_mod;
 
         options.immediate_binding_point = choose_immediate_binding_point(options.bindings);
         if (uses_immediates && !options.immediate_binding_point.has_value()) {
@@ -2324,8 +2328,8 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
         const MslImmediateLayout layout = compute_msl_immediate_layout(
             user_immediate_size, has_frag_depth_clamp, num_buffer_sizes);
         // Mandatory on every generation: Tint always declares this member, and its
-        // default offset of 0 collides with user immediates. No yawgpu option
-        // references it from the shader yet, but it is part of the block either way.
+        // default offset of 0 collides with user immediates. The fix_u32_div_mod
+        // workaround reads it; the layout reserves it even when the flag is off.
         options.non_constant_zero_offset = layout.non_constant_zero_offset;
         if (has_frag_depth_clamp) {
             options.depth_range_offsets = tint::msl::writer::Options::RangeOffsets{
@@ -2414,6 +2418,9 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
                                 const YawgpuTintOverrideValue* ov,
                                 size_t n_ov,
                                 bool disable_robustness,
+                                bool polyfill_bool_vec_dynamic_store,
+                                bool replace_workgroup_atomic_store_with_exchange,
+                                bool replace_unsigned_compare_zero,
                                 bool use_vulkan_memory_model,
                                 bool use_storage_input_output_16,
                                 uint32_t framebuffer_fetch_descriptor_set,
@@ -2447,6 +2454,10 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
         tint::spirv::writer::Options options;
         options.entry_point_name = entry_point;
         options.disable_robustness = disable_robustness;
+        options.workarounds.polyfill_bool_vec_dynamic_store = polyfill_bool_vec_dynamic_store;
+        options.workarounds.replace_workgroup_atomic_store_with_exchange =
+            replace_workgroup_atomic_store_with_exchange;
+        options.workarounds.replace_unsigned_compare_zero = replace_unsigned_compare_zero;
         options.extensions.use_vulkan_memory_model = use_vulkan_memory_model;
         options.extensions.use_storage_input_output_16 = use_storage_input_output_16;
         options.multisampled_input_attachment = multisampled_input_attachment;
