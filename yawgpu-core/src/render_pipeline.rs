@@ -1546,6 +1546,10 @@ pub(crate) fn select_render_shader_source(
                 .and_then(|fragment| fragment.hal_immediates(user_immediate_size));
             Ok((
                 HalShaderSource::MslStagesWithBufferSizes {
+                    vertex_has_invariant_attribute: vertex.has_invariant_attribute,
+                    fragment_has_invariant_attribute: fragment
+                        .as_ref()
+                        .is_some_and(|fragment| fragment.has_invariant_attribute),
                     vertex: vertex.source,
                     fragment: fragment.as_ref().map(|fragment| fragment.source.clone()),
                     vertex_buffer_size_bindings: hal_msl_buffer_size_bindings(
@@ -5615,6 +5619,81 @@ fn fs() -> @location(0) vec4<f32> {
             )
         );
         assert_eq!(validate_clip_distances_size(8), Ok(()));
+    }
+
+    #[test]
+    fn select_render_shader_source_metal_threads_per_stage_invariant_attributes() {
+        let device = noop_device();
+        for (invariant, fragment_input) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let attribute = if invariant { "@invariant" } else { "" };
+            let position_struct =
+                format!("struct Position {{ {attribute} @builtin(position) position: vec4f }}");
+            let fragment_wgsl = if fragment_input {
+                "@fragment fn fs(input: Position) -> @location(0) vec4f { return input.position; }"
+            } else {
+                "@fragment fn fs() -> @location(0) vec4f { return vec4f(1); }"
+            };
+            let module = Arc::new(
+                device.create_shader_module(ShaderModuleSource::Wgsl(format!(
+                    "{position_struct}
+                 @vertex fn vs() -> Position {{ return Position(vec4f(0, 0, 0, 1)); }}
+                 {fragment_wgsl}",
+                ))),
+            );
+            for separate_fragment in [false, true] {
+                let mut descriptor = render_pipeline_descriptor(module.clone());
+                if separate_fragment {
+                    descriptor.fragment.as_mut().unwrap().shader.module = Arc::new(
+                        device.create_shader_module(ShaderModuleSource::Wgsl(format!(
+                            "{position_struct}\n{fragment_wgsl}",
+                        ))),
+                    );
+                }
+                for fragment_entry in [Some("fs"), None] {
+                    let mut descriptor = descriptor.clone();
+                    if fragment_entry.is_none() {
+                        descriptor.fragment = None;
+                    }
+                    // Repeat selection to exercise the cached codegen result too.
+                    for _ in 0..2 {
+                        let (source, _, _, _) = select_render_shader_source(
+                            HalBackend::Metal,
+                            &descriptor,
+                            "vs",
+                            fragment_entry,
+                            &[],
+                            &[],
+                            &[],
+                            false,
+                            &[],
+                            true,
+                            Default::default(),
+                        )
+                        .expect("generate render MSL on Noop");
+                        let HalShaderSource::MslStagesWithBufferSizes {
+                            vertex_has_invariant_attribute,
+                            fragment_has_invariant_attribute,
+                            fragment,
+                            ..
+                        } = source
+                        else {
+                            panic!("Metal backend must select per-stage Tint MSL");
+                        };
+                        assert_eq!(vertex_has_invariant_attribute, invariant);
+                        assert_eq!(fragment.is_some(), fragment_entry.is_some());
+                        assert_eq!(
+                            fragment_has_invariant_attribute,
+                            fragment
+                                .as_ref()
+                                .is_some_and(|msl| msl.contains("[[invariant]]")),
+                            "fragment MSL: {fragment:?}",
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

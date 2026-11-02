@@ -501,6 +501,7 @@ pub(crate) fn select_compute_shader_source(
             let immediates = generated.hal_immediates(user_immediate_size);
             Ok((
                 HalShaderSource::MslWithBufferSizes {
+                    has_invariant_attribute: generated.has_invariant_attribute,
                     source: generated.source,
                     buffer_size_bindings: hal_msl_buffer_size_bindings(
                         &generated.buffer_size_bindings,
@@ -2888,6 +2889,37 @@ fn cs() {
         assert_eq!(texture_metadata_ubo_binding, None);
         assert!(source.contains("#version 310 es"));
         assert!(source.contains("local_size_x = 2"));
+    }
+
+    #[test]
+    fn select_compute_shader_source_metal_threads_invariant_attribute() {
+        let device = noop_device();
+        let module = device.create_shader_module(ShaderModuleSource::Wgsl(
+            "@vertex fn vs() -> @invariant @builtin(position) vec4f { return vec4f(0, 0, 0, 1); }
+             @compute @workgroup_size(1) fn cs() {}"
+                .to_owned(),
+        ));
+        for _ in 0..2 {
+            let (source, _, _) = select_compute_shader_source(
+                HalBackend::Metal,
+                &module,
+                "cs",
+                &[],
+                &[],
+                false,
+                0,
+                true,
+                Default::default(),
+            )
+            .expect("generate compute MSL on Noop");
+            assert!(matches!(
+                source,
+                HalShaderSource::MslWithBufferSizes {
+                    has_invariant_attribute: false,
+                    ..
+                }
+            ));
+        }
     }
 
     /// Block 94 S2: a compute entry point using a user `var<immediate>`

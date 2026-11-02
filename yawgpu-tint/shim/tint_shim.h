@@ -309,6 +309,7 @@ typedef struct {
     uint32_t frag_depth_clamp_slot;     /* MSL buffer index of the immediate block (valid iff has_frag_depth_clamp) */
     uint32_t frag_depth_clamp_offset;   /* byte offset of the min/max depth pair in the block (valid iff has_frag_depth_clamp) */
     bool uses_immediates;               /* true if this EP needs the immediate block: user var<immediate> data, the frag-depth clamp, buffer sizes, or fix_u32_div_mod (even without a div/mod) */
+    bool has_invariant_attribute;       /* true if Tint emitted an invariant attribute */
     uint32_t immediate_slot;            /* MSL buffer index of the immediate block (valid iff uses_immediates) */
     uint32_t immediate_block_size;      /* bytes to deliver at immediate_slot, rounded up to 16 (valid iff uses_immediates) */
     bool has_buffer_sizes;              /* true if the block carries an array<u32, N> of buffer sizes, N > 0 */

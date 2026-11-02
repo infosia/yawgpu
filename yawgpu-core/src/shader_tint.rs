@@ -615,6 +615,7 @@ impl ReflectedModule {
                 })
                 .collect::<Vec<_>>();
             Ok(GeneratedMsl {
+                has_invariant_attribute: output.has_invariant_attribute,
                 source: output.source,
                 entry_point: output.entry_point,
                 buffer_size_bindings,
@@ -1995,6 +1996,38 @@ mod tests {
             let name = texel_format(format).unwrap();
             assert_eq!(name, expected);
             assert!(crate::TextureFormat::from_wgsl_texel_name(&name).is_some());
+        }
+    }
+
+    #[test]
+    fn generate_msl_cache_preserves_entry_scoped_invariant_attribute() {
+        let module = parse_and_validate_wgsl(
+            "@vertex fn vs_invariant() -> @invariant @builtin(position) vec4f { return vec4f(0, 0, 0, 1); }
+             @vertex fn vs_plain() -> @builtin(position) vec4f { return vec4f(0, 0, 0, 1); }
+             @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }
+             @compute @workgroup_size(1) fn cs() {}",
+        ).unwrap();
+        let constants = PipelineConstants::default();
+        let bindings = empty_msl_binding_map();
+        for (index, (entry, expected)) in [
+            ("vs_invariant", true),
+            ("vs_plain", false),
+            ("fs", false),
+            ("cs", false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let first = module
+                .generate_msl(entry, &bindings, &constants, 0, Default::default())
+                .unwrap();
+            let cached = module
+                .generate_msl(entry, &bindings, &constants, 0, Default::default())
+                .unwrap();
+            assert_eq!(first.has_invariant_attribute, expected, "{entry}");
+            assert_eq!(cached.has_invariant_attribute, expected, "{entry}");
+            assert_eq!(first, cached);
+            assert_eq!(module.codegen_miss_count(), index + 1);
         }
     }
 

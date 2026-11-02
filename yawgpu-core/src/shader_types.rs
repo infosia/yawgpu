@@ -55,6 +55,8 @@ pub(crate) enum MslResourceBindingKind {
 /// Stores generated shader source for generated MSL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GeneratedMsl {
+    /// Whether Tint emitted an invariant attribute in this MSL source.
+    pub has_invariant_attribute: bool,
     /// Source.
     pub source: String,
     /// Entry point.
@@ -519,6 +521,7 @@ mod tests {
 
     fn generated_msl() -> GeneratedMsl {
         GeneratedMsl {
+            has_invariant_attribute: false,
             source: String::new(),
             entry_point: String::new(),
             buffer_size_bindings: Vec::new(),

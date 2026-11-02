@@ -633,6 +633,8 @@ static_assert(offsetof(YawgpuTintMslOutput, frag_depth_clamp_offset) == 56,
               "YawgpuTintMslOutput layout changed");
 static_assert(offsetof(YawgpuTintMslOutput, uses_immediates) == 60,
               "YawgpuTintMslOutput layout changed");
+static_assert(offsetof(YawgpuTintMslOutput, has_invariant_attribute) == 61,
+              "YawgpuTintMslOutput layout changed");
 static_assert(offsetof(YawgpuTintMslOutput, immediate_slot) == 64,
               "YawgpuTintMslOutput layout changed");
 static_assert(offsetof(YawgpuTintMslOutput, immediate_block_size) == 68,
@@ -2218,6 +2220,7 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
         out->frag_depth_clamp_slot = 0;
         out->frag_depth_clamp_offset = 0;
         out->uses_immediates = false;
+        out->has_invariant_attribute = false;
         out->immediate_slot = 0;
         out->immediate_block_size = 0;
         out->has_buffer_sizes = false;
@@ -2352,6 +2355,7 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
             set_error(err, result.Failure());
             return false;
         }
+        out->has_invariant_attribute = result->has_invariant_attribute;
         out->msl = dup_string(result->msl);
         if (out->msl == nullptr) {
             set_error_string(err, "failed to allocate MSL output");

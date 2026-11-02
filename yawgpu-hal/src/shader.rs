@@ -6,6 +6,8 @@ pub enum HalShaderSource {
     Msl(String),
     /// MSL source with immediate-block and buffer-size metadata.
     MslWithBufferSizes {
+        /// Whether Tint emitted an invariant attribute in this library.
+        has_invariant_attribute: bool,
         /// MSL source.
         source: String,
         /// Bindings whose byte lengths populate the buffer sizes in the
@@ -32,6 +34,10 @@ pub enum HalShaderSource {
     /// Per-stage MSL render sources with immediate-block and buffer-size
     /// metadata.
     MslStagesWithBufferSizes {
+        /// Whether Tint emitted an invariant attribute in the vertex source.
+        vertex_has_invariant_attribute: bool,
+        /// Whether Tint emitted an invariant attribute in the fragment source.
+        fragment_has_invariant_attribute: bool,
         /// Vertex stage MSL source.
         vertex: String,
         /// Optional fragment stage MSL source.
@@ -264,6 +270,7 @@ mod tests {
     #[test]
     fn hal_shader_source_msl_buffer_size_metadata_round_trips() {
         let source = HalShaderSource::MslWithBufferSizes {
+            has_invariant_attribute: false,
             source: "kernel void main0() {}".to_owned(),
             buffer_size_bindings: vec![HalMslBufferSizeBinding::new(1, 2)],
             workgroup_memory_sizes: vec![32, 16],
@@ -273,6 +280,7 @@ mod tests {
         assert!(matches!(
             source,
             HalShaderSource::MslWithBufferSizes {
+                has_invariant_attribute: false,
                 source,
                 buffer_size_bindings,
                 workgroup_memory_sizes,
@@ -292,6 +300,8 @@ mod tests {
     #[test]
     fn hal_shader_source_msl_stages_with_buffer_sizes_includes_vertex_buffer_metal_indices() {
         let source = HalShaderSource::MslStagesWithBufferSizes {
+            vertex_has_invariant_attribute: false,
+            fragment_has_invariant_attribute: false,
             vertex: "vertex_src".to_owned(),
             fragment: Some("fragment_src".to_owned()),
             vertex_buffer_size_bindings: vec![HalMslBufferSizeBinding::new(0, 1)],
@@ -304,6 +314,8 @@ mod tests {
         assert!(matches!(
             source,
             HalShaderSource::MslStagesWithBufferSizes {
+                vertex_has_invariant_attribute: false,
+                fragment_has_invariant_attribute: false,
                 vertex,
                 fragment,
                 vertex_buffer_size_bindings,

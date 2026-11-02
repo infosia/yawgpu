@@ -159,7 +159,10 @@ unsafe impl Send for Program {}
 unsafe impl Sync for Program {}
 
 /// MSL generator output.
+#[non_exhaustive]
 pub struct MslOutput {
+    /// Whether Tint emitted an invariant attribute in this MSL source.
+    pub has_invariant_attribute: bool,
     /// Generated MSL source.
     pub source: String,
     /// Generated MSL entry point name.
@@ -1346,6 +1349,7 @@ mod real {
         frag_depth_clamp_slot: u32,
         frag_depth_clamp_offset: u32,
         uses_immediates: bool,
+        has_invariant_attribute: bool,
         immediate_slot: u32,
         immediate_block_size: u32,
         has_buffer_sizes: bool,
@@ -1365,6 +1369,7 @@ mod real {
         assert!(core::mem::offset_of!(RawMslOutput, frag_depth_clamp_slot) == 52);
         assert!(core::mem::offset_of!(RawMslOutput, frag_depth_clamp_offset) == 56);
         assert!(core::mem::offset_of!(RawMslOutput, uses_immediates) == 60);
+        assert!(core::mem::offset_of!(RawMslOutput, has_invariant_attribute) == 61);
         assert!(core::mem::offset_of!(RawMslOutput, immediate_slot) == 64);
         assert!(core::mem::offset_of!(RawMslOutput, immediate_block_size) == 68);
         assert!(core::mem::offset_of!(RawMslOutput, has_buffer_sizes) == 72);
@@ -2127,6 +2132,7 @@ mod real {
                 frag_depth_clamp_slot: 0,
                 frag_depth_clamp_offset: 0,
                 uses_immediates: false,
+                has_invariant_attribute: false,
                 immediate_slot: 0,
                 immediate_block_size: 0,
                 has_buffer_sizes: false,
@@ -2191,6 +2197,7 @@ mod real {
             let immediate_slot = out.uses_immediates.then_some(out.immediate_slot);
             let buffer_sizes_offset = out.has_buffer_sizes.then_some(out.buffer_sizes_offset);
             Ok(MslOutput {
+                has_invariant_attribute: out.has_invariant_attribute,
                 source: msl_guard.into_string(),
                 entry_point: entry_point_guard.into_string(),
                 buffer_size_bindings,
@@ -4496,6 +4503,43 @@ fn cs() {
             "allocations: {:?}\nMSL:\n{}",
             msl.workgroup_allocations,
             msl.source
+        );
+    }
+
+    #[test]
+    fn generate_msl_reports_entry_scoped_invariant_attribute() {
+        let program = Program::parse(
+            "struct Position { @invariant @builtin(position) position: vec4f }
+             @vertex fn invariant_vs() -> Position { return Position(vec4f(0, 0, 0, 1)); }
+             @fragment fn invariant_fs(input: Position) -> @location(0) vec4f { return input.position; }
+             @vertex fn plain_vs() -> @builtin(position) vec4f { return vec4f(0, 0, 0, 1); }
+             @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }
+             @compute @workgroup_size(1) fn cs() {}",
+            false, false, false, false, false, false, &[],
+        ).unwrap();
+        for (entry, expected) in [
+            ("invariant_vs", true),
+            ("plain_vs", false),
+            ("fs", false),
+            ("cs", false),
+        ] {
+            let output = workaround_msl(&program, entry, Default::default());
+            assert_eq!(output.has_invariant_attribute, expected, "{entry}");
+            assert_eq!(
+                output.has_invariant_attribute,
+                output.source.contains("[[invariant]]"),
+                "{}",
+                output.source
+            );
+        }
+        // Shader IO retains invariant in IR, but the current printer does not emit it
+        // on builtin function parameters. Follow the emitted MSL, not the WGSL input.
+        let fragment = workaround_msl(&program, "invariant_fs", Default::default());
+        assert_eq!(
+            fragment.has_invariant_attribute,
+            fragment.source.contains("[[invariant]]"),
+            "{}",
+            fragment.source,
         );
     }
 
@@ -7397,5 +7441,29 @@ fn main_ok() {}
         .unwrap();
         let err = program.resolved_workgroup_size("fs", &[]).unwrap_err();
         assert!(!err.to_string().is_empty());
+    }
+}
+
+#[cfg(all(test, not(have_tint)))]
+mod stub_tests {
+    use super::*;
+
+    #[test]
+    fn generate_msl_stub_returns_unavailable() {
+        let program = Program {};
+        assert!(matches!(
+            program.generate_msl(
+                "vs",
+                &Bindings::default(),
+                &[],
+                true,
+                false,
+                &[],
+                u32::MAX,
+                0,
+                Default::default(),
+            ),
+            Err(TintError::Unavailable)
+        ));
     }
 }

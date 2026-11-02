@@ -143,6 +143,7 @@ impl MetalDevice {
                 buffer_size_bindings,
                 workgroup_memory_sizes,
                 immediates,
+                ..
             } => (
                 source,
                 buffer_size_bindings,
@@ -356,6 +357,7 @@ mod tests {
             // Use the same source variant and compile path as Tint output. The
             // runtime buffer load prevents constant folding of the infinity.
             let shader = HalShaderSource::MslWithBufferSizes {
+                has_invariant_attribute: false,
                 source: r#"
 #include <metal_stdlib>
 using namespace metal;
@@ -446,6 +448,7 @@ kernel void cs(
 "#
         .to_owned();
         let shader = HalShaderSource::MslWithBufferSizes {
+            has_invariant_attribute: false,
             source,
             buffer_size_bindings: Vec::new(),
             workgroup_memory_sizes: vec![32, 16],

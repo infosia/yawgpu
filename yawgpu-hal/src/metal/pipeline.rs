@@ -174,6 +174,12 @@ pub(super) fn create_render_pipeline(
         let pipeline_descriptor = MTLRenderPipelineDescriptor::new();
         pipeline_descriptor.setVertexFunction(Some(&vertex_function));
         pipeline_descriptor.setFragmentFunction(fragment_function.as_deref());
+        // SAFETY: the mapping returns a valid Metal topology class for every WebGPU topology.
+        unsafe {
+            pipeline_descriptor.setInputPrimitiveTopology(map_input_primitive_topology(
+                descriptor.primitive_topology,
+            ));
+        }
         pipeline_descriptor.setRasterSampleCount(to_ns(u64::from(descriptor.sample_count))?);
         pipeline_descriptor.setAlphaToCoverageEnabled(descriptor.alpha_to_coverage_enabled);
         // Each color target populates `MTLRenderPipelineDescriptor.colorAttachments[i]`,
@@ -473,7 +479,7 @@ fn create_render_functions(
 ) -> Result<RenderFunctions, HalError> {
     match shader {
         HalShaderSource::Msl(source) => {
-            let library = create_render_library(device, &source)?;
+            let library = create_render_library(device, &source, None)?;
             let vertex_function = render_function(&library, vertex_entry_point, "vertex")?;
             let fragment_function = fragment_entry_point
                 .map(|entry| render_function(&library, entry, "fragment"))
@@ -481,11 +487,11 @@ fn create_render_functions(
             Ok((vertex_function, fragment_function))
         }
         HalShaderSource::MslStages { vertex, fragment } => {
-            let vertex_library = create_render_library(device, &vertex)?;
+            let vertex_library = create_render_library(device, &vertex, None)?;
             let vertex_function = render_function(&vertex_library, vertex_entry_point, "vertex")?;
             let fragment_function = match (fragment, fragment_entry_point) {
                 (Some(fragment), Some(fragment_entry_point)) => {
-                    let fragment_library = create_render_library(device, &fragment)?;
+                    let fragment_library = create_render_library(device, &fragment, None)?;
                     Some(render_function(
                         &fragment_library,
                         fragment_entry_point,
@@ -502,8 +508,14 @@ fn create_render_functions(
             };
             Ok((vertex_function, fragment_function))
         }
-        HalShaderSource::MslWithBufferSizes { source, .. } => {
-            let library = create_render_library(device, &source)?;
+        HalShaderSource::MslWithBufferSizes {
+            source,
+            has_invariant_attribute,
+            ..
+        } => {
+            // Core sends Tint render output only as per-stage MslStagesWithBufferSizes.
+            // This combined-library arm keeps R2's contract for completeness.
+            let library = create_render_library(device, &source, Some(&[has_invariant_attribute]))?;
             let vertex_function = render_function(&library, vertex_entry_point, "vertex")?;
             let fragment_function = fragment_entry_point
                 .map(|entry| render_function(&library, entry, "fragment"))
@@ -511,13 +523,22 @@ fn create_render_functions(
             Ok((vertex_function, fragment_function))
         }
         HalShaderSource::MslStagesWithBufferSizes {
-            vertex, fragment, ..
+            vertex,
+            fragment,
+            vertex_has_invariant_attribute,
+            fragment_has_invariant_attribute,
+            ..
         } => {
-            let vertex_library = create_render_library(device, &vertex)?;
+            let vertex_library =
+                create_render_library(device, &vertex, Some(&[vertex_has_invariant_attribute]))?;
             let vertex_function = render_function(&vertex_library, vertex_entry_point, "vertex")?;
             let fragment_function = match (fragment, fragment_entry_point) {
                 (Some(fragment), Some(fragment_entry_point)) => {
-                    let fragment_library = create_render_library(device, &fragment)?;
+                    let fragment_library = create_render_library(
+                        device,
+                        &fragment,
+                        Some(&[fragment_has_invariant_attribute]),
+                    )?;
                     Some(render_function(
                         &fragment_library,
                         fragment_entry_point,
@@ -550,13 +571,31 @@ fn render_function(
         .ok_or_else(|| shader_error(format!("{stage} function '{entry_point}' not found")))
 }
 
+// None denotes application-provided MSL. Tint flags describe exactly the
+// stages in this library; a combined library preserves if either stage needs it.
+fn render_library_preserves_invariance(tint_stage_flags: Option<&[bool]>) -> bool {
+    tint_stage_flags.is_none_or(|flags| flags.iter().any(|&flag| flag))
+}
+
+fn map_input_primitive_topology(
+    topology: HalPrimitiveTopology,
+) -> objc2_metal::MTLPrimitiveTopologyClass {
+    use objc2_metal::MTLPrimitiveTopologyClass as Class;
+    match topology {
+        HalPrimitiveTopology::PointList => Class::Point,
+        HalPrimitiveTopology::LineList | HalPrimitiveTopology::LineStrip => Class::Line,
+        HalPrimitiveTopology::TriangleList | HalPrimitiveTopology::TriangleStrip => Class::Triangle,
+    }
+}
+
 fn create_render_library(
     device: &ProtocolObject<dyn MTLDevice>,
     msl_source: &str,
+    tint_stage_flags: Option<&[bool]>,
 ) -> Result<Retained<ProtocolObject<dyn MTLLibrary>>, HalError> {
     let source = NSString::from_str(msl_source);
     let options = MTLCompileOptions::new();
-    options.setPreserveInvariance(true);
+    options.setPreserveInvariance(render_library_preserves_invariance(tint_stage_flags));
     device
         .newLibraryWithSource_options_error(&source, Some(&options))
         .map_err(|error| shader_error(error.localizedDescription().to_string()))
@@ -632,6 +671,136 @@ mod tests {
     use super::*;
 
     #[test]
+    fn render_library_preserves_invariance_for_tint_stages_and_passthrough() {
+        assert!(render_library_preserves_invariance(None));
+        for vertex in [false, true] {
+            assert_eq!(render_library_preserves_invariance(Some(&[vertex])), vertex);
+            for fragment in [false, true] {
+                assert_eq!(
+                    render_library_preserves_invariance(Some(&[vertex, fragment])),
+                    vertex || fragment
+                );
+                assert_eq!(
+                    render_library_preserves_invariance(Some(&[fragment])),
+                    fragment
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn input_primitive_topology_maps_every_webgpu_topology() {
+        use objc2_metal::MTLPrimitiveTopologyClass as Class;
+        for (topology, expected) in [
+            (HalPrimitiveTopology::PointList, Class::Point),
+            (HalPrimitiveTopology::LineList, Class::Line),
+            (HalPrimitiveTopology::LineStrip, Class::Line),
+            (HalPrimitiveTopology::TriangleList, Class::Triangle),
+            (HalPrimitiveTopology::TriangleStrip, Class::Triangle),
+        ] {
+            assert_eq!(map_input_primitive_topology(topology), expected);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test: compiles and draws Tint MSL with and without invariant"]
+    fn metal_tint_render_pipelines_with_and_without_invariant_compile_and_draw() {
+        use super::super::test_helpers::{metal_device, render_descriptor, texture_descriptor};
+        use crate::{HalRenderColorTarget, HalRenderPipeline};
+
+        autoreleasepool(|_| {
+            let device = metal_device();
+            let texture = device.create_texture(&texture_descriptor()).unwrap();
+            for invariant in [false, true] {
+                // Tint emits TINT_INVARIANT on the position member when needed.
+                let attribute = if invariant { "TINT_INVARIANT" } else { "" };
+                let vertex = format!(
+                    r#"
+#include <metal_stdlib>
+using namespace metal;
+#define TINT_INVARIANT [[invariant]]
+struct tint_vs_outputs {{ float4 position [[position]] {attribute}; }};
+vertex tint_vs_outputs tint_vs(uint vertex_id [[vertex_id]]) {{
+    float2 positions[3] = {{float2(-1, -1), float2(3, -1), float2(-1, 3)}};
+    return {{float4(positions[vertex_id], 0, 1)}};
+}}
+"#
+                );
+                let fragment = r#"
+#include <metal_stdlib>
+using namespace metal;
+fragment float4 tint_fs() { return float4(1, 0, 0, 1); }
+"#;
+                for per_stage in [false, true] {
+                    let shader = if per_stage {
+                        HalShaderSource::MslStagesWithBufferSizes {
+                            vertex: vertex.clone(),
+                            fragment: Some(fragment.to_owned()),
+                            vertex_has_invariant_attribute: invariant,
+                            fragment_has_invariant_attribute: false,
+                            vertex_buffer_size_bindings: Vec::new(),
+                            fragment_buffer_size_bindings: Vec::new(),
+                            vertex_immediates: None,
+                            fragment_immediates: None,
+                            vertex_buffer_metal_indices: Vec::new(),
+                        }
+                    } else {
+                        HalShaderSource::MslWithBufferSizes {
+                            source: format!("{vertex}\n{fragment}"),
+                            has_invariant_attribute: invariant,
+                            buffer_size_bindings: Vec::new(),
+                            workgroup_memory_sizes: Vec::new(),
+                            immediates: None,
+                        }
+                    };
+                    let pipeline = device
+                        .create_render_pipeline(
+                            shader,
+                            "tint_vs",
+                            Some("tint_fs"),
+                            &render_descriptor(),
+                            &[],
+                        )
+                        .expect("compile Tint MSL through the Metal HAL");
+                    let pass = HalRenderPassCommandStream {
+                        color_targets: vec![Some(HalRenderColorTarget {
+                            texture: HalTexture::Metal(texture.clone()),
+                            view_format: HalTextureFormat::Rgba8Unorm,
+                            resolve_target: None,
+                            resolve_view_format: None,
+                            mip_level: 0,
+                            array_layer: 0,
+                            depth_slice: 0,
+                            resolve_mip_level: 0,
+                            resolve_array_layer: 0,
+                            load_op: HalRenderLoadOp::Clear,
+                            store: true,
+                            clear_color: [0.0; 4],
+                        })],
+                        commands: vec![
+                            HalRenderPassCommand::SetPipeline(HalRenderPipeline::Metal(pipeline)),
+                            HalRenderPassCommand::Draw {
+                                vertex_count: 3,
+                                instance_count: 1,
+                                first_vertex: 0,
+                                first_instance: 0,
+                            },
+                        ],
+                        ..Default::default()
+                    };
+                    let queue = device.queue();
+                    queue
+                        .submit_copies(&[HalCopy::RenderPassCommandStream(pass)])
+                        .expect("draw triangle");
+                    queue
+                        .wait_idle()
+                        .expect("Metal draw completes without errors");
+                }
+            }
+        });
+    }
+
+    #[test]
     fn msl_header_without_relaxed_math_matches_dawn() {
         assert_eq!(
             msl_header(false),
@@ -678,6 +847,7 @@ mod tests {
             let expected = format!("{}{source}", msl_header(supports_relaxed_math));
             let shader = prepare_msl_shader(
                 HalShaderSource::MslWithBufferSizes {
+                    has_invariant_attribute: true,
                     source: source.to_owned(),
                     buffer_size_bindings: Vec::new(),
                     workgroup_memory_sizes: vec![16],
@@ -686,11 +856,13 @@ mod tests {
                 supports_relaxed_math,
             );
             assert!(matches!(shader, HalShaderSource::MslWithBufferSizes {
-                source, workgroup_memory_sizes, ..
+                source, workgroup_memory_sizes, has_invariant_attribute: true, ..
             } if source == expected && workgroup_memory_sizes == [16]));
             for fragment in [None, Some(source.to_owned())] {
                 let shader = prepare_msl_shader(
                     HalShaderSource::MslStagesWithBufferSizes {
+                        vertex_has_invariant_attribute: true,
+                        fragment_has_invariant_attribute: false,
                         vertex: source.to_owned(),
                         fragment: fragment.clone(),
                         vertex_buffer_size_bindings: Vec::new(),
@@ -703,7 +875,7 @@ mod tests {
                 );
                 let expected_fragment = fragment.map(|_| expected.clone());
                 assert!(matches!(shader, HalShaderSource::MslStagesWithBufferSizes {
-                    vertex, fragment, vertex_buffer_metal_indices, ..
+                    vertex, fragment, vertex_buffer_metal_indices, vertex_has_invariant_attribute: true, fragment_has_invariant_attribute: false, ..
                 } if vertex == expected && fragment == expected_fragment
                     && vertex_buffer_metal_indices == [2]));
             }
@@ -715,6 +887,8 @@ mod tests {
         // The Tint frontend emits `[[stage_in]]` vertex input, which needs an
         // MTLVertexDescriptor regardless of the source variant.
         let shader = HalShaderSource::MslStagesWithBufferSizes {
+            vertex_has_invariant_attribute: false,
+            fragment_has_invariant_attribute: false,
             vertex: "vertex Out v(In in [[stage_in]]) { return {}; }".to_owned(),
             fragment: None,
             vertex_buffer_size_bindings: Vec::new(),
@@ -735,6 +909,8 @@ mod tests {
     #[test]
     fn render_shader_skips_vertex_descriptor_for_vertex_pulling_msl() {
         let shader = HalShaderSource::MslStagesWithBufferSizes {
+            vertex_has_invariant_attribute: false,
+            fragment_has_invariant_attribute: false,
             vertex: String::new(),
             fragment: None,
             vertex_buffer_size_bindings: Vec::new(),
