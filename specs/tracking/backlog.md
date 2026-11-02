@@ -155,13 +155,12 @@ reference `> i32::MAX`, `first_instance` indirect, external textures,
 
 ## Recommended order
 
-1. **A12** when a native Vulkan host is available.
-2. **E1**, which decides **E11** and part of **E3**.
-3. **A13**, starting with the most widely used hardware (AMD Mesa).
-4. **A10**, small, and Block 119 raised its stakes.
-5. **C2 / C1** surfaces as separate initiatives.
-6. **F1 to F3** alongside any of the above.
-7. Lowered by user direction: **C4** feature-gated clippy in CI, then **B2**
+1. **E1**, which decides **E11** and part of **E3**.
+2. **A13**, starting with the most widely used hardware (AMD Mesa).
+3. **A10**, small, and Block 119 raised its stakes.
+4. **C2 / C1** surfaces as separate initiatives.
+5. **F1 to F3** alongside any of the above.
+6. Lowered by user direction: **C4** feature-gated clippy in CI, then **B2**
    binding arrays, then **D12** and the rest of the GLES rows.
 
 ---
