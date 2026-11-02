@@ -48,6 +48,16 @@ const BACKEND: &str = "metal";
 const MAX_VERTEX_BUFFERS: u32 = 8;
 const RESERVED_BUFFER_LENGTH_SLOT: u32 = 1;
 
+/// First macOS or iOS version supporting the MSL relaxed math pragma.
+#[cfg(any(test, target_os = "macos", target_os = "ios"))]
+const fn relaxed_math_min_os_version(is_macos: bool) -> (isize, isize, isize) {
+    if is_macos {
+        (15, 0, 0)
+    } else {
+        (18, 0, 0)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MetalGpuFamily {
     Apple1,
@@ -519,6 +529,19 @@ impl MetalAdapter {
             });
         #[cfg(not(target_os = "macos"))]
         let os_at_least_26_6_1 = false;
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        let supports_relaxed_math = {
+            let version = relaxed_math_min_os_version(cfg!(target_os = "macos"));
+            objc2_foundation::NSProcessInfo::processInfo().isOperatingSystemAtLeastVersion(
+                objc2_foundation::NSOperatingSystemVersion {
+                    majorVersion: version.0,
+                    minorVersion: version.1,
+                    patchVersion: version.2,
+                },
+            )
+        };
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        let supports_relaxed_math = false;
         let forced = std::env::var("YAWGPU_FORCE_SHADER_WORKAROUNDS").ok();
         let shader_workarounds = crate::HalShaderWorkarounds::for_metal(
             cfg!(target_os = "macos"),
@@ -529,6 +552,7 @@ impl MetalAdapter {
         .with_forced(crate::HalShaderWorkarounds::parse_forced(forced.as_deref()));
         Ok(MetalDevice {
             shader_workarounds,
+            supports_relaxed_math,
             timestamp_resources: timestamp_resources.clone(),
             device: self.device.clone(),
             allocations: AtomicU64::new(0),
@@ -697,6 +721,12 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn metal_relaxed_math_min_os_version_matches_dawn() {
+        assert_eq!(relaxed_math_min_os_version(true), (15, 0, 0));
+        assert_eq!(relaxed_math_min_os_version(false), (18, 0, 0));
+    }
 
     #[test]
     fn timestamp_sampling_mode_prefers_stage_boundary() {

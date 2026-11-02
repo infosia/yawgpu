@@ -3,6 +3,8 @@ use super::*;
 /// Stores metal device data used by validation and backend submission.
 pub struct MetalDevice {
     pub(crate) shader_workarounds: crate::HalShaderWorkarounds,
+    /// Whether this device's OS supports the MSL relaxed math pragma.
+    pub(super) supports_relaxed_math: bool,
     pub(super) device: Retained<ProtocolObject<dyn MTLDevice>>,
     pub(super) allocations: AtomicU64,
     pub(super) queue: MetalQueue,
@@ -133,6 +135,7 @@ impl MetalDevice {
         workgroup_size: (u32, u32, u32),
         _bindings: &[HalDescriptorBinding],
     ) -> Result<MetalComputePipeline, HalError> {
+        let shader = prepare_msl_shader(shader, self.supports_relaxed_math);
         let (msl_source, buffer_size_bindings, workgroup_memory_sizes, immediates) = match shader {
             HalShaderSource::Msl(source) => (source, Vec::new(), Vec::new(), None),
             HalShaderSource::MslWithBufferSizes {
@@ -174,7 +177,7 @@ impl MetalDevice {
     ) -> Result<MetalRenderPipeline, HalError> {
         create_render_pipeline(
             &self.device,
-            shader,
+            prepare_msl_shader(shader, self.supports_relaxed_math),
             vertex_entry_point,
             fragment_entry_point,
             descriptor,
@@ -339,6 +342,87 @@ mod tests {
         assert_eq!(pipeline.workgroup_size, (1, 1, 1));
         // A pipeline created from plain Msl (no workgroup vars) has empty sizes.
         assert!(pipeline.workgroup_memory_sizes.is_empty());
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test; requires macOS 15+ or iOS 18+"]
+    fn metal_tint_compute_relaxed_math_preserves_nan_from_runtime_infinity() {
+        autoreleasepool(|_| {
+            let device = metal_device();
+            if !device.supports_relaxed_math {
+                eprintln!("skipping: relaxed math requires macOS 15+ or iOS 18+");
+                return;
+            }
+            // Use the same source variant and compile path as Tint output. The
+            // runtime buffer load prevents constant folding of the infinity.
+            let shader = HalShaderSource::MslWithBufferSizes {
+                source: r#"
+#include <metal_stdlib>
+using namespace metal;
+kernel void nan_bits(device const float* input [[buffer(0)]],
+                     device uint* output [[buffer(1)]]) {
+    float x = input[0];
+    output[0] = as_type<uint>(x - x);
+    output[1] = as_type<uint>(x / x);
+    output[2] = as_type<uint>(x * 0.0f);
+}
+"#
+                .to_owned(),
+                buffer_size_bindings: Vec::new(),
+                workgroup_memory_sizes: Vec::new(),
+                immediates: None,
+            };
+            let pipeline = device
+                .create_compute_pipeline(shader, "nan_bits", (1, 1, 1), &[])
+                .expect("compile with the Tint MSL header");
+            let input = device
+                .create_buffer(4, HalBufferUsage::default())
+                .expect("input buffer");
+            input
+                .write(0, &f32::INFINITY.to_ne_bytes())
+                .expect("write runtime infinity");
+            let output = device
+                .create_buffer(12, HalBufferUsage::default())
+                .expect("output buffer");
+            output.write(0, &[0; 12]).expect("clear output");
+            let command = device.queue.inner.commandBuffer().expect("command buffer");
+            let encoder = command.computeCommandEncoder().expect("compute encoder");
+            encoder.setComputePipelineState(&pipeline.inner);
+            // SAFETY: Both buffers remain alive through command completion and
+            // have the sizes and binding indices required by the kernel.
+            unsafe {
+                encoder.setBuffer_offset_atIndex(Some(input.inner().expect("input")), 0, 0);
+                encoder.setBuffer_offset_atIndex(Some(output.inner().expect("output")), 0, 1);
+            }
+            let size = MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            };
+            encoder.dispatchThreadgroups_threadsPerThreadgroup(size, size);
+            encoder.endEncoding();
+            command.commit();
+            command.waitUntilCompleted();
+            assert_eq!(
+                command.status(),
+                MTLCommandBufferStatus::Completed,
+                "{:?}",
+                command.error()
+            );
+            let bytes = output.read(0, 12).expect("read NaN bits");
+            for (expression, bytes) in ["x - x", "x / x", "x * 0.0f"]
+                .into_iter()
+                .zip(bytes.as_chunks::<4>().0)
+            {
+                let bits = u32::from_ne_bytes(*bytes);
+                assert_eq!(
+                    bits & 0x7f80_0000,
+                    0x7f80_0000,
+                    "{expression}: {bits:#010x}"
+                );
+                assert_ne!(bits & 0x007f_ffff, 0, "{expression}: {bits:#010x}");
+            }
+        });
     }
 
     #[test]

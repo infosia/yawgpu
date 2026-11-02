@@ -2,6 +2,37 @@ use super::*;
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
 use crate::metal::format::vertex_format_byte_size;
 
+fn msl_header(supports_relaxed_math: bool) -> &'static str {
+    if supports_relaxed_math {
+        "#ifdef __clang__\n#pragma clang diagnostic ignored \"-Wall\"\n#endif\n\n#pragma METAL fp math_mode(relaxed)\n"
+    } else {
+        "#ifdef __clang__\n#pragma clang diagnostic ignored \"-Wall\"\n#endif\n"
+    }
+}
+
+/// Prepends Dawn's header to Tint MSL, leaving application MSL unchanged.
+pub(super) fn prepare_msl_shader(
+    mut shader: HalShaderSource,
+    supports_relaxed_math: bool,
+) -> HalShaderSource {
+    // Core uses the metadata variants for Tint output, including internal and
+    // tiled pipelines. Plain Msl/MslStages carry shader-passthrough source.
+    let header = msl_header(supports_relaxed_math);
+    match &mut shader {
+        HalShaderSource::MslWithBufferSizes { source, .. } => source.insert_str(0, header),
+        HalShaderSource::MslStagesWithBufferSizes {
+            vertex, fragment, ..
+        } => {
+            vertex.insert_str(0, header);
+            if let Some(fragment) = fragment {
+                fragment.insert_str(0, header);
+            }
+        }
+        _ => {}
+    }
+    shader
+}
+
 /// Stores metal compute pipeline data used by validation and backend submission.
 #[derive(Clone)]
 pub struct MetalComputePipeline {
@@ -599,6 +630,85 @@ fn map_stencil_operation(operation: HalStencilOperation) -> MTLStencilOperation 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn msl_header_without_relaxed_math_matches_dawn() {
+        assert_eq!(
+            msl_header(false),
+            "#ifdef __clang__\n#pragma clang diagnostic ignored \"-Wall\"\n#endif\n"
+        );
+    }
+
+    #[test]
+    fn msl_header_with_relaxed_math_matches_dawn() {
+        assert_eq!(
+            msl_header(true),
+            "#ifdef __clang__\n#pragma clang diagnostic ignored \"-Wall\"\n#endif\n\n#pragma METAL fp math_mode(relaxed)\n"
+        );
+    }
+
+    #[test]
+    fn prepare_msl_shader_preserves_passthrough_sources() {
+        let source = "#pragma METAL fp math_mode(safe)\n#include <metal_stdlib>\n";
+        for supports_relaxed_math in [false, true] {
+            let shader = prepare_msl_shader(
+                HalShaderSource::Msl(source.to_owned()),
+                supports_relaxed_math,
+            );
+            assert!(matches!(shader, HalShaderSource::Msl(msl) if msl == source));
+            for fragment in [None, Some(source.to_owned())] {
+                let shader = prepare_msl_shader(
+                    HalShaderSource::MslStages {
+                        vertex: source.to_owned(),
+                        fragment: fragment.clone(),
+                    },
+                    supports_relaxed_math,
+                );
+                assert!(matches!(shader, HalShaderSource::MslStages {
+                    vertex, fragment: actual,
+                } if vertex == source && actual == fragment));
+            }
+        }
+    }
+
+    #[test]
+    fn prepare_msl_shader_prefixes_tint_sources() {
+        let source = "#include <metal_stdlib>\n";
+        for supports_relaxed_math in [false, true] {
+            let expected = format!("{}{source}", msl_header(supports_relaxed_math));
+            let shader = prepare_msl_shader(
+                HalShaderSource::MslWithBufferSizes {
+                    source: source.to_owned(),
+                    buffer_size_bindings: Vec::new(),
+                    workgroup_memory_sizes: vec![16],
+                    immediates: None,
+                },
+                supports_relaxed_math,
+            );
+            assert!(matches!(shader, HalShaderSource::MslWithBufferSizes {
+                source, workgroup_memory_sizes, ..
+            } if source == expected && workgroup_memory_sizes == [16]));
+            for fragment in [None, Some(source.to_owned())] {
+                let shader = prepare_msl_shader(
+                    HalShaderSource::MslStagesWithBufferSizes {
+                        vertex: source.to_owned(),
+                        fragment: fragment.clone(),
+                        vertex_buffer_size_bindings: Vec::new(),
+                        fragment_buffer_size_bindings: Vec::new(),
+                        vertex_immediates: None,
+                        fragment_immediates: None,
+                        vertex_buffer_metal_indices: vec![2],
+                    },
+                    supports_relaxed_math,
+                );
+                let expected_fragment = fragment.map(|_| expected.clone());
+                assert!(matches!(shader, HalShaderSource::MslStagesWithBufferSizes {
+                    vertex, fragment, vertex_buffer_metal_indices, ..
+                } if vertex == expected && fragment == expected_fragment
+                    && vertex_buffer_metal_indices == [2]));
+            }
+        }
+    }
 
     #[test]
     fn render_shader_uses_vertex_descriptor_for_stage_in_msl() {

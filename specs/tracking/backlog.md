@@ -57,6 +57,7 @@ below are stable IDs, not the rank.
 | E1 | Block 97 S4 re-measure | Run 7, 2026-11-02 |
 | E13 | P-005, work-done flushed pending writes | Block 121, 2026-11-02 |
 | E14 | P-006, staging recycle per write; `compute_unique` explained | Block 122, 2026-11-02 |
+| A15 | Metal MSL math mode differed from Dawn | Block 123, 2026-11-02 |
 | — | F-151 real-GPU confirmation | Metal CTS case passes, 2026-11-02 |
 | A12 | Block 120 on native Vulkan | Windows native Vulkan e2e and forced CTS, 2026-11-02 |
 
@@ -67,7 +68,7 @@ below are stable IDs, not the rank.
 | # | Item | Difficulty | Evidence |
 |---|---|---|---|
 | A14 | Releasing the last device reference does not destroy the device, so the device-lost callback reports `CallbackCancelled` at instance release. Dawn destroys and reports `Destroyed` (`DeviceBase::WillDropLastExternalRef`). Seen as the bench's exit code; check against Dawn before changing. | S | `specs/tracking/perf-dawn-baseline.md` Run 7, Teardown note |
-| A15 | Metal MSL math mode: Dawn prepends `#pragma METAL fp math_mode(relaxed)` (macOS 15+) unless strict math is requested; yawgpu leaves Metal's default. Check what the default is and whether any CTS or precision case can tell the difference before changing it. | S | `specs/blocks/122-metal-blit-coalescing.md` S2; Dawn `metal/ShaderModuleMTL.mm` |
+| A16 | Metal render pipelines always compile with `preserveInvariance = true`; Dawn sets it only when Tint reports `has_invariant_attribute`. It may disable floating-point optimisations Dawn applies, so results and speed can differ. | S | `yawgpu-hal/src/metal/pipeline.rs` `create_render_library`; Dawn `metal/ShaderModuleMTL.mm`; Block 123 m4 |
 | A13 | **Dawn workarounds still unset**: AMD Mesa below 25.3 float polyfills, Imagination `polyfill_case_switch`, MSL `polyfill_clamp_float`, and others. Each needs a gate survey against Dawn. | M | `specs/blocks/120-tint-driver-workarounds.md` Out of scope |
 | A3 | **Lazy zero-init GLES clear paths (Block 104 S4)** — core marks and un-marks on every backend, but the GLES HAL has no `ClearTexture` lowering for the Stage-2 eligibility set (sampled reads of uninitialized depth/stencil, compressed and MSAA textures). Tier-2 catalogue item; passes today only where the driver hands back zeroed memory. | M | `specs/blocks/104-lazy-zero-init-stage2.md` S4; `specs/blocks/67-gles-backend.md` mapping matrix |
 | A7 | GLES `SetImmediates` is recorded and bounds-checked but never read by the draw path — a silent gap. Unreachable today because `max_immediate_size` is 0 and core rejects first; must become an explicit `HalError` if the limit is ever raised. | S | `specs/blocks/67-gles-backend.md:282`, `yawgpu-hal/src/gles/adapter.rs` |
@@ -159,7 +160,7 @@ reference `> i32::MAX`, `first_instance` indirect, external textures,
 
 ## Recommended order
 
-1. **A15**, the Metal math-mode difference from Block 122.
+1. **A16**, the Metal `preserveInvariance` difference from Block 123.
 2. **A13**, starting with the most widely used hardware (AMD Mesa).
 3. **A10**, small, and Block 119 raised its stakes.
 4. **C2 / C1** surfaces as separate initiatives.
@@ -292,3 +293,4 @@ Re-verification after the fixes: `cargo test --workspace` 1093/0, clippy default
 - E1 done as Run 7 in `perf-dawn-baseline.md`; it opened E13 (P-005) and A14, and E11 now needs a bench case first.
 - E13 done by Block 121; Run 8 opened E14 (P-006) and carried the `compute_unique` check into it.
 - E14 done by Block 122 (the cause was staging recycling, not the blit encoder); it opened A15.
+- A15 done by Block 123 (relaxed math pragma, red-checked on M2); it opened A16.
