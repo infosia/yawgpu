@@ -556,6 +556,31 @@ Covered by runs of the same library code: Metal `webgpu:*` `fail=2 crash=0`
 (Block 120, 2026-11-02); native Vulkan on Windows (Block 120) and on Linux
 (Block 119).
 
+## Run 8 — 2026-11-02, after Block 121 (P-005 fixed)
+
+Same machine, Dawn and harness as Run 7; yawgpu two rounds, lower minimum.
+
+| case | run 7 ns | now ns | dawn ns | ratio |
+|---|---|---|---|---|
+| `queue/write_buffer_then_wait` | 118168 | **1238** | 574 | 2.16× |
+| `queue/write_buffer_4kb` | 590 | 1935 | 649 | 2.98× |
+| `frame/10writes_dispatch_submit_wait` | 148344 | 145363 | 164268 | 0.88× |
+
+Every other case moved by less than 8%. CTS on Metal: `fail=2 crash=0`, subcase
+counts unchanged.
+
+### P-006 — one Metal blit encoder per queued buffer copy
+
+`queue/write_buffer_4kb` did not regress in real terms. It runs 20,000 writes with no
+submit. Before Block 121 the pending copies were submitted by the next case, outside
+the timed loop, which is the same blind spot Run 1 noted for Dawn. Block 121's 16 MiB
+flush now submits about 4,096 copies inside the loop, as Dawn does, so the loop pays
+for them: about 1.3 µs per copy. `MetalQueue::submit_copies`
+(`yawgpu-hal/src/metal/queue.rs`) opens a new `blitCommandEncoder` for every
+`HalCopy::Buffer`. Dawn's `CommandRecordingContext::EnsureBlit` reuses the open blit
+encoder. Every submit that carries several queue writes pays this, so it is not
+specific to the bench. Backlog E14. Vulkan is not measured for it.
+
 ## Status
 
 P-004 **resolved**, including the constant-factor follow-up (399 → 224 ns,
@@ -565,9 +590,9 @@ structural: `queue/write_buffer_then_wait` 1.53×, `bindgroup/create_destroy`
 1.33×, `encode/compute_1_dispatch` 1.14×, `encode/render_draw` 1.16×.
 
 Block 97 **S3** is **done** (`88cfe58`) and **S4** is **done** (Run 7,
-2026-11-02). Run 7 found one regression, **P-005** (`onSubmittedWorkDone`
-flushes pending writes; 205× on `queue/write_buffer_then_wait`). Every other
-gap is per-command recording cost, at 1.84× or below.
+2026-11-02). Run 7 found **P-005**, fixed by Block 121 (Run 8: 205× to 2.16×). Run 8 found
+**P-006** (one blit encoder per queued buffer copy on Metal). The other gaps are
+per-command recording cost, at 1.84× or below.
 
 ## Superseded status notes
 

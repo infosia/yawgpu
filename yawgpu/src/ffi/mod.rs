@@ -3670,7 +3670,58 @@ mod tests {
     }
 
     #[test]
-    fn audit_s10_work_done_flushes_queued_buffer_writes() {
+    fn block_121_work_done_preserves_pending_writes_until_map_async() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let queue = wgpuDeviceGetQueue(device);
+            let buffer = wgpuDeviceCreateBuffer(
+                device,
+                &buffer_descriptor(
+                    native::WGPUBufferUsage_MapRead | native::WGPUBufferUsage_CopyDst,
+                    4,
+                ),
+            );
+            wgpuQueueWriteBuffer(queue, buffer, 0, [7u8; 4].as_ptr().cast(), 4);
+            let core = &borrow_handle(queue, "WGPUQueue").core;
+            let before = core.latest_submission_index();
+            let mut work = QueueWorkDoneState::default();
+            wgpuQueueOnSubmittedWorkDone(
+                queue,
+                native::WGPUQueueWorkDoneCallbackInfo {
+                    mode: native::WGPUCallbackMode_AllowProcessEvents,
+                    callback: Some(queue_work_done_callback),
+                    userdata1: (&mut work as *mut QueueWorkDoneState).cast(),
+                    ..std::mem::zeroed()
+                },
+            );
+            assert_eq!(core.latest_submission_index(), before);
+            for _ in 0..8 {
+                if work.fired != 0 {
+                    break;
+                }
+                wgpuInstanceProcessEvents(instance);
+            }
+            assert_eq!(work.fired, 1);
+            assert_eq!(work.status, native::WGPUQueueWorkDoneStatus_Success);
+            assert_eq!(core.latest_submission_index(), before);
+
+            let mut mapped = BufferMapAsyncState::default();
+            map_buffer_async(buffer, native::WGPUMapMode_Read, 0, 4, &mut mapped);
+            process_events_until_buffer_map_fires(instance, &mapped);
+            assert_eq!(mapped.fired, 1);
+            assert_eq!(mapped.status, native::WGPUMapAsyncStatus_Success);
+            let ptr = wgpuBufferGetConstMappedRange(buffer, 0, 4);
+            assert!(!ptr.is_null());
+            assert_eq!(std::slice::from_raw_parts(ptr.cast::<u8>(), 4), &[7; 4]);
+            wgpuBufferUnmap(buffer);
+            wgpuBufferRelease(buffer);
+            wgpuQueueRelease(queue);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn block_121_r1_work_done_gates_on_earlier_submission() {
         unsafe {
             let (instance, adapter, device) = noop_chain();
             let queue = wgpuDeviceGetQueue(device);
@@ -3678,26 +3729,36 @@ mod tests {
                 device,
                 &buffer_descriptor(native::WGPUBufferUsage_CopyDst, 4),
             );
-            wgpuQueueWriteBuffer(queue, buffer, 0, [7u8; 4].as_ptr().cast(), 4);
+            wgpuQueueWriteBuffer(queue, buffer, 0, [3u8; 4].as_ptr().cast(), 4);
+            wgpuQueueSubmit(queue, 0, std::ptr::null());
             let core = &borrow_handle(queue, "WGPUQueue").core;
-            let before = core.latest_submission_index();
+            let submitted = core.latest_submission_index();
+            assert_ne!(submitted, yawgpu_hal::SubmissionIndex::NONE);
+
+            wgpuQueueWriteBuffer(queue, buffer, 0, [7u8; 4].as_ptr().cast(), 4);
+            assert_eq!(core.latest_submission_index(), submitted);
+            let mut work = QueueWorkDoneState::default();
             wgpuQueueOnSubmittedWorkDone(
                 queue,
                 native::WGPUQueueWorkDoneCallbackInfo {
                     mode: native::WGPUCallbackMode_AllowProcessEvents,
+                    callback: Some(queue_work_done_callback),
+                    userdata1: (&mut work as *mut QueueWorkDoneState).cast(),
                     ..std::mem::zeroed()
                 },
             );
-            assert_ne!(core.latest_submission_index(), before);
-            assert_eq!(
-                borrow_handle(buffer, "WGPUBuffer")
-                    .core
-                    .hal()
-                    .unwrap()
-                    .read(0, 4)
-                    .unwrap(),
-                vec![7; 4]
-            );
+            assert_eq!(core.latest_submission_index(), submitted);
+            assert_eq!(work.fired, 0);
+            for _ in 0..8 {
+                if work.fired != 0 {
+                    break;
+                }
+                wgpuInstanceProcessEvents(instance);
+            }
+            assert_eq!(work.fired, 1);
+            assert_eq!(work.status, native::WGPUQueueWorkDoneStatus_Success);
+            assert_eq!(core.latest_submission_index(), submitted);
+
             wgpuBufferRelease(buffer);
             wgpuQueueRelease(queue);
             release_handles(instance, adapter, device);

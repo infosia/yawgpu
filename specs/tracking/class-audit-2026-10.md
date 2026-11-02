@@ -78,7 +78,7 @@ under-strict vs Dawn.
 | C10 | MINOR | `wgpuSurfaceConfigure` dispatches the error callback while holding surface locks; clears state before the fallible configure | |
 | C11 | MINOR | uncaptured callback may still run after `wgpuDeviceRelease` returns | |
 | S5 | MAJOR | `wgpuSurfacePresent` does not flush pending queue writes (Dawn submits pending commands in present) | |
-| S10 | MINOR | `onSubmittedWorkDone` ignores pending writes (no flush) | |
+| S10 | MINOR | `onSubmittedWorkDone` ignores pending writes (no flush) | Wrong premise: Dawn does not flush either. Fixed in Block 113, then reverted by Block 121. |
 | T6 | MINOR | `writeTexture` into depth16unorm / stencil8 with a non-multiple-of-4 offset is not repacked; Vulkan requires 4-byte buffer offsets for DS images | |
 
 ## Vulkan → Block 114

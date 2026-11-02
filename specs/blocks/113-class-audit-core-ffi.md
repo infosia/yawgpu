@@ -85,6 +85,8 @@ the ledger row):
   running and never runs again.
 - **S5** `wgpuSurfacePresent` flushes pending queue writes first.
 - **S10** `onSubmittedWorkDone` flushes / accounts for pending writes.
+  *Superseded by Block 121: Dawn does not flush here, and the flush cost a GPU
+  round trip per call.*
 - **T6** `writeTexture` repacks when `offset % 4 != 0` for depth / stencil
   formats (Vulkan requires 4-byte buffer offsets for DS images).
 

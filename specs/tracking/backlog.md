@@ -55,6 +55,7 @@ below are stable IDs, not the rank.
 | — | CTS findings F-161 to F-164 | Block 119 |
 | — | Tint driver workarounds from Block 118 | Block 120, see A12 |
 | E1 | Block 97 S4 re-measure | Run 7, 2026-11-02 |
+| E13 | P-005, work-done flushed pending writes | Block 121, 2026-11-02 |
 | — | F-151 real-GPU confirmation | Metal CTS case passes, 2026-11-02 |
 | A12 | Block 120 on native Vulkan | Windows native Vulkan e2e and forced CTS, 2026-11-02 |
 
@@ -123,7 +124,7 @@ reference `> i32::MAX`, `first_instance` indirect, external textures,
 
 | # | Item | Difficulty | Evidence |
 |---|---|---|---|
-| E13 | **P-005**: `onSubmittedWorkDone` flushes pending writes (Block 113 S10). Dawn does not, so `queue/write_buffer_then_wait` is 205× Dawn. Restore Dawn's behaviour for work-done only; present keeps flushing. Also look at `pipeline/compute_unique`, which moved from 0.97× to 1.12×. | S | `specs/tracking/perf-dawn-baseline.md` Run 7 |
+| E14 | **P-006**: Metal `submit_copies` opens one blit encoder per queued buffer copy; Dawn reuses one. Costs about 1.3 µs per copy, visible as `queue/write_buffer_4kb` 2.98×. Also look at `pipeline/compute_unique`, which moved from 0.97× to 1.12-1.15×. | S | `specs/tracking/perf-dawn-baseline.md` Run 8 |
 | E2 | Residual gaps vs Dawn with no structural lever: `write_buffer_then_wait` 1.53×, `bindgroup/create_destroy` 1.33×, `render_draw` 224 vs 99 ns. | Diffuse | `specs/tracking/perf-dawn-baseline.md:435-446` |
 | E3 | Deferred cache layers: real `VkPipelineCache`; Metal `MTLLibrary`-by-source cache (measure-first); whole-module Tint IR clone (needs an upstream Tint API). | M / M / L | `specs/blocks/95-shader-compile-cache.md:35-41`; `yawgpu-tint/src/lib.rs` |
 | E11 | Vulkan `VkRenderPass` / `VkFramebuffer` / `VkDescriptorPool` caches, left out of Block 117. Run 7 cannot decide it: no bench case isolates per-pass creation, so add one that submits many passes without waiting. | M | `specs/blocks/117-vulkan-submit-recycling.md` |
@@ -157,7 +158,7 @@ reference `> i32::MAX`, `first_instance` indirect, external textures,
 
 ## Recommended order
 
-1. **E13** (P-005), from E1's Run 7.
+1. **E14** (P-006), from Block 121's Run 8.
 2. **A13**, starting with the most widely used hardware (AMD Mesa).
 3. **A10**, small, and Block 119 raised its stakes.
 4. **C2 / C1** surfaces as separate initiatives.
@@ -288,3 +289,4 @@ Re-verification after the fixes: `cargo test --workspace` 1093/0, clippy default
 - F-151 confirmed on real hardware; Block 113 status, `SPEC.md` Phases 13, 14, and 16, and `threading-audit.md` corrected.
 - Later the same day: C4, B2 and GLES ranked last by user direction; B2 records that default Dawn rejects binding arrays too.
 - E1 done as Run 7 in `perf-dawn-baseline.md`; it opened E13 (P-005) and A14, and E11 now needs a bench case first.
+- E13 done by Block 121; Run 8 opened E14 (P-006) and carried the `compute_unique` check into it.

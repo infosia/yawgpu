@@ -55,7 +55,6 @@ pub unsafe extern "C" fn wgpuQueueOnSubmittedWorkDone(
         return native::WGPUFuture { id: 0 };
     }
     let queue = clone_handle(queue, "WGPUQueue");
-    dispatch_optional_device_error(&queue.device, queue.core.flush_pending_writes());
     let submission_index = queue.core.latest_submission_index();
     queue
         .instance

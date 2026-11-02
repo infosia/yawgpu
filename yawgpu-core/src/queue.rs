@@ -64,6 +64,8 @@ pub(crate) struct QueueInner {
     submit_test_hook: Mutex<Option<SubmitTestHook>>,
     #[cfg(test)]
     wait_idle_test_hook: Mutex<Option<SubmitTestHook>>,
+    #[cfg(test)]
+    fail_next_pending_submit: Mutex<bool>,
 }
 
 // A one-shot seam around validation, the HAL call and commit, scoped to one queue.
@@ -84,6 +86,10 @@ impl SubmitTestHook {
 }
 
 const STAGING_CHUNK_SIZE: u64 = 64 * 1024;
+
+// Same threshold as Dawn's kPendingMemorySubmitThreshold, measured as staging
+// capacity rather than requested bytes, so it flushes no later than Dawn.
+const PENDING_MEMORY_SUBMIT_THRESHOLD: u64 = 16 * 1024 * 1024;
 
 /// Caps the staging chunks kept for reuse, so a burst of queue writes cannot
 /// leave a large pool resident for the lifetime of the queue. Four chunks is
@@ -110,6 +116,8 @@ struct PendingWriteBatch {
     fail_next_stage: bool,
     copies: Vec<HalCopy>,
     chunks: Vec<StagingChunk>,
+    /// Total buffer capacity in `chunks`; excludes in-flight and free buffers.
+    staged_bytes: u64,
     current_chunk: Option<usize>,
     /// Standard-size chunks consumed by submissions that have not yet been
     /// proven complete. Each chunk moves to `free_chunks` when the queue's
@@ -151,7 +159,7 @@ impl PendingWriteBatch {
         #[cfg(test)]
         if std::mem::take(&mut self.fail_next_stage) {
             let buffer = self.take_chunk(device)?;
-            self.chunks.push(StagingChunk { buffer, cursor: 0 });
+            self.add_chunk(buffer, 0);
             return Err(yawgpu_hal::HalError::BufferOperationFailed {
                 backend: "Noop",
                 message: "injected staging failure",
@@ -163,10 +171,7 @@ impl PendingWriteBatch {
             // strictly greater than `STAGING_CHUNK_SIZE`.
             let buffer = self.create_staging_buffer(device, size)?;
             buffer.write(0, data)?;
-            self.chunks.push(StagingChunk {
-                buffer: buffer.clone(),
-                cursor: size,
-            });
+            self.add_chunk(buffer.clone(), size);
             return Ok((buffer, 0));
         }
 
@@ -183,7 +188,7 @@ impl PendingWriteBatch {
         } else {
             let buffer = self.take_chunk(device)?;
             let index = self.chunks.len();
-            self.chunks.push(StagingChunk { buffer, cursor: 0 });
+            self.add_chunk(buffer, 0);
             self.current_chunk = Some(index);
             (index, 0)
         };
@@ -192,6 +197,11 @@ impl PendingWriteBatch {
         chunk.buffer.write(offset, data)?;
         chunk.cursor = offset + size;
         Ok((chunk.buffer.clone(), offset))
+    }
+
+    fn add_chunk(&mut self, buffer: HalBuffer, cursor: u64) {
+        self.staged_bytes = self.staged_bytes.saturating_add(buffer.size());
+        self.chunks.push(StagingChunk { buffer, cursor });
     }
 
     /// Takes a pooled standard-size chunk, allocating one when the pool is
@@ -220,6 +230,7 @@ impl PendingWriteBatch {
 
     fn take_submission(&mut self) -> PendingWriteSubmission {
         self.current_chunk = None;
+        self.staged_bytes = 0;
         PendingWriteSubmission {
             copies: std::mem::take(&mut self.copies),
             chunks: std::mem::take(&mut self.chunks),
@@ -361,6 +372,8 @@ impl Queue {
                 submit_test_hook: Mutex::new(None),
                 #[cfg(test)]
                 wait_idle_test_hook: Mutex::new(None),
+                #[cfg(test)]
+                fail_next_pending_submit: Mutex::new(false),
             }),
         }
     }
@@ -444,6 +457,9 @@ impl Queue {
     /// Empty writes (zero-length `data`) are validated and then skip
     /// staging allocation, matching the no-op behaviour of the former direct
     /// path.
+    ///
+    /// Pending writes are submitted when their staging capacity reaches
+    /// `PENDING_MEMORY_SUBMIT_THRESHOLD`.
     pub fn write_buffer(&self, write: QueueBufferWrite<'_>) -> Option<DeviceError> {
         let QueueBufferWrite {
             device,
@@ -499,7 +515,8 @@ impl Queue {
             destination_offset: offset,
             size,
         }));
-        None
+        drop(pending);
+        self.maybe_flush_pending_writes_locked()
     }
 
     /// Waits until all submitted queue work has completed.
@@ -526,6 +543,9 @@ impl Queue {
     }
 
     /// Writes `data` into the texture through the backend copy path.
+    ///
+    /// Pending writes are submitted when their staging capacity reaches
+    /// `PENDING_MEMORY_SUBMIT_THRESHOLD`.
     pub fn write_texture(&self, write: QueueTextureWrite<'_>) -> Option<DeviceError> {
         let _submission = self.inner.submission.lock();
         if self.inner.lost.load(std::sync::atomic::Ordering::Acquire) {
@@ -687,7 +707,8 @@ impl Queue {
             overlay.commit();
             copies.push(copy);
             pending.copies.extend(copies);
-            return None;
+            drop(pending);
+            return self.maybe_flush_pending_writes_locked();
         }
 
         // Fast path: layout is already backend-representable; copy verbatim.
@@ -743,7 +764,8 @@ impl Queue {
         overlay.commit();
         copies.push(copy);
         pending.copies.extend(copies);
-        None
+        drop(pending);
+        self.maybe_flush_pending_writes_locked()
     }
 
     /// Submits command buffers to the queue after validating each is non-error and not already submitted.
@@ -975,11 +997,33 @@ impl Queue {
         self.flush_pending_writes_locked()
     }
 
-    // The caller holds submission; validation-error paths must not reacquire it.
+    // The caller holds submission and has released pending_writes. Keep the
+    // submission lock through the threshold check and flush to serialize maps.
+    fn maybe_flush_pending_writes_locked(&self) -> Option<DeviceError> {
+        let should_flush =
+            self.inner.pending_writes.lock().staged_bytes >= PENDING_MEMORY_SUBMIT_THRESHOLD;
+        if should_flush {
+            self.flush_pending_writes_locked()
+        } else {
+            None
+        }
+    }
+
+    // The caller holds submission; write and validation-error paths must not reacquire it.
     fn flush_pending_writes_locked(&self) -> Option<DeviceError> {
         let PendingWriteSubmission { copies, chunks } = self.take_pending_writes();
         if copies.is_empty() {
             return None;
+        }
+        #[cfg(test)]
+        if std::mem::take(&mut *self.inner.fail_next_pending_submit.lock()) {
+            return self.finish_pending_submission(
+                chunks,
+                Err(yawgpu_hal::HalError::QueueSubmissionFailed {
+                    backend: "Noop",
+                    message: "injected pending submit failure".to_owned(),
+                }),
+            );
         }
         let result = self.inner.hal.submit_copies(&copies);
         self.finish_pending_submission(chunks, result)
@@ -4687,6 +4731,212 @@ fn fs() -> @location(0) vec4<f32> {
         assert_eq!(queue.latest_submission_index(), SubmissionIndex::NONE);
         assert_eq!(queue.flush_pending_writes(), None);
         assert!(queue.latest_submission_index() > SubmissionIndex::NONE);
+    }
+
+    #[test]
+    fn queue_write_buffer_flushes_at_pending_memory_threshold() {
+        // Cover both pooled-only batches and a dedicated buffer worth two chunks.
+        for dedicated_size in [0, 2 * STAGING_CHUNK_SIZE] {
+            let device = noop_device();
+            let queue = device.queue();
+            let buffer = device.create_buffer(BufferDescriptor {
+                usage: BufferUsage::COPY_DST,
+                size: 2 * STAGING_CHUNK_SIZE,
+                mapped_at_creation: false,
+            });
+            let data = vec![7; (2 * STAGING_CHUNK_SIZE) as usize];
+            let write = |size: u64| {
+                queue.write_buffer(QueueBufferWrite {
+                    device: device.hal(),
+                    buffer: &buffer,
+                    offset: 0,
+                    data: &data[..size as usize],
+                })
+            };
+            if dedicated_size != 0 {
+                assert_eq!(write(dedicated_size), None);
+                assert_eq!(
+                    queue.inner.pending_writes.lock().staged_bytes,
+                    dedicated_size
+                );
+            }
+            let pooled_count =
+                (PENDING_MEMORY_SUBMIT_THRESHOLD - dedicated_size) / STAGING_CHUNK_SIZE - 1;
+            for _ in 0..pooled_count {
+                assert_eq!(write(STAGING_CHUNK_SIZE), None);
+                assert_eq!(queue.latest_submission_index(), SubmissionIndex::NONE);
+            }
+            assert_eq!(
+                queue.inner.pending_writes.lock().staged_bytes,
+                PENDING_MEMORY_SUBMIT_THRESHOLD - STAGING_CHUNK_SIZE
+            );
+
+            // A four-byte write consumes a whole new chunk's capacity.
+            assert_eq!(write(4), None);
+            let first_submission = hal_noop_queue().submit_empty().unwrap();
+            assert_eq!(queue.latest_submission_index(), first_submission);
+            {
+                let pending = queue.inner.pending_writes.lock();
+                assert_eq!(pending.staged_bytes, 0);
+                assert!(pending.chunks.is_empty());
+                assert_eq!(pending.in_flight.len() as u64, pooled_count + 1);
+            }
+
+            // Completed chunks move through the free pool; neither list counts.
+            assert_eq!(write(4), None);
+            let pending = queue.inner.pending_writes.lock();
+            assert_eq!(pending.staged_bytes, STAGING_CHUNK_SIZE);
+            assert_eq!(pending.pool_sizes(), (0, MAX_FREE_STAGING_CHUNKS - 1));
+            drop(pending);
+            assert_eq!(queue.latest_submission_index(), first_submission);
+        }
+    }
+
+    #[test]
+    fn queue_write_texture_flushes_at_pending_memory_threshold() {
+        // Exercise both the verbatim layout and the repacked-row path.
+        for repack in [false, true] {
+            let device = noop_device();
+            let queue = device.queue();
+            let size = Extent3d {
+                width: 128,
+                height: 128,
+                depth_or_array_layers: 1,
+            };
+            let texture = device.create_texture(TextureDescriptor {
+                usage: TextureUsage::COPY_DST,
+                dimension: TextureDimension::D2,
+                size,
+                format: rgba8_unorm(),
+                mip_level_count: 1,
+                sample_count: 1,
+                view_formats: Vec::new(),
+            });
+            let bytes_per_row = if repack { 513 } else { 512 };
+            let data = vec![7; (127 * bytes_per_row + 512) as usize];
+            let write = || {
+                queue.write_texture(QueueTextureWrite {
+                    device: device.hal(),
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: Origin3d { x: 0, y: 0, z: 0 },
+                    write_size: size,
+                    aspect: TextureAspect::All,
+                    layout: TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(bytes_per_row),
+                        rows_per_image: None,
+                    },
+                    data: &data,
+                })
+            };
+            for _ in 0..PENDING_MEMORY_SUBMIT_THRESHOLD / STAGING_CHUNK_SIZE - 1 {
+                assert_eq!(write(), None);
+                assert_eq!(queue.latest_submission_index(), SubmissionIndex::NONE);
+            }
+            assert_eq!(
+                queue.inner.pending_writes.lock().staged_bytes,
+                PENDING_MEMORY_SUBMIT_THRESHOLD - STAGING_CHUNK_SIZE
+            );
+            assert_eq!(write(), None);
+            let first_submission = hal_noop_queue().submit_empty().unwrap();
+            assert_eq!(queue.latest_submission_index(), first_submission);
+            assert_eq!(queue.inner.pending_writes.lock().staged_bytes, 0);
+            assert_eq!(write(), None);
+            assert_eq!(
+                queue.inner.pending_writes.lock().staged_bytes,
+                STAGING_CHUNK_SIZE
+            );
+            assert_eq!(queue.latest_submission_index(), first_submission);
+        }
+    }
+
+    #[test]
+    fn queue_writes_return_threshold_flush_failure() {
+        // The threshold flush error must propagate through all three write paths.
+        for write_kind in 0..3 {
+            let device = noop_device();
+            let queue = device.queue();
+            let buffer = device.create_buffer(BufferDescriptor {
+                usage: BufferUsage::COPY_DST,
+                size: STAGING_CHUNK_SIZE,
+                mapped_at_creation: false,
+            });
+            let data = vec![7; STAGING_CHUNK_SIZE as usize];
+            *queue.inner.fail_next_pending_submit.lock() = true;
+            for _ in 0..PENDING_MEMORY_SUBMIT_THRESHOLD / STAGING_CHUNK_SIZE - 1 {
+                assert_eq!(
+                    queue.write_buffer(QueueBufferWrite {
+                        device: device.hal(),
+                        buffer: &buffer,
+                        offset: 0,
+                        data: &data,
+                    }),
+                    None
+                );
+            }
+            let texture = noop_2x2_rgba8_texture(&device);
+            let error = if write_kind == 0 {
+                queue.write_buffer(QueueBufferWrite {
+                    device: device.hal(),
+                    buffer: &buffer,
+                    offset: 0,
+                    data: &[7; 4],
+                })
+            } else {
+                queue.write_texture(QueueTextureWrite {
+                    device: device.hal(),
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: Origin3d { x: 0, y: 0, z: 0 },
+                    write_size: Extent3d {
+                        width: 2,
+                        height: 2,
+                        depth_or_array_layers: 1,
+                    },
+                    aspect: TextureAspect::All,
+                    layout: TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(if write_kind == 1 { 8 } else { 9 }),
+                        rows_per_image: None,
+                    },
+                    data: &[7; 17],
+                })
+            };
+            assert_eq!(
+                error,
+                Some(DeviceError::internal(
+                    yawgpu_hal::HalError::QueueSubmissionFailed {
+                        backend: "Noop",
+                        message: "injected pending submit failure".to_owned(),
+                    }
+                    .to_string()
+                ))
+            );
+            assert_eq!(queue.latest_submission_index(), SubmissionIndex::NONE);
+            assert!(submitted_copies(&queue).is_empty());
+            {
+                let pending = queue.inner.pending_writes.lock();
+                assert_eq!(pending.staged_bytes, 0);
+                assert!(pending.chunks.is_empty());
+                assert!(pending.copies.is_empty());
+            }
+            // The fault is one-shot and the next batch starts from zero.
+            assert_eq!(
+                queue.write_buffer(QueueBufferWrite {
+                    device: device.hal(),
+                    buffer: &buffer,
+                    offset: 0,
+                    data: &[7; 4],
+                }),
+                None
+            );
+            assert_eq!(queue.flush_pending_writes(), None);
+            assert_eq!(
+                queue.latest_submission_index(),
+                hal_noop_queue().submit_empty().unwrap()
+            );
+        }
     }
 
     #[test]
