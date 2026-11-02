@@ -53,6 +53,7 @@ struct SpirvCodegenKey {
     framebuffer_fetch_descriptor_set: u32,
     multisampled_input_attachment: bool,
     polyfill_pixel_center: Option<u32>,
+    needs_frag_depth_range: bool,
     user_immediate_size: u32,
 }
 
@@ -309,8 +310,8 @@ impl ReflectedModule {
     /// `user_immediate_size` is the owning pipeline layout's reserved
     /// user-immediate byte budget (Block 94, 0..=64; see
     /// [`Self::generate_msl`]). It only affects output when
-    /// `polyfill_pixel_center` is `Some`: the internal depth-range
-    /// immediates land at push-constant byte offsets
+    /// `needs_frag_depth_range` is true:
+    /// the internal depth-range immediates land at push-constant byte offsets
     /// `{user_immediate_size, user_immediate_size + 4}`, directly after
     /// the user region.
     #[allow(clippy::too_many_arguments)]
@@ -323,6 +324,7 @@ impl ReflectedModule {
         framebuffer_fetch_descriptor_set: u32,
         multisampled_input_attachment: bool,
         polyfill_pixel_center: Option<u32>,
+        needs_frag_depth_range: bool,
         user_immediate_size: u32,
         use_storage_input_output_16: bool,
         emit_vertex_point_size: bool,
@@ -350,6 +352,7 @@ impl ReflectedModule {
             framebuffer_fetch_descriptor_set,
             multisampled_input_attachment,
             polyfill_pixel_center,
+            needs_frag_depth_range,
             user_immediate_size,
         };
         let mut cache = self
@@ -371,6 +374,7 @@ impl ReflectedModule {
                 framebuffer_fetch_descriptor_set,
                 multisampled_input_attachment,
                 polyfill_pixel_center,
+                needs_frag_depth_range,
                 user_immediate_size,
                 use_storage_input_output_16,
                 emit_vertex_point_size,
@@ -1057,6 +1061,21 @@ impl ReflectedModule {
         });
         let uses_framebuffer_fetch = inputs.iter().any(|variable| variable.color.is_some());
         uses_sample_interpolant || entry.sample_index_used || uses_framebuffer_fetch
+    }
+
+    /// Returns whether this fragment needs the viewport depth-range immediates
+    /// for the pixel-center polyfill or shader-written depth with clipping enabled.
+    pub(crate) fn fragment_needs_depth_range(
+        &self,
+        entry_point: &str,
+        sample_count: u32,
+        unclipped_depth: bool,
+    ) -> bool {
+        !unclipped_depth
+            && (self.fragment_needs_pixel_center_polyfill(entry_point, sample_count)
+                || self
+                    .fragment_builtins(entry_point)
+                    .is_some_and(|builtins| builtins.frag_depth))
     }
 
     /// Returns the lowest inter-stage `@location` index not used by the given
@@ -1899,6 +1918,7 @@ mod tests {
                         0,
                         false,
                         None,
+                        false,
                         0,
                         true,
                         false,
@@ -1970,6 +1990,7 @@ mod tests {
                     0,
                     false,
                     None,
+                    false,
                     0,
                     enabled,
                     false,
@@ -2299,6 +2320,7 @@ fn cs() {}
                 0,
                 false,
                 None,
+                false,
                 0,
                 true,
                 false,
@@ -2314,6 +2336,7 @@ fn cs() {}
                 0,
                 false,
                 None,
+                false,
                 0,
                 true,
                 false,
@@ -2332,6 +2355,7 @@ fn cs() {}
                 0,
                 false,
                 None,
+                false,
                 0,
                 true,
                 false,
@@ -3241,6 +3265,7 @@ fn cs() {}
             0,
             false,
             None,
+            false,
             0,
             true,
             false,
@@ -3279,6 +3304,7 @@ fn fs() -> @location(0) vec4<f32> {
                 0,
                 false,
                 None,
+                false,
                 0,
                 true,
                 false,
@@ -3294,6 +3320,7 @@ fn fs() -> @location(0) vec4<f32> {
                 0,
                 false,
                 None,
+                false,
                 0,
                 true,
                 false,
@@ -3390,6 +3417,7 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
                         0,
                         false,
                         None,
+                        false,
                         0,
                         true,
                         point_size,
@@ -3422,6 +3450,84 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
     }
 
     #[test]
+    fn fragment_depth_range_trigger_and_spirv_codegen_cache() {
+        let module = parse_and_validate_wgsl(
+            r#"
+@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0, 0, 0, 1); }
+@fragment fn depth() -> @builtin(frag_depth) f32 { return 0.9; }
+struct Out { @builtin(frag_depth) depth: f32 }
+@fragment fn struct_depth() -> Out { return Out(0.9); }
+@fragment fn color() -> @location(0) vec4f { return vec4f(1); }
+@fragment fn pixel_center(@location(0) @interpolate(perspective, sample) uv: vec2f,
+    @builtin(position) p: vec4f)
+    -> @location(0) vec4f { return p + vec4f(uv, 0, 0); }
+@fragment fn pixel_depth(@location(0) @interpolate(perspective, sample) uv: vec2f,
+    @builtin(position) p: vec4f) -> Out { return Out(p.z + uv.x); }
+"#,
+        )
+        .unwrap();
+        for (entry, uses_pixel_center, writes_depth) in [
+            ("depth", false, true),
+            ("struct_depth", false, true),
+            ("color", false, false),
+            ("pixel_center", true, false),
+            ("pixel_depth", true, true),
+            ("vs", false, false),
+            ("missing", false, false),
+        ] {
+            for sample_count in [1, 4] {
+                let pixel_center = uses_pixel_center && sample_count > 1;
+                // Pixel-center remains enabled even when depth-range is disabled.
+                assert_eq!(
+                    module.fragment_needs_pixel_center_polyfill(entry, sample_count),
+                    pixel_center
+                );
+                for unclipped in [false, true] {
+                    assert_eq!(
+                        module.fragment_needs_depth_range(entry, sample_count, unclipped),
+                        (pixel_center || writes_depth) && !unclipped,
+                        "entry={entry}, sample_count={sample_count}, unclipped={unclipped}",
+                    );
+                }
+            }
+        }
+        assert!(!module.fragment_needs_depth_range("pixel_center", 4, true));
+
+        for (index, entry) in ["depth", "pixel_center", "pixel_depth"]
+            .into_iter()
+            .enumerate()
+        {
+            let generate = |unclipped| {
+                module
+                    .generate_spirv(
+                        entry,
+                        ShaderStage::Fragment,
+                        &PipelineConstants::default(),
+                        false,
+                        0,
+                        false,
+                        module
+                            .fragment_needs_pixel_center_polyfill(entry, 4)
+                            .then_some(1),
+                        module.fragment_needs_depth_range(entry, 4, unclipped),
+                        16,
+                        true,
+                        false,
+                        Default::default(),
+                    )
+                    .unwrap()
+            };
+            let clipped = generate(false);
+            let unclipped = generate(true);
+            assert_ne!(clipped, unclipped);
+            assert_eq!(module.codegen_miss_count(), (index + 1) * 2);
+            assert_eq!(generate(false), clipped);
+            assert_eq!(generate(true), unclipped);
+            assert_eq!(module.codegen_miss_count(), (index + 1) * 2);
+        }
+    }
+
+    #[test]
     fn generate_spirv_keeps_robustness_with_vulkan_memory_model_toggle() {
         let module = parse_and_validate_wgsl(
             r#"
@@ -3449,6 +3555,7 @@ fn cs() {
                     0,
                     false,
                     None,
+                    false,
                     0,
                     true,
                     false,

@@ -546,6 +546,7 @@ pub(crate) fn select_compute_shader_source(
                 0,
                 false,
                 None,
+                false,
                 user_immediate_size,
                 use_storage_input_output_16,
                 false,

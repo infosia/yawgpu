@@ -1029,36 +1029,14 @@ fn create_hal_render_pipeline_with_subpass_color_slots(
             Ok(descriptor) => descriptor,
             Err(message) => return (None, Some(message)),
         };
-    // On Vulkan, the `@builtin(position)` pixel-center polyfill (applied when the
-    // fragment reads position under sample-rate shading) reconstructs the depth
-    // in NDC space and needs the viewport depth range delivered as a fragment
-    // push constant. Flag it so the HAL declares the push-constant range and
-    // writes the viewport min/max depth at draw time. Matches the SPIR-V
-    // generation decision in `select_render_shader_source`.
     if matches!(hal_device.backend(), HalBackend::Vulkan) {
-        if let (Some(fragment), Some(fragment_entry_name)) =
-            (descriptor.fragment.as_ref(), fragment_entry_name)
-        {
-            if let Some(fragment_module) = fragment.shader.module.reflected() {
-                hal_descriptor.needs_frag_depth_range_push_constant = fragment_module
-                    .fragment_needs_pixel_center_polyfill(
-                        fragment_entry_name,
-                        descriptor.multisample.count,
-                    );
-            }
-        }
-        // Block 94 S3: the pipeline's effective user-immediate byte budget
-        // (same resolution the SPIR-V codegen used above via
-        // `select_render_shader_source`) sizes the user prefix of the
-        // combined push-constant block; the depth-range pair -- when the
-        // polyfill flag above is set -- sits directly after it.
-        match render_pipeline_layout_immediate_size(
+        if let Err(message) = configure_vulkan_render_immediates(
             descriptor,
             vertex_entry_name,
             fragment_entry_name,
+            &mut hal_descriptor,
         ) {
-            Ok(size) => hal_descriptor.user_immediate_size = size,
-            Err(message) => return (None, Some(message)),
+            return (None, Some(message));
         }
     }
     match hal_device.create_render_pipeline(
@@ -1071,6 +1049,32 @@ fn create_hal_render_pipeline_with_subpass_color_slots(
         Ok(pipeline) => (Some(pipeline), None),
         Err(error) => (None, Some(error.to_string())),
     }
+}
+
+/// Shares the depth-range trigger and user prefix between ordinary and tiled
+/// Vulkan pipelines, matching the options in `select_render_shader_source`.
+fn configure_vulkan_render_immediates(
+    descriptor: &RenderPipelineDescriptor,
+    vertex_entry_name: &str,
+    fragment_entry_name: Option<&str>,
+    hal_descriptor: &mut yawgpu_hal::HalRenderPipelineDescriptor,
+) -> Result<(), String> {
+    hal_descriptor.needs_frag_depth_range_push_constant =
+        match (descriptor.fragment.as_ref(), fragment_entry_name) {
+            (Some(fragment), Some(entry_name)) => {
+                fragment.shader.module.reflected().is_some_and(|module| {
+                    module.fragment_needs_depth_range(
+                        entry_name,
+                        descriptor.multisample.count,
+                        descriptor.primitive.unclipped_depth,
+                    )
+                })
+            }
+            _ => false,
+        };
+    hal_descriptor.user_immediate_size =
+        render_pipeline_layout_immediate_size(descriptor, vertex_entry_name, fragment_entry_name)?;
+    Ok(())
 }
 
 /// Creates HAL subpass render pipeline through the regular HAL render-pipeline path.
@@ -1222,7 +1226,7 @@ fn create_hal_vulkan_subpass_render_pipeline(
         Ok(input_attachment_bindings) => descriptor_bindings.extend(input_attachment_bindings),
         Err(message) => return (None, Some(message)),
     }
-    let hal_descriptor = match hal_subpass_render_pipeline_descriptor(
+    let mut hal_descriptor = match hal_subpass_render_pipeline_descriptor(
         descriptor,
         vertex_buffer_bindings,
         pass_layout,
@@ -1233,6 +1237,14 @@ fn create_hal_vulkan_subpass_render_pipeline(
         Ok(descriptor) => descriptor,
         Err(message) => return (None, Some(message)),
     };
+    if let Err(message) = configure_vulkan_render_immediates(
+        descriptor,
+        vertex_entry_name,
+        fragment_entry_name,
+        &mut hal_descriptor,
+    ) {
+        return (None, Some(message));
+    }
     let hal_pass_layout = hal_subpass_pass_layout(pass_layout);
     match hal_device.create_subpass_render_pipeline(
         shader,
@@ -1649,9 +1661,21 @@ pub(crate) fn select_render_shader_source(
                     .map(|_| vertex_module.free_inter_stage_location(vertex_entry_name)),
                 _ => None,
             };
+            let needs_frag_depth_range = match (fragment, fragment_entry_name) {
+                (Some(fragment), Some(entry_name)) => {
+                    fragment.shader.module.reflected().is_some_and(|module| {
+                        module.fragment_needs_depth_range(
+                            entry_name,
+                            descriptor.multisample.count,
+                            descriptor.primitive.unclipped_depth,
+                        )
+                    })
+                }
+                _ => false,
+            };
             // The pipeline's effective user-immediate byte budget (Block 94
             // S3, same resolution as the Metal arm): the internal depth-range
-            // immediates (pixel-center polyfill) are rebased directly after
+            // immediates (pixel-center polyfill or frag-depth clamp) are rebased after
             // this region in the push-constant block, mirroring Dawn
             // (`dawn/native/vulkan/ShaderModuleVk.cpp:349-355`).
             let user_immediate_size = render_pipeline_layout_immediate_size(
@@ -1667,6 +1691,7 @@ pub(crate) fn select_render_shader_source(
                 framebuffer_fetch_descriptor_set,
                 multisampled_input_attachment,
                 polyfill_pixel_center,
+                needs_frag_depth_range,
                 user_immediate_size,
                 use_storage_input_output_16,
                 emit_vertex_point_size(descriptor.primitive.topology),
@@ -1698,6 +1723,7 @@ pub(crate) fn select_render_shader_source(
                         framebuffer_fetch_descriptor_set,
                         multisampled_input_attachment,
                         polyfill_pixel_center,
+                        needs_frag_depth_range,
                         user_immediate_size,
                         use_storage_input_output_16,
                         false,
@@ -5641,6 +5667,107 @@ fn fs() -> @location(0) vec4<f32> {
             )
         );
         assert_eq!(validate_clip_distances_size(8), Ok(()));
+    }
+
+    #[test]
+    fn vulkan_frag_depth_clamp_matches_shader_and_hal_immediates() {
+        let device = noop_device();
+        let wgsl = r#"
+struct Input {
+    @builtin(position) pos: vec4f,
+    @location(0) @interpolate(perspective, sample) uv: vec2f,
+}
+@vertex fn vs() -> Input { return Input(vec4f(0, 0, 0, 1), vec2f(0)); }
+@fragment fn depth() -> @builtin(frag_depth) f32 { return 0.9; }
+@fragment fn color() -> @location(0) vec4f { return vec4f(1); }
+@fragment fn pixel_center(v: Input) -> @location(0) vec4f { return v.pos + vec4f(v.uv, 0, 0); }
+@fragment fn pixel_depth(v: Input) -> @builtin(frag_depth) f32 { return v.pos.z + v.uv.x; }
+"#;
+        let module =
+            Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(wgsl.to_owned())));
+        for separate_fragment in [false, true] {
+            for (entry, unclipped, expected) in [
+                (Some("depth"), false, true),
+                (Some("depth"), true, false),
+                (Some("color"), false, false),
+                (Some("color"), true, false),
+                (Some("pixel_center"), false, true),
+                (Some("pixel_center"), true, false),
+                (Some("pixel_depth"), false, true),
+                (Some("pixel_depth"), true, false),
+                (None, false, false),
+            ] {
+                let mut descriptor = render_pipeline_descriptor(module.clone());
+                descriptor.primitive.unclipped_depth = unclipped;
+                descriptor.multisample.count = 4;
+                descriptor.layout = RenderPipelineLayout::Explicit(Arc::new(
+                    device.create_pipeline_layout(PipelineLayoutDescriptor {
+                        bind_group_layouts: Vec::new(),
+                        immediate_size: 16,
+                        error: None,
+                    }),
+                ));
+                if entry.is_none() {
+                    descriptor.fragment = None;
+                } else if separate_fragment {
+                    descriptor.fragment.as_mut().unwrap().shader.module = Arc::new(
+                        device.create_shader_module(ShaderModuleSource::Wgsl(wgsl.to_owned())),
+                    );
+                }
+                let mut hal = hal_render_pipeline_descriptor(&descriptor, &[]).unwrap();
+                configure_vulkan_render_immediates(&descriptor, "vs", entry, &mut hal).unwrap();
+                assert_eq!(hal.needs_frag_depth_range_push_constant, expected);
+                assert_eq!(hal.user_immediate_size, 16);
+                assert_eq!(hal.unclipped_depth, unclipped);
+                let (source, _, _, _) = select_render_shader_source(
+                    HalBackend::Vulkan,
+                    &descriptor,
+                    "vs",
+                    entry,
+                    &[],
+                    &[],
+                    &[],
+                    false,
+                    &[],
+                    true,
+                    Default::default(),
+                )
+                .unwrap();
+                let HalShaderSource::SpirVStages { fragment, .. } = source else {
+                    panic!("expected SPIR-V stages");
+                };
+                if let Some(words) = fragment {
+                    let mut remaining = &words[5..];
+                    let mut has_clamp = false;
+                    let mut instructions = Vec::new();
+                    while let Some(&header) = remaining.first() {
+                        let count = (header >> 16) as usize;
+                        assert!(count > 0);
+                        let instruction = &remaining[..count];
+                        // OpExtInst GLSL.std.450 NClamp.
+                        if header & 0xffff == 12 && instruction[4] == 81 {
+                            has_clamp = true;
+                        }
+                        instructions.push(instruction);
+                        remaining = &remaining[count..];
+                    }
+                    let constants = instructions
+                        .iter()
+                        .filter(|i| i[0] & 0xffff == 43)
+                        .map(|i| (i[2], i[3]))
+                        .collect::<std::collections::HashMap<_, _>>();
+                    let indices = instructions
+                        .iter()
+                        .filter(|i| i[0] & 0xffff == 65)
+                        .filter_map(|i| constants.get(i.last().unwrap()).copied())
+                        .collect::<Vec<_>>();
+                    let writes_depth = matches!(entry, Some("depth" | "pixel_depth"));
+                    assert_eq!(has_clamp, expected && writes_depth);
+                    assert_eq!(indices.contains(&4), expected);
+                    assert_eq!(indices.contains(&5), expected);
+                }
+            }
+        }
     }
 
     #[test]

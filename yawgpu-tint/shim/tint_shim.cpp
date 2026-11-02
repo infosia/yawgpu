@@ -2437,6 +2437,7 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
                                 bool multisampled_input_attachment,
                                 bool has_polyfill_pixel_center,
                                 uint32_t polyfill_pixel_center,
+                                bool needs_frag_depth_range,
                                 uint32_t user_immediate_size,
                                 uint32_t** words_out,
                                 size_t* n_words_out,
@@ -2483,6 +2484,15 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
         // backend, which sets the same option).
         if (has_polyfill_pixel_center) {
             options.polyfill_pixel_center = polyfill_pixel_center;
+        }
+        // Dawn keeps the pixel-center polyfill independent of unclippedDepth,
+        // but only supplies depth-range immediates when depth clipping is enabled.
+        if (needs_frag_depth_range) {
+            // Match Dawn's ToPushConstantBytes / minimum_immediate_size:
+            // decompose to exactly the reserved bytes, excluding struct tail
+            // padding (a vec4 user prefix plus two f32s has Size() == 32,
+            // but the Vulkan push-constant range is only 24 bytes).
+            options.minimum_immediate_size = user_immediate_size + 8u;
             // The pixel-center reconstruction maps the recovered NDC depth into
             // the viewport depth range (min/max depth), which are supplied at
             // draw time as push constants. Two f32 immediates directly after
@@ -2497,7 +2507,8 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
             // `spirv/writer/raise/raise.cc:105-116`). The Vulkan HAL declares
             // a matching push-constant range over the combined block and
             // writes the viewport min/max depth at these offsets. Matches
-            // Dawn's ClampFragDepthArgs layout.
+            // Dawn's ClampFragDepthArgs layout. The same pair also clamps
+            // shader-written frag_depth when unclippedDepth is false.
             options.depth_range_offsets = tint::spirv::writer::Options::RangeOffsets{
                 /*min=*/user_immediate_size, /*max=*/user_immediate_size + 4u};
         }

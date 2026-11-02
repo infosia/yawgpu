@@ -5,18 +5,18 @@ use crate::{
     HalTextureViewDimension,
 };
 
-/// Byte size of the `@builtin(position)` pixel-center polyfill depth-range
+/// Byte size of the pixel-center polyfill / frag-depth clamp depth-range
 /// pair: two `f32`s carrying the viewport `min_depth` and `max_depth`,
 /// placed at byte offset `user_immediate_size` of the combined immediates
 /// push-constant block (matching the Tint `depth_range_offsets`
 /// `{user_immediate_size, user_immediate_size + 4}` used when compiling the
-/// polyfilled fragment shader; Dawn `ClampFragDepthArgs`).
+/// fragment shader; Dawn `ClampFragDepthArgs`).
 pub(super) const FRAG_DEPTH_RANGE_PUSH_CONSTANT_BYTES: u32 = 8;
 
 /// Combined immediates push-constant block metadata for one Vulkan pipeline
 /// (Block 94 S3). Mirrors Dawn's `ImmediatesLayoutVk.h` layout: user
 /// immediate bytes `[0, user_immediate_size)` first, the internal
-/// depth-range pair (pixel-center polyfill) appended directly after when
+/// depth-range pair (pixel-center polyfill or frag-depth clamp) appended when
 /// present. The `VkPipelineLayout` declares one `VkPushConstantRange` of
 /// `block_size` bytes at offset 0 (Dawn `PipelineLayoutVk.cpp:98-104`), and
 /// every draw/dispatch delivers the composed block via
@@ -28,7 +28,7 @@ pub(super) struct VulkanImmediates {
     /// present.
     pub(super) block_size: u32,
     /// Byte offset of the 8-byte depth-range pair within the block, when
-    /// the `@builtin(position)` pixel-center polyfill needs it. Always
+    /// the pixel-center polyfill or frag-depth clamp needs it. Always
     /// `None` for compute pipelines.
     pub(super) depth_range_offset: Option<u32>,
 }
@@ -36,9 +36,11 @@ pub(super) struct VulkanImmediates {
 /// Resolves the combined immediates block for a render pipeline from its
 /// HAL descriptor: `user_immediate_size` user bytes, plus the depth-range
 /// pair right after when `needs_frag_depth_range_push_constant` is set.
+/// Tint's `minimum_immediate_size` uses this same total, so struct alignment
+/// padding cannot make the emitted SPIR-V block exceed the declared range.
 /// `None` when the pipeline uses no immediates at all (no push-constant
 /// range is declared, byte-identical to the pre-Block-94 behaviour for
-/// pipelines without the polyfill).
+/// pipelines without internal immediates).
 pub(super) fn vulkan_render_immediates(
     descriptor: &HalRenderPipelineDescriptor,
 ) -> Option<VulkanImmediates> {
@@ -127,8 +129,8 @@ pub(super) struct VulkanRenderPipelineInner {
     pub(super) vertex_shader_module: vk::ShaderModule,
     pub(super) fragment_shader_module: Option<vk::ShaderModule>,
     /// Combined immediates push-constant block (Block 94 S3): user
-    /// immediate bytes first, the `@builtin(position)` pixel-center
-    /// polyfill depth-range pair at `depth_range_offset` when present. The
+    /// immediate bytes first, the pixel-center polyfill / frag-depth clamp
+    /// depth-range pair at `depth_range_offset` when present. The
     /// draw path composes and pushes the whole block before every draw.
     /// `None` when the pipeline uses no immediates at all.
     pub(super) immediates: Option<VulkanImmediates>,
@@ -586,8 +588,8 @@ pub(super) fn create_render_pipeline(
             }
         };
     // Combined immediates push-constant block (Block 94 S3): user immediate
-    // bytes `[0, user_immediate_size)`, then -- for the `@builtin(position)`
-    // pixel-center polyfill -- the viewport depth-range pair (min/max f32s)
+    // bytes `[0, user_immediate_size)`, then -- for the pixel-center polyfill
+    // or frag-depth clamp -- the viewport depth-range pair (min/max f32s)
     // directly after, matching the Tint `depth_range_offsets` set for these
     // shaders. Declare one range of the whole block over the graphics stages
     // (the vertex stage may also declare the block; Dawn likewise covers all
@@ -769,8 +771,8 @@ pub(super) fn create_subpass_render_pipeline(
             }
         };
     // Combined immediates push-constant block (Block 94 S3): user immediate
-    // bytes `[0, user_immediate_size)`, then -- for the `@builtin(position)`
-    // pixel-center polyfill -- the viewport depth-range pair (min/max f32s)
+    // bytes `[0, user_immediate_size)`, then -- for the pixel-center polyfill
+    // or frag-depth clamp -- the viewport depth-range pair (min/max f32s)
     // directly after, matching the Tint `depth_range_offsets` set for these
     // shaders. Declare one range of the whole block over the graphics stages
     // (the vertex stage may also declare the block; Dawn likewise covers all
@@ -2850,6 +2852,170 @@ mod tests {
                 depth_range_offset: None,
             })
         );
+    }
+
+    #[test]
+    fn vulkan_frag_depth_clamp_reserves_range_after_user_immediates() {
+        let mut descriptor = crate::vulkan::test_helpers::render_descriptor();
+        descriptor.needs_frag_depth_range_push_constant = true;
+        for user_size in [0, 16, 64] {
+            descriptor.user_immediate_size = user_size;
+            let immediates = vulkan_render_immediates(&descriptor).unwrap();
+            assert_eq!(immediates.depth_range_offset, Some(user_size));
+            assert_eq!(immediates.block_size, user_size + 8);
+        }
+    }
+
+    /// Reads the byte size of Tint's emitted push-constant Block, following
+    /// its variable, pointer, struct, array, length constant and ArrayStride.
+    fn spirv_immediate_block_size(words: &[u32]) -> Option<u32> {
+        assert_eq!(words[0], 0x0723_0203);
+        let mut instructions = Vec::new();
+        let mut remaining = &words[5..];
+        while let Some(&header) = remaining.first() {
+            let count = (header >> 16) as usize;
+            assert!(count > 0 && count <= remaining.len());
+            instructions.push(&remaining[..count]);
+            remaining = &remaining[count..];
+        }
+        // OpVariable in PushConstant storage, then OpTypePointer.
+        let variable = instructions
+            .iter()
+            .find(|i| i[0] & 0xffff == 59 && i[3] == 9)?;
+        let pointer = instructions
+            .iter()
+            .find(|i| i[0] & 0xffff == 32 && i[1] == variable[1])
+            .unwrap();
+        assert_eq!(pointer[2], 9);
+        let block = instructions
+            .iter()
+            .find(|i| i[0] & 0xffff == 30 && i[1] == pointer[3])
+            .unwrap();
+        assert_eq!(block.len(), 3, "Tint wraps one decomposed u32 array");
+        assert!(instructions
+            .iter()
+            .any(|i| i[0] & 0xffff == 71 && i[1] == block[1] && i[2] == 2));
+        assert!(instructions
+            .iter()
+            .any(|i| i[0] & 0xffff == 72 && i[1] == block[1] && i[2..] == [0, 35, 0]));
+        let array = instructions
+            .iter()
+            .find(|i| i[0] & 0xffff == 28 && i[1] == block[2])
+            .unwrap();
+        let element = instructions
+            .iter()
+            .find(|i| i[0] & 0xffff == 21 && i[1] == array[2])
+            .unwrap();
+        assert_eq!(element[2..], [32, 0]);
+        let stride = instructions
+            .iter()
+            .find(|i| i[0] & 0xffff == 71 && i[1] == array[1] && i[2] == 6)
+            .unwrap()[3];
+        assert_eq!(stride, 4);
+        let length = instructions
+            .iter()
+            .find(|i| i[0] & 0xffff == 43 && i[2] == array[3])
+            .unwrap()[3];
+        Some(length * stride)
+    }
+
+    #[test]
+    fn vulkan_depth_range_declared_size_matches_generated_spirv_block() {
+        for has_user in [false, true] {
+            for (pixel_center, writes_depth) in [(false, true), (true, false), (true, true)] {
+                let mut source = String::new();
+                if has_user {
+                    source.push_str(
+                        "requires immediate_address_space;\nvar<immediate> imm: vec4f;\n",
+                    );
+                }
+                source.push_str(
+                    r#"
+struct Input {
+    @builtin(position) pos: vec4f,
+    @location(0) @interpolate(perspective, sample) uv: vec2f,
+}
+struct Output {
+    @builtin(frag_depth) depth: f32,
+    @location(0) color: vec4f,
+}
+"#,
+                );
+                let depth = if has_user { "imm.x" } else { "0.9" };
+                let color = if has_user {
+                    "v.pos + imm + vec4f(v.uv, 0, 0)"
+                } else {
+                    "v.pos + vec4f(v.uv, 0, 0)"
+                };
+                if writes_depth {
+                    source.push_str(&format!("@fragment fn fs(v: Input) -> Output {{ return Output({depth}, {color}); }}"));
+                } else {
+                    source.push_str(&format!(
+                        "@fragment fn fs(v: Input) -> @location(0) vec4f {{ return {color}; }}"
+                    ));
+                }
+                let program = yawgpu_tint::Program::parse(
+                    &source,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    &[11],
+                )
+                .unwrap();
+                // Match e2e_vulkan_immediates' failing vec4f shape: 4 * 4 = 16
+                // user bytes, followed by the two f32 depth-range values.
+                let user_size = program.immediate_data_size("fs").unwrap();
+                assert_eq!(user_size, if has_user { 16 } else { 0 });
+                let budgets = if has_user {
+                    vec![user_size, 64]
+                } else {
+                    vec![0]
+                };
+                for budget in budgets {
+                    for unclipped in [false, true] {
+                        let mut descriptor = crate::vulkan::test_helpers::render_descriptor();
+                        descriptor.user_immediate_size = budget;
+                        descriptor.needs_frag_depth_range_push_constant = !unclipped;
+                        let immediates = vulkan_render_immediates(&descriptor);
+                        let words = program
+                            .generate_spirv(
+                                "fs",
+                                &yawgpu_tint::Bindings::default(),
+                                &[],
+                                true,
+                                false,
+                                0,
+                                false,
+                                pixel_center.then_some(1),
+                                !unclipped,
+                                budget,
+                                true,
+                                false,
+                                Default::default(),
+                            )
+                            .unwrap();
+                        let declared_size = immediates.map_or(0, |block| block.block_size);
+                        let emitted_size = spirv_immediate_block_size(&words).unwrap_or(0);
+                        let expected_size = if unclipped { user_size } else { declared_size };
+                        assert_eq!(
+                            emitted_size,
+                            expected_size,
+                            "budget/polyfill/depth/unclipped={:?}",
+                            (budget, pixel_center, writes_depth, unclipped),
+                        );
+                        assert!(emitted_size <= declared_size);
+                        assert_eq!(declared_size, budget + if unclipped { 0 } else { 8 });
+                        assert_eq!(
+                            immediates.and_then(|block| block.depth_range_offset),
+                            (!unclipped).then_some(budget)
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Block 94 S3: compute pipelines have no internal immediates -- the

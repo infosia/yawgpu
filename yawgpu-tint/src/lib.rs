@@ -1571,6 +1571,7 @@ mod real {
             multisampled_input_attachment: bool,
             has_polyfill_pixel_center: bool,
             polyfill_pixel_center: u32,
+            needs_frag_depth_range: bool,
             user_immediate_size: u32,
             words_out: *mut *mut u32,
             n_words_out: *mut usize,
@@ -2236,13 +2237,16 @@ mod real {
         /// `user_immediate_size` is the owning pipeline layout's reserved
         /// user-immediate byte budget (Block 94, 0..=64) -- same meaning as
         /// in [`Self::generate_msl`]. It only affects output when
-        /// `polyfill_pixel_center` is `Some`: the internal depth-range
-        /// immediates are placed at byte offsets `{user_immediate_size,
+        /// `needs_frag_depth_range` is true:
+        /// the internal depth-range immediates are placed at byte offsets `{user_immediate_size,
         /// user_immediate_size + 4}` of the push-constant block, directly
         /// after the user region (mirrors Dawn
         /// `ShaderModuleVk.cpp:349-355`).
         ///
         /// `emit_vertex_point_size` is enabled only for point-list vertex stages.
+        /// `needs_frag_depth_range` enables the viewport range when the pipeline
+        /// needs the pixel-center polyfill or writes `frag_depth`, and unclipped
+        /// depth is disabled. `polyfill_pixel_center` is independent of this flag.
         #[allow(clippy::too_many_arguments)]
         pub fn generate_spirv(
             &self,
@@ -2254,6 +2258,7 @@ mod real {
             framebuffer_fetch_descriptor_set: u32,
             multisampled_input_attachment: bool,
             polyfill_pixel_center: Option<u32>,
+            needs_frag_depth_range: bool,
             user_immediate_size: u32,
             use_storage_input_output_16: bool,
             emit_vertex_point_size: bool,
@@ -2287,6 +2292,7 @@ mod real {
                     multisampled_input_attachment,
                     polyfill_pixel_center.is_some(),
                     polyfill_pixel_center.unwrap_or(0),
+                    needs_frag_depth_range,
                     user_immediate_size,
                     &mut words,
                     &mut len,
@@ -2691,6 +2697,7 @@ mod stub {
             _framebuffer_fetch_descriptor_set: u32,
             _multisampled_input_attachment: bool,
             _polyfill_pixel_center: Option<u32>,
+            _needs_frag_depth_range: bool,
             _user_immediate_size: u32,
             _use_storage_input_output_16: bool,
             _emit_vertex_point_size: bool,
@@ -2803,6 +2810,7 @@ fn cs(@builtin(local_invocation_index) index: u32) {
                 0,
                 false,
                 None,
+                false,
                 0,
                 true,
                 false,
@@ -2843,6 +2851,7 @@ fn cs(@builtin(local_invocation_index) index: u32) {
                     0,
                     false,
                     None,
+                    false,
                     0,
                     true,
                     false,
@@ -2901,6 +2910,7 @@ fn cs(@builtin(local_invocation_index) i: u32) {
                         0,
                         false,
                         None,
+                        false,
                         0,
                         true,
                         enabled,
@@ -3033,6 +3043,93 @@ fn cs(@builtin(local_invocation_index) i: u32) {
             offset += count;
         }
         instructions
+    }
+
+    /// The clamp uses the same two immediates as the pixel-center polyfill,
+    /// even without position inputs, and starts after the layout's user region.
+    #[test]
+    fn spirv_frag_depth_clamp_uses_depth_range_after_user_immediates() {
+        let program = Program::parse(
+            r#"
+requires immediate_address_space;
+var<immediate> params: vec4f;
+@fragment fn depth() -> @builtin(frag_depth) f32 { return params.x; }
+@fragment fn color() -> @location(0) vec4f { return params; }
+"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[11],
+        )
+        .unwrap();
+        for (entry, needs_range, expected_clamp) in [
+            ("depth", true, true),
+            ("depth", false, false),
+            ("color", false, false),
+        ] {
+            for user_size in [16, 64] {
+                let words = program
+                    .generate_spirv(
+                        entry,
+                        &Bindings::default(),
+                        &[],
+                        true,
+                        false,
+                        0,
+                        false,
+                        None,
+                        needs_range,
+                        user_size,
+                        true,
+                        false,
+                        Default::default(),
+                    )
+                    .unwrap();
+                let instructions = spirv_instructions(&words);
+                // OpExtInst GLSL.std.450 NClamp (Tint preserves NaN semantics).
+                assert_eq!(
+                    instructions
+                        .iter()
+                        .any(|i| i[0] & 0xffff == 12 && i[4] == 81),
+                    expected_clamp
+                );
+                // Tint decomposes immediates into a u32 array. Check the
+                // actual word indices loaded for min/max, after the user words.
+                let constants = instructions
+                    .iter()
+                    .filter(|i| i[0] & 0xffff == 43)
+                    .map(|i| (i[2], i[3]))
+                    .collect::<std::collections::HashMap<_, _>>();
+                let indices = instructions
+                    .iter()
+                    .filter(|i| i[0] & 0xffff == 65)
+                    .filter_map(|i| constants.get(i.last().unwrap()).copied())
+                    .collect::<Vec<_>>();
+                assert_eq!(indices.contains(&(user_size / 4)), needs_range);
+                assert_eq!(indices.contains(&(user_size / 4 + 1)), needs_range);
+            }
+        }
+        let collision = program
+            .generate_spirv(
+                "depth",
+                &Bindings::default(),
+                &[],
+                true,
+                false,
+                0,
+                false,
+                None,
+                true,
+                0,
+                true,
+                false,
+                Default::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(collision, TintError::Codegen(message) if message.contains("overlap")));
     }
 
     #[test]
@@ -3187,6 +3284,7 @@ fn cs(@builtin(local_invocation_index) i: u32) {
                     0,
                     false,
                     None,
+                    false,
                     0,
                     enabled,
                     false,
@@ -3596,6 +3694,7 @@ fn main() {
                 0,
                 false,
                 None,
+                false,
                 0,
                 true,
                 false,
@@ -3613,6 +3712,7 @@ fn main() {
                 0,
                 false,
                 None,
+                false,
                 0,
                 true,
                 false,
@@ -4603,6 +4703,7 @@ fn main() {
                 0,
                 false,
                 None,
+                false,
                 0,
                 true,
                 false,
@@ -4772,6 +4873,7 @@ fn cs() {
                     0,
                     false,
                     None,
+                    false,
                     0,
                     true,
                     false,
@@ -4825,6 +4927,7 @@ fn cs() {
                 0,
                 false,
                 None,
+                false,
                 0,
                 true,
                 false,
@@ -4979,6 +5082,7 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
                 0,
                 false,
                 None,
+                false,
                 0,
                 true,
                 false,
@@ -4995,6 +5099,7 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
                 0,
                 false,
                 Some(1),
+                false,
                 0,
                 true,
                 false,
@@ -5007,6 +5112,73 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
             without, with,
             "polyfill_pixel_center must alter the emitted SPIR-V"
         );
+    }
+
+    #[test]
+    fn spirv_pixel_center_without_depth_range_accepts_unclipped_depth() {
+        let program = Program::parse(
+            r#"
+struct Input {
+    @builtin(position) pos: vec4f,
+    @location(0) @interpolate(perspective, sample) uv: vec2f,
+}
+struct Output { @builtin(frag_depth) depth: f32, @location(0) color: vec4f }
+@vertex fn vs() -> Input { return Input(vec4f(0, 0, 0, 1), vec2f(0)); }
+@fragment fn fs(v: Input) -> Output {
+    return Output(0.9, v.pos + vec4f(v.uv, 0, 0));
+}
+"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        for entry in ["vs", "fs"] {
+            for needs_range in [false, true] {
+                let words = program
+                    .generate_spirv(
+                        entry,
+                        &Bindings::default(),
+                        &[],
+                        true,
+                        false,
+                        0,
+                        false,
+                        Some(1),
+                        needs_range,
+                        0,
+                        true,
+                        false,
+                        Default::default(),
+                    )
+                    .unwrap();
+                let instructions = spirv_instructions(&words);
+                // Both stages retain the pixel-center varying at Location 1.
+                assert!(instructions
+                    .iter()
+                    .any(|i| i[0] & 0xffff == 71 && i[2..] == [30, 1]));
+                if entry == "fs" {
+                    // Unclipped depth needs neither a PushConstant variable
+                    // nor GLSL.std.450 NClamp, while the polyfill stays enabled.
+                    assert_eq!(
+                        instructions
+                            .iter()
+                            .any(|i| i[0] & 0xffff == 59 && i[3] == 9),
+                        needs_range
+                    );
+                    assert_eq!(
+                        instructions
+                            .iter()
+                            .any(|i| i[0] & 0xffff == 12 && i[4] == 81),
+                        needs_range
+                    );
+                }
+            }
+        }
     }
 
     /// Block 94 S3: a fragment that needs the pixel-center polyfill's
@@ -5063,6 +5235,7 @@ fn cs() {
                 0,
                 false,
                 Some(1),
+                true,
                 16,
                 true,
                 false,
@@ -5083,6 +5256,7 @@ fn cs() {
             0,
             false,
             Some(1),
+            true,
             0,
             true,
             false,
@@ -5113,6 +5287,7 @@ fn cs() {
                 0,
                 false,
                 None,
+                false,
                 16,
                 true,
                 false,
@@ -5146,6 +5321,7 @@ fn cs() {
                 0,
                 false,
                 None,
+                false,
                 0,
                 true,
                 false,
@@ -5179,6 +5355,7 @@ fn cs() {
             0,
             true,
             None,
+            false,
             0,
             true,
             false,
@@ -5232,6 +5409,7 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
                 0,
                 true,
                 None,
+                false,
                 0,
                 true,
                 false,
@@ -5292,6 +5470,7 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
                 0,
                 true,
                 None,
+                false,
                 0,
                 true,
                 false,
@@ -5312,6 +5491,7 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
                 0,
                 false,
                 None,
+                false,
                 0,
                 true,
                 false,
@@ -5513,6 +5693,7 @@ fn cs() {
                     0,
                     false,
                     None,
+                    false,
                     0,
                     true,
                     false,
@@ -6568,6 +6749,7 @@ fn cs() { _ = u.value; }
                 0,
                 false,
                 None,
+                false,
                 0,
                 true,
                 false,
@@ -6584,6 +6766,7 @@ fn cs() { _ = u.value; }
                 0,
                 false,
                 None,
+                false,
                 0,
                 true,
                 false,
@@ -7168,6 +7351,7 @@ fn cs() {
                     0,
                     false,
                     None,
+                    false,
                     0,
                     true,
                     false,
@@ -7256,6 +7440,7 @@ fn fs(in: VsOut) -> @location(0) vec4f {
                         0,
                         false,
                         None,
+                        false,
                         0,
                         true,
                         false,
@@ -7402,6 +7587,7 @@ fn cs() {
                     0,
                     false,
                     None,
+                    false,
                     0,
                     true,
                     false,

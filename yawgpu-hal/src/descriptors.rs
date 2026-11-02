@@ -68,10 +68,11 @@ pub struct HalRenderPipelineDescriptor {
     pub cull_mode: HalCullMode,
     /// Enables unclipped depth.
     pub unclipped_depth: bool,
-    /// Whether the fragment shader was compiled with the `@builtin(position)`
-    /// pixel-center polyfill and therefore needs the viewport depth range
-    /// (`min_depth`, `max_depth`) delivered as a fragment push constant. Only
-    /// meaningful on the Vulkan backend; other backends ignore it.
+    /// Whether the fragment shader needs the viewport depth range for the
+    /// `@builtin(position)` pixel-center polyfill or the `frag_depth` clamp
+    /// (`min_depth`, `max_depth`) delivered as a fragment push constant while
+    /// `unclipped_depth` is false. Only meaningful on the Vulkan backend;
+    /// other backends ignore it.
     pub needs_frag_depth_range_push_constant: bool,
     /// The pipeline layout's reserved user-immediate byte budget (Block 94,
     /// 0..=64). Only meaningful on the Vulkan backend, where the combined

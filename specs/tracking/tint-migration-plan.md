@@ -810,7 +810,10 @@ compressed/MSAA zero-init.
   `DEPTH_STENCIL_ATTACHMENT`) via `VkImageViewUsageCreateInfo` (matches wgpu-hal), dropping the
   SAMPLED precondition. `yawgpu-hal/src/vulkan/encode.rs`. Verified: `3d_texture_slices` 6→7/7 on
   MoltenVK, no operation-tree regression.
-- **F-139 (xfail, MoltenVK artifact — native Vulkan correct)** — `depth_clip_clamp` ×2. WebGPU
+- **F-139 — superseded by Block 126 (2026-11-03).** The premise below was wrong: native
+  Vulkan without `VK_EXT_depth_clip_enable` also needs the in-shader clamp, as Dawn always
+  applies it. Block 126 ports Dawn's clamp, and both cases now pass on MoltenVK. Original
+  entry: **(xfail, MoltenVK artifact — native Vulkan correct)** — `depth_clip_clamp` ×2. WebGPU
   requires shader-written frag_depth clamped to the viewport [minDepth,maxDepth] and out-of-[0,1]
   primitives clipped. yawgpu's Vulkan HAL maps this correctly for NATIVE Vulkan (depthClampEnable
   + `VK_EXT_depth_clip_enable`), but MoltenVK clamps Metal `[[depth]]` only to [0,1] and collapses

@@ -4192,15 +4192,7 @@ fn prepare_vulkan_render_draw(
         state.descriptors_dirty = false;
     }
     if let Some(immediates) = pipeline.inner.immediates {
-        let block = crate::immediates::compose_immediates_block(
-            &state.immediate_data,
-            immediates
-                .depth_range_offset
-                .unwrap_or(immediates.block_size),
-            immediates.block_size,
-            immediates.depth_range_offset,
-            [state.viewport.min_depth, state.viewport.max_depth],
-        );
+        let block = vulkan_render_immediates_block(immediates, state);
         unsafe {
             device.cmd_push_constants(
                 command_buffer,
@@ -4212,6 +4204,23 @@ fn prepare_vulkan_render_draw(
         }
     }
     Ok(())
+}
+
+/// Composes the bytes pushed before every direct, indirect, or bundle draw,
+/// using the current viewport even when only the viewport changed.
+fn vulkan_render_immediates_block(
+    immediates: super::pipeline::VulkanImmediates,
+    state: &VulkanRenderStreamState<'_>,
+) -> Vec<u8> {
+    crate::immediates::compose_immediates_block(
+        &state.immediate_data,
+        immediates
+            .depth_range_offset
+            .unwrap_or(immediates.block_size),
+        immediates.block_size,
+        immediates.depth_range_offset,
+        [state.viewport.min_depth, state.viewport.max_depth],
+    )
 }
 
 fn vk_index_type(format: HalIndexFormat) -> vk::IndexType {
@@ -5231,6 +5240,30 @@ pub(super) fn to_image_extent(extent: HalExtent3d) -> vk::Extent3D {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn vulkan_frag_depth_clamp_draw_bytes_follow_viewport_changes() {
+        let mut descriptor = crate::vulkan::test_helpers::render_descriptor();
+        descriptor.needs_frag_depth_range_push_constant = true;
+        for user_size in [0, 16, 64] {
+            descriptor.user_immediate_size = user_size;
+            let immediates = super::super::pipeline::vulkan_render_immediates(&descriptor).unwrap();
+            let mut state = VulkanRenderStreamState::new(vk::Rect2D::default(), 1, 1, None, &[]);
+            state.immediate_data.fill(0x5a);
+            // Default viewport, then two changes with the same pipeline. This
+            // composer runs for every draw, including indirect and bundle draws.
+            for [min, max] in [[0.0_f32, 1.0_f32], [0.1, 0.5], [0.25, 0.75]] {
+                state.viewport.min_depth = min;
+                state.viewport.max_depth = max;
+                let block = vulkan_render_immediates_block(immediates, &state);
+                let prefix = user_size as usize;
+                assert_eq!(block.len(), prefix + 8);
+                assert_eq!(&block[..prefix], &vec![0x5a; prefix]);
+                assert_eq!(&block[prefix..prefix + 4], &min.to_ne_bytes());
+                assert_eq!(&block[prefix + 4..], &max.to_ne_bytes());
+            }
+        }
+    }
+
     #[test]
     fn audit_t1_present_blit_scales_the_complete_configured_image() {
         let region = presentation_blit_region(128, 96, 64, 64);

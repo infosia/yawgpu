@@ -2058,6 +2058,7 @@ mod tests {
                 0,
                 false,
                 None,
+                false,
                 0,
                 device.storage_input_output16(),
                 false,

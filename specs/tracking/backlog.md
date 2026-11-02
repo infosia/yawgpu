@@ -160,7 +160,9 @@ reference `> i32::MAX`, `first_instance` indirect, external textures,
 
 ## Recommended order
 
-1. **Block 125** (Tint option parity, part 1), then **Block 126** (Vulkan `frag_depth` clamp), from the Block 124 survey.
+1. **Block 127** (Vulkan subgroup setup parity), from the Block 124 survey. The survey's
+   larger items remain: robustness2 / pipeline robustness, SPIR-V 1.4, extended
+   dynamic state, `VkPipelineCache` (E3).
 2. **A13**, starting with the most widely used hardware (AMD Mesa).
 3. **A10**, small, and Block 119 raised its stakes.
 4. **C2 / C1** surfaces as separate initiatives.
@@ -295,3 +297,4 @@ Re-verification after the fixes: `cargo test --workspace` 1093/0, clippy default
 - E14 done by Block 122 (the cause was staging recycling, not the blit encoder); it opened A15.
 - A15 done by Block 123 (relaxed math pragma, red-checked on M2); it opened A16.
 - A16 done by Block 124. A survey of Dawn's backend setup found 13 more differences; the flag-level ones are Block 125 and the `frag_depth` clamp is Block 126.
+- Blocks 125 and 126 done (Tint option parity part 1; Vulkan `frag_depth` clamp, which also fixed F-139 on MoltenVK). Native Vulkan runs owed for both.

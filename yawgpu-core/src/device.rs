@@ -1357,6 +1357,7 @@ mod tests {
                 0,
                 false,
                 None,
+                false,
                 16,
                 true,
                 false,

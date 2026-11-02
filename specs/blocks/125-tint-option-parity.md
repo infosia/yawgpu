@@ -1,6 +1,6 @@
 # Block 125 — Tint writer and pipeline flags: Dawn parity, part 1
 
-Status: **COMPLETE (2026-11-03)**, CTS pending. Phase Review: 0 CRITICAL, 0 MAJOR, 7 MINOR;
+Status: **COMPLETE (2026-11-03)**. Phase Review: 0 CRITICAL, 0 MAJOR, 7 MINOR;
 m1-m4 and m6 fixed, m5 and m7 recorded below.
 Source: user request (2026-11-02): "fix similar easy items as they are found". These
 come from a read-only survey of Dawn's backend setup, run during Block 124. Every
@@ -101,7 +101,7 @@ reference-only.
 | Metal e2e | 154 passed, 0 failed |
 | Vulkan e2e | all pass except the known `imageView2DOn3DImage` case and Block 126's `frag_depth_is_clamped_to_viewport`, which is that block's red check |
 | `packed_dot_products` e2e (`yawgpu/tests/common/shader_parity.rs`) | passes on Metal and MoltenVK |
-| webgpu-native-cts, Metal, `webgpu:*` | pending |
+| webgpu-native-cts, Metal, `webgpu:*` | `fail=2 crash=0`; subcase counts unchanged |
 
 Native Vulkan is owed. The rules are exercised on MoltenVK only, and a native host
 is the verdict for R1-R6.
