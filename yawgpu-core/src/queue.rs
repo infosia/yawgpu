@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -114,6 +114,8 @@ struct InFlightStagingChunk {
 struct PendingWriteBatch {
     #[cfg(test)]
     fail_next_stage: bool,
+    #[cfg(debug_assertions)]
+    last_retired_submission_index: Option<SubmissionIndex>,
     copies: Vec<HalCopy>,
     chunks: Vec<StagingChunk>,
     /// Total buffer capacity in `chunks`; excludes in-flight and free buffers.
@@ -121,9 +123,10 @@ struct PendingWriteBatch {
     current_chunk: Option<usize>,
     /// Standard-size chunks consumed by submissions that have not yet been
     /// proven complete. Each chunk moves to `free_chunks` when the queue's
-    /// completed submission index reaches its key. If completion polling
-    /// fails after device loss, the chunks remain retained until queue drop.
-    in_flight: Vec<InFlightStagingChunk>,
+    /// completed submission index reaches its key. Retirement under the
+    /// submission lock appends indices in non-decreasing order. If completion
+    /// polling fails after device loss, chunks remain retained until queue drop.
+    in_flight: VecDeque<InFlightStagingChunk>,
     /// Chunks proven free for reuse, all of exactly `STAGING_CHUNK_SIZE`.
     free_chunks: Vec<HalBuffer>,
 }
@@ -242,6 +245,15 @@ impl PendingWriteBatch {
     /// for one write of one exact size, so pooling them would grow an
     /// unbounded cache that almost never produces a hit.
     fn retire(&mut self, submission_index: SubmissionIndex, chunks: Vec<StagingChunk>) {
+        #[cfg(debug_assertions)]
+        {
+            debug_assert!(
+                self.last_retired_submission_index
+                    .is_none_or(|previous| previous <= submission_index),
+                "staging retirement indices must be non-decreasing"
+            );
+            self.last_retired_submission_index = Some(submission_index);
+        }
         self.in_flight.extend(
             chunks
                 .into_iter()
@@ -256,19 +268,22 @@ impl PendingWriteBatch {
 
     /// Recycles chunks whose consuming submission is known complete. Chunks
     /// after `completed_submission_index` remain retained and cannot be
-    /// overwritten by a later queue write. Anything over the pool cap drops.
+    /// overwritten by a later queue write. Only the completed prefix is
+    /// visited; nothing moves or allocates if it is empty. Anything over the
+    /// pool cap drops.
     fn recycle_completed(&mut self, completed_submission_index: SubmissionIndex) {
-        let mut still_in_flight = Vec::with_capacity(self.in_flight.len());
-        for chunk in std::mem::take(&mut self.in_flight) {
-            if chunk.submission_index <= completed_submission_index {
-                if self.free_chunks.len() < MAX_FREE_STAGING_CHUNKS {
-                    self.free_chunks.push(chunk.buffer);
-                }
-            } else {
-                still_in_flight.push(chunk);
+        while self
+            .in_flight
+            .front()
+            .is_some_and(|chunk| chunk.submission_index <= completed_submission_index)
+        {
+            let Some(chunk) = self.in_flight.pop_front() else {
+                break;
+            };
+            if self.free_chunks.len() < MAX_FREE_STAGING_CHUNKS {
+                self.free_chunks.push(chunk.buffer);
             }
         }
-        self.in_flight = still_in_flight;
     }
 
     #[cfg(test)]
@@ -4969,6 +4984,260 @@ fn fs() -> @location(0) vec4<f32> {
         // Safety: the resolved map owns four readable bytes until unmap.
         assert_eq!(unsafe { std::slice::from_raw_parts(ptr, 4) }, &[1, 2, 3, 4]);
         assert_eq!(buffer.unmap(), None);
+    }
+
+    fn retired_staging_batch(indices: &[SubmissionIndex]) -> PendingWriteBatch {
+        let device = noop_device();
+        let mut batch = PendingWriteBatch::default();
+        for (marker, &submission_index) in indices.iter().enumerate() {
+            let buffer = device
+                .hal()
+                .create_buffer(STAGING_CHUNK_SIZE, HalBufferUsage::default())
+                .expect("staging buffer");
+            buffer.write(0, &[marker as u8]).expect("mark chunk");
+            batch.retire(submission_index, vec![StagingChunk { buffer, cursor: 0 }]);
+        }
+        batch
+    }
+
+    #[test]
+    fn pending_write_recycle_without_completions_keeps_in_flight_storage() {
+        let hal = hal_noop_queue();
+        let completed = hal.submit_empty().expect("completed index");
+        let first = hal.submit_empty().expect("first in-flight index");
+        let second = hal.submit_empty().expect("second in-flight index");
+        let indices = [first, first, second];
+        let mut batch = retired_staging_batch(&indices);
+        let storage = batch.in_flight.as_slices().0.as_ptr();
+        let capacity = batch.in_flight.capacity();
+        for _ in 0..3 {
+            batch.recycle_completed(completed);
+            assert_eq!(batch.in_flight_submission_indices(), indices);
+            assert_eq!(batch.pool_sizes(), (3, 0));
+            assert_eq!(batch.in_flight.as_slices().0.as_ptr(), storage);
+            assert_eq!(batch.in_flight.capacity(), capacity);
+        }
+
+        let mut empty = PendingWriteBatch::default();
+        empty.recycle_completed(completed);
+        assert_eq!(empty.pool_sizes(), (0, 0));
+        assert_eq!(empty.in_flight.capacity(), 0);
+        assert_eq!(empty.free_chunks.capacity(), 0);
+    }
+
+    #[test]
+    fn pending_write_recycle_partial_completion_preserves_prefix_order() {
+        let hal = hal_noop_queue();
+        let first = hal.submit_empty().expect("first index");
+        let second = hal.submit_empty().expect("second index");
+        let third = hal.submit_empty().expect("third index");
+        let mut batch = retired_staging_batch(&[first, first, second, third, third]);
+
+        batch.recycle_completed(second);
+
+        assert_eq!(batch.pool_sizes(), (2, 3));
+        assert_eq!(batch.in_flight_submission_indices(), [third, third]);
+        let recycled: Vec<_> = batch
+            .free_chunks
+            .iter()
+            .map(|buffer| buffer.read(0, 1).expect("pooled marker")[0])
+            .collect();
+        assert_eq!(recycled, [0, 1, 2]);
+        let retained: Vec<_> = batch
+            .in_flight
+            .iter()
+            .map(|chunk| chunk.buffer.read(0, 1).expect("in-flight marker")[0])
+            .collect();
+        assert_eq!(retained, [3, 4]);
+    }
+
+    #[test]
+    fn pending_write_recycle_out_of_order_chunks_delays_reuse() {
+        let hal = hal_noop_queue();
+        let indices: Vec<_> = (0..5)
+            .map(|_| hal.submit_empty().expect("submission index"))
+            .collect();
+        let device = noop_device();
+        // Bypass retire's order check to model an invariant violation: [5, 3].
+        let out_of_order = [indices[4], indices[2]];
+        let mut batch = PendingWriteBatch {
+            in_flight: out_of_order
+                .into_iter()
+                .map(|submission_index| InFlightStagingChunk {
+                    submission_index,
+                    buffer: device
+                        .hal()
+                        .create_buffer(STAGING_CHUNK_SIZE, HalBufferUsage::default())
+                        .expect("staging buffer"),
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        batch.recycle_completed(indices[3]);
+        assert_eq!(batch.pool_sizes(), (2, 0));
+        assert_eq!(batch.in_flight_submission_indices(), out_of_order);
+
+        batch.recycle_completed(indices[4]);
+        assert_eq!(batch.pool_sizes(), (0, 2));
+    }
+
+    #[test]
+    fn pending_write_recycle_full_completion_keeps_pool_cap_and_oldest_chunks() {
+        let hal = hal_noop_queue();
+        let completed = hal.submit_empty().expect("completed index");
+        let mut batch = retired_staging_batch(&[completed; MAX_FREE_STAGING_CHUNKS + 3]);
+        let device = noop_device();
+        let existing = batch.take_chunk(device.hal()).expect("existing free chunk");
+        existing.write(0, &[0xff]).expect("mark existing chunk");
+        batch.free_chunks.push(existing);
+
+        batch.recycle_completed(completed);
+
+        assert_eq!(batch.pool_sizes(), (0, MAX_FREE_STAGING_CHUNKS));
+        let retained: Vec<_> = batch
+            .free_chunks
+            .iter()
+            .map(|buffer| buffer.read(0, 1).expect("pooled marker")[0])
+            .collect();
+        let expected: Vec<_> = std::iter::once(0xff)
+            .chain((0..MAX_FREE_STAGING_CHUNKS - 1).map(|marker| marker as u8))
+            .collect();
+        assert_eq!(retained, expected);
+    }
+
+    #[test]
+    fn staging_retire_indices_are_non_decreasing_across_flushes_and_submits() {
+        let device = noop_device();
+        let queue = device.queue();
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 8,
+            mapped_at_creation: false,
+        }));
+        let write = || {
+            assert_eq!(
+                queue.write_buffer(QueueBufferWrite {
+                    device: device.hal(),
+                    buffer: &buffer,
+                    offset: 0,
+                    data: &[1; 4],
+                }),
+                None
+            );
+        };
+        let mut retired = Vec::new();
+        let mut record_retired = |count| {
+            let latest = queue.latest_submission_index();
+            let indices = queue
+                .inner
+                .pending_writes
+                .lock()
+                .in_flight_submission_indices();
+            assert_eq!(indices, vec![latest; count]);
+            retired.extend(indices);
+        };
+        for _ in 0..3 {
+            write();
+            assert_eq!(queue.flush_pending_writes(), None);
+            record_retired(1);
+
+            write();
+            assert_eq!(queue.submit(&[]), None);
+            record_retired(1);
+
+            // Queued and encoder-side writes retire at the same new index.
+            write();
+            let encoder = device.create_command_encoder();
+            assert_eq!(encoder.write_buffer(Arc::clone(&buffer), 4, &[2; 4]), None);
+            let (commands, error) = encoder.finish();
+            assert_eq!(error, None);
+            assert_eq!(queue.submit(&[Arc::new(commands)]), None);
+            record_retired(2);
+
+            // A failed encoder write with no queued copies retires against
+            // the existing latest index, so equality is permitted too.
+            let latest = queue.latest_submission_index();
+            let encoder = device.create_command_encoder();
+            assert_eq!(encoder.write_buffer(Arc::clone(&buffer), 4, &[3; 4]), None);
+            let (commands, error) = encoder.finish();
+            assert_eq!(error, None);
+            queue.inner.pending_writes.lock().fail_next_stage = true;
+            assert!(queue.submit(&[Arc::new(commands)]).is_some());
+            assert_eq!(queue.latest_submission_index(), latest);
+            record_retired(1);
+        }
+        // A write that consumes the threshold's last chunk triggers a flush.
+        let threshold_buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: STAGING_CHUNK_SIZE,
+            mapped_at_creation: false,
+        });
+        let data = vec![5; STAGING_CHUNK_SIZE as usize];
+        let threshold_chunks = (PENDING_MEMORY_SUBMIT_THRESHOLD / STAGING_CHUNK_SIZE) as usize;
+        let threshold_write = || {
+            assert_eq!(
+                queue.write_buffer(QueueBufferWrite {
+                    device: device.hal(),
+                    buffer: &threshold_buffer,
+                    offset: 0,
+                    data: &data,
+                }),
+                None
+            );
+        };
+        let latest = queue.latest_submission_index();
+        for _ in 1..threshold_chunks {
+            threshold_write();
+            assert_eq!(queue.latest_submission_index(), latest);
+        }
+        threshold_write();
+        assert!(queue.latest_submission_index() > latest);
+        record_retired(threshold_chunks);
+
+        // Reusing a submitted command buffer rejects it but flushes queued writes.
+        let encoder = device.create_command_encoder();
+        let (commands, error) = encoder.finish();
+        assert_eq!(error, None);
+        let commands = Arc::new(commands);
+        assert_eq!(queue.submit(std::slice::from_ref(&commands)), None);
+        write();
+        let latest = queue.latest_submission_index();
+        let error = queue
+            .submit(&[commands])
+            .expect("resubmitted command buffer must fail");
+        assert_eq!(
+            error.message,
+            "command buffer cannot be submitted more than once"
+        );
+        assert!(queue.latest_submission_index() > latest);
+        record_retired(1);
+
+        // Failed lowering with queued copies submits those copies at a new index.
+        write();
+        let latest = queue.latest_submission_index();
+        let encoder = device.create_command_encoder();
+        assert_eq!(encoder.write_buffer(Arc::clone(&buffer), 4, &[3; 4]), None);
+        let (commands, error) = encoder.finish();
+        assert_eq!(error, None);
+        queue.inner.pending_writes.lock().fail_next_stage = true;
+        assert!(queue.submit(&[Arc::new(commands)]).is_some());
+        assert!(queue.latest_submission_index() > latest);
+        record_retired(2);
+
+        // wait_idle flushes its pending write and then recycles its retirement.
+        write();
+        let latest = queue.latest_submission_index();
+        assert_eq!(queue.wait_idle(), None);
+        let completed = queue.latest_submission_index();
+        assert!(completed > latest);
+        retired.push(completed);
+        let (in_flight, free) = queue.inner.pending_writes.lock().pool_sizes();
+        assert_eq!(in_flight, 0);
+        assert!((1..=MAX_FREE_STAGING_CHUNKS).contains(&free));
+
+        assert_eq!(retired.len(), 15 + threshold_chunks + 4);
+        assert!(retired.windows(2).all(|pair| pair[0] <= pair[1]));
     }
 
     /// Q5/Q17: a chunk consumed by a submission may not be reused until its

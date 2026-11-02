@@ -136,6 +136,62 @@ fn queue_submission_error(message: impl Into<String>) -> HalError {
     }
 }
 
+// Owns the retained encoder for one run; taking it ensures it is ended once.
+#[derive(Default)]
+struct CoalescedBlitEncoder {
+    inner: Option<Retained<ProtocolObject<dyn MTLBlitCommandEncoder>>>,
+}
+
+impl CoalescedBlitEncoder {
+    fn get(
+        &mut self,
+        command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+        creation_error: &'static str,
+    ) -> Result<&ProtocolObject<dyn MTLBlitCommandEncoder>, HalError> {
+        if self.inner.is_none() {
+            self.inner = Some(
+                command_buffer
+                    .blitCommandEncoder()
+                    .ok_or_else(|| queue_submission_error(creation_error))?,
+            );
+        }
+        self.inner
+            .as_deref()
+            .ok_or_else(|| queue_submission_error(creation_error))
+    }
+
+    fn end(&mut self) {
+        if let Some(encoder) = self.inner.take() {
+            encoder.endEncoding();
+        }
+    }
+}
+
+impl Drop for CoalescedBlitEncoder {
+    fn drop(&mut self) {
+        self.end();
+    }
+}
+
+// Coalescable arms must encode only through the shared blit.get(...) encoder
+// and must never touch command_buffer directly.
+fn is_coalescable_blit(copy: &HalCopy) -> bool {
+    match copy {
+        HalCopy::Buffer(_)
+        | HalCopy::BufferClear(_)
+        | HalCopy::BufferToTexture(_)
+        | HalCopy::TextureToBuffer(_)
+        | HalCopy::TextureToTexture(_) => true,
+        HalCopy::ClearTexture(_)
+        | HalCopy::WriteTimestamp(_)
+        | HalCopy::ResolveQuerySet(_)
+        | HalCopy::ComputePass(_)
+        | HalCopy::RenderPassCommandStream(_) => false,
+        #[cfg(feature = "tiled")]
+        HalCopy::SubpassRenderPass(_) => false,
+    }
+}
+
 impl MetalQueue {
     /// Creates a new instance.
     pub fn new() -> Result<Self, HalError> {
@@ -256,25 +312,29 @@ impl MetalQueue {
             })?;
             let mut serialize_event = None;
             let mut serialize_value = 0;
+            let mut blit = CoalescedBlitEncoder::default();
             for copy in copies {
+                if !is_coalescable_blit(copy) {
+                    blit.end();
+                }
                 match copy {
                     HalCopy::Buffer(copy) => {
-                        let blit = command_buffer.blitCommandEncoder().ok_or_else(|| {
-                            queue_submission_error("buffer-copy blit encoder creation returned nil")
-                        })?;
-                        let result = encode_buffer_copy(&blit, copy);
-                        blit.endEncoding();
-                        result?;
+                        encode_buffer_copy(
+                            blit.get(
+                                &command_buffer,
+                                "buffer-copy blit encoder creation returned nil",
+                            )?,
+                            copy,
+                        )?;
                     }
                     HalCopy::BufferClear(clear) => {
-                        let blit = command_buffer.blitCommandEncoder().ok_or_else(|| {
-                            queue_submission_error(
+                        encode_buffer_clear(
+                            blit.get(
+                                &command_buffer,
                                 "buffer-clear blit encoder creation returned nil",
-                            )
-                        })?;
-                        let result = encode_buffer_clear(&blit, clear);
-                        blit.endEncoding();
-                        result?;
+                            )?,
+                            clear,
+                        )?;
                     }
                     HalCopy::ClearTexture(clear) => {
                         encode_texture_clear(&command_buffer, clear)?;
@@ -406,34 +466,31 @@ impl MetalQueue {
                         result?;
                     }
                     HalCopy::BufferToTexture(copy) => {
-                        let blit = command_buffer.blitCommandEncoder().ok_or_else(|| {
-                            queue_submission_error(
+                        encode_buffer_to_texture(
+                            blit.get(
+                                &command_buffer,
                                 "buffer-to-texture blit encoder creation returned nil",
-                            )
-                        })?;
-                        let result = encode_buffer_to_texture(&blit, copy);
-                        blit.endEncoding();
-                        result?;
+                            )?,
+                            copy,
+                        )?;
                     }
                     HalCopy::TextureToBuffer(copy) => {
-                        let blit = command_buffer.blitCommandEncoder().ok_or_else(|| {
-                            queue_submission_error(
+                        encode_texture_to_buffer(
+                            blit.get(
+                                &command_buffer,
                                 "texture-to-buffer blit encoder creation returned nil",
-                            )
-                        })?;
-                        let result = encode_texture_to_buffer(&blit, copy);
-                        blit.endEncoding();
-                        result?;
+                            )?,
+                            copy,
+                        )?;
                     }
                     HalCopy::TextureToTexture(copy) => {
-                        let blit = command_buffer.blitCommandEncoder().ok_or_else(|| {
-                            queue_submission_error(
+                        encode_texture_to_texture(
+                            blit.get(
+                                &command_buffer,
                                 "texture-to-texture blit encoder creation returned nil",
-                            )
-                        })?;
-                        let result = encode_texture_to_texture(&blit, copy);
-                        blit.endEncoding();
-                        result?;
+                            )?,
+                            copy,
+                        )?;
                     }
                     HalCopy::ComputePass(pass) => {
                         let encoder = command_buffer.computeCommandEncoder().ok_or_else(|| {
@@ -472,6 +529,7 @@ impl MetalQueue {
                     }
                 }
             }
+            blit.end();
             self.commit_tracked(command_buffer, copies.to_vec(), serialize_event)
         })
     }
@@ -516,6 +574,313 @@ mod tests {
     use super::super::test_helpers::*;
     use super::*;
     use crate::HalBufferCopy;
+
+    #[test]
+    fn coalescable_blit_kinds_define_maximal_runs_without_gpu() {
+        let device = crate::noop::NoopDevice::new();
+        let buffer = HalBuffer::Noop(
+            device
+                .create_buffer(1024, HalBufferUsage::default())
+                .expect("Noop buffer"),
+        );
+        let descriptor = texture_descriptor();
+        let texture = HalTexture::Noop(device.create_texture(&descriptor).expect("Noop texture"));
+        let origin = crate::HalOrigin3d { x: 0, y: 0, z: 0 };
+        let extent = HalExtent3d {
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+        };
+        let transfer = HalBufferTextureCopy {
+            buffer: buffer.clone(),
+            buffer_layout: crate::HalBufferTextureLayout {
+                offset: 0,
+                bytes_per_row: 256,
+                rows_per_image: 4,
+            },
+            texture: texture.clone(),
+            format: descriptor.format,
+            aspect: crate::HalTextureAspect::All,
+            mip_level: 0,
+            origin,
+            extent,
+        };
+        let blits = [
+            HalCopy::Buffer(HalBufferCopy {
+                source: buffer.clone(),
+                source_offset: 0,
+                destination: buffer.clone(),
+                destination_offset: 16,
+                size: 16,
+            }),
+            HalCopy::BufferClear(HalBufferClear {
+                buffer: buffer.clone(),
+                offset: 0,
+                size: 16,
+            }),
+            HalCopy::BufferToTexture(transfer.clone()),
+            HalCopy::TextureToBuffer(transfer),
+            HalCopy::TextureToTexture(HalTextureCopy {
+                source: texture.clone(),
+                source_mip_level: 0,
+                source_origin: origin,
+                destination: texture.clone(),
+                destination_mip_level: 0,
+                destination_origin: origin,
+                extent,
+            }),
+        ];
+        let query_set = HalQuerySet::Noop { count: 1 };
+        let boundaries = [
+            HalCopy::ClearTexture(HalTextureClear {
+                texture,
+                format: descriptor.format,
+                aspect: crate::HalTextureAspect::All,
+                mip_level: 0,
+                base_array_layer: 0,
+                array_layer_count: 1,
+            }),
+            HalCopy::WriteTimestamp(crate::HalWriteTimestamp {
+                query_set: query_set.clone(),
+                query_index: 0,
+            }),
+            HalCopy::ResolveQuerySet(HalResolveQuerySet {
+                query_set,
+                first_query: 0,
+                query_count: 1,
+                written_queries: vec![0],
+                destination: buffer,
+                destination_offset: 0,
+            }),
+            HalCopy::ComputePass(HalComputePass {
+                pipeline: crate::HalComputePipeline::Noop,
+                bind_buffers: Vec::new(),
+                bind_textures: Vec::new(),
+                bind_samplers: Vec::new(),
+                bind_external_textures: Vec::new(),
+                immediate_data: Vec::new(),
+                dispatch: HalComputeDispatch::Direct {
+                    workgroups: (1, 1, 1),
+                },
+            }),
+            HalCopy::RenderPassCommandStream(HalRenderPassCommandStream::default()),
+            #[cfg(feature = "tiled")]
+            HalCopy::SubpassRenderPass(crate::HalSubpassRenderPassCommand {
+                layout: crate::HalSubpassPassLayout {
+                    color_attachments: Vec::new(),
+                    depth_stencil_attachment: None,
+                    subpasses: vec![crate::HalSubpassLayout {
+                        color_attachment_indices: Vec::new(),
+                        uses_depth_stencil: false,
+                        input_attachments: Vec::new(),
+                    }],
+                    dependencies: Vec::new(),
+                },
+                extent,
+                color_attachments: Vec::new(),
+                depth_stencil_attachment: None,
+                draws: Vec::new(),
+            }),
+        ];
+        for boundary in &boundaries {
+            assert!(!is_coalescable_blit(boundary), "{boundary:?}");
+        }
+        let mixed = vec![
+            blits[0].clone(),
+            blits[1].clone(),
+            boundaries[0].clone(),
+            blits[2].clone(),
+            boundaries[1].clone(),
+            boundaries[2].clone(),
+            blits[3].clone(),
+            blits[4].clone(),
+        ];
+        for (copies, expected) in [
+            (vec![], vec![]),
+            (blits.to_vec(), vec![true; 5]),
+            (vec![boundaries[0].clone()], vec![false]),
+            (
+                mixed,
+                vec![true, true, false, true, false, false, true, true],
+            ),
+        ] {
+            let actual: Vec<_> = copies.iter().map(is_coalescable_blit).collect();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_queue_coalesced_buffer_copies_last_write_wins() {
+        const COPY_COUNT: u32 = 512;
+        let device = metal_device();
+        let staging = device
+            .create_buffer(u64::from(COPY_COUNT) * 16, HalBufferUsage::default())
+            .expect("staging buffer");
+        let destination = device
+            .create_buffer(16, HalBufferUsage::default())
+            .expect("destination buffer");
+        let bytes: Vec<_> = (0..COPY_COUNT)
+            .flat_map(|index| index.to_ne_bytes().repeat(4))
+            .collect();
+        staging.write(0, &bytes).expect("seed distinct regions");
+        let copies: Vec<_> = (0..COPY_COUNT)
+            .map(|index| {
+                HalCopy::Buffer(HalBufferCopy {
+                    source: HalBuffer::Metal(staging.clone()),
+                    source_offset: u64::from(index) * 16,
+                    destination: HalBuffer::Metal(destination.clone()),
+                    destination_offset: 0,
+                    size: 16,
+                })
+            })
+            .collect();
+        let submitted = device
+            .queue()
+            .submit_copies(&copies)
+            .expect("submit copies");
+        device
+            .queue()
+            .wait_for_submission(submitted)
+            .expect("wait for copies");
+        assert_eq!(
+            destination.read(0, 16).expect("read destination"),
+            (COPY_COUNT - 1).to_ne_bytes().repeat(4)
+        );
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    #[cfg(feature = "metal")]
+    fn metal_queue_coalesced_mixed_copies_across_compute_pass() {
+        let device = metal_device();
+        let staging = device
+            .create_buffer(256, HalBufferUsage::default())
+            .expect("staging buffer");
+        let scratch = device
+            .create_buffer(256, HalBufferUsage::default())
+            .expect("scratch buffer");
+        let readback = device
+            .create_buffer(544, HalBufferUsage::default())
+            .expect("readback buffer");
+        staging
+            .write(0, &[0x31, 0x72, 0xb4, 0xf5].repeat(64))
+            .expect("seed upload");
+        readback.write(0, &[0xa5; 544]).expect("seed readback");
+        let mut descriptor = texture_descriptor();
+        descriptor.width = 8;
+        descriptor.height = 1;
+        let texture = device.create_texture(&descriptor).expect("upload texture");
+        let mirror = device.create_texture(&descriptor).expect("mirror texture");
+        let origin = crate::HalOrigin3d { x: 0, y: 0, z: 0 };
+        let extent = HalExtent3d {
+            width: 8,
+            height: 1,
+            depth_or_array_layers: 1,
+        };
+        let transfer =
+            |buffer: &MetalBuffer, texture: &MetalTexture, offset| HalBufferTextureCopy {
+                buffer: HalBuffer::Metal(buffer.clone()),
+                buffer_layout: crate::HalBufferTextureLayout {
+                    offset,
+                    bytes_per_row: 256,
+                    rows_per_image: 1,
+                },
+                texture: HalTexture::Metal(texture.clone()),
+                format: descriptor.format,
+                aspect: crate::HalTextureAspect::All,
+                mip_level: 0,
+                origin,
+                extent,
+            };
+        let pipeline = device
+            .create_compute_pipeline(compute_msl(), "main0", (1, 1, 1), &[])
+            .expect("boundary compute pipeline");
+        let copies = [
+            HalCopy::Buffer(HalBufferCopy {
+                source: HalBuffer::Metal(staging),
+                source_offset: 0,
+                destination: HalBuffer::Metal(scratch.clone()),
+                destination_offset: 0,
+                size: 256,
+            }),
+            HalCopy::BufferClear(HalBufferClear {
+                buffer: HalBuffer::Metal(scratch.clone()),
+                offset: 16,
+                size: 16,
+            }),
+            HalCopy::BufferToTexture(transfer(&scratch, &texture, 0)),
+            // Preserve the old bytes before overwriting their source in this run.
+            HalCopy::Buffer(HalBufferCopy {
+                source: HalBuffer::Metal(scratch.clone()),
+                source_offset: 0,
+                destination: HalBuffer::Metal(readback.clone()),
+                destination_offset: 528,
+                size: 16,
+            }),
+            HalCopy::BufferClear(HalBufferClear {
+                buffer: HalBuffer::Metal(scratch.clone()),
+                offset: 0,
+                size: 16,
+            }),
+            HalCopy::TextureToTexture(HalTextureCopy {
+                source: HalTexture::Metal(texture.clone()),
+                source_mip_level: 0,
+                source_origin: origin,
+                destination: HalTexture::Metal(mirror.clone()),
+                destination_mip_level: 0,
+                destination_origin: origin,
+                extent,
+            }),
+            HalCopy::TextureToBuffer(transfer(&readback, &mirror, 0)),
+            HalCopy::ComputePass(HalComputePass {
+                pipeline: crate::HalComputePipeline::Metal(pipeline),
+                bind_buffers: Vec::new(),
+                bind_textures: Vec::new(),
+                bind_samplers: Vec::new(),
+                bind_external_textures: Vec::new(),
+                immediate_data: Vec::new(),
+                dispatch: HalComputeDispatch::Direct {
+                    workgroups: (1, 1, 1),
+                },
+            }),
+            HalCopy::TextureToBuffer(transfer(&readback, &texture, 256)),
+            HalCopy::Buffer(HalBufferCopy {
+                source: HalBuffer::Metal(scratch.clone()),
+                source_offset: 16,
+                destination: HalBuffer::Metal(readback.clone()),
+                destination_offset: 512,
+                size: 16,
+            }),
+        ];
+        let submitted = device
+            .queue()
+            .submit_copies(&copies)
+            .expect("submit mixed copies");
+        device
+            .queue()
+            .wait_for_submission(submitted)
+            .expect("wait for mixed copies");
+        let mut expected = [0x31, 0x72, 0xb4, 0xf5].repeat(4);
+        expected.extend_from_slice(&[0; 16]);
+        assert_eq!(readback.read(0, 32).expect("read mirror"), expected);
+        assert_eq!(readback.read(256, 32).expect("read upload"), expected);
+        assert_eq!(
+            readback.read(512, 16).expect("read cleared buffer"),
+            [0; 16]
+        );
+        assert_eq!(
+            readback
+                .read(528, 16)
+                .expect("read before source overwrite"),
+            [0x31, 0x72, 0xb4, 0xf5].repeat(4)
+        );
+        assert_eq!(
+            scratch.read(0, 16).expect("read overwritten source"),
+            [0; 16]
+        );
+    }
 
     #[test]
     fn timestamp_resolution_numbering_is_per_submission() {

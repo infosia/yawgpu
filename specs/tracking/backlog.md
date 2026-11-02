@@ -56,6 +56,7 @@ below are stable IDs, not the rank.
 | — | Tint driver workarounds from Block 118 | Block 120, see A12 |
 | E1 | Block 97 S4 re-measure | Run 7, 2026-11-02 |
 | E13 | P-005, work-done flushed pending writes | Block 121, 2026-11-02 |
+| E14 | P-006, staging recycle per write; `compute_unique` explained | Block 122, 2026-11-02 |
 | — | F-151 real-GPU confirmation | Metal CTS case passes, 2026-11-02 |
 | A12 | Block 120 on native Vulkan | Windows native Vulkan e2e and forced CTS, 2026-11-02 |
 
@@ -66,6 +67,7 @@ below are stable IDs, not the rank.
 | # | Item | Difficulty | Evidence |
 |---|---|---|---|
 | A14 | Releasing the last device reference does not destroy the device, so the device-lost callback reports `CallbackCancelled` at instance release. Dawn destroys and reports `Destroyed` (`DeviceBase::WillDropLastExternalRef`). Seen as the bench's exit code; check against Dawn before changing. | S | `specs/tracking/perf-dawn-baseline.md` Run 7, Teardown note |
+| A15 | Metal MSL math mode: Dawn prepends `#pragma METAL fp math_mode(relaxed)` (macOS 15+) unless strict math is requested; yawgpu leaves Metal's default. Check what the default is and whether any CTS or precision case can tell the difference before changing it. | S | `specs/blocks/122-metal-blit-coalescing.md` S2; Dawn `metal/ShaderModuleMTL.mm` |
 | A13 | **Dawn workarounds still unset**: AMD Mesa below 25.3 float polyfills, Imagination `polyfill_case_switch`, MSL `polyfill_clamp_float`, and others. Each needs a gate survey against Dawn. | M | `specs/blocks/120-tint-driver-workarounds.md` Out of scope |
 | A3 | **Lazy zero-init GLES clear paths (Block 104 S4)** — core marks and un-marks on every backend, but the GLES HAL has no `ClearTexture` lowering for the Stage-2 eligibility set (sampled reads of uninitialized depth/stencil, compressed and MSAA textures). Tier-2 catalogue item; passes today only where the driver hands back zeroed memory. | M | `specs/blocks/104-lazy-zero-init-stage2.md` S4; `specs/blocks/67-gles-backend.md` mapping matrix |
 | A7 | GLES `SetImmediates` is recorded and bounds-checked but never read by the draw path — a silent gap. Unreachable today because `max_immediate_size` is 0 and core rejects first; must become an explicit `HalError` if the limit is ever raised. | S | `specs/blocks/67-gles-backend.md:282`, `yawgpu-hal/src/gles/adapter.rs` |
@@ -124,7 +126,6 @@ reference `> i32::MAX`, `first_instance` indirect, external textures,
 
 | # | Item | Difficulty | Evidence |
 |---|---|---|---|
-| E14 | **P-006**: Metal `submit_copies` opens one blit encoder per queued buffer copy; Dawn reuses one. Costs about 1.3 µs per copy, visible as `queue/write_buffer_4kb` 2.98×. Also look at `pipeline/compute_unique`, which moved from 0.97× to 1.12-1.15×. | S | `specs/tracking/perf-dawn-baseline.md` Run 8 |
 | E2 | Residual gaps vs Dawn with no structural lever: `write_buffer_then_wait` 1.53×, `bindgroup/create_destroy` 1.33×, `render_draw` 224 vs 99 ns. | Diffuse | `specs/tracking/perf-dawn-baseline.md:435-446` |
 | E3 | Deferred cache layers: real `VkPipelineCache`; Metal `MTLLibrary`-by-source cache (measure-first); whole-module Tint IR clone (needs an upstream Tint API). | M / M / L | `specs/blocks/95-shader-compile-cache.md:35-41`; `yawgpu-tint/src/lib.rs` |
 | E11 | Vulkan `VkRenderPass` / `VkFramebuffer` / `VkDescriptorPool` caches, left out of Block 117. Run 7 cannot decide it: no bench case isolates per-pass creation, so add one that submits many passes without waiting. | M | `specs/blocks/117-vulkan-submit-recycling.md` |
@@ -158,7 +159,7 @@ reference `> i32::MAX`, `first_instance` indirect, external textures,
 
 ## Recommended order
 
-1. **E14** (P-006), from Block 121's Run 8.
+1. **A15**, the Metal math-mode difference from Block 122.
 2. **A13**, starting with the most widely used hardware (AMD Mesa).
 3. **A10**, small, and Block 119 raised its stakes.
 4. **C2 / C1** surfaces as separate initiatives.
@@ -290,3 +291,4 @@ Re-verification after the fixes: `cargo test --workspace` 1093/0, clippy default
 - Later the same day: C4, B2 and GLES ranked last by user direction; B2 records that default Dawn rejects binding arrays too.
 - E1 done as Run 7 in `perf-dawn-baseline.md`; it opened E13 (P-005) and A14, and E11 now needs a bench case first.
 - E13 done by Block 121; Run 8 opened E14 (P-006) and carried the `compute_unique` check into it.
+- E14 done by Block 122 (the cause was staging recycling, not the blit encoder); it opened A15.

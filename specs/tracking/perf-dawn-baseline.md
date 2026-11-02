@@ -581,6 +581,54 @@ for them: about 1.3 µs per copy. `MetalQueue::submit_copies`
 encoder. Every submit that carries several queue writes pays this, so it is not
 specific to the bench. Backlog E14. Vulkan is not measured for it.
 
+## Run 9 — 2026-11-02, after Block 122
+
+Same machine, Dawn and harness as Run 7; yawgpu two rounds, lower minimum. Rows marked
+`*` moved by more than 8% from Run 8.
+
+| case | run 8 ns | now ns | dawn ns | ratio |
+|---|---|---|---|---|
+| `buffer/create_destroy` | 1773 | 1783 | 1851 | 0.96× |
+| `buffer/create_mapped_unmap` | 1800 | 1784 | 4480 | 0.40× |
+| `bindgroup/create_destroy` | 203 | 199 | 128 | 1.55× |
+| `queue/write_buffer_4kb` | 1935 | 1058 | 649 | 1.63× | *
+| `queue/write_buffer_then_wait` | 1238 | 1144 | 574 | 1.99× |
+| `frame/10writes_dispatch_submit_wait` | 145363 | 112999 | 164268 | 0.69× | *
+| `shader/create_cached` | 131 | 130 | 676 | 0.19× |
+| `shader/create_unique` | 16506 | 17226 | 20286 | 0.85× |
+| `pipeline/compute_cached` | 72 | 71 | 346 | 0.20× |
+| `pipeline/compute_unique` | 102379 | 102152 | 88812 | 1.15× |
+| `pipeline/render_unique` | 136649 | 139983 | 147365 | 0.95× |
+| `encode/empty_encoder_finish` | 142 | 144 | 162 | 0.89× |
+| `encode/compute_1_dispatch` | 744 | 740 | 608 | 1.22× |
+| `encode/render_pass_empty` | 944 | 938 | 861 | 1.09× |
+| `encode/render_bind_draw` | 153 | 153 | 83 | 1.84× |
+| `encode/render_draw` | 46 | 45 | 38 | 1.20× |
+| `submit/empty` | 1555 | 1544 | 2537 | 0.61× |
+| `submit/compute_1_dispatch` | 24978 | 23911 | 46145 | 0.52× |
+| `submit/render_100_draws_wait` | 170877 | 171952 | 200097 | 0.86× |
+| `submit/compute_wait_idle` | 136897 | 138186 | 145048 | 0.95× |
+
+`frame/10writes_dispatch_submit_wait` is not an improvement: its two rounds read 113
+and 144 µs. That case is dominated by GPU latency and is noisy across runs.
+
+### P-006, corrected
+
+Run 8 attributed `queue/write_buffer_4kb` to one Metal blit encoder per queued copy.
+Block 122 coalesced the encoders, and the case stayed at 1,951 ns, so that diagnosis
+was wrong. A `sample` profile then showed the cost in
+`PendingWriteBatch::recycle_completed`. It ran on every write and rebuilt the whole
+in-flight list, which holds hundreds of chunks after a 16 MiB flush. Recycling now
+pops only the completed prefix (Block 122 R6), and the case fell to 1,058 ns (1.63×).
+The rest is the data copy, staging-buffer allocation once the four-chunk free pool is
+exhausted, and the submit. **Profile before naming a cause.** Two plausible readings of
+the same number pointed at different layers.
+
+### `pipeline/compute_unique`
+
+See Block 122 S2. The case measures Metal compiler-cache lookups, because its shader
+sources repeat across batches, and about 98% of it is in the Metal compiler service.
+
 ## Status
 
 P-004 **resolved**, including the constant-factor follow-up (399 → 224 ns,
@@ -590,9 +638,9 @@ structural: `queue/write_buffer_then_wait` 1.53×, `bindgroup/create_destroy`
 1.33×, `encode/compute_1_dispatch` 1.14×, `encode/render_draw` 1.16×.
 
 Block 97 **S3** is **done** (`88cfe58`) and **S4** is **done** (Run 7,
-2026-11-02). Run 7 found **P-005**, fixed by Block 121 (Run 8: 205× to 2.16×). Run 8 found
-**P-006** (one blit encoder per queued buffer copy on Metal). The other gaps are
-per-command recording cost, at 1.84× or below.
+2026-11-02). Run 7 found **P-005**, fixed by Block 121. Run 8 found **P-006**, fixed by Block 122
+(Run 9: `queue/write_buffer_4kb` 2.98× to 1.63×; the cause was staging recycling, not
+the blit encoder). The other gaps are per-command recording cost, at 1.84× or below.
 
 ## Superseded status notes
 
