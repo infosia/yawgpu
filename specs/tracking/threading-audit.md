@@ -30,6 +30,9 @@ Verification: `yawgpu/tests/e2e_{metal,vulkan}_threading_audit.rs` — 6 probes 
 scissor, viewport, read-only depth preserved, indirect dispatch), all green on both backends; the cull
 keep/discard pair is **identical across Metal and Vulkan**, pinning WebGPU↔Vulkan Y/winding parity.
 
+**Superseded by `462b4d8` (2026-06-08):** core bakes the mask into the MSL, so Metal no longer
+rejects a non-default mask. Original text follows.
+
 **Known Tier-1 limitation (Clean Review MINOR, accepted):** Metal rejects a non-default
 `multisample.mask` (`!= 0xFFFF_FFFF`) with `HalError` because the pinned `objc2-metal` bindings do not
 expose `MTLRenderPipelineDescriptor.sampleMask`. Default mask is honored; only non-default masks error on

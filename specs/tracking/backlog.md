@@ -1,87 +1,71 @@
 # Backlog — remaining TODOs and missing features, by priority and difficulty
 
-**Snapshot date: 2026-09-23** (tree at `2c6ea6f`; supersedes the
-2026-09-22 snapshot at `d6f865b`, whose progress log is kept below as
+**Snapshot date: 2026-11-02** (tree at `48067a3`; supersedes the
+2026-09-23 snapshot at `2c6ea6f`, whose progress log is kept below as
 history). This is a cross-cutting inventory, not a plan: it collects
-every open / deferred / partial item recorded across `specs/blocks/`,
-`specs/tracking/`, `README.md`, and the source (comment markers,
-`HalError` rejections, hard-coded feature tables, the C-ABI symbol set),
-then ranks them. Each row was verified against the source or the doc
-that records it. Items the docs mark DONE / RESOLVED / COMPLETE are
-omitted; the previous snapshot's closed rows (A1, A2, A3 S1–S3, A4, A5,
-A8, A9, B1, B4, B5, D11 Vulkan items, all of F) are listed once under
-"Closed since the previous snapshot".
+the open / deferred / partial items recorded across `specs/blocks/`,
+`specs/tracking/`, `README.md`, and the source, then ranks them. Items
+the docs mark DONE / RESOLVED / COMPLETE are omitted; the previous
+snapshot's closed rows are listed once under "Closed since the previous
+snapshot".
 
 Re-take this snapshot rather than editing rows in place when the state
 changes; per-item ledgers stay in their own tracking docs.
 
 ## Method
 
-- Docs: all `specs/blocks/*.md` (now 41, through Block 107), all
-  `specs/tracking/*.md`, `specs/reference/*.md`, `README.md`,
-  `DESIGN.md`, grepped for deferred / follow-up / open / not yet /
-  unsupported / xfail / residual; every Phase Review table since
-  `d6f865b` re-read for "Deferred" dispositions.
-- Source: `yawgpu`, `yawgpu-core`, `yawgpu-hal`, `yawgpu-tint` for
-  `TODO`/`FIXME`/`unimplemented!`/`todo!`, `HalError` returns for
-  validated WebGPU operations, `supports_*` bodies, `#[ignore]` reasons,
-  and the `wgpu*` export set against `webgpu.h`.
-- Headline counts (2026-09-23): 3 `TODO`s (two `tiled 2.4` Transient
-  arms, one GLES `HalError: Clone` note), 0 `FIXME`/`unimplemented!`/
-  `todo!`; 375 `#[ignore]` tests (265 in `yawgpu/tests` e2e, 110 in
-  `yawgpu-hal`; all manual real-GPU gates, none marked known-failing);
-  GLES `HalError` catalogue unchanged since the previous snapshot (no
-  GLES mapping commits since `d6f865b`); 202 of 202 `wgpu*` symbols
-  exported (Block 101); hard-coded `supports_*`: Metal 10 literal `true`
-  (all Dawn-unconditional, doc-noted since Block 99), Vulkan 0 literals
-  (every entry is a device query), GLES 18 `false` + 1 optimistic `true`
-  (`depth32float_stencil8`).
+- Every Block 108-120 status line was read. Their open items, the 2026-10
+  code review ledger, and the rows of the previous snapshot were carried in.
+- Checked against the source at this tree: A3, A6, A7, A10, B2, B3, C1, C2, C4, D2,
+  D3, D8, D13, E1, E6, E7, E10, the `TODO` markers, and the export set.
+- **Carried from the previous snapshot without a source check:** B6, B7, D1, D4 to
+  D7, D9, E2 to E5, E8, E9. Re-confirm these when their work is planned.
+- This pass did not repeat the full-doc grep or re-read every Phase Review table.
+- Headline counts (2026-11-02): 3 `TODO`s (two `tiled 2.4` Transient arms,
+  one GLES `HalError: Clone` note), 0 `FIXME`/`unimplemented!`/`todo!`; 463
+  `#[ignore]` tests (331 in `yawgpu/tests`, 132 in `yawgpu-hal`); 202 of 202
+  `webgpu.h` symbols exported, plus Dawn's `wgpuCommandEncoderWriteBuffer`.
+- CTS state: Metal and Linux native Vulkan both `fail=2 crash=0`. Both failures
+  are cases Dawn also fails (Block 119 R9). GLES on Linux NVIDIA is raw
+  `fail=28,810 crash=0`.
 
 **Difficulty scale:** S = under a day, M = several days, L = a week or
 more. "Manual" = blocked on hardware or a host this machine cannot
 reach.
 
 **Priority rationale:** silently-wrong behaviour that the CTS cannot
-catch ranks above advertised-but-non-functional, which ranks above a
-missing standard API, which ranks above platform/presentation coverage,
-which ranks above Tier-2 GLES gaps, then perf/refactor, then doc drift.
+catch ranks above a missing standard API, which ranks above
+platform/presentation coverage, then perf/refactor, then doc drift. Tier-2
+GLES gaps rank last, by user direction (2026-11-02). The letters below are
+stable IDs, not the rank.
 
 ---
 
-## Closed since the previous snapshot (`d6f865b` → `2c6ea6f`)
+## Closed since the previous snapshot (`2c6ea6f` → `48067a3`)
 
 | Prev # | Item | Closed by |
 |---|---|---|
-| A1 | `timestamp-query` advertised but non-functional | Block 102 (`57c64e7`, `ddec607`, Phase Review `061aab3`); e2e 4/4 Metal + MoltenVK, CTS 0 fail |
-| A2 | `wgpuCommandEncoderWriteBuffer` discarded `data` | Block 100 (`2f97d3d`) |
-| A3 (S1–S3) | Lazy zero-init Stage 2, core + Metal + Vulkan | Block 104 (`60744d8`, `99d786b`, `9aa1da3`, Phase Review `251a4cc`/`c83bbbf`) — GLES clear paths remain, see A3 below |
-| A4 | Hard-coded `supports_*` tables | Block 99 (`6783728`, `55162d3`) |
-| A5 | Vulkan per-texture image-layout tracking | Block 105 (`a00daf9`..`2583b87`), MoltenVK re-confirm `daf967e` |
-| A8 | Vulkan 3D attachment `storeOp: Discard` epilogue clear range | Block 107 R1 (`3f809b1`) — eager clear removed, core lazy clear covers it |
-| A9 | Vulkan sampled + storage-bound subresource layout mismatch | Block 107 R2 (`3f809b1`, `2c6ea6f`) — image-wide `GENERAL` rule |
-| B1 | `wgpuGetProcAddress` | Block 101 (`45d1942`), 202/202 |
-| B4 | ~50 CTS `#[ignore]`s | Stale (in-repo ports deleted in `a9218a0`), `62338d8` |
-| B5 | Fixed surface capabilities | Block 103 (`a2907ca`), Win32 e2e `97e1713` |
-| D11 (Vulkan) | clip-distances / swizzle depth / immediates on native Vulkan | Block 106 (`4d5bc52`, `6c8b417`) |
-| F | 8 doc-drift rows | `aaef70c` |
-
-Also fixed on the way, never a backlog row: Metal `tint_storage_buffer_sizes`
-`setBytes` length (`288887a`), `VK_KHR_portability_subset` feature chaining
-+ `TYPE_2D_ARRAY_COMPATIBLE` narrowing (`fdef682`, `daf967e`).
+| A6 | Metal rejects a non-default `multisample.mask` | Stale row: core has baked the mask into MSL since `462b4d8`; `threading-audit.md` now says so |
+| — | Subgroup size control | Block 108, see F2 for its owed Mac notes |
+| — | 2026-10 code review: CRITICALs and MAJORs | Blocks 109-112, except G2 (D12) |
+| — | 2026-10 bug-class audit | Blocks 113-115 |
+| — | Tint double IR lowering; Vulkan per-submit churn | Blocks 116, 117 |
+| — | Dawn bump to v20261030 | Block 118 |
+| — | CTS findings F-161 to F-164 | Block 119 |
+| — | Tint driver workarounds from Block 118 | Block 120, see A12 |
+| — | F-151 real-GPU confirmation | Metal CTS case passes, 2026-11-02 |
 
 ---
 
 ## Priority A — correctness (silent-wrong, invisible to the CTS)
 
-Every Tier-1 row from the previous snapshot is closed. What remains is
-Tier-2 or unreachable by validation today.
-
 | # | Item | Difficulty | Evidence |
 |---|---|---|---|
+| A12 | **Block 120 on native Vulkan**: the three SPIR-V workarounds ran only on MoltenVK, which is reference-only. Run the forced `e2e_vulkan_shader_workarounds` on a native host. | Manual | `specs/blocks/120-tint-driver-workarounds.md` Verification |
+| A13 | **Dawn workarounds still unset**: AMD Mesa below 25.3 float polyfills, Imagination `polyfill_case_switch`, MSL `polyfill_clamp_float`, and others. Each needs a gate survey against Dawn. | M | `specs/blocks/120-tint-driver-workarounds.md` Out of scope |
 | A3 | **Lazy zero-init GLES clear paths (Block 104 S4)** — core marks and un-marks on every backend, but the GLES HAL has no `ClearTexture` lowering for the Stage-2 eligibility set (sampled reads of uninitialized depth/stencil, compressed and MSAA textures). Tier-2 catalogue item; passes today only where the driver hands back zeroed memory. | M | `specs/blocks/104-lazy-zero-init-stage2.md` S4; `specs/blocks/67-gles-backend.md` mapping matrix |
-| A6 | Metal rejects a non-default `multisample.mask` with `HalError` (pinned `objc2-metal` does not expose `sampleMask`); Vulkan applies it. Accepted as a Tier-1 limitation, still a divergence between the two Tier-1 backends. | S–M | `specs/tracking/threading-audit.md:33-36` |
 | A7 | GLES `SetImmediates` is recorded and bounds-checked but never read by the draw path — a silent gap. Unreachable today because `max_immediate_size` is 0 and core rejects first; must become an explicit `HalError` if the limit is ever raised. | S | `specs/blocks/67-gles-backend.md:282`, `yawgpu-hal/src/gles/adapter.rs` |
-| A10 | Block 102 m4: a timestamp conversion pass that fails to lower would be dropped silently (raw ticks left in the destination). Unreachable by construction today (internal pipeline is non-error, bind group binds a submit-validated buffer); revisit when a second internal compute pass appears. | S (needs a result threaded through the lowering walk) | `specs/tracking/backlog.md` Phase Review Blocks 99–102, m4 |
+| A10 | Block 102 m4: `hal_compute_pass_execution` returning `None` drops the pass silently (`queue.rs:1389`). This row said to revisit when a second internal compute pass appeared, and Block 119's indirect validation is one. The stakes are higher: a dropped validation pass leaves the user's dispatch reading stale arguments. It stays unreachable by construction, because the internal pipeline is non-error and the bind group binds a submit-validated buffer. Thread a result through the lowering walk. | S | `yawgpu-core/src/queue.rs`; `specs/tracking/backlog.md` Phase Review Blocks 99–102, m4 |
 | A11 | Block 107 F2 (documented, not a bug): `wgpuSurfacePresent` is the one consumer core does not lazily clear for, so a surface texture Discarded then presented shows `DONT_CARE` contents on Vulkan. Matches Metal and Dawn; listed so nobody re-adds the eager clear. | — | `specs/blocks/107-vulkan-discard-epilogue-shared-layout.md` R1 |
 
 ## Priority B — missing standard WebGPU surface
@@ -100,17 +84,17 @@ Tier-2 or unreachable by validation today.
 | C1 | **Android `ANativeWindow` surface on Vulkan is a stub** — returns `SwapchainCreationFailed("Android native window surface not implemented")`. | M | `yawgpu-hal/src/lib.rs` |
 | C2 | **Xlib / Wayland / XCB surface sources are accepted by validation but inert** — no `VkSurfaceKHR` is created for them (only `CAMetalLayer` and Win32 HWND reach a Vulkan surface). Linux has no windowed presentation on any backend. | M each | `yawgpu/src/ffi/mod.rs`, `yawgpu-hal/src/vulkan/mod.rs`; `specs/blocks/85-windows-surface.md:269-279` |
 | C3 | GLES Linux windowed presentation; the headless `EGL_PLATFORM_DEVICE_EXT` cascade must be skipped for window surfaces when it is added. | M | `yawgpu-hal/src/gles/egl.rs`; `specs/blocks/67-gles-backend.md:500-509` |
-| C4 | **CI runs only the default (Noop) gates.** Feature-gated clippy (`vulkan` / `metal` / `gles` / `tiled` / `shader-passthrough`) never runs in CI, so lint rot reaches contributors first; no real-GPU CI for the 375 manual tests; no Windows example-build job. | M (infra) | `.github/workflows/ci.yml`; `specs/tracking/toolchain-clippy-1-98.md:110-126`; `specs/blocks/85-windows-surface.md:276-278` |
+| C4 | **CI covers only default and `tiled`.** Feature-gated clippy (`vulkan` / `metal` / `gles` / `shader-passthrough`) never runs in CI, so lint rot reaches contributors first; no real-GPU CI for the 463 manual tests; no Windows example-build job. | M (infra) | `.github/workflows/ci.yml`; `specs/tracking/toolchain-clippy-1-98.md:110-126`; `specs/blocks/85-windows-surface.md:276-278` |
 
 ## Priority D — GLES Tier 2 residue
 
-Campaign state: raw CTS fail 30,408 → 6,261 (crocus / Haswell host, now
-gone); README also carries the NVIDIA Linux (ES 3.2) table. The
-remaining tail is fragmented; each row is an independent investigation.
-No GLES mapping commits have landed since the previous snapshot.
+Latest raw CTS: Linux NVIDIA `fail=28,810 crash=0` (Block 119). Each row is an
+independent investigation.
 
 | # | Item | Difficulty | Evidence |
 |---|---|---|---|
+| D12 | **GL context never released after `with_current_context`** (review G2), the last open MAJOR of the 2026-10 review. A second thread fails. Needs an ownership change, so it gets its own block. | M | `specs/blocks/111-code-review-hal-majors.md:152` |
+| D13 | `khronos-egl` `make_current` can panic inside `Drop`, which breaks the no-panics principle. | S | `yawgpu-hal/src/gles/device.rs:212, 230` |
 | D1 | **MSAA per-sample behaviour** — `multisample.mask` / `@builtin(sample_mask)` and alpha-to-coverage do not gate per-sample colour/depth writes (~1,510 fails). Documented as the next deep-debug slice. | L | `specs/tracking/cts-gles-sweep-0705.md:1206-1218` |
 | D2 | **`maxBindingsPerBindGroup` off-by-one** — the limit is a plain `min` of GL maxima with no reservation for Tint's texture-metadata UBO. Mechanism confirmed, not fixed. | S | `specs/blocks/67-gles-backend.md:809-825` |
 | D3 | Query sets: timestamp not advertised although `EXT_disjoint_timer_query` exists; `submit_resolve_query_set` writes zeroes from a software vector rather than real GL query objects. Block 102's core path (conversion pass, `HalQueryKind::Timestamp`) is ready for a GLES arm. | M | `yawgpu-hal/src/gles/queue.rs`; `specs/blocks/67-gles-backend.md:279` |
@@ -120,8 +104,8 @@ No GLES mapping commits have landed since the previous snapshot.
 | D7 | Cube / cube-array colour attachments; framebuffer fetch via `EXT_shader_framebuffer_fetch`; compressed-format advertisement. | S–M / M / M | `specs/blocks/67-gles-backend.md:254, 265`; `specs/tracking/format-completeness-audit.md:34-37` |
 | D8 | Latent self-deadlock: `Drop` impls of GLES buffer / pipeline / sampler / texture inners acquire `with_current_context`; dropping the last `Arc` inside a context closure re-deadlocks. A guard is cheap. | S | `specs/tracking/cts-gles-sweep-0705.md:136-145` |
 | D9 | `unorm8x4-bgra` renders R/B swapped on hosts without `EXT/ARB_vertex_array_bgra` (execution-only divergence; shader swizzle emulation deferred). | M | `specs/blocks/67-gles-backend.md:786-790` |
-| D10 | **Manual verification owed**: ANGLE re-confirmation after the Tint migration, Windows WGL/NVIDIA sweep, catalogue re-sweep on the NVIDIA Linux host (README Haswell table stays until then). | Manual | `specs/tracking/tint-integration-refactor.md:219-221`; `specs/blocks/67-gles-backend.md:141, 269` |
-| D11 | **DONE 2026-09-23** — ETC2/ASTC probes E8/E9 executed on Apple M2 via MoltenVK: `e2e_vulkan_texture_compression` 10/10 under the Khronos layer, 0 VUID lines, no self-skip (ledger `texture-compression-vulkan.md` "ETC2 / ASTC probes on MoltenVK"). Vulkan items were closed by Block 106. Original text: only the ETC2/ASTC probes E8/E9 remained (desktop NVIDIA does not expose those families; needs Android Vulkan or MoltenVK on Apple Silicon). | S (Mac) | `specs/tracking/texture-compression-vulkan.md:94-96, 119` |
+| D10 | **Manual verification owed**: ANGLE re-confirmation after the Tint migration. Windows WGL passed 38 of 39 e2e at the Block 118 pin; `e2e_gles_process_exit` crashes on every run because F-153's exit guard is armed only on the EGL path. | Manual | `specs/tracking/tint-integration-refactor.md:219-221`; `specs/blocks/118-dawn-v20261030-bump.md` |
+| D14 | README Linux NVIDIA GLES table is older than the suite's: it shows `fail=29,715`, the suite README shows 28,810. | S | `README.md:511` |
 
 Permanent / catalogued Tier-2 rejections (not backlog, listed for
 completeness): vertex-stage storage images, `rg32*` storage formats,
@@ -136,39 +120,47 @@ reference `> i32::MAX`, `first_instance` indirect, external textures,
 
 | # | Item | Difficulty | Evidence |
 |---|---|---|---|
-| E1 | Block 97 **S4** (re-measure + CTS re-run, record a Run section). S3 is done (`88cfe58`); the perf ledger now says so. | S | `specs/tracking/perf-dawn-baseline.md` |
+| E1 | Block 97 **S4** (re-measure + CTS re-run, record a Run section). The last run is 2026-08-08, so Blocks 116 and 117 are unmeasured, as is Block 120 m6: per-draw immediates on Apple Silicon below macOS 26.6.1. | S | `specs/tracking/perf-dawn-baseline.md`; `specs/blocks/120-tint-driver-workarounds.md` |
 | E2 | Residual gaps vs Dawn with no structural lever: `write_buffer_then_wait` 1.53×, `bindgroup/create_destroy` 1.33×, `render_draw` 224 vs 99 ns. | Diffuse | `specs/tracking/perf-dawn-baseline.md:435-446` |
 | E3 | Deferred cache layers: real `VkPipelineCache`; Metal `MTLLibrary`-by-source cache (measure-first); whole-module Tint IR clone (needs an upstream Tint API). | M / M / L | `specs/blocks/95-shader-compile-cache.md:35-41`; `yawgpu-tint/src/lib.rs` |
+| E11 | Vulkan `VkRenderPass` / `VkFramebuffer` / `VkDescriptorPool` caches, left out of Block 117. Decide after E1. | M | `specs/blocks/117-vulkan-submit-recycling.md` |
 | E4 | refactor-dedup deferrals: double `Arc<core::X>` in FFI Impl structs, Metal derived-view cache + per-draw scratch reuse, unified `HalRenderStreamState` interpreter, GLES draw-time dirty tracking + binding index maps, subpass attachment validation dedupe; **+ Block 107 F5**: a `RenderBindings<'_>` struct for the Vulkan render descriptor call chain (`update_render_descriptor_sets` `too_many_arguments`, `bind_textures` / `pass_textures` side by side). | M each | `specs/tracking/refactor-dedup.md:38-56, 98-101, 191-196`; `specs/blocks/107-vulkan-discard-epilogue-shared-layout.md` F5 |
-| E5 | `tiled`: depth-format transient attachments, MSAA subpass input (Dawn-deferred; 2-arg `inputAttachmentLoad` parked on a Dawn resolver issue), queries inside subpass passes, GLES mapping, `SubpassAttachmentResource::Transient` arm TODOs (the two remaining `TODO(tiled 2.4)` markers). | M / L / M / L | `specs/blocks/55-tiled-rendering.md:45-53, 501-507, 639-648`; `yawgpu-core/src/subpass.rs:244`, `yawgpu-hal/src/command.rs:765` |
+| E5 | `tiled`: depth-format transient attachments, MSAA subpass input (Dawn-deferred; 2-arg `inputAttachmentLoad` parked on a Dawn resolver issue), queries inside subpass passes, GLES mapping, `SubpassAttachmentResource::Transient` arm TODOs (the two remaining `TODO(tiled 2.4)` markers).; a forced-flag e2e on the subpass path (Block 120). | M / L / M / L | `specs/blocks/55-tiled-rendering.md:45-53, 501-507, 639-648`; `yawgpu-core/src/subpass.rs:244`, `yawgpu-hal/src/command.rs:779` |
 | E6 | Vulkan limits: `maxFragmentCombinedOutputResources` redistribution, NVIDIA 2 GB storage cap, `max_color_attachment_bytes_per_sample` not queried. | S | `yawgpu-hal/src/vulkan/mod.rs`; `specs/tracking/adapter-limits.md:39-40, 90` |
 | E7 | Metal subgroup size range hard-coded `(32, 32)`; f16 review MINORs (write-only `VulkanDeviceInner` flags, duplicate feature query). | S | `specs/tracking/subgroups.md:106-108`; `specs/tracking/shader-f16.md:177-183` |
 | E8 | `shader-passthrough`: B5 Phase Review outstanding; gating SPIR-V passthrough behind `WGPUInstanceFeatureName_ShaderSourceSPIRV` deferred. | S / S | `specs/blocks/33-shader-passthrough.md:257-270` |
 | E9 | Block 102 m12 cosmetic deferrals: tests inserted above `use super::*`; `#[cfg(test)] pub(crate)` shim; `RenderPassTimestampWrites` reused for compute passes (renaming is a cross-crate API change). | S | `specs/tracking/backlog.md` Phase Review Blocks 99–102, m12 |
 | E10 | GLES `HalError` is not `Clone`; the GLES module keeps a `TODO` to derive it upstream once every variant allows it. | S | `yawgpu-hal/src/gles/mod.rs:43` |
+| E12 | Remaining review MINORs: the 2026-10 list (`wgpuInstanceWaitAny` busy-spin and others) and Block 120 m5 (`#[non_exhaustive]` on the `yawgpu-tint` workaround structs). | Mixed | `specs/tracking/code-review-2026-10.md`; `specs/blocks/120-tint-driver-workarounds.md` |
 
 ## Priority F — doc drift
 
-None open. The previous snapshot's eight rows were closed in `aaef70c`
-(see the 2026-09-23 progress entry). Re-check on the next snapshot.
+| # | Item | Difficulty | Evidence |
+|---|---|---|---|
+| F1 | `specs/blocks/README.md` indexes 12 blocks; `specs/blocks/` holds 55. | S | `specs/blocks/README.md` |
+| F2 | Block 108 lists a Metal compile check and a MoltenVK run as owed. The compile check has been covered by every later Metal build. Whether MoltenVK exposes `computeFullSubgroups` is still unrecorded. | S | `specs/blocks/108-subgroup-size-control.md:248` |
+| F3 | Block 109 "Owed" section: its sync-validation item looks satisfied by the Windows run at `decfd69`. Confirm and remove. | S | `specs/blocks/109-code-review-criticals.md:308`; `specs/tracking/code-review-2026-10.md` |
+
+---
+
+## Decided, not backlog
+
+- Zero-count indirect dispatch on Mesa ANV Haswell wedges the machine. The user
+  decided on 2026-07-05 not to implement the conditional-rendering workaround, and
+  the affected CTS files stay quarantined on that host. Block 119 R5d adds a second
+  route to the same hazard. See `specs/tracking/cts-full-sweep-0704-native-vulkan.md`.
 
 ---
 
 ## Recommended order
 
-1. ~~**D11** ETC2/ASTC probes E8/E9 on the M2 under MoltenVK~~ — done
-   2026-09-23 (see the progress log).
-2. **B6 + D2 + D8** — all S, root cause known; one coding-agent handoff
-   (a spec check, a limit reservation, a re-entrancy guard).
-3. **C4** feature-gated clippy in CI — infra only, stops lint rot from
-   reaching the next contributor.
-4. **A6** Metal `multisample.mask` — the last Tier-1 vs Tier-1
-   divergence (`objc2-metal` bump or a manual selector).
-5. **B2** binding arrays, then **C1 / C2** surfaces as separate
-   initiatives.
-6. **D** (GLES, starting with D3 since Block 102 made it a HAL-only
-   arm) and **E** as separate initiatives; E1 whenever a perf change
-   lands.
+1. **A12** when a native Vulkan host is available.
+2. **E1**, which decides **E11** and part of **E3**.
+3. **A13**, starting with the most widely used hardware (AMD Mesa).
+4. **C4** feature-gated clippy in CI.
+5. **B2** binding arrays, then **C2 / C1** surfaces as separate initiatives.
+6. **F1 to F3** alongside any of the above.
+7. **D12** and the rest of **D** as separate initiatives.
 
 ---
 
@@ -285,3 +277,9 @@ Re-verification after the fixes: `cargo test --workspace` 1093/0, clippy default
 
 - Re-ran `webgpu:api,*` + `webgpu:shader,execution,*` on this host (yawgpu `2c6ea6f` release `--features vulkan`) with `--output` and bucketed every skip by message: 381,430 of 443,719 are ASTC / ETC2 / EAC (not exposed by desktop NVIDIA); the rest are structural (view-compat pairs, limit == default, over-limit, spec-forbidden stage/format combos), C-API N/A, or harness-side gaps (default device without the needed feature, WGSL language-feature query not wired). Counts match the 2026-09-25 README sweep exactly.
 - The one yawgpu-implementable skipped feature is `subgroup-size-control` (`WGPUFeatureName_SubgroupSizeControl = 0x17`, in the pinned header, never advertised). New row **B8 → Block 108** (`specs/blocks/108-subgroup-size-control.md`): Vulkan-only per Dawn (Metal unsupported), `VK_EXT_subgroup_size_control` + `computeFullSubgroups`, core validation of `@subgroup_size` (x-multiple, range, `maxComputeWorkgroupSubgroups`), `REQUIRE_FULL_SUBGROUPS` / `ALLOW_VARYING_SUBGROUP_SIZE` lowering, plus a webgpu-native-cts port update (S4).
+
+### 2026-11-02 — snapshot re-taken at `48067a3`
+
+- Tables rebuilt after Blocks 108-120. A6 closed as stale. New rows: A12, A13, D12, D13, D14, E11, E12, F1 to F3. GLES moved to last by user direction. The Method section lists which rows were not re-checked against the source.
+- The Haswell indirect wedge moved out of the list: it was confirmed in 2026-07 and the user decided against a workaround, so Block 119 R5d's "unconfirmed" was wrong and is corrected.
+- F-151 confirmed on real hardware; Block 113 status, `SPEC.md` Phases 13, 14, and 16, and `threading-audit.md` corrected.

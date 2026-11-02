@@ -2308,7 +2308,7 @@ bullets above are history only; no residual under-validation remains in this sec
 - **Follow-up (separate slice):** surface `ERROR_DEVICE_LOST` to `yawgpu-core` as a WebGPU
   device-loss event so harnesses can recycle a genuinely lost device.
 
-## F-151 — `TransientAttachment` accepted as a render-pass resolve target — RESOLVED on Noop (real-GPU re-confirmation pending)
+## F-151 — `TransientAttachment` accepted as a render-pass resolve target — RESOLVED
 
 - **Finding (2026-09-21, webgpu-native-cts `docs/FINDINGS.md` F-151, Dawn-CONFIRMED):**
   `webgpu:api,validation,render_pass,resolve:resolve_attachment:resolveTargetUsage_transient=true;_valid=false`
@@ -2345,8 +2345,9 @@ bullets above are history only; no residual under-validation remains in this sec
   91 binaries, **1026** passing (baseline 1025, +1 the new test), 0 failed;
   `cargo clippy --workspace --all-targets -- -D warnings` exit 0, and likewise
   `-p yawgpu-core --features tiled`. No existing test changed (diff is +36/−0, one file).
-- **Pending:** real-GPU CTS re-run of the case and the whole `render_pass,resolve` file,
-  expecting `fail=0`.
+- **Real-GPU confirmation (2026-11-02):** the case reports `pass`, not `skip`, in the Metal
+  `webgpu:*` run for Block 120. The only 2 failures of that run are `have_all_language_features`
+  cases, and the same holds for the Linux native Vulkan run recorded in Block 119.
 - **Under-specifications noted in `validate_resolve_target`, listed and deliberately NOT fixed**
   (next worklist for this area): (1) `mipLevelCount == 1` is enforced at the `beginRenderPass`
   call site rather than inside the shared function, so the tiled subpass caller never applies it —

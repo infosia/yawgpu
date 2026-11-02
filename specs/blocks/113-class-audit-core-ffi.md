@@ -1,6 +1,7 @@
 # Block 113 — bug-class audit: core / FFI
 
-Status: **PLANNED (2026-10-25)**.
+Status: **COMPLETE (2026-10-25)** — S1 `76a0714`, S2 `b469aa5`, S3 `7488716`, Phase
+Review `6fd7ac1`.
 Source: `specs/tracking/class-audit-2026-10.md` (the IDs below are its
 rows; each row states the defect, the Dawn behaviour and the triggering
 call). Oracle: Dawn `third_party/dawn/src/dawn/native/` + `webgpu.h` +

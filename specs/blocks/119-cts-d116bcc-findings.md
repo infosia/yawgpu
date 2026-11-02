@@ -113,8 +113,13 @@ experimental. `unrestricted_aliasing` stays unreported: `webgpu.h` has no enumer
 for it. Both `have_all_language_features` cases remain failing, as on Dawn (F-159).
 
 R5d. Invalid counts now reach `vkCmdDispatchIndirect` as zeros, as in Dawn. The HAL
-skips zero-sized direct dispatches because of a Mesa ANV Haswell wedge. Whether that
-wedge also applies to indirect dispatch is unconfirmed.
+skips zero-sized direct dispatches because of a Mesa ANV Haswell wedge. That wedge also
+applies to indirect dispatch: it froze the machine in the supervised re-try recorded in
+`specs/tracking/cts-full-sweep-0704-native-vulkan.md`. There the user decided on
+2026-07-05 not to implement the conditional-rendering workaround, because it would
+serve one EOL GPU. A legal zero-count indirect dispatch already hit this, so this block
+adds a second route to the same hazard and no new class. Nothing changes here. Dawn has
+no guard on either path.
 
 ## Verification (2026-11-01)
 
