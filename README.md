@@ -442,8 +442,8 @@ bypassing WGSL and Tint entirely:
 yawgpu is the **primary conformance subject** of
 [**webgpu-native-cts**](https://github.com/infosia/webgpu-native-cts) — a C++20
 suite that ports the upstream WebGPU CTS and links *directly* against the
-`webgpu.h` C ABI (no JavaScript engine), running every case in its own
-subprocess (`--isolate`) against a real GPU. **Dawn**, Google's C++ reference
+`webgpu.h` C ABI (no JavaScript engine), running every case in parallel worker
+processes (`--workers`) against a real GPU. **Dawn**, Google's C++ reference
 implementation, is the **oracle** every result is judged against.
 
 Across the **entire ported suite** — `api/validation`, `api/operation`,

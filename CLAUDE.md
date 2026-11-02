@@ -81,6 +81,11 @@ in the library (with its inline unit test), then re-confirmed on hardware; the
 finding ledger is `specs/tracking/cts-coverage.md` and the suite's
 `docs/FINDINGS.md`.
 
+**Run the CTS with plain `--workers 6`; do not pass `--isolate`.** A full
+`webgpu:*` run on Metal takes about 22 minutes that way. `--isolate` starts one
+process per case: the same run had not finished after over 2 hours. It also
+reports per-case counts, which cannot be compared with the per-subcase baselines.
+
 ## Shader frontend — Tint
 
 The WGSL→{MSL, SPIR-V, GLSL ES} compiler and reflection source is **Tint** (Dawn's
