@@ -87,6 +87,7 @@ retains between passes — becomes a wrong-pixels bug rather than a crash.
 - **S3** Delete the old per-draw `HalRenderPass` path once nothing emits it.
 - **S4** Re-measure and re-run CTS on both backends; record a new run section in
   `specs/tracking/perf-dawn-baseline.md`.
+  **Done 2026-11-02** as Run 7, which also found P-005.
 
 Each slice ends green on Noop; S2 and S4 additionally require real-GPU runs.
 

@@ -437,6 +437,125 @@ clone into the command, usage-scope index probes, and the per-draw command
 build. No single >30% lever is visible in the profile any more; further
 narrowing would be diffuse micro-work, recorded here as low-priority.
 
+## Run 7 — 2026-11-02, Block 97 S4 (after Blocks 98-120)
+
+| | |
+|---|---|
+| Machine | Apple M2, macOS 27.2 (26B123) |
+| Backend | Metal (both); yawgpu also on MoltenVK |
+| yawgpu | `356e125`, `cargo build -p yawgpu --release --features metal,vulkan` |
+| Dawn | tag `v20261030.184100` (`97ae1b10ac`), CMake Release, Metal only, default toggles |
+| Harness | `benches/`, default reps, two full rounds per implementation, alternating |
+
+The Dawn library differs from Runs 1-6: it is now the release yawgpu's Tint pin is
+based on, so both sides compile WGSL with the same Tint. Each figure is the lower of
+the two rounds' minimums. The rounds agreed within 8% on every case except yawgpu
+`pipeline/compute_cached` (76 and 67 ns).
+
+| case | iters | yawgpu ns | dawn ns | ratio |
+|---|---|---|---|---|
+| `buffer/create_destroy` | 20000 | 1701 | 1851 | 0.92× |
+| `buffer/create_mapped_unmap` | 10000 | 1764 | 4480 | 0.39× |
+| `bindgroup/create_destroy` | 20000 | 190 | 128 | 1.48× |
+| `queue/write_buffer_4kb` | 20000 | 590 | 649 | 0.91× |
+| `queue/write_buffer_then_wait` | 500 | 118168 | 574 | 205.69× |
+| `frame/10writes_dispatch_submit_wait` | 300 | 148344 | 164268 | 0.90× |
+| `shader/create_cached` | 5000 | 127 | 676 | 0.19× |
+| `shader/create_unique` | 200 | 16186 | 20286 | 0.80× |
+| `pipeline/compute_cached` | 5000 | 67 | 346 | 0.19× |
+| `pipeline/compute_unique` | 100 | 99835 | 88812 | 1.12× |
+| `pipeline/render_unique` | 60 | 133397 | 147365 | 0.91× |
+| `encode/empty_encoder_finish` | 20000 | 142 | 162 | 0.88× |
+| `encode/compute_1_dispatch` | 20000 | 705 | 608 | 1.16× |
+| `encode/render_pass_empty` | 20000 | 965 | 861 | 1.12× |
+| `encode/render_bind_draw` | 200000 | 153 | 83 | 1.84× |
+| `encode/render_draw` | 200000 | 45 | 38 | 1.20× |
+| `submit/empty` | 10000 | 1531 | 2537 | 0.60× |
+| `submit/compute_1_dispatch` | 5000 | 24570 | 46145 | 0.53× |
+| `submit/render_100_draws_wait` | 200 | 174282 | 200097 | 0.87× |
+| `submit/compute_wait_idle` | 500 | 137494 | 145048 | 0.95× |
+
+yawgpu on MoltenVK, same build, one round. MoltenVK is reference-only, and Dawn was
+not built with Vulkan, so there is no ratio column:
+
+| case | yawgpu MoltenVK ns |
+|---|---|
+| `buffer/create_destroy` | 2101 |
+| `buffer/create_mapped_unmap` | 2151 |
+| `bindgroup/create_destroy` | 190 |
+| `queue/write_buffer_4kb` | 638 |
+| `queue/write_buffer_then_wait` | 122578 |
+| `frame/10writes_dispatch_submit_wait` | 165508 |
+| `shader/create_cached` | 135 |
+| `shader/create_unique` | 17198 |
+| `pipeline/compute_cached` | 71 |
+| `pipeline/compute_unique` | 159838 |
+| `pipeline/render_unique` | 194797 |
+| `encode/empty_encoder_finish` | 146 |
+| `encode/compute_1_dispatch` | 714 |
+| `encode/render_pass_empty` | 900 |
+| `encode/render_bind_draw` | 150 |
+| `encode/render_draw` | 45 |
+| `submit/empty` | 18298 |
+| `submit/compute_1_dispatch` | 24419 |
+| `submit/render_100_draws_wait` | 186741 |
+| `submit/compute_wait_idle` | 144056 |
+
+### Reading
+
+- End to end, yawgpu is now ahead of Dawn: `frame/10writes_dispatch_submit_wait`
+  0.90×, `submit/render_100_draws_wait` 0.87×, `submit/compute_1_dispatch` 0.53×.
+- Per-command recording is still behind: `encode/render_bind_draw` 1.84× (Run 6:
+  2.27×), `bindgroup/create_destroy` 1.48× (1.85×), `encode/render_draw` 1.20×,
+  `encode/compute_1_dispatch` 1.16×. These are the diffuse costs Run 6 described.
+- `pipeline/compute_unique` moved from 0.97× (Run 1) to 1.12×: yawgpu went from
+  85 to 100 µs, and Dawn stayed at 88 to 89 µs. Not investigated. Candidates are the
+  newer Tint and the per-pipeline work Blocks 118-120 added.
+- `submit/empty` is no longer a fake win and stays under Dawn (0.60×).
+- MoltenVK `submit/empty` 18.3 µs and `submit/compute_1_dispatch` 24.4 µs match
+  Block 117's 17.4 and 24.1 µs, so nothing has regressed since.
+- No case isolates the per-pass `VkRenderPass` / `VkFramebuffer` creation that
+  backlog E11 would cache: the `_wait` cases are dominated by GPU latency. E11
+  needs a case that submits many passes without waiting before it can be decided.
+- **`queue/write_buffer_then_wait` 205.69×** is a regression from Run 4's 1.53×,
+  P-005 below.
+
+### P-005 — `onSubmittedWorkDone` flushes pending writes, Dawn does not
+
+yawgpu takes 118 µs, a full GPU round trip. Dawn takes 574 ns. Block 113 S10
+(`7488716`) made `onSubmittedWorkDone` flush the queue's pending writes and wait for
+them, because the audit row said it "ignores pending writes". Its test is
+`audit_s10_work_done_flushes_queued_buffer_writes` in `yawgpu/src/ffi/mod.rs`.
+
+Dawn does not do this. `CopyFromStagingToBuffer` records the copy with
+`SubmitMode::Passive` on Metal (`metal/DeviceMTL.mm`) and on Vulkan
+(`vulkan/DeviceVk.cpp`), so `HasPendingCommands()` stays false.
+`GetScheduledWorkDoneSerial()` then returns the last submitted serial, and the
+callback does not wait for the write (`Queue.cpp`, `ExecutionQueue.cpp`). A passive
+copy is flushed by the next submit, by a `mapAsync` that needs it, or after 16 MiB
+of pending uploads (`DynamicUploader::MaybeSubmitPendingCommands`).
+
+So S10 is stricter than the oracle, and the audit premise was wrong. Dawn's
+behaviour is observably safe, because every way to read the written data forces the
+flush first. The fix is to restore Dawn's behaviour for `onSubmittedWorkDone` only.
+`wgpuSurfacePresent` keeps flushing (S5), as Dawn's present does. Not yet planned as
+a block.
+
+### Teardown note
+
+The yawgpu bench binary exits 1 after printing every result: "device lost (reason 3):
+Instance released". The bench treats every loss except `Destroyed` as fatal. Dawn
+destroys the device when its last external reference is released
+(`DeviceBase::WillDropLastExternalRef`), and the lost callback then reports
+`Destroyed`. yawgpu does not, so the callback reports `CallbackCancelled` when the
+instance is released. The Dawn bench exits 0. This does not affect any figure.
+
+### CTS
+
+Covered by runs of the same library code: Metal `webgpu:*` `fail=2 crash=0`
+(Block 120, 2026-11-02); native Vulkan on Windows (Block 120) and on Linux
+(Block 119).
+
 ## Status
 
 P-004 **resolved**, including the constant-factor follow-up (399 → 224 ns,
@@ -445,12 +564,10 @@ P-003 in Block 97. The remaining gaps against Dawn are small and none is
 structural: `queue/write_buffer_then_wait` 1.53×, `bindgroup/create_destroy`
 1.33×, `encode/compute_1_dispatch` 1.14×, `encode/render_draw` 1.16×.
 
-Block 97 **S3** is **done** (`88cfe58`: GLES moved to the command stream and
-the per-draw `HalRenderPass` path deleted — `HalCopy` carries only
-`RenderPassCommandStream`, `yawgpu-hal/src/command.rs`). **S4** (re-measure +
-CTS re-run, record a Run section) is still open — backlog E1
-(`backlog.md`). *(Corrected 2026-09-23; the previous wording "S3 and moving
-GLES off the legacy path are still open" was stale.)*
+Block 97 **S3** is **done** (`88cfe58`) and **S4** is **done** (Run 7,
+2026-11-02). Run 7 found one regression, **P-005** (`onSubmittedWorkDone`
+flushes pending writes; 205× on `queue/write_buffer_then_wait`). Every other
+gap is per-command recording cost, at 1.84× or below.
 
 ## Superseded status notes
 

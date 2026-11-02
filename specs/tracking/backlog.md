@@ -54,6 +54,7 @@ below are stable IDs, not the rank.
 | — | Dawn bump to v20261030 | Block 118 |
 | — | CTS findings F-161 to F-164 | Block 119 |
 | — | Tint driver workarounds from Block 118 | Block 120, see A12 |
+| E1 | Block 97 S4 re-measure | Run 7, 2026-11-02 |
 | — | F-151 real-GPU confirmation | Metal CTS case passes, 2026-11-02 |
 | A12 | Block 120 on native Vulkan | Windows native Vulkan e2e and forced CTS, 2026-11-02 |
 
@@ -63,6 +64,7 @@ below are stable IDs, not the rank.
 
 | # | Item | Difficulty | Evidence |
 |---|---|---|---|
+| A14 | Releasing the last device reference does not destroy the device, so the device-lost callback reports `CallbackCancelled` at instance release. Dawn destroys and reports `Destroyed` (`DeviceBase::WillDropLastExternalRef`). Seen as the bench's exit code; check against Dawn before changing. | S | `specs/tracking/perf-dawn-baseline.md` Run 7, Teardown note |
 | A13 | **Dawn workarounds still unset**: AMD Mesa below 25.3 float polyfills, Imagination `polyfill_case_switch`, MSL `polyfill_clamp_float`, and others. Each needs a gate survey against Dawn. | M | `specs/blocks/120-tint-driver-workarounds.md` Out of scope |
 | A3 | **Lazy zero-init GLES clear paths (Block 104 S4)** — core marks and un-marks on every backend, but the GLES HAL has no `ClearTexture` lowering for the Stage-2 eligibility set (sampled reads of uninitialized depth/stencil, compressed and MSAA textures). Tier-2 catalogue item; passes today only where the driver hands back zeroed memory. | M | `specs/blocks/104-lazy-zero-init-stage2.md` S4; `specs/blocks/67-gles-backend.md` mapping matrix |
 | A7 | GLES `SetImmediates` is recorded and bounds-checked but never read by the draw path — a silent gap. Unreachable today because `max_immediate_size` is 0 and core rejects first; must become an explicit `HalError` if the limit is ever raised. | S | `specs/blocks/67-gles-backend.md:282`, `yawgpu-hal/src/gles/adapter.rs` |
@@ -121,10 +123,10 @@ reference `> i32::MAX`, `first_instance` indirect, external textures,
 
 | # | Item | Difficulty | Evidence |
 |---|---|---|---|
-| E1 | Block 97 **S4** (re-measure + CTS re-run, record a Run section). The last run is 2026-08-08, so Blocks 116 and 117 are unmeasured, as is Block 120 m6: per-draw immediates on Apple Silicon below macOS 26.6.1. | S | `specs/tracking/perf-dawn-baseline.md`; `specs/blocks/120-tint-driver-workarounds.md` |
+| E13 | **P-005**: `onSubmittedWorkDone` flushes pending writes (Block 113 S10). Dawn does not, so `queue/write_buffer_then_wait` is 205× Dawn. Restore Dawn's behaviour for work-done only; present keeps flushing. Also look at `pipeline/compute_unique`, which moved from 0.97× to 1.12×. | S | `specs/tracking/perf-dawn-baseline.md` Run 7 |
 | E2 | Residual gaps vs Dawn with no structural lever: `write_buffer_then_wait` 1.53×, `bindgroup/create_destroy` 1.33×, `render_draw` 224 vs 99 ns. | Diffuse | `specs/tracking/perf-dawn-baseline.md:435-446` |
 | E3 | Deferred cache layers: real `VkPipelineCache`; Metal `MTLLibrary`-by-source cache (measure-first); whole-module Tint IR clone (needs an upstream Tint API). | M / M / L | `specs/blocks/95-shader-compile-cache.md:35-41`; `yawgpu-tint/src/lib.rs` |
-| E11 | Vulkan `VkRenderPass` / `VkFramebuffer` / `VkDescriptorPool` caches, left out of Block 117. Decide after E1. | M | `specs/blocks/117-vulkan-submit-recycling.md` |
+| E11 | Vulkan `VkRenderPass` / `VkFramebuffer` / `VkDescriptorPool` caches, left out of Block 117. Run 7 cannot decide it: no bench case isolates per-pass creation, so add one that submits many passes without waiting. | M | `specs/blocks/117-vulkan-submit-recycling.md` |
 | E4 | refactor-dedup deferrals: double `Arc<core::X>` in FFI Impl structs, Metal derived-view cache + per-draw scratch reuse, unified `HalRenderStreamState` interpreter, GLES draw-time dirty tracking + binding index maps, subpass attachment validation dedupe; **+ Block 107 F5**: a `RenderBindings<'_>` struct for the Vulkan render descriptor call chain (`update_render_descriptor_sets` `too_many_arguments`, `bind_textures` / `pass_textures` side by side). | M each | `specs/tracking/refactor-dedup.md:38-56, 98-101, 191-196`; `specs/blocks/107-vulkan-discard-epilogue-shared-layout.md` F5 |
 | E5 | `tiled`: depth-format transient attachments, MSAA subpass input (Dawn-deferred; 2-arg `inputAttachmentLoad` parked on a Dawn resolver issue), queries inside subpass passes, GLES mapping, `SubpassAttachmentResource::Transient` arm TODOs (the two remaining `TODO(tiled 2.4)` markers).; a forced-flag e2e on the subpass path (Block 120). | M / L / M / L | `specs/blocks/55-tiled-rendering.md:45-53, 501-507, 639-648`; `yawgpu-core/src/subpass.rs:244`, `yawgpu-hal/src/command.rs:779` |
 | E6 | Vulkan limits: `maxFragmentCombinedOutputResources` redistribution, NVIDIA 2 GB storage cap, `max_color_attachment_bytes_per_sample` not queried. | S | `yawgpu-hal/src/vulkan/mod.rs`; `specs/tracking/adapter-limits.md:39-40, 90` |
@@ -155,7 +157,7 @@ reference `> i32::MAX`, `first_instance` indirect, external textures,
 
 ## Recommended order
 
-1. **E1**, which decides **E11** and part of **E3**.
+1. **E13** (P-005), from E1's Run 7.
 2. **A13**, starting with the most widely used hardware (AMD Mesa).
 3. **A10**, small, and Block 119 raised its stakes.
 4. **C2 / C1** surfaces as separate initiatives.
@@ -285,3 +287,4 @@ Re-verification after the fixes: `cargo test --workspace` 1093/0, clippy default
 - The Haswell indirect wedge moved out of the list: it was confirmed in 2026-07 and the user decided against a workaround, so Block 119 R5d's "unconfirmed" was wrong and is corrected.
 - F-151 confirmed on real hardware; Block 113 status, `SPEC.md` Phases 13, 14, and 16, and `threading-audit.md` corrected.
 - Later the same day: C4, B2 and GLES ranked last by user direction; B2 records that default Dawn rejects binding arrays too.
+- E1 done as Run 7 in `perf-dawn-baseline.md`; it opened E13 (P-005) and A14, and E11 now needs a bench case first.
