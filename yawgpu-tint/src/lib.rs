@@ -40,6 +40,10 @@ pub struct SpirvWorkarounds {
     /// Emit native OpSDot/OpUDot only with enabled shaderIntegerDotProduct support.
     /// The default is false, which selects packed integer dot product polyfills.
     pub native_dot_4x8_packed: bool,
+    /// Rely on enabled Vulkan robustImageAccess2 instead of image clamps.
+    pub disable_image_robustness: bool,
+    /// Rely on robustBufferAccess2 for runtime-sized storage array indices.
+    pub disable_storage_runtime_sized_array_index_clamping: bool,
     /// Initialize workgroup memory with OpConstantNull.
     pub use_zero_initialize_workgroup_memory: bool,
     /// Add MaximallyReconvergesKHR to entry points; takes precedence over uniform control flow.
@@ -1562,6 +1566,8 @@ mod real {
             ov: *const RawOverrideValue,
             n_ov: usize,
             disable_robustness: bool,
+            disable_image_robustness: bool,
+            disable_storage_runtime_sized_array_index_clamping: bool,
             polyfill_bool_vec_dynamic_store: bool,
             replace_workgroup_atomic_store_with_exchange: bool,
             replace_unsigned_compare_zero: bool,
@@ -2285,6 +2291,8 @@ mod real {
                     raw_overrides.as_ptr(),
                     raw_overrides.len(),
                     !robust,
+                    workarounds.disable_image_robustness,
+                    workarounds.disable_storage_runtime_sized_array_index_clamping,
                     workarounds.polyfill_bool_vec_dynamic_store,
                     workarounds.replace_workgroup_atomic_store_with_exchange,
                     workarounds.replace_unsigned_compare_zero,
@@ -2825,6 +2833,88 @@ fn cs(@builtin(local_invocation_index) index: u32) {
                 flags,
             )
             .unwrap()
+    }
+
+    #[test]
+    fn spirv_image_robustness_flag_removes_texture_load_coordinate_clamp() {
+        let program = Program::parse(
+            r#"
+@group(0) @binding(0) var image: texture_2d<u32>;
+@group(0) @binding(1) var<storage, read_write> result: vec4u;
+@compute @workgroup_size(1) fn cs(@builtin(global_invocation_id) id: vec3u) {
+    result = textureLoad(image, vec2i(id.xy), 0);
+}
+"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        for disabled in [false, true] {
+            let words = workaround_spirv(
+                &program,
+                SpirvWorkarounds {
+                    disable_image_robustness: disabled,
+                    ..Default::default()
+                },
+            );
+            let instructions = spirv_instructions(&words);
+            // OpImageFetch remains; coordinate bounds use GLSL.std.450 UMin (38).
+            assert!(instructions.iter().any(|i| i[0] & 0xffff == 95));
+            assert_eq!(
+                instructions
+                    .iter()
+                    .any(|i| i[0] & 0xffff == 12 && i[4] == 38),
+                !disabled
+            );
+            // Image dimensions are queried solely for coordinate robustness.
+            assert_eq!(instructions.iter().any(|i| i[0] & 0xffff == 103), !disabled);
+        }
+    }
+
+    #[test]
+    fn spirv_storage_robustness_flag_removes_runtime_array_index_clamp() {
+        let program = Program::parse(
+            r#"
+@group(0) @binding(0) var<storage, read_write> data: array<u32>;
+@compute @workgroup_size(1) fn cs(@builtin(global_invocation_id) id: vec3u) {
+    data[id.x] = data[id.y] + 1u;
+}
+"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        for disabled in [false, true] {
+            let words = workaround_spirv(
+                &program,
+                SpirvWorkarounds {
+                    disable_storage_runtime_sized_array_index_clamping: disabled,
+                    ..Default::default()
+                },
+            );
+            let instructions = spirv_instructions(&words);
+            // Both load and store survive, but OpArrayLength and UMin disappear.
+            for opcode in [61, 62] {
+                assert!(instructions.iter().any(|i| i[0] & 0xffff == opcode));
+            }
+            assert_eq!(instructions.iter().any(|i| i[0] & 0xffff == 68), !disabled);
+            assert_eq!(
+                instructions
+                    .iter()
+                    .any(|i| i[0] & 0xffff == 12 && i[4] == 38),
+                !disabled
+            );
+        }
     }
 
     #[test]

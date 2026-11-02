@@ -3,6 +3,8 @@ use super::*;
 /// Holds shared state for the vulkan device handle.
 pub(super) struct VulkanDeviceInner {
     pub(super) shader_workarounds: crate::HalShaderWorkarounds,
+    /// Whether the pipeline robustness extension and feature were enabled.
+    pub(super) pipeline_robustness: bool,
     /// Reconvergence features enabled at device creation, independent of Tint choice.
     pub(super) reconvergence_features: ReconvergenceFeatures,
     pub(super) _instance: Arc<VulkanInstanceInner>,
@@ -57,6 +59,7 @@ impl fmt::Debug for VulkanDeviceInner {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("VulkanDeviceInner")
+            .field("pipeline_robustness", &self.pipeline_robustness)
             .field("reconvergence_features", &self.reconvergence_features)
             .field(
                 "shader_demote_to_helper_invocation",

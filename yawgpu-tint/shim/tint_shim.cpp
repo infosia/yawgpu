@@ -2424,6 +2424,8 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
                                 const YawgpuTintOverrideValue* ov,
                                 size_t n_ov,
                                 bool disable_robustness,
+                                bool disable_image_robustness,
+                                bool disable_storage_runtime_sized_array_index_clamping,
                                 bool polyfill_bool_vec_dynamic_store,
                                 bool replace_workgroup_atomic_store_with_exchange,
                                 bool replace_unsigned_compare_zero,
@@ -2467,6 +2469,11 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
         tint::spirv::writer::Options options;
         options.entry_point_name = entry_point;
         options.disable_robustness = disable_robustness;
+        options.extensions.disable_image_robustness = disable_image_robustness;
+        options.extensions.disable_storage_runtime_sized_array_index_clamping =
+            disable_storage_runtime_sized_array_index_clamping;
+        // yawgpu does not round uniform allocations to Dawn's 16-byte boundary.
+        options.extensions.disable_uniform_runtime_sized_array_index_clamping = false;
         options.workarounds.polyfill_bool_vec_dynamic_store = polyfill_bool_vec_dynamic_store;
         options.workarounds.replace_workgroup_atomic_store_with_exchange =
             replace_workgroup_atomic_store_with_exchange;

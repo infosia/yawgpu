@@ -1225,6 +1225,15 @@ pub(super) fn create_graphics_pipeline(
     if let Some(depth_stencil) = depth_stencil.as_ref() {
         pipeline_info = pipeline_info.depth_stencil_state(depth_stencil);
     }
+    // Shared by normal pipelines, tiled subpasses, and lazy resolve variants.
+    let mut robustness = vk::PipelineRobustnessCreateInfoEXT::default()
+        .vertex_inputs(vk::PipelineRobustnessBufferBehaviorEXT::ROBUST_BUFFER_ACCESS)
+        .uniform_buffers(vk::PipelineRobustnessBufferBehaviorEXT::DEVICE_DEFAULT)
+        .storage_buffers(vk::PipelineRobustnessBufferBehaviorEXT::DEVICE_DEFAULT)
+        .images(vk::PipelineRobustnessImageBehaviorEXT::DEVICE_DEFAULT);
+    if device.pipeline_robustness {
+        pipeline_info = pipeline_info.push_next(&mut robustness);
+    }
     let pipelines = unsafe {
         device
             .device

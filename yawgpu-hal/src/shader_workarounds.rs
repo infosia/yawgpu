@@ -19,6 +19,10 @@ pub struct HalShaderWorkarounds {
     /// SPIR-V: use enabled native packed integer dot product support.
     /// False by default, so Tint polyfills without device feature information.
     pub native_dot_4x8_packed: bool,
+    /// SPIR-V: rely on enabled robustImageAccess2 instead of image clamps.
+    pub disable_image_robustness: bool,
+    /// SPIR-V: rely on robustBufferAccess2 for runtime-sized storage arrays.
+    pub disable_storage_runtime_sized_array_index_clamping: bool,
     /// SPIR-V: initialize workgroup variables with OpConstantNull.
     pub use_zero_initialize_workgroup_memory: bool,
     /// SPIR-V: add MaximallyReconvergesKHR to entry points.
@@ -99,6 +103,9 @@ impl HalShaderWorkarounds {
             disable_demote_to_helper: self.disable_demote_to_helper,
             use_demote_to_helper_invocation: self.use_demote_to_helper_invocation,
             native_dot_4x8_packed: self.native_dot_4x8_packed,
+            disable_image_robustness: self.disable_image_robustness,
+            disable_storage_runtime_sized_array_index_clamping: self
+                .disable_storage_runtime_sized_array_index_clamping,
             use_zero_initialize_workgroup_memory: self.use_zero_initialize_workgroup_memory,
             use_maximal_reconvergence: self.use_maximal_reconvergence,
             use_subgroup_uniform_control_flow: self.use_subgroup_uniform_control_flow,

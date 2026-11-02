@@ -334,6 +334,9 @@ impl ReflectedModule {
         tint_workarounds.use_demote_to_helper_invocation =
             workarounds.use_demote_to_helper_invocation;
         tint_workarounds.native_dot_4x8_packed = workarounds.native_dot_4x8_packed;
+        tint_workarounds.disable_image_robustness = workarounds.disable_image_robustness;
+        tint_workarounds.disable_storage_runtime_sized_array_index_clamping =
+            workarounds.disable_storage_runtime_sized_array_index_clamping;
         tint_workarounds.use_zero_initialize_workgroup_memory =
             workarounds.use_zero_initialize_workgroup_memory;
         tint_workarounds.use_maximal_reconvergence = workarounds.use_maximal_reconvergence;
@@ -1906,10 +1909,12 @@ mod tests {
                 assert_eq!(module.codegen_miss_count(), i + 1);
             }
         }
-        let mut spirv_flags = [yawgpu_hal::HalShaderWorkarounds::default(); 4];
+        let mut spirv_flags = [yawgpu_hal::HalShaderWorkarounds::default(); 6];
         spirv_flags[1].polyfill_bool_vec_dynamic_store = true;
         spirv_flags[2].replace_workgroup_atomic_store_with_exchange = true;
         spirv_flags[3].replace_unsigned_compare_zero = true;
+        spirv_flags[4].disable_image_robustness = true;
+        spirv_flags[5].disable_storage_runtime_sized_array_index_clamping = true;
         for (i, flags) in spirv_flags.into_iter().enumerate() {
             for _ in 0..2 {
                 module

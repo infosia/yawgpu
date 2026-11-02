@@ -855,6 +855,55 @@ impl VulkanAdapter {
         // VkDeviceCreateInfo.pNext without enabling the parent extension
         // (VUID-VkDeviceCreateInfo-pNext-pNext).
         let effective_api_version = YAWGPU_VULKAN_API_VERSION.min(device_properties.api_version);
+        let robustness2_enabled = self.has_device_extension(vk::EXT_ROBUSTNESS2_NAME);
+        let pipeline_robustness_extension =
+            self.has_device_extension(vk::EXT_PIPELINE_ROBUSTNESS_NAME);
+        let mut robustness2_features = vk::PhysicalDeviceRobustness2FeaturesEXT::default();
+        let mut pipeline_robustness_features =
+            vk::PhysicalDevicePipelineRobustnessFeaturesEXT::default();
+        let mut robustness_features = vk::PhysicalDeviceFeatures2::default();
+        if robustness2_enabled {
+            extension_names.push(vk::EXT_ROBUSTNESS2_NAME.as_ptr());
+            robustness_features = robustness_features.push_next(&mut robustness2_features);
+        }
+        if pipeline_robustness_extension {
+            robustness_features = robustness_features.push_next(&mut pipeline_robustness_features);
+        }
+        unsafe {
+            self.instance
+                .instance
+                .get_physical_device_features2(self.physical_device, &mut robustness_features);
+        }
+        let pipeline_robustness = pipeline_robustness_extension
+            && pipeline_robustness_features.pipeline_robustness == vk::TRUE;
+        if pipeline_robustness {
+            extension_names.push(vk::EXT_PIPELINE_ROBUSTNESS_NAME.as_ptr());
+        }
+        // Match Dawn's DeviceExt::DescriptorIndexing: only the advertised
+        // extension permits this query, with no core-version promotion.
+        // No descriptor-indexing features are enabled here.
+        let descriptor_indexing_available = descriptor_indexing_available(
+            device_properties.api_version,
+            self.has_device_extension(vk::EXT_DESCRIPTOR_INDEXING_NAME),
+        );
+        let mut descriptor_indexing_properties =
+            vk::PhysicalDeviceDescriptorIndexingProperties::default();
+        if descriptor_indexing_available {
+            let mut properties2 = vk::PhysicalDeviceProperties2::default()
+                .push_next(&mut descriptor_indexing_properties);
+            unsafe {
+                self.instance
+                    .instance
+                    .get_physical_device_properties2(self.physical_device, &mut properties2);
+            }
+        }
+        let image_robust_access2 = use_image_robust_access2(
+            robustness2_enabled,
+            robustness2_features.robust_image_access2 == vk::TRUE,
+        );
+        // Reuse the queried bits without the query chain links.
+        robustness2_features.p_next = std::ptr::null_mut();
+        pipeline_robustness_features.p_next = std::ptr::null_mut();
         // Match Tint's native instructions to features actually enabled below.
         // Without demote support Tint retains its discard emulation.
         let shader_demote_extension =
@@ -1007,6 +1056,18 @@ impl VulkanAdapter {
         // device reports support (the spec mandates every Vulkan 1.0 device exposes
         // this feature, so the guard is defensive rather than required).
         let robust_buffer_access = supported_features.robust_buffer_access == vk::TRUE;
+        // robustBufferAccess2 requires robustBufferAccess to be enabled
+        // (VUID-VkPhysicalDeviceRobustness2FeaturesEXT-robustBufferAccess2-04000).
+        if !robust_buffer_access {
+            robustness2_features.robust_buffer_access2 = vk::FALSE;
+        }
+        let buffer_robust_access2 = use_buffer_robust_access2(
+            robustness2_enabled,
+            robustness2_features.robust_buffer_access2 == vk::TRUE,
+            robust_buffer_access,
+            descriptor_indexing_available,
+            descriptor_indexing_properties.robust_buffer_access_update_after_bind == vk::TRUE,
+        );
         // WebGPU render pipelines can configure blend/write masks per color target.
         // Vulkan requires independentBlend for differing per-attachment blend state.
         let independent_blend = supported_features.independent_blend == vk::TRUE;
@@ -1147,6 +1208,12 @@ impl VulkanAdapter {
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&extension_names)
             .enabled_features(&enabled_features);
+        if robustness2_enabled {
+            create_info = create_info.push_next(&mut robustness2_features);
+        }
+        if pipeline_robustness {
+            create_info = create_info.push_next(&mut pipeline_robustness_features);
+        }
         if depth_clip_control {
             create_info = create_info.push_next(&mut depth_clip_enable_features);
         }
@@ -1208,10 +1275,13 @@ impl VulkanAdapter {
             shader_integer_dot_product,
             zero_initialize_workgroup_memory,
             reconvergence,
+            image_robust_access2,
+            buffer_robust_access2,
         );
         let inner = Arc::new(VulkanDeviceInner {
             shader_workarounds,
             reconvergence_features,
+            pipeline_robustness,
             _instance: Arc::clone(&self.instance),
             device,
             physical_device: self.physical_device,
@@ -1601,6 +1671,30 @@ fn hal_limits_from_vk(vk: vk::PhysicalDeviceLimits, max_buffer_size: u64) -> Hal
     }
 }
 
+/// Matches Dawn's extension-only availability, regardless of the device API version.
+fn descriptor_indexing_available(_device_api_version: u32, extension_present: bool) -> bool {
+    extension_present
+}
+
+/// Uses driver image robustness only when robustness2 and its image bit are enabled.
+fn use_image_robust_access2(robustness2_enabled: bool, robust_image_access2: bool) -> bool {
+    robustness2_enabled && robust_image_access2
+}
+
+/// Matches Dawn's conservative descriptor-indexing exception for buffer robustness.
+fn use_buffer_robust_access2(
+    robustness2_enabled: bool,
+    robust_buffer_access2: bool,
+    robust_buffer_access_enabled: bool,
+    descriptor_indexing_available: bool,
+    robust_buffer_access_update_after_bind: bool,
+) -> bool {
+    robustness2_enabled
+        && robust_buffer_access2
+        && robust_buffer_access_enabled
+        && (!descriptor_indexing_available || robust_buffer_access_update_after_bind)
+}
+
 /// Adds enabled writer features without changing device-selected driver workarounds.
 fn vulkan_writer_flags(
     workarounds: crate::HalShaderWorkarounds,
@@ -1608,8 +1702,12 @@ fn vulkan_writer_flags(
     integer_dot_enabled: bool,
     zero_init_enabled: bool,
     reconvergence: Reconvergence,
+    image_robust_access2: bool,
+    buffer_robust_access2: bool,
 ) -> crate::HalShaderWorkarounds {
     crate::HalShaderWorkarounds {
+        disable_image_robustness: image_robust_access2,
+        disable_storage_runtime_sized_array_index_clamping: buffer_robust_access2,
         use_demote_to_helper_invocation: demote_enabled,
         native_dot_4x8_packed: integer_dot_enabled,
         use_zero_initialize_workgroup_memory: zero_init_enabled,
@@ -2024,10 +2122,144 @@ mod tests {
     }
 
     #[test]
+    fn robustness2_decisions_cover_all_device_facts() {
+        for (enabled, supported, expected) in [
+            (false, false, false),
+            (false, true, false),
+            (true, false, false),
+            (true, true, true),
+        ] {
+            assert_eq!(use_image_robust_access2(enabled, supported), expected);
+            for (robust_buffer_access, indexing, update_after_bind, expected_buffer) in [
+                (true, false, false, expected),
+                (true, false, true, expected),
+                (true, true, false, false),
+                (true, true, true, expected),
+                (false, false, false, false),
+                (false, false, true, false),
+                (false, true, false, false),
+                (false, true, true, false),
+            ] {
+                assert_eq!(
+                    use_buffer_robust_access2(
+                        enabled,
+                        supported,
+                        robust_buffer_access,
+                        indexing,
+                        update_after_bind,
+                    ),
+                    expected_buffer,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn descriptor_indexing_availability_requires_advertised_extension() {
+        for version in [
+            vk::API_VERSION_1_1,
+            vk::API_VERSION_1_2,
+            vk::API_VERSION_1_3,
+        ] {
+            assert!(!descriptor_indexing_available(version, false));
+            assert!(descriptor_indexing_available(version, true));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a real Vulkan device and validation layer; S2 manual run"]
+    fn vulkan_robustness2_decisions_and_render_pipeline() {
+        let device = test_helpers::vulkan_device();
+        let inner = &device.inner;
+        let instance = &inner._instance;
+        let physical = inner.physical_device;
+        let robustness2 =
+            has_device_extension_for_physical_device(instance, physical, vk::EXT_ROBUSTNESS2_NAME);
+        let pipeline_extension = has_device_extension_for_physical_device(
+            instance,
+            physical,
+            vk::EXT_PIPELINE_ROBUSTNESS_NAME,
+        );
+        let mut robust = vk::PhysicalDeviceRobustness2FeaturesEXT::default();
+        let mut pipeline = vk::PhysicalDevicePipelineRobustnessFeaturesEXT::default();
+        let mut features = vk::PhysicalDeviceFeatures2::default();
+        if robustness2 {
+            features = features.push_next(&mut robust);
+        }
+        if pipeline_extension {
+            features = features.push_next(&mut pipeline);
+        }
+        unsafe {
+            instance
+                .instance
+                .get_physical_device_features2(physical, &mut features);
+        }
+        let robust_buffer_access_enabled = features.features.robust_buffer_access == vk::TRUE;
+        let properties = unsafe { instance.instance.get_physical_device_properties(physical) };
+        let indexing = descriptor_indexing_available(
+            properties.api_version,
+            has_device_extension_for_physical_device(
+                instance,
+                physical,
+                vk::EXT_DESCRIPTOR_INDEXING_NAME,
+            ),
+        );
+        let mut indexing_properties = vk::PhysicalDeviceDescriptorIndexingProperties::default();
+        if indexing {
+            let mut properties2 =
+                vk::PhysicalDeviceProperties2::default().push_next(&mut indexing_properties);
+            unsafe {
+                instance
+                    .instance
+                    .get_physical_device_properties2(physical, &mut properties2);
+            }
+        }
+        let flags = device.shader_workarounds();
+        eprintln!("robustness2={robustness2}, robustBufferAccess={robust_buffer_access_enabled}, robustBufferAccess2={}, robustImageAccess2={}, nullDescriptor={}, descriptorIndexing={indexing}, robustBufferAccessUpdateAfterBind={}, pipelineRobustness={}, imageDecision={}, bufferDecision={}",
+            robust.robust_buffer_access2, robust.robust_image_access2, robust.null_descriptor,
+            indexing_properties.robust_buffer_access_update_after_bind, inner.pipeline_robustness,
+            flags.disable_image_robustness, flags.disable_storage_runtime_sized_array_index_clamping);
+        assert_eq!(
+            flags.disable_image_robustness,
+            use_image_robust_access2(robustness2, robust.robust_image_access2 == vk::TRUE,)
+        );
+        assert_eq!(
+            flags.disable_storage_runtime_sized_array_index_clamping,
+            use_buffer_robust_access2(
+                robustness2,
+                robust.robust_buffer_access2 == vk::TRUE,
+                robust_buffer_access_enabled,
+                indexing,
+                indexing_properties.robust_buffer_access_update_after_bind == vk::TRUE,
+            )
+        );
+        assert_eq!(
+            inner.pipeline_robustness,
+            pipeline_extension && pipeline.pipeline_robustness == vk::TRUE
+        );
+        let source = "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0, 0, 0, 1); } @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }";
+        let shader = crate::HalShaderSource::SpirVStages {
+            vertex: compile_writer_test_spirv(&device, source, "vs"),
+            fragment: Some(compile_writer_test_spirv(&device, source, "fs")),
+        };
+        device
+            .create_render_pipeline(
+                shader,
+                "vs",
+                Some("fs"),
+                &test_helpers::render_descriptor(),
+                &[],
+            )
+            .expect("create render pipeline with enabled robustness state");
+    }
+
+    #[test]
     fn vulkan_writer_flags_preserve_workarounds_and_map_enabled_features() {
         let workarounds = crate::HalShaderWorkarounds {
             replace_unsigned_compare_zero: true,
             polyfill_bool_vec_dynamic_store: true,
+            disable_image_robustness: true,
+            disable_storage_runtime_sized_array_index_clamping: true,
             // Stale writer flags must be replaced by the enabled-device facts.
             use_demote_to_helper_invocation: true,
             native_dot_4x8_packed: true,
@@ -2052,6 +2284,13 @@ mod tests {
                 enabled[1],
                 enabled[2],
                 Reconvergence::None,
+                enabled[0],
+                enabled[1],
+            );
+            assert_eq!(flags.disable_image_robustness, enabled[0]);
+            assert_eq!(
+                flags.disable_storage_runtime_sized_array_index_clamping,
+                enabled[1]
             );
             assert!(!flags.use_maximal_reconvergence);
             assert!(!flags.use_subgroup_uniform_control_flow);
@@ -2171,7 +2410,15 @@ mod tests {
             (Maximal, true, false),
             (Uniform, false, true),
         ] {
-            let flags = vulkan_writer_flags(Default::default(), false, false, false, selected);
+            let flags = vulkan_writer_flags(
+                Default::default(),
+                false,
+                false,
+                false,
+                selected,
+                false,
+                false,
+            );
             assert_eq!(flags.use_maximal_reconvergence, maximal);
             assert_eq!(flags.use_subgroup_uniform_control_flow, uniform);
         }
@@ -2462,6 +2709,9 @@ mod tests {
         let mut options = yawgpu_tint::SpirvWorkarounds::default();
         options.use_demote_to_helper_invocation = flags.use_demote_to_helper_invocation;
         options.native_dot_4x8_packed = flags.native_dot_4x8_packed;
+        options.disable_image_robustness = flags.disable_image_robustness;
+        options.disable_storage_runtime_sized_array_index_clamping =
+            flags.disable_storage_runtime_sized_array_index_clamping;
         options.use_zero_initialize_workgroup_memory = flags.use_zero_initialize_workgroup_memory;
         yawgpu_tint::Program::parse(source, false, false, false, false, false, false, &[])
             .expect("parse writer test WGSL")
