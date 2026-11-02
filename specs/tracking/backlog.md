@@ -25,7 +25,8 @@ changes; per-item ledgers stay in their own tracking docs.
   one GLES `HalError: Clone` note), 0 `FIXME`/`unimplemented!`/`todo!`; 463
   `#[ignore]` tests (331 in `yawgpu/tests`, 132 in `yawgpu-hal`); 202 of 202
   `webgpu.h` symbols exported, plus Dawn's `wgpuCommandEncoderWriteBuffer`.
-- CTS state: Metal and Linux native Vulkan both `fail=2 crash=0`. Both failures
+- CTS state: Metal, Linux native Vulkan, and (2026-11-03, at `d7ff142`) Windows native
+  Vulkan all `fail=2 crash=0`. Both failures
   are cases Dawn also fails (Block 119 R9). GLES on Linux NVIDIA is raw
   `fail=28,810 crash=0`.
 
@@ -68,6 +69,7 @@ below are stable IDs, not the rank.
 
 | # | Item | Difficulty | Evidence |
 |---|---|---|---|
+| A17 | **Native hardware owed for Blocks 126 and 127.** The Windows NVIDIA run took the feature-present paths. Still unexercised: the `frag_depth` shader clamp on a device without `VK_EXT_depth_clip_enable`, and the default compute subgroup size and invocation clamp on a device whose subgroup sizes vary (Intel). | Manual | `specs/blocks/126-vulkan-frag-depth-clamp.md`, `specs/blocks/127-vulkan-subgroup-parity.md` Verification |
 | A14 | Releasing the last device reference does not destroy the device, so the device-lost callback reports `CallbackCancelled` at instance release. Dawn destroys and reports `Destroyed` (`DeviceBase::WillDropLastExternalRef`). Seen as the bench's exit code; check against Dawn before changing. | S | `specs/tracking/perf-dawn-baseline.md` Run 7, Teardown note |
 | A13 | **Dawn workarounds still unset**: AMD Mesa below 25.3 float polyfills, Imagination `polyfill_case_switch`, MSL `polyfill_clamp_float`, and others. Each needs a gate survey against Dawn. | M | `specs/blocks/120-tint-driver-workarounds.md` Out of scope |
 | A3 | **Lazy zero-init GLES clear paths (Block 104 S4)** — core marks and un-marks on every backend, but the GLES HAL has no `ClearTexture` lowering for the Stage-2 eligibility set (sampled reads of uninitialized depth/stencil, compressed and MSAA textures). Tier-2 catalogue item; passes today only where the driver hands back zeroed memory. | M | `specs/blocks/104-lazy-zero-init-stage2.md` S4; `specs/blocks/67-gles-backend.md` mapping matrix |
@@ -298,3 +300,4 @@ Re-verification after the fixes: `cargo test --workspace` 1093/0, clippy default
 - A16 done by Block 124. A survey of Dawn's backend setup found 13 more differences; the flag-level ones are Block 125 and the `frag_depth` clamp is Block 126.
 - Blocks 125 and 126 done (Tint option parity part 1; Vulkan `frag_depth` clamp, which also fixed F-139 on MoltenVK). Native Vulkan runs owed for both.
 - Block 127 done (Vulkan reconvergence and default compute subgroup size). Native Vulkan runs owed for Blocks 125-127.
+- Blocks 121 and 125-127 ran on Windows native Vulkan at `d7ff142`: e2e 157/157 and HAL ignored 75/75 with 0 VUIDs; CTS `webgpu:*` `fail=2 crash=0`, every area equal to the 2026-11-01 Windows baseline except 5 more `shader,execution` passes where the F-165 crash did not fire. The native-Vulkan owed items for Blocks 121 and 125 are closed. A17 opened for the device-specific paths of Blocks 126 and 127.

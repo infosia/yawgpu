@@ -1,7 +1,8 @@
 # Block 127 — Vulkan subgroup setup: Dawn parity
 
 Status: **COMPLETE (2026-11-03)**. Phase Review: 0 CRITICAL, 0 MAJOR, 5 MINOR; all resolved,
-see below. Native Vulkan is owed: no new path runs on this host.
+see below. Native Vulkan ran on 2026-11-03 and took the maximal reconvergence path;
+the default compute subgroup size still needs a device with varying sizes.
 Source: the Block 124 survey, items 4 and 6, under the user's 2026-11-02 request
 to fix similar items as they are found.
 Oracle: Dawn at the pinned `third_party/dawn`: `native/vulkan/PhysicalDeviceVk.cpp`
@@ -106,6 +107,32 @@ the new paths. Metal CTS was not rerun: the change touches only SPIR-V options a
 Vulkan HAL. A native Vulkan run, ideally on an Intel GPU with varying subgroup sizes,
 is owed. The ignored test
 `vulkan_device_reconvergence_and_default_compute_pipeline` checks itself there.
+
+### Windows native Vulkan (2026-11-03)
+
+Run on Windows 11, NVIDIA GeForce RTX 5060 Ti, driver 617.14, Vulkan 1.4.351, at yawgpu
+`d7ff142`. The Khronos validation layer was on for the e2e and HAL runs.
+
+`vulkan_device_reconvergence_and_default_compute_pipeline` passed and logged:
+
+```text
+reconvergence extensions: maximal=true, subgroup_uniform_control_flow=true; enabled features=ReconvergenceFeatures { maximal: true, uniform_control_flow: true }
+Tint reconvergence: maximal=true, subgroup_uniform_control_flow=false; default compute subgroup size=None
+subgroupSizeControl enabled=true; requiredSubgroupSizeStages=VERTEX | ... | FRAGMENT | COMPUTE | ...
+```
+
+Both device features are enabled and Tint gets maximal reconvergence only, as R1 and
+"Deviations from Dawn" describe. The subgroup size is fixed at 32, so R2 and R3
+correctly select no default size and no clamp. Those two rules still need a device
+whose minimum and maximum sizes differ, such as Intel.
+
+| Gate | Result |
+|---|---|
+| Vulkan HAL ignored tests | 75 passed, 0 failed, 0 VUIDs |
+| Vulkan e2e, `vulkan,tiled,shader-passthrough`, including the subgroup suites | 157 passed, 0 failed, 0 VUIDs |
+| webgpu-native-cts, `webgpu:*` | `fail=2 crash=0`; subgroup and quad queries have no failure |
+
+The full CTS table is in Block 125's "Windows native Vulkan" section.
 
 ## Phase Review
 

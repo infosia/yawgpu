@@ -1,7 +1,8 @@
 # Block 125 — Tint writer and pipeline flags: Dawn parity, part 1
 
 Status: **COMPLETE (2026-11-03)**. Phase Review: 0 CRITICAL, 0 MAJOR, 7 MINOR;
-m1-m4 and m6 fixed, m5 and m7 recorded below.
+m1-m4 and m6 fixed, m5 and m7 recorded below. Native Vulkan ran on 2026-11-03;
+see "Windows native Vulkan" below.
 Source: user request (2026-11-02): "fix similar easy items as they are found". These
 come from a read-only survey of Dawn's backend setup, run during Block 124. Every
 item below was checked against the source.
@@ -103,8 +104,43 @@ reference-only.
 | `packed_dot_products` e2e (`yawgpu/tests/common/shader_parity.rs`) | passes on Metal and MoltenVK |
 | webgpu-native-cts, Metal, `webgpu:*` | `fail=2 crash=0`; subcase counts unchanged |
 
-Native Vulkan is owed. The rules are exercised on MoltenVK only, and a native host
-is the verdict for R1-R6.
+Native Vulkan was owed at the time of this run; see the next section.
+
+### Windows native Vulkan (2026-11-03)
+
+Run on Windows 11, NVIDIA GeForce RTX 5060 Ti, driver 617.14, Vulkan 1.4.351, at yawgpu
+`d7ff142`. The Khronos validation layer was on for the e2e and HAL runs. This host takes the
+feature-present side of every Vulkan rule: `shaderDemoteToHelperInvocation`,
+`shaderIntegerDotProduct`, `vulkanMemoryModel` with `vulkanMemoryModelDeviceScope`,
+`shaderZeroInitializeWorkgroupMemory`, and `subgroupSizeControl` are all present, and the
+vendor is NVIDIA. So R1-R6 ran their native paths, not the polyfills. The same run covers
+Blocks 121, 126, and 127.
+
+| Gate | Result |
+|---|---|
+| Vulkan e2e, `vulkan,tiled,shader-passthrough`, `--ignored` | 157 passed, 0 failed, 0 VUIDs |
+| Vulkan HAL ignored tests | 75 passed, 0 failed, 0 VUIDs |
+| `packed_dot_products` e2e | passes |
+| webgpu-native-cts (CTS `a5cbf67`), `webgpu:*`, `expectations/yawgpu-vulkan.txt` | `fail=2 crash=0` |
+
+The CTS ran as four per-area runs with `--workers 8`, as the 2026-11-01 Windows
+baseline did, and took 35 minutes.
+
+| Area | pass | skip | fail | xfail | baseline pass |
+|---|---:|---:|---:|---:|---:|
+| `api,validation` | 246,484 | 111,283 | 0 | 4 | 246,484 |
+| `api,operation` | 180,779 | 152,819 | 0 | 0 | 180,779 |
+| `shader,execution` | 562,548 | 320,680 | 0 | 25 | 562,543 |
+| `shader,validation` | 662,535 | 20,299 | 2 | 0 | 662,535 |
+| **total** | **1,652,346** | **605,081** | **2** | **29** | **1,652,341** |
+
+The 2 failures are the Block 119 R9 cases (`have_all_language_features` for
+`fragment_depth` and `unrestricted_aliasing`). The 29 xfails are the documented
+non-defects in the expectations file. The 93 xpasses are passing subcases inside those
+case-level entries (F-085 `sample_mask`, `index_buffer_format_dirtying`) and the
+host-dependent F-152 `corr` entry. `shader,execution` gains 5 passes and loses the
+baseline's 1 crash: that is the intermittent F-165 driver crash, which did not fire.
+Every other area matches the baseline exactly.
 
 ## Phase Review
 

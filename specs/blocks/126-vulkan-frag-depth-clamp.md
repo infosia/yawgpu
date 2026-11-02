@@ -1,7 +1,8 @@
 # Block 126 — Vulkan: clamp `frag_depth` in the shader, as Dawn
 
 Status: **COMPLETE (2026-11-03)**. Phase Review: 0 CRITICAL, 0 MAJOR, 5 MINOR; all resolved,
-see below. Native Vulkan without `VK_EXT_depth_clip_enable` is owed.
+see below. Native Vulkan with the extension ran on 2026-11-03; native Vulkan
+without `VK_EXT_depth_clip_enable` is still owed.
 Source: the Block 124 survey of Dawn's backend setup. Supersedes F-139's premise in
 `specs/tracking/tint-migration-plan.md`.
 Oracle: Dawn at the pinned `third_party/dawn`: `native/vulkan/RenderPipelineVk.cpp`
@@ -105,6 +106,21 @@ reference-only.
 F-139's two MoltenVK failures now pass. They were never `xfail` entries in
 webgpu-native-cts, only a comment in `expectations/yawgpu-vulkan.txt`, so nothing
 xpasses. The suite marked F-139 resolved at its `0de4463`.
+
+### Windows native Vulkan (2026-11-03)
+
+Run on Windows 11, NVIDIA GeForce RTX 5060 Ti, driver 617.14, Vulkan 1.4.351, at yawgpu
+`d7ff142`. The Khronos validation layer was on for the e2e and HAL runs. The device has
+`VK_EXT_depth_clip_enable` with `depthClipEnable`, so the run covers the
+extension-present path only.
+
+| Gate | Result |
+|---|---|
+| `frag_depth_is_clamped_to_viewport` and the other Vulkan e2e | 157 passed, 0 failed, 0 VUIDs |
+| webgpu-native-cts, `depth_clip_clamp` within `webgpu:*` | 0 fail |
+
+The full CTS table is in Block 125's "Windows native Vulkan" section. A native
+device without the extension, where the shader clamp is the only clamp, is still owed.
 
 ## Phase Review
 

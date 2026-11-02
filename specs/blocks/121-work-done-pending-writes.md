@@ -111,6 +111,15 @@ P-006: the Metal HAL opens one blit encoder per queued buffer copy
 `specs/tracking/perf-dawn-baseline.md` and backlog E14. Every other case moved by less
 than 8% from Run 7.
 
+### Windows native Vulkan (2026-11-03)
+
+Run on Windows 11, NVIDIA GeForce RTX 5060 Ti, driver 617.14, Vulkan 1.4.351, at yawgpu
+`d7ff142`. The Khronos validation layer was on for the e2e and HAL runs. The three
+`e2e_vulkan_work_done_writes` cases pass, in a Vulkan e2e run of 157 passed,
+0 failed, 0 VUIDs. On webgpu-native-cts `webgpu:*`, `api,operation` matches the
+2026-11-01 Windows baseline exactly (180,779 pass, 0 fail). The full table is in
+Block 125's "Windows native Vulkan" section.
+
 ## Phase Review
 
 | ID | Finding | Disposition |
