@@ -28,7 +28,7 @@ relies on fixed-function clamping:
 
 F-139 assumed native Vulkan never needs the shader clamp. That holds only with the
 extension. The CTS hosts (NVIDIA, and MoltenVK) have it, so the CTS has not seen
-the failure. On MoltenVK, F-139's two `depth_clip_clamp` xfails come from the
+the failure. On MoltenVK, F-139's two `depth_clip_clamp` failures come from the
 missing shader clamp, so this block may also make them pass there.
 
 ## Rules
@@ -102,9 +102,9 @@ reference-only.
 | webgpu-native-cts, MoltenVK, `depth_clip_clamp:*` | before (Block 125 library) `fail=2`; after `pass=4 fail=0` |
 | webgpu-native-cts, Metal, `webgpu:*` | `fail=2 crash=0`; subcase counts unchanged |
 
-F-139's two MoltenVK xfails now pass. `expectations/yawgpu-vulkan.txt` in
-webgpu-native-cts still lists them, and will report them as xpass until the suite
-drops them.
+F-139's two MoltenVK failures now pass. They were never `xfail` entries in
+webgpu-native-cts, only a comment in `expectations/yawgpu-vulkan.txt`, so nothing
+xpasses. The suite marked F-139 resolved at its `0de4463`.
 
 ## Phase Review
 
