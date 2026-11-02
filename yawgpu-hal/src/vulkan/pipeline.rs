@@ -1063,6 +1063,15 @@ fn depth_clamp_and_clip(depth_clip_control: bool, unclipped_depth: bool) -> (boo
     }
 }
 
+/// Report actual fragment subgroup size on pre-SPIR-V-1.6 modules.
+fn fragment_stage_flags(subgroup_size_control: bool) -> vk::PipelineShaderStageCreateFlags {
+    if subgroup_size_control {
+        vk::PipelineShaderStageCreateFlags::ALLOW_VARYING_SUBGROUP_SIZE
+    } else {
+        vk::PipelineShaderStageCreateFlags::empty()
+    }
+}
+
 /// Creates graphics pipeline and reports validation errors through the owning device.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn create_graphics_pipeline(
@@ -1086,6 +1095,7 @@ pub(super) fn create_graphics_pipeline(
         shader_stages.push(
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::FRAGMENT)
+                .flags(fragment_stage_flags(device.subgroup_size_control))
                 .module(fragment_shader_module)
                 .name(fragment_entry),
         );
@@ -2289,6 +2299,18 @@ pub(super) fn descriptor_buffer_info(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fragment_subgroup_flags_follow_enabled_size_control() {
+        assert_eq!(
+            super::fragment_stage_flags(false),
+            ash::vk::PipelineShaderStageCreateFlags::empty()
+        );
+        assert_eq!(
+            super::fragment_stage_flags(true),
+            ash::vk::PipelineShaderStageCreateFlags::ALLOW_VARYING_SUBGROUP_SIZE
+        );
+    }
+
     use super::*;
 
     // Minimal instruction streams exercise the metadata reader without a GPU.

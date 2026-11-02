@@ -825,29 +825,6 @@ impl VulkanAdapter {
             extension_names.push(vk::KHR_SWAPCHAIN_NAME.as_ptr());
         }
         let depth_clip_enable_extension = self.has_device_extension(vk::EXT_DEPTH_CLIP_ENABLE_NAME);
-        // CTS finding F-129(1): Tint lowers WGSL `discard` to SPIR-V
-        // `OpDemoteToHelperInvocation` so that derivatives (`fwidth`/`dpdx`/`dpdy`)
-        // after a non-uniform `discard` stay well-defined. Executing that opcode
-        // requires `shaderDemoteToHelperInvocation`. Enable it whenever the device
-        // supports it; if absent, degrade gracefully (device creation still
-        // succeeds — shaders without `discard` are unaffected, and a `discard`
-        // shader would fail pipeline validation rather than crash here).
-        let shader_demote_extension =
-            self.has_device_extension(vk::EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_NAME);
-        let shader_demote_to_helper_invocation = if shader_demote_extension {
-            let mut demote_features =
-                vk::PhysicalDeviceShaderDemoteToHelperInvocationFeatures::default();
-            let mut features2 =
-                vk::PhysicalDeviceFeatures2::default().push_next(&mut demote_features);
-            unsafe {
-                self.instance
-                    .instance
-                    .get_physical_device_features2(self.physical_device, &mut features2);
-            }
-            demote_features.shader_demote_to_helper_invocation == vk::TRUE
-        } else {
-            false
-        };
         let shader_float16_int8_extension =
             self.has_device_extension(vk::KHR_SHADER_FLOAT16_INT8_NAME);
         let storage_16bit_extension = self.has_device_extension(vk::KHR_16BIT_STORAGE_NAME);
@@ -870,6 +847,60 @@ impl VulkanAdapter {
         // VkDeviceCreateInfo.pNext without enabling the parent extension
         // (VUID-VkDeviceCreateInfo-pNext-pNext).
         let effective_api_version = YAWGPU_VULKAN_API_VERSION.min(device_properties.api_version);
+        // Match Tint's native instructions to features actually enabled below.
+        // Without demote support Tint retains its discard emulation.
+        let shader_demote_extension =
+            self.has_device_extension(vk::EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_NAME);
+        let integer_dot_extension =
+            self.has_device_extension(vk::KHR_SHADER_INTEGER_DOT_PRODUCT_NAME);
+        let zero_initialize_extension =
+            self.has_device_extension(vk::KHR_ZERO_INITIALIZE_WORKGROUP_MEMORY_NAME);
+        let mut demote_features =
+            vk::PhysicalDeviceShaderDemoteToHelperInvocationFeatures::default();
+        let mut integer_dot_features = vk::PhysicalDeviceShaderIntegerDotProductFeatures::default();
+        let mut zero_initialize_features =
+            vk::PhysicalDeviceZeroInitializeWorkgroupMemoryFeatures::default();
+        let mut writer_features = vk::PhysicalDeviceFeatures2::default();
+        if writer_feature_available(effective_api_version, shader_demote_extension) {
+            writer_features = writer_features.push_next(&mut demote_features);
+        }
+        if writer_feature_available(effective_api_version, integer_dot_extension) {
+            writer_features = writer_features.push_next(&mut integer_dot_features);
+        }
+        if writer_feature_available(effective_api_version, zero_initialize_extension) {
+            writer_features = writer_features.push_next(&mut zero_initialize_features);
+        }
+        unsafe {
+            self.instance
+                .instance
+                .get_physical_device_features2(self.physical_device, &mut writer_features);
+        }
+        let shader_demote_to_helper_invocation = writer_feature_enabled(
+            effective_api_version,
+            shader_demote_extension,
+            demote_features.shader_demote_to_helper_invocation,
+        );
+        let shader_integer_dot_product = writer_feature_enabled(
+            effective_api_version,
+            integer_dot_extension,
+            integer_dot_features.shader_integer_dot_product,
+        );
+        let zero_initialize_workgroup_memory = zero_initialize_workgroup_memory_enabled(
+            effective_api_version,
+            zero_initialize_extension,
+            zero_initialize_features.shader_zero_initialize_workgroup_memory,
+            device_properties.vendor_id,
+        );
+        // These features were promoted in Vulkan 1.3. Use the effective API
+        // version, so a 1.1 instance still enables the extension names.
+        if effective_api_version < vk::API_VERSION_1_3 {
+            if shader_integer_dot_product {
+                extension_names.push(vk::KHR_SHADER_INTEGER_DOT_PRODUCT_NAME.as_ptr());
+            }
+            if zero_initialize_workgroup_memory {
+                extension_names.push(vk::KHR_ZERO_INITIALIZE_WORKGROUP_MEMORY_NAME.as_ptr());
+            }
+        }
         let vulkan_memory_model_available =
             vulkan_memory_model_available(effective_api_version, vulkan_memory_model_extension);
         let mut vulkan_memory_model_supported_features =
@@ -883,10 +914,12 @@ impl VulkanAdapter {
                     .get_physical_device_features2(self.physical_device, &mut features2);
             }
         }
-        let vulkan_memory_model = vulkan_memory_model_available
-            && vulkan_memory_model_supported_features.vulkan_memory_model == vk::TRUE;
-        let vulkan_memory_model_device_scope = vulkan_memory_model
-            && vulkan_memory_model_supported_features.vulkan_memory_model_device_scope == vk::TRUE;
+        let vulkan_memory_model = vulkan_memory_model_enabled(
+            vulkan_memory_model_available,
+            vulkan_memory_model_supported_features.vulkan_memory_model,
+            vulkan_memory_model_supported_features.vulkan_memory_model_device_scope,
+        );
+        let vulkan_memory_model_device_scope = vulkan_memory_model;
         let image_format_list =
             image_format_list_available(effective_api_version, image_format_list_extension);
         let swapchain_mutable_format = image_format_list
@@ -1005,7 +1038,7 @@ impl VulkanAdapter {
         if fragment_stores_and_atomics {
             enabled_features.fragment_stores_and_atomics = vk::TRUE;
         }
-        if shader_demote_to_helper_invocation {
+        if shader_demote_to_helper_invocation && effective_api_version < vk::API_VERSION_1_3 {
             extension_names.push(vk::EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_NAME.as_ptr());
         }
         if shader_float16 {
@@ -1047,6 +1080,14 @@ impl VulkanAdapter {
         let mut shader_demote_features =
             vk::PhysicalDeviceShaderDemoteToHelperInvocationFeatures::default()
                 .shader_demote_to_helper_invocation(true);
+        // Keep query chains separate: reusing a queried struct would retain
+        // its pNext links and append duplicate feature structures at creation.
+        let mut integer_dot_enable_features =
+            vk::PhysicalDeviceShaderIntegerDotProductFeatures::default()
+                .shader_integer_dot_product(true);
+        let mut zero_initialize_enable_features =
+            vk::PhysicalDeviceZeroInitializeWorkgroupMemoryFeatures::default()
+                .shader_zero_initialize_workgroup_memory(true);
         let mut shader_float16_int8_enable_features =
             vk::PhysicalDeviceShaderFloat16Int8Features::default().shader_float16(true);
         let mut vulkan_memory_model_enable_features =
@@ -1064,6 +1105,12 @@ impl VulkanAdapter {
         }
         if shader_demote_to_helper_invocation {
             create_info = create_info.push_next(&mut shader_demote_features);
+        }
+        if shader_integer_dot_product {
+            create_info = create_info.push_next(&mut integer_dot_enable_features);
+        }
+        if zero_initialize_workgroup_memory {
+            create_info = create_info.push_next(&mut zero_initialize_enable_features);
         }
         if shader_float16 {
             create_info = create_info.push_next(&mut shader_float16_int8_enable_features);
@@ -1102,6 +1149,12 @@ impl VulkanAdapter {
             cfg!(target_os = "windows"),
         )
         .with_forced(crate::HalShaderWorkarounds::parse_forced(forced.as_deref()));
+        let shader_workarounds = vulkan_writer_flags(
+            shader_workarounds,
+            shader_demote_to_helper_invocation,
+            shader_integer_dot_product,
+            zero_initialize_workgroup_memory,
+        );
         let inner = Arc::new(VulkanDeviceInner {
             shader_workarounds,
             _instance: Arc::clone(&self.instance),
@@ -1491,6 +1544,53 @@ fn hal_limits_from_vk(vk: vk::PhysicalDeviceLimits, max_buffer_size: u64) -> Hal
     }
 }
 
+/// Adds enabled writer features without changing device-selected driver workarounds.
+fn vulkan_writer_flags(
+    workarounds: crate::HalShaderWorkarounds,
+    demote_enabled: bool,
+    integer_dot_enabled: bool,
+    zero_init_enabled: bool,
+) -> crate::HalShaderWorkarounds {
+    crate::HalShaderWorkarounds {
+        use_demote_to_helper_invocation: demote_enabled,
+        native_dot_4x8_packed: integer_dot_enabled,
+        use_zero_initialize_workgroup_memory: zero_init_enabled,
+        ..workarounds
+    }
+}
+
+/// Whether a Vulkan 1.3 writer feature can be queried or enabled.
+fn writer_feature_available(api_version: u32, extension_present: bool) -> bool {
+    // The Vulkan 1.3 branch is dormant while YAWGPU_VULKAN_API_VERSION is 1.1.
+    api_version >= vk::API_VERSION_1_3 || extension_present
+}
+
+/// Native writer instructions require both availability and the feature bit.
+fn writer_feature_enabled(api_version: u32, extension_present: bool, feature: vk::Bool32) -> bool {
+    writer_feature_available(api_version, extension_present) && feature == vk::TRUE
+}
+
+/// Dawn disables native workgroup zero initialization on ARM and Imagination.
+fn zero_initialize_workgroup_memory_enabled(
+    api_version: u32,
+    extension_present: bool,
+    feature: vk::Bool32,
+    vendor_id: u32,
+) -> bool {
+    // Dawn enables the feature on ARM/Imagination and gates only Tint; yawgpu gates both, with no behavioural difference.
+    writer_feature_enabled(api_version, extension_present, feature)
+        && !matches!(vendor_id, 0x13b5 | 0x1010)
+}
+
+/// Tint always emits device-scope capability when using the Vulkan memory model.
+fn vulkan_memory_model_enabled(
+    available: bool,
+    model: vk::Bool32,
+    device_scope: vk::Bool32,
+) -> bool {
+    available && model == vk::TRUE && device_scope == vk::TRUE
+}
+
 fn vulkan_memory_model_available(api_version: u32, extension_present: bool) -> bool {
     let major = vk::api_version_major(api_version);
     let minor = vk::api_version_minor(api_version);
@@ -1759,6 +1859,392 @@ mod tests {
         let Some(device) = device else { return };
         let device = crate::HalDevice::Vulkan(device);
         assert!(device.shader_workarounds().replace_unsigned_compare_zero);
+    }
+
+    #[test]
+    fn vulkan_writer_flags_preserve_workarounds_and_map_enabled_features() {
+        let workarounds = crate::HalShaderWorkarounds {
+            replace_unsigned_compare_zero: true,
+            polyfill_bool_vec_dynamic_store: true,
+            // Stale writer flags must be replaced by the enabled-device facts.
+            use_demote_to_helper_invocation: true,
+            native_dot_4x8_packed: true,
+            use_zero_initialize_workgroup_memory: true,
+            ..Default::default()
+        };
+        for enabled in [
+            [false, false, false],
+            [true, false, false],
+            [false, true, false],
+            [false, false, true],
+            [true, true, false],
+            [true, false, true],
+            [false, true, true],
+            [true, true, true],
+        ] {
+            let flags = vulkan_writer_flags(workarounds, enabled[0], enabled[1], enabled[2]);
+            assert_eq!(
+                [
+                    flags.use_demote_to_helper_invocation,
+                    flags.native_dot_4x8_packed,
+                    flags.use_zero_initialize_workgroup_memory
+                ],
+                enabled
+            );
+            assert!(flags.replace_unsigned_compare_zero);
+            assert!(flags.polyfill_bool_vec_dynamic_store);
+        }
+    }
+
+    #[test]
+    fn vulkan_writer_native_features_require_availability_and_feature_bits() {
+        // A reported feature alone is insufficient at the Vulkan 1.1 baseline.
+        assert!(!writer_feature_available(vk::API_VERSION_1_1, false));
+        assert!(!writer_feature_enabled(
+            vk::API_VERSION_1_1,
+            false,
+            vk::TRUE
+        ));
+        // R1 demote and R2 integer dot use the same promoted-feature gate.
+        for (api, extension, feature, expected) in [
+            (vk::API_VERSION_1_1, false, vk::TRUE, false),
+            (vk::API_VERSION_1_1, true, vk::TRUE, true),
+            (vk::API_VERSION_1_1, true, vk::FALSE, false),
+            (vk::API_VERSION_1_2, false, vk::TRUE, false),
+            (vk::API_VERSION_1_2, true, vk::TRUE, true),
+            (vk::API_VERSION_1_3, false, vk::TRUE, true),
+            (vk::API_VERSION_1_3, false, vk::FALSE, false),
+        ] {
+            assert_eq!(writer_feature_enabled(api, extension, feature), expected);
+        }
+        for (api, extension, feature, vendor, expected) in [
+            (vk::API_VERSION_1_1, false, vk::TRUE, 0x8086, false),
+            (vk::API_VERSION_1_1, true, vk::FALSE, 0x8086, false),
+            (vk::API_VERSION_1_1, true, vk::TRUE, 0x8086, true),
+            (vk::API_VERSION_1_1, true, vk::TRUE, 0x13b5, false),
+            (vk::API_VERSION_1_1, true, vk::TRUE, 0x1010, false),
+            (vk::API_VERSION_1_3, false, vk::TRUE, 0x10de, true),
+            (vk::API_VERSION_1_3, false, vk::TRUE, 0x13b5, false),
+            (vk::API_VERSION_1_3, false, vk::TRUE, 0x1010, false),
+        ] {
+            assert_eq!(
+                zero_initialize_workgroup_memory_enabled(api, extension, feature, vendor),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn vulkan_memory_model_requires_model_and_device_scope() {
+        for (available, model, scope, expected) in [
+            (true, vk::TRUE, vk::FALSE, false),
+            (true, vk::TRUE, vk::TRUE, true),
+            (true, vk::FALSE, vk::TRUE, false),
+            (true, vk::FALSE, vk::FALSE, false),
+            (false, vk::TRUE, vk::TRUE, false),
+            (false, vk::TRUE, vk::FALSE, false),
+            (false, vk::FALSE, vk::TRUE, false),
+            (false, vk::FALSE, vk::FALSE, false),
+        ] {
+            assert_eq!(
+                vulkan_memory_model_enabled(available, model, scope),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a real Vulkan device and validation layer; S2 manual run"]
+    fn vulkan_writer_features_report_enabled_device_features() {
+        let instance = VulkanInstance::new().expect("create Vulkan instance");
+        let adapter = instance
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("Vulkan adapter");
+        let device = adapter.create_device().expect("create Vulkan device");
+        let inner = &device.inner;
+        let flags = device.shader_workarounds();
+        eprintln!(
+            "enabled Vulkan writer features: {flags:?}, memory model: {}",
+            inner.vulkan_memory_model
+        );
+        let properties = unsafe {
+            inner
+                ._instance
+                .instance
+                .get_physical_device_properties(inner.physical_device)
+        };
+        let api = YAWGPU_VULKAN_API_VERSION.min(properties.api_version);
+        let demote_available = writer_feature_available(
+            api,
+            adapter.has_device_extension(vk::EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_NAME),
+        );
+        let dot_available = writer_feature_available(
+            api,
+            adapter.has_device_extension(vk::KHR_SHADER_INTEGER_DOT_PRODUCT_NAME),
+        );
+        let zero_available = writer_feature_available(
+            api,
+            adapter.has_device_extension(vk::KHR_ZERO_INITIALIZE_WORKGROUP_MEMORY_NAME),
+        );
+        let model_available = vulkan_memory_model_available(
+            api,
+            adapter.has_device_extension(vk::KHR_VULKAN_MEMORY_MODEL_NAME),
+        );
+        let mut demote = vk::PhysicalDeviceShaderDemoteToHelperInvocationFeatures::default();
+        let mut dot = vk::PhysicalDeviceShaderIntegerDotProductFeatures::default();
+        let mut zero = vk::PhysicalDeviceZeroInitializeWorkgroupMemoryFeatures::default();
+        let mut model = vk::PhysicalDeviceVulkanMemoryModelFeatures::default();
+        let mut features = vk::PhysicalDeviceFeatures2::default();
+        if demote_available {
+            features = features.push_next(&mut demote);
+        }
+        if dot_available {
+            features = features.push_next(&mut dot);
+        }
+        if zero_available {
+            features = features.push_next(&mut zero);
+        }
+        if model_available {
+            features = features.push_next(&mut model);
+        }
+        unsafe {
+            inner
+                ._instance
+                .instance
+                .get_physical_device_features2(inner.physical_device, &mut features);
+        }
+        assert_eq!(
+            flags.use_demote_to_helper_invocation,
+            inner.shader_demote_to_helper_invocation
+        );
+        assert_eq!(
+            flags.use_demote_to_helper_invocation,
+            demote_available && demote.shader_demote_to_helper_invocation == vk::TRUE
+        );
+        assert_eq!(
+            flags.native_dot_4x8_packed,
+            dot_available && dot.shader_integer_dot_product == vk::TRUE
+        );
+        assert_eq!(
+            flags.use_zero_initialize_workgroup_memory,
+            zero_available
+                && zero.shader_zero_initialize_workgroup_memory == vk::TRUE
+                && !matches!(properties.vendor_id, 0x13b5 | 0x1010)
+        );
+        assert_eq!(
+            inner.vulkan_memory_model,
+            model_available
+                && model.vulkan_memory_model == vk::TRUE
+                && model.vulkan_memory_model_device_scope == vk::TRUE
+        );
+    }
+
+    fn compile_writer_test_spirv(device: &VulkanDevice, source: &str, entry: &str) -> Vec<u32> {
+        let flags = device.shader_workarounds();
+        let mut options = yawgpu_tint::SpirvWorkarounds::default();
+        options.use_demote_to_helper_invocation = flags.use_demote_to_helper_invocation;
+        options.native_dot_4x8_packed = flags.native_dot_4x8_packed;
+        options.use_zero_initialize_workgroup_memory = flags.use_zero_initialize_workgroup_memory;
+        yawgpu_tint::Program::parse(source, false, false, false, false, false, false, &[])
+            .expect("parse writer test WGSL")
+            .generate_spirv(
+                entry,
+                &yawgpu_tint::Bindings::default(),
+                &[],
+                true,
+                device.vulkan_memory_model(),
+                0,
+                false,
+                None,
+                0,
+                device.storage_input_output16(),
+                false,
+                options,
+            )
+            .expect("compile writer test SPIR-V")
+    }
+
+    #[test]
+    #[ignore = "requires a real Vulkan device and validation layer; S2 manual run"]
+    fn vulkan_dot4_u8_packed_compiles_and_runs() {
+        use crate::{
+            HalBoundBuffer, HalBuffer, HalBufferBindingKind, HalBufferUsage, HalComputeDispatch,
+            HalComputePass, HalComputePipeline, HalCopy, HalDescriptorBinding,
+            HalDescriptorBindingKind, HalShaderSource,
+        };
+        let device = test_helpers::vulkan_device();
+        let source = r#"
+@group(0) @binding(0) var<storage, read_write> data: array<u32, 3>;
+@compute @workgroup_size(1) fn cs() { data[0] = dot4U8Packed(data[1], data[2]); }
+"#;
+        let spirv = compile_writer_test_spirv(&device, source, "cs");
+        let pipeline = device
+            .create_compute_pipeline(
+                HalShaderSource::SpirV(spirv),
+                "cs",
+                (1, 1, 1),
+                &[HalDescriptorBinding {
+                    group: 0,
+                    binding: 0,
+                    kind: HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Storage),
+                }],
+                0,
+                None,
+            )
+            .unwrap();
+        let buffer = device
+            .create_buffer(
+                12,
+                HalBufferUsage {
+                    storage: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let input: Vec<u8> = [0u32, 0x04030201, 0x01010101]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        buffer.write(0, &input).unwrap();
+        let pass = HalComputePass {
+            pipeline: HalComputePipeline::Vulkan(pipeline),
+            bind_buffers: vec![HalBoundBuffer {
+                group: 0,
+                binding: 0,
+                metal_index: 0,
+                vertex_metal_index: None,
+                fragment_metal_index: None,
+                buffer: HalBuffer::Vulkan(buffer.clone()),
+                offset: 0,
+                size: 12,
+            }],
+            bind_textures: Vec::new(),
+            bind_samplers: Vec::new(),
+            bind_external_textures: Vec::new(),
+            immediate_data: Vec::new(),
+            dispatch: HalComputeDispatch::Direct {
+                workgroups: (1, 1, 1),
+            },
+        };
+        let submission = device
+            .queue()
+            .submit_copies(&[HalCopy::ComputePass(pass)])
+            .unwrap();
+        device.queue().wait_for_submission(submission).unwrap();
+        assert_eq!(buffer.read(0, 4).unwrap(), 10u32.to_le_bytes());
+    }
+
+    #[test]
+    #[ignore = "requires a real Vulkan device and validation layer; S2 manual run"]
+    fn vulkan_discard_then_derivative_compiles_and_runs() {
+        use crate::{
+            HalBuffer, HalBufferTextureCopy, HalBufferTextureLayout, HalBufferUsage, HalCopy,
+            HalExtent3d, HalOrigin3d, HalRenderColorTarget, HalRenderLoadOp, HalRenderPassCommand,
+            HalRenderPassCommandStream, HalRenderPipeline, HalShaderSource, HalTexture,
+            HalTextureAspect, HalTextureFormat,
+        };
+        let device = test_helpers::vulkan_device();
+        let source = r#"
+diagnostic(off, derivative_uniformity);
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+    let p = array<vec2f, 3>(vec2f(-1, -1), vec2f(3, -1), vec2f(-1, 3));
+    return vec4f(p[i], 0, 1);
+}
+@fragment fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
+    if (p.x < 2.0) { discard; }
+    return vec4f(dpdx(p.x));
+}
+"#;
+        let shader = HalShaderSource::SpirVStages {
+            vertex: compile_writer_test_spirv(&device, source, "vs"),
+            fragment: Some(compile_writer_test_spirv(&device, source, "fs")),
+        };
+        let pipeline = device
+            .create_render_pipeline(
+                shader,
+                "vs",
+                Some("fs"),
+                &test_helpers::render_descriptor(),
+                &[],
+            )
+            .unwrap();
+        let texture = device
+            .create_texture(&test_helpers::texture_descriptor())
+            .unwrap();
+        let pass = HalRenderPassCommandStream {
+            color_targets: vec![Some(HalRenderColorTarget {
+                texture: HalTexture::Vulkan(texture.clone()),
+                view_format: crate::HalTextureFormat::Rgba8Unorm,
+                resolve_target: None,
+                resolve_view_format: None,
+                mip_level: 0,
+                array_layer: 0,
+                depth_slice: 0,
+                resolve_mip_level: 0,
+                resolve_array_layer: 0,
+                load_op: HalRenderLoadOp::Clear,
+                store: true,
+                clear_color: [0.0; 4],
+            })],
+            commands: vec![
+                HalRenderPassCommand::SetPipeline(HalRenderPipeline::Vulkan(pipeline)),
+                HalRenderPassCommand::Draw {
+                    vertex_count: 3,
+                    instance_count: 1,
+                    first_vertex: 0,
+                    first_instance: 0,
+                },
+            ],
+            ..Default::default()
+        };
+        let readback = device
+            .create_buffer(
+                8,
+                HalBufferUsage {
+                    copy_dst: true,
+                    map_read: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        readback.write(0, &[0x7f; 8]).unwrap();
+        // Adjacent pixels at x=1 and x=2 straddle the p.x < 2.0 discard boundary.
+        let copy = HalCopy::TextureToBuffer(HalBufferTextureCopy {
+            buffer: HalBuffer::Vulkan(readback.clone()),
+            buffer_layout: HalBufferTextureLayout {
+                offset: 0,
+                bytes_per_row: 8,
+                rows_per_image: 1,
+            },
+            texture: HalTexture::Vulkan(texture),
+            format: HalTextureFormat::Rgba8Unorm,
+            aspect: HalTextureAspect::All,
+            mip_level: 0,
+            origin: HalOrigin3d { x: 1, y: 1, z: 0 },
+            extent: HalExtent3d {
+                width: 2,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        });
+        let submission = device
+            .queue()
+            .submit_copies(&[HalCopy::RenderPassCommandStream(pass), copy])
+            .unwrap();
+        device.queue().wait_for_submission(submission).unwrap();
+        let pixels = readback.read(0, 8).unwrap();
+        assert_eq!(
+            &pixels[..4],
+            &[0, 0, 0, 0],
+            "discarded pixel must keep the clear value"
+        );
+        assert_eq!(
+            &pixels[4..],
+            &[255, 255, 255, 255],
+            "dpdx(p.x) must shade the surviving pixel white"
+        );
     }
 
     #[test]
@@ -2409,7 +2895,11 @@ mod tests {
             } else {
                 vk::PhysicalDeviceVulkanMemoryModelFeatures::default()
             };
-            let vulkan_memory_model = available && features.vulkan_memory_model == vk::TRUE;
+            let vulkan_memory_model = vulkan_memory_model_enabled(
+                available,
+                features.vulkan_memory_model,
+                features.vulkan_memory_model_device_scope,
+            );
             let vulkan_memory_model_device_scope =
                 vulkan_memory_model && features.vulkan_memory_model_device_scope == vk::TRUE;
 

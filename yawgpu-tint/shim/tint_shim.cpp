@@ -2198,6 +2198,7 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
                               size_t n_ov,
                               bool disable_robustness,
                               bool fix_u32_div_mod,
+                              bool disable_demote_to_helper,
                               bool polyfill_bool_vec_dynamic_store,
                               bool emit_vertex_point_size,
                               const YawgpuTintVertexBuffer* vertex_buffers,
@@ -2244,6 +2245,7 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
         options.remapped_entry_point_name = remapped_entry_point;
         options.disable_robustness = disable_robustness;
         options.workarounds.fix_u32_div_mod = fix_u32_div_mod;
+        options.extensions.disable_demote_to_helper = disable_demote_to_helper;
         options.workarounds.polyfill_bool_vec_dynamic_store = polyfill_bool_vec_dynamic_store;
         // Point-list topology on Metal requires every vertex to set [[point_size]];
         // Tint emits it (= 1.0) when asked. yawgpu threads this from the render
@@ -2425,6 +2427,10 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
                                 bool polyfill_bool_vec_dynamic_store,
                                 bool replace_workgroup_atomic_store_with_exchange,
                                 bool replace_unsigned_compare_zero,
+                                bool use_demote_to_helper_invocation,
+                                bool native_dot_4x8_packed,
+                                bool use_zero_initialize_workgroup_memory,
+                                bool emit_vertex_point_size,
                                 bool use_vulkan_memory_model,
                                 bool use_storage_input_output_16,
                                 uint32_t framebuffer_fetch_descriptor_set,
@@ -2462,6 +2468,10 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
         options.workarounds.replace_workgroup_atomic_store_with_exchange =
             replace_workgroup_atomic_store_with_exchange;
         options.workarounds.replace_unsigned_compare_zero = replace_unsigned_compare_zero;
+        options.emit_vertex_point_size = emit_vertex_point_size;
+        options.extensions.use_demote_to_helper_invocation = use_demote_to_helper_invocation;
+        options.extensions.dot_4x8_packed = !native_dot_4x8_packed;
+        options.extensions.use_zero_initialize_workgroup_memory = use_zero_initialize_workgroup_memory;
         options.extensions.use_vulkan_memory_model = use_vulkan_memory_model;
         options.extensions.use_storage_input_output_16 = use_storage_input_output_16;
         options.multisampled_input_attachment = multisampled_input_attachment;

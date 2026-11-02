@@ -7,11 +7,20 @@ pub(crate) const METAL_U32_DIV_MOD_FIXED_VERSION: (isize, isize, isize) = (26, 6
 #[cfg(all(test, any(feature = "metal", feature = "vulkan")))]
 pub(crate) static FORCE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Driver workarounds selected once when a HAL device is created.
+/// Writer features and driver workarounds selected once when a HAL device is created.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 #[must_use]
 pub struct HalShaderWorkarounds {
+    /// MSL: skip the demote transform on non-Apple GPUs.
+    pub disable_demote_to_helper: bool,
+    /// SPIR-V: use the enabled demote-to-helper feature.
+    pub use_demote_to_helper_invocation: bool,
+    /// SPIR-V: use enabled native packed integer dot product support.
+    /// False by default, so Tint polyfills without device feature information.
+    pub native_dot_4x8_packed: bool,
+    /// SPIR-V: initialize workgroup variables with OpConstantNull.
+    pub use_zero_initialize_workgroup_memory: bool,
     /// MSL: inject a non-constant zero into unsigned divide and modulo.
     pub fix_u32_div_mod: bool,
     /// MSL/SPIR-V: polyfill dynamically indexed boolean-vector stores.
@@ -31,6 +40,7 @@ impl HalShaderWorkarounds {
         os_at_least_26_6_1: bool,
     ) -> Self {
         Self {
+            disable_demote_to_helper: !is_apple,
             fix_u32_div_mod: is_macos && is_apple && !os_at_least_26_6_1,
             polyfill_bool_vec_dynamic_store: is_macos && is_intel,
             ..Self::default()
@@ -82,6 +92,10 @@ impl HalShaderWorkarounds {
     #[cfg(any(test, feature = "metal", feature = "vulkan"))]
     pub(crate) fn with_forced(self, forced: Self) -> Self {
         Self {
+            disable_demote_to_helper: self.disable_demote_to_helper,
+            use_demote_to_helper_invocation: self.use_demote_to_helper_invocation,
+            native_dot_4x8_packed: self.native_dot_4x8_packed,
+            use_zero_initialize_workgroup_memory: self.use_zero_initialize_workgroup_memory,
             fix_u32_div_mod: self.fix_u32_div_mod || forced.fix_u32_div_mod,
             polyfill_bool_vec_dynamic_store: self.polyfill_bool_vec_dynamic_store
                 || forced.polyfill_bool_vec_dynamic_store,
@@ -99,6 +113,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn vulkan_default_writer_flags_disable_native_dot_products() {
+        assert!(!HalShaderWorkarounds::default().native_dot_4x8_packed);
+    }
+
+    #[test]
     fn metal_u32_div_mod_fixed_version_matches_dawn() {
         assert_eq!(METAL_U32_DIV_MOD_FIXED_VERSION, (26, 6, 1));
     }
@@ -110,6 +129,7 @@ mod tests {
                 // false also covers iOS Apple GPUs.
                 for (apple, intel) in [(true, false), (false, true), (false, false)] {
                     let flags = HalShaderWorkarounds::for_metal(macos, apple, intel, fixed);
+                    assert_eq!(flags.disable_demote_to_helper, !apple);
                     assert_eq!(flags.fix_u32_div_mod, macos && apple && !fixed);
                     assert_eq!(flags.polyfill_bool_vec_dynamic_store, macos && intel);
                     assert!(!flags.replace_workgroup_atomic_store_with_exchange);

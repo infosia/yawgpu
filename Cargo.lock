@@ -741,6 +741,7 @@ dependencies = [
  "parking_lot",
  "thiserror",
  "windows-sys",
+ "yawgpu-tint",
 ]
 
 [[package]]

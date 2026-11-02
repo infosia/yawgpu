@@ -32,3 +32,6 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_LibraryLoader",
 ], optional = true }
+
+[dev-dependencies]
+yawgpu-tint = { path = "../yawgpu-tint" }

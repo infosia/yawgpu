@@ -1359,6 +1359,7 @@ mod tests {
                 None,
                 16,
                 true,
+                false,
                 Default::default(),
             )
             .unwrap();

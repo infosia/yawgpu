@@ -15,8 +15,8 @@ pub(super) struct VulkanDeviceInner {
     pub(super) sampler_anisotropy: bool,
     /// Whether `VK_EXT_shader_demote_to_helper_invocation` /
     /// `shaderDemoteToHelperInvocation` was enabled at device creation. When
-    /// true, SPIR-V `OpDemoteToHelperInvocation` (which Tint emits for WGSL
-    /// `discard`) is legal to execute, so derivatives (`fwidth`/`dpdx`/`dpdy`)
+    /// true, Tint selects SPIR-V `OpDemoteToHelperInvocation` for WGSL
+    /// `discard`; otherwise it emulates discard. Derivatives (`fwidth`/`dpdx`/`dpdy`)
     /// after a non-uniform `discard` are well-defined (CTS finding F-129).
     pub(super) shader_demote_to_helper_invocation: bool,
     /// Whether `VK_KHR_shader_float16_int8` / `shaderFloat16` was enabled.

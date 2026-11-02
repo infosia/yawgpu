@@ -1480,8 +1480,7 @@ pub(crate) fn select_render_shader_source(
             };
             let msl_vertex_buffers =
                 msl_vertex_buffer_bindings(&descriptor.vertex.buffers, vertex_buffer_bindings)?;
-            let force_point_size =
-                matches!(descriptor.primitive.topology, PrimitiveTopology::PointList);
+            let force_point_size = emit_vertex_point_size(descriptor.primitive.topology);
             // The pipeline's effective user-immediate byte budget (Block 94,
             // 0..=64): the explicit layout's `immediate_size`, or -- for auto
             // layouts, mirroring Dawn `CreateDefault`
@@ -1670,6 +1669,7 @@ pub(crate) fn select_render_shader_source(
                 polyfill_pixel_center,
                 user_immediate_size,
                 use_storage_input_output_16,
+                emit_vertex_point_size(descriptor.primitive.topology),
                 workarounds,
             )?;
             let fragment_color_slots = match (fragment, fragment_entry_name) {
@@ -1700,6 +1700,7 @@ pub(crate) fn select_render_shader_source(
                         polyfill_pixel_center,
                         user_immediate_size,
                         use_storage_input_output_16,
+                        false,
                         workarounds,
                     )?)
                 }
@@ -3585,8 +3586,29 @@ pub(crate) fn validate_multisample_state(
     Ok(())
 }
 
+/// Point-list pipelines require the default vertex point size on both backends.
+fn emit_vertex_point_size(topology: PrimitiveTopology) -> bool {
+    topology == PrimitiveTopology::PointList
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn point_size_is_emitted_only_for_point_lists() {
+        for topology in [
+            PrimitiveTopology::PointList,
+            PrimitiveTopology::LineList,
+            PrimitiveTopology::LineStrip,
+            PrimitiveTopology::TriangleList,
+            PrimitiveTopology::TriangleStrip,
+        ] {
+            assert_eq!(
+                super::emit_vertex_point_size(topology),
+                topology == PrimitiveTopology::PointList
+            );
+        }
+    }
+
     #[test]
     fn audit_render_overrides_are_entry_scoped() {
         let device = noop_device();

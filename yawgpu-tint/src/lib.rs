@@ -17,20 +17,31 @@
 //! declarations) was duplicated verbatim between the two `cfg` arms.
 #![warn(missing_docs)]
 
-/// Driver workarounds consumed by the MSL writer.
+/// Device-selected features and workarounds consumed by the MSL writer.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[must_use]
+#[non_exhaustive]
 pub struct MslWorkarounds {
+    /// Skip the demote-to-helper transform on non-Apple GPUs.
+    pub disable_demote_to_helper: bool,
     /// Inject a non-constant zero into unsigned divide and modulo.
     pub fix_u32_div_mod: bool,
     /// Polyfill dynamically indexed boolean-vector stores.
     pub polyfill_bool_vec_dynamic_store: bool,
 }
 
-/// Driver workarounds consumed by the SPIR-V writer.
+/// Device-selected features and workarounds consumed by the SPIR-V writer.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[must_use]
+#[non_exhaustive]
 pub struct SpirvWorkarounds {
+    /// Use the enabled Vulkan demote-to-helper feature.
+    pub use_demote_to_helper_invocation: bool,
+    /// Emit native OpSDot/OpUDot only with enabled shaderIntegerDotProduct support.
+    /// The default is false, which selects packed integer dot product polyfills.
+    pub native_dot_4x8_packed: bool,
+    /// Initialize workgroup memory with OpConstantNull.
+    pub use_zero_initialize_workgroup_memory: bool,
     /// Polyfill dynamically indexed boolean-vector stores.
     pub polyfill_bool_vec_dynamic_store: bool,
     /// Replace workgroup atomic stores with atomic exchanges.
@@ -1530,6 +1541,7 @@ mod real {
             n_ov: usize,
             disable_robustness: bool,
             fix_u32_div_mod: bool,
+            disable_demote_to_helper: bool,
             polyfill_bool_vec_dynamic_store: bool,
             emit_vertex_point_size: bool,
             vertex_buffers: *const RawVertexBuffer,
@@ -1549,6 +1561,10 @@ mod real {
             polyfill_bool_vec_dynamic_store: bool,
             replace_workgroup_atomic_store_with_exchange: bool,
             replace_unsigned_compare_zero: bool,
+            use_demote_to_helper_invocation: bool,
+            native_dot_4x8_packed: bool,
+            use_zero_initialize_workgroup_memory: bool,
+            emit_vertex_point_size: bool,
             use_vulkan_memory_model: bool,
             use_storage_input_output_16: bool,
             framebuffer_fetch_descriptor_set: u32,
@@ -2149,6 +2165,7 @@ mod real {
                     raw_overrides.len(),
                     !robust,
                     workarounds.fix_u32_div_mod,
+                    workarounds.disable_demote_to_helper,
                     workarounds.polyfill_bool_vec_dynamic_store,
                     emit_vertex_point_size,
                     raw_vertex_buffers.as_ptr(),
@@ -2211,8 +2228,8 @@ mod real {
         }
 
         /// Generates SPIR-V words for `entry_point`.
-        /// `workarounds` selects device-specific Tint writer fixes for boolean
-        /// vector stores, workgroup atomic stores, and unsigned zero comparisons.
+        /// `workarounds` selects device-specific writer features and fixes; native
+        /// instructions must match the features enabled on the Vulkan device.
         /// `use_storage_input_output_16` permits 16-bit stage IO; disable it
         /// when the Vulkan device did not enable `storageInputOutput16`.
         ///
@@ -2224,6 +2241,8 @@ mod real {
         /// user_immediate_size + 4}` of the push-constant block, directly
         /// after the user region (mirrors Dawn
         /// `ShaderModuleVk.cpp:349-355`).
+        ///
+        /// `emit_vertex_point_size` is enabled only for point-list vertex stages.
         #[allow(clippy::too_many_arguments)]
         pub fn generate_spirv(
             &self,
@@ -2237,6 +2256,7 @@ mod real {
             polyfill_pixel_center: Option<u32>,
             user_immediate_size: u32,
             use_storage_input_output_16: bool,
+            emit_vertex_point_size: bool,
             workarounds: SpirvWorkarounds,
         ) -> Result<Vec<u32>, TintError> {
             let ep = cstring(entry_point, "entry point").map_err(TintError::Codegen)?;
@@ -2257,6 +2277,10 @@ mod real {
                     workarounds.polyfill_bool_vec_dynamic_store,
                     workarounds.replace_workgroup_atomic_store_with_exchange,
                     workarounds.replace_unsigned_compare_zero,
+                    workarounds.use_demote_to_helper_invocation,
+                    workarounds.native_dot_4x8_packed,
+                    workarounds.use_zero_initialize_workgroup_memory,
+                    emit_vertex_point_size,
                     use_vulkan_memory_model,
                     use_storage_input_output_16,
                     framebuffer_fetch_descriptor_set,
@@ -2652,8 +2676,10 @@ mod stub {
         }
 
         /// Generates SPIR-V words for `entry_point`.
-        /// `workarounds` selects device-specific Tint writer fixes for boolean
-        /// vector stores, workgroup atomic stores, and unsigned zero comparisons.
+        /// `workarounds` selects device-specific writer features and fixes; native
+        /// instructions must match the features enabled on the Vulkan device.
+        ///
+        /// `emit_vertex_point_size` is enabled only for point-list vertex stages.
         #[allow(clippy::too_many_arguments)]
         pub fn generate_spirv(
             &self,
@@ -2667,6 +2693,7 @@ mod stub {
             _polyfill_pixel_center: Option<u32>,
             _user_immediate_size: u32,
             _use_storage_input_output_16: bool,
+            _emit_vertex_point_size: bool,
             _workarounds: SpirvWorkarounds,
         ) -> Result<Vec<u32>, TintError> {
             Err(TintError::Unavailable)
@@ -2778,9 +2805,177 @@ fn cs(@builtin(local_invocation_index) index: u32) {
                 None,
                 0,
                 true,
+                false,
                 flags,
             )
             .unwrap()
+    }
+
+    #[test]
+    fn spirv_default_polyfills_signed_and_unsigned_packed_dot_products() {
+        let program = Program::parse(
+            r#"
+@group(0) @binding(0) var<storage, read_write> data: array<u32, 4>;
+@compute @workgroup_size(1) fn cs() {
+    data[0] = bitcast<u32>(dot4I8Packed(data[2], data[3]));
+    data[1] = dot4U8Packed(data[2], data[3]);
+}
+"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let defaults = SpirvWorkarounds::default();
+        assert!(!defaults.native_dot_4x8_packed);
+        let generate = |flags| {
+            program
+                .generate_spirv(
+                    "cs",
+                    &Bindings::default(),
+                    &[],
+                    true,
+                    false,
+                    0,
+                    false,
+                    None,
+                    0,
+                    true,
+                    false,
+                    flags,
+                )
+                .unwrap()
+        };
+        let polyfilled = generate(defaults);
+        let native = generate(SpirvWorkarounds {
+            native_dot_4x8_packed: true,
+            ..defaults
+        });
+        for opcode in [4450, 4451] {
+            assert!(!spirv_instructions(&polyfilled)
+                .iter()
+                .any(|i| i[0] & 0xffff == opcode));
+            assert!(spirv_instructions(&native)
+                .iter()
+                .any(|i| i[0] & 0xffff == opcode));
+        }
+    }
+
+    #[test]
+    fn spirv_writer_feature_options_change_instructions() {
+        let source = r#"
+diagnostic(off, derivative_uniformity);
+@group(0) @binding(0) var<storage, read_write> result: array<u32, 4>;
+var<workgroup> scratch: u32;
+@compute @workgroup_size(1)
+fn cs(@builtin(local_invocation_index) i: u32) {
+    result[0] = dot4U8Packed(result[1], result[2]) + scratch + i;
+}
+@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0, 0, 0, 1); }
+@fragment fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
+    if (p.x < 1.0) { discard; }
+    return vec4f(dpdx(p.x));
+}
+"#;
+        let program =
+            Program::parse(source, false, false, false, false, false, false, &[]).unwrap();
+        for enabled in [false, true] {
+            let flags = SpirvWorkarounds {
+                use_demote_to_helper_invocation: enabled,
+                native_dot_4x8_packed: enabled,
+                use_zero_initialize_workgroup_memory: enabled,
+                ..Default::default()
+            };
+            let generate = |entry| {
+                program
+                    .generate_spirv(
+                        entry,
+                        &Bindings::default(),
+                        &[],
+                        true,
+                        false,
+                        0,
+                        false,
+                        None,
+                        0,
+                        true,
+                        enabled,
+                        flags,
+                    )
+                    .unwrap()
+            };
+            let fragment = generate("fs");
+            assert_eq!(
+                spirv_instructions(&fragment)
+                    .iter()
+                    .any(|i| i[0] & 0xffff == 5380),
+                enabled
+            );
+            let compute = generate("cs");
+            let instructions = spirv_instructions(&compute);
+            // OpUDot is absent only when packed dot products are polyfilled.
+            assert_eq!(instructions.iter().any(|i| i[0] & 0xffff == 4451), enabled);
+            // Only native workgroup zero initialization adds an initializer
+            // operand to the Workgroup OpVariable.
+            assert!(instructions
+                .iter()
+                .any(|i| i[0] & 0xffff == 59 && i[3] == 4 && (i.len() == 5) == enabled));
+            let vertex = generate("vs");
+            // OpDecorate BuiltIn PointSize (1).
+            assert_eq!(
+                spirv_instructions(&vertex)
+                    .iter()
+                    .any(|i| i[0] & 0xffff == 71 && i.len() == 4 && i[2] == 11 && i[3] == 1),
+                enabled
+            );
+        }
+    }
+
+    #[test]
+    fn msl_disable_demote_to_helper_changes_discard_lowering() {
+        let program = Program::parse(
+            r#"
+@group(0) @binding(0) var<storage, read_write> result: u32;
+@fragment fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
+    if (p.x < 1.0) { discard; }
+    result = 42u;
+    return vec4f(1);
+}
+"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let emulated = workaround_msl(&program, "fs", MslWorkarounds::default());
+        let native = workaround_msl(
+            &program,
+            "fs",
+            MslWorkarounds {
+                disable_demote_to_helper: true,
+                ..Default::default()
+            },
+        );
+        assert_ne!(emulated.source, native.source);
+        assert!(
+            emulated.source.contains("continue_execution"),
+            "{}",
+            emulated.source
+        );
+        assert!(
+            !native.source.contains("continue_execution"),
+            "{}",
+            native.source
+        );
+        assert!(native.source.contains("discard_fragment()"));
     }
 
     #[test]
@@ -2994,6 +3189,7 @@ fn cs(@builtin(local_invocation_index) index: u32) {
                     None,
                     0,
                     enabled,
+                    false,
                     Default::default(),
                 )
                 .unwrap();
@@ -3402,6 +3598,7 @@ fn main() {
                 None,
                 0,
                 true,
+                false,
                 Default::default(),
             )
             .unwrap();
@@ -3418,6 +3615,7 @@ fn main() {
                 None,
                 0,
                 true,
+                false,
                 Default::default(),
             )
             .unwrap();
@@ -4407,6 +4605,7 @@ fn main() {
                 None,
                 0,
                 true,
+                false,
                 Default::default(),
             )
             .unwrap_err();
@@ -4575,6 +4774,7 @@ fn cs() {
                     None,
                     0,
                     true,
+                    false,
                     Default::default(),
                 )
                 .unwrap();
@@ -4627,6 +4827,7 @@ fn cs() {
                 None,
                 0,
                 true,
+                false,
                 Default::default(),
             )
             .unwrap();
@@ -4780,6 +4981,7 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
                 None,
                 0,
                 true,
+                false,
                 Default::default(),
             )
             .unwrap();
@@ -4795,6 +4997,7 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
                 Some(1),
                 0,
                 true,
+                false,
                 Default::default(),
             )
             .unwrap();
@@ -4862,6 +5065,7 @@ fn cs() {
                 Some(1),
                 16,
                 true,
+                false,
                 Default::default(),
             )
             .unwrap();
@@ -4881,6 +5085,7 @@ fn cs() {
             Some(1),
             0,
             true,
+            false,
             Default::default(),
         );
         let Err(collision_err) = collision else {
@@ -4910,6 +5115,7 @@ fn cs() {
                 None,
                 16,
                 true,
+                false,
                 Default::default(),
             )
             .unwrap();
@@ -4942,6 +5148,7 @@ fn cs() {
                 None,
                 0,
                 true,
+                false,
                 Default::default(),
             )
             .unwrap();
@@ -4974,6 +5181,7 @@ fn cs() {
             None,
             0,
             true,
+            false,
             Default::default(),
         ) {
             Ok(_) => panic!("expected multisampled input attachment generation to fail"),
@@ -5026,6 +5234,7 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
                 None,
                 0,
                 true,
+                false,
                 Default::default(),
             )
             .unwrap();
@@ -5085,6 +5294,7 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
                 None,
                 0,
                 true,
+                false,
                 Default::default(),
             )
             .unwrap();
@@ -5104,6 +5314,7 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
                 None,
                 0,
                 true,
+                false,
                 Default::default(),
             )
             .is_err());
@@ -5304,6 +5515,7 @@ fn cs() {
                     None,
                     0,
                     true,
+                    false,
                     Default::default(),
                 )
                 .unwrap();
@@ -6358,6 +6570,7 @@ fn cs() { _ = u.value; }
                 None,
                 0,
                 true,
+                false,
                 Default::default(),
             )
             .unwrap();
@@ -6373,6 +6586,7 @@ fn cs() { _ = u.value; }
                 None,
                 0,
                 true,
+                false,
                 Default::default(),
             )
             .unwrap();
@@ -6956,6 +7170,7 @@ fn cs() {
                     None,
                     0,
                     true,
+                    false,
                     Default::default(),
                 )
                 .unwrap()
@@ -7043,6 +7258,7 @@ fn fs(in: VsOut) -> @location(0) vec4f {
                         None,
                         0,
                         true,
+                        false,
                         Default::default(),
                     )
                     .unwrap()
@@ -7188,6 +7404,7 @@ fn cs() {
                     None,
                     0,
                     true,
+                    false,
                     Default::default(),
                 )
                 .unwrap()

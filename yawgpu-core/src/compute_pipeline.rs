@@ -548,6 +548,7 @@ pub(crate) fn select_compute_shader_source(
                 None,
                 user_immediate_size,
                 use_storage_input_output_16,
+                false,
                 workarounds,
             )?;
             Ok((

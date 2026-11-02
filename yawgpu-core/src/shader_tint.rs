@@ -44,6 +44,7 @@ struct MslCodegenKey {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SpirvCodegenKey {
+    emit_vertex_point_size: bool,
     workarounds: yawgpu_tint::SpirvWorkarounds,
     entry_point: String,
     constants: CanonicalConstants,
@@ -297,7 +298,7 @@ impl ReflectedModule {
     ///
     /// `vulkan_memory_model` enables Tint's SPV_KHR_vulkan_memory_model output
     /// when the Vulkan backend enabled `VK_KHR_vulkan_memory_model` /
-    /// `vulkanMemoryModel`. SPIR-V robustness stays enabled.
+    /// `vulkanMemoryModel` and `vulkanMemoryModelDeviceScope`. SPIR-V robustness stays enabled.
     /// `use_storage_input_output_16` mirrors the enabled Vulkan
     /// `storageInputOutput16` feature; false makes Tint widen f16 stage IO.
     ///
@@ -324,15 +325,23 @@ impl ReflectedModule {
         polyfill_pixel_center: Option<u32>,
         user_immediate_size: u32,
         use_storage_input_output_16: bool,
+        emit_vertex_point_size: bool,
         workarounds: yawgpu_hal::HalShaderWorkarounds,
     ) -> Result<Vec<u32>, String> {
-        let workarounds = yawgpu_tint::SpirvWorkarounds {
-            polyfill_bool_vec_dynamic_store: workarounds.polyfill_bool_vec_dynamic_store,
-            replace_workgroup_atomic_store_with_exchange: workarounds
-                .replace_workgroup_atomic_store_with_exchange,
-            replace_unsigned_compare_zero: workarounds.replace_unsigned_compare_zero,
-        };
+        let mut tint_workarounds = yawgpu_tint::SpirvWorkarounds::default();
+        tint_workarounds.use_demote_to_helper_invocation =
+            workarounds.use_demote_to_helper_invocation;
+        tint_workarounds.native_dot_4x8_packed = workarounds.native_dot_4x8_packed;
+        tint_workarounds.use_zero_initialize_workgroup_memory =
+            workarounds.use_zero_initialize_workgroup_memory;
+        tint_workarounds.polyfill_bool_vec_dynamic_store =
+            workarounds.polyfill_bool_vec_dynamic_store;
+        tint_workarounds.replace_workgroup_atomic_store_with_exchange =
+            workarounds.replace_workgroup_atomic_store_with_exchange;
+        tint_workarounds.replace_unsigned_compare_zero = workarounds.replace_unsigned_compare_zero;
+        let workarounds = tint_workarounds;
         let key = SpirvCodegenKey {
+            emit_vertex_point_size,
             workarounds,
             entry_point: entry_name.to_owned(),
             constants: CanonicalConstants::from(pipeline_constants),
@@ -364,6 +373,7 @@ impl ReflectedModule {
                 polyfill_pixel_center,
                 user_immediate_size,
                 use_storage_input_output_16,
+                emit_vertex_point_size,
                 workarounds,
             )
             .map_err(|e| e.to_string());
@@ -559,10 +569,12 @@ impl ReflectedModule {
         user_immediate_size: u32,
         workarounds: yawgpu_hal::HalShaderWorkarounds,
     ) -> Result<GeneratedMsl, String> {
-        let workarounds = yawgpu_tint::MslWorkarounds {
-            fix_u32_div_mod: workarounds.fix_u32_div_mod,
-            polyfill_bool_vec_dynamic_store: workarounds.polyfill_bool_vec_dynamic_store,
-        };
+        let mut tint_workarounds = yawgpu_tint::MslWorkarounds::default();
+        tint_workarounds.disable_demote_to_helper = workarounds.disable_demote_to_helper;
+        tint_workarounds.fix_u32_div_mod = workarounds.fix_u32_div_mod;
+        tint_workarounds.polyfill_bool_vec_dynamic_store =
+            workarounds.polyfill_bool_vec_dynamic_store;
+        let workarounds = tint_workarounds;
         let key = MslCodegenKey {
             workarounds,
             entry_point: entry_name.to_owned(),
@@ -1889,6 +1901,7 @@ mod tests {
                         None,
                         0,
                         true,
+                        false,
                         flags,
                     )
                     .unwrap();
@@ -1959,6 +1972,7 @@ mod tests {
                     None,
                     0,
                     enabled,
+                    false,
                     Default::default(),
                 )
                 .unwrap();
@@ -2287,6 +2301,7 @@ fn cs() {}
                 None,
                 0,
                 true,
+                false,
                 Default::default(),
             )
             .unwrap();
@@ -2301,6 +2316,7 @@ fn cs() {}
                 None,
                 0,
                 true,
+                false,
                 Default::default(),
             )
             .unwrap();
@@ -2318,6 +2334,7 @@ fn cs() {}
                 None,
                 0,
                 true,
+                false,
                 Default::default(),
             )
             .unwrap();
@@ -3226,6 +3243,7 @@ fn cs() {}
             None,
             0,
             true,
+            false,
             Default::default(),
         )
         .unwrap();
@@ -3263,6 +3281,7 @@ fn fs() -> @location(0) vec4<f32> {
                 None,
                 0,
                 true,
+                false,
                 Default::default(),
             )
             .unwrap();
@@ -3277,6 +3296,7 @@ fn fs() -> @location(0) vec4<f32> {
                 None,
                 0,
                 true,
+                false,
                 Default::default(),
             )
             .unwrap();
@@ -3340,6 +3360,68 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
     }
 
     #[test]
+    fn writer_feature_flags_partition_codegen_caches() {
+        let module = parse_and_validate_wgsl(
+            r#"
+@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0, 0, 0, 1); }
+"#,
+        )
+        .unwrap();
+        let mut variants = vec![(false, false, yawgpu_hal::HalShaderWorkarounds::default())];
+        variants.push((true, false, Default::default()));
+        variants.push((false, true, Default::default()));
+        for index in 0..3 {
+            let mut flags = yawgpu_hal::HalShaderWorkarounds::default();
+            match index {
+                0 => flags.use_demote_to_helper_invocation = true,
+                1 => flags.native_dot_4x8_packed = true,
+                _ => flags.use_zero_initialize_workgroup_memory = true,
+            }
+            variants.push((false, false, flags));
+        }
+        for _ in 0..2 {
+            for &(point_size, memory_model, flags) in &variants {
+                module
+                    .generate_spirv(
+                        "vs",
+                        ShaderStage::Vertex,
+                        &PipelineConstants::default(),
+                        memory_model,
+                        0,
+                        false,
+                        None,
+                        0,
+                        true,
+                        point_size,
+                        flags,
+                    )
+                    .unwrap();
+            }
+            assert_eq!(module.codegen_miss_count(), variants.len());
+        }
+        for _ in 0..2 {
+            for disabled in [false, true] {
+                let mut flags = yawgpu_hal::HalShaderWorkarounds::default();
+                flags.disable_demote_to_helper = disabled;
+                module
+                    .generate_render_vertex_msl(
+                        "vs",
+                        &MslBindingMap {
+                            resources: Vec::new(),
+                        },
+                        &[],
+                        false,
+                        &PipelineConstants::default(),
+                        0,
+                        flags,
+                    )
+                    .unwrap();
+            }
+            assert_eq!(module.codegen_miss_count(), variants.len() + 2);
+        }
+    }
+
+    #[test]
     fn generate_spirv_keeps_robustness_with_vulkan_memory_model_toggle() {
         let module = parse_and_validate_wgsl(
             r#"
@@ -3369,6 +3451,7 @@ fn cs() {
                     None,
                     0,
                     true,
+                    false,
                     Default::default(),
                 )
                 .unwrap();

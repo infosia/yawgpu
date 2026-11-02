@@ -356,6 +356,7 @@ YAWGPU_TINT_API bool yawgpu_tint_generate_msl(const YawgpuTintProgram*,
                               size_t n_ov,
                               bool disable_robustness,
                               bool fix_u32_div_mod,
+                              bool disable_demote_to_helper,
                               bool polyfill_bool_vec_dynamic_store,
                               bool emit_vertex_point_size,
                               const YawgpuTintVertexBuffer* vertex_buffers,
@@ -365,7 +366,11 @@ YAWGPU_TINT_API bool yawgpu_tint_generate_msl(const YawgpuTintProgram*,
                               YawgpuTintMslOutput* out,
                               char** err);
 
-/* `use_storage_input_output_16` must match the enabled Vulkan
+/* Native demote and zero-initialization options must match enabled Vulkan
+   features. `native_dot_4x8_packed` requires shaderIntegerDotProduct; false selects Tint polyfills.
+   `emit_vertex_point_size` is true only for point-list vertex stages.
+   `use_vulkan_memory_model` requires both the model and device-scope features.
+   `use_storage_input_output_16` must match the enabled Vulkan
    storageInputOutput16 feature, so Tint can widen f16 stage IO when absent.
    `user_immediate_size` has the same meaning as in yawgpu_tint_generate_msl:
    the owning pipeline layout's reserved user-immediate byte budget (Block
@@ -382,6 +387,10 @@ YAWGPU_TINT_API bool yawgpu_tint_generate_spirv(const YawgpuTintProgram*,
                                 bool polyfill_bool_vec_dynamic_store,
                                 bool replace_workgroup_atomic_store_with_exchange,
                                 bool replace_unsigned_compare_zero,
+                                bool use_demote_to_helper_invocation,
+                                bool native_dot_4x8_packed,
+                                bool use_zero_initialize_workgroup_memory,
+                                bool emit_vertex_point_size,
                                 bool use_vulkan_memory_model,
                                 bool use_storage_input_output_16,
                                 uint32_t framebuffer_fetch_descriptor_set,
