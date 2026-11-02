@@ -1,7 +1,8 @@
 # Block 120 — Tint driver workarounds
 
 Status: **COMPLETE (2026-11-02)**. Phase Review: 0 CRITICAL, 3 MAJOR, 6 MINOR; every
-MAJOR and m1-m4 fixed, m5 and m6 recorded below. Native Vulkan has not run this block.
+MAJOR and m1-m4 fixed, m5 and m6 recorded below. Native Vulkan ran on 2026-11-02;
+see "Windows native Vulkan" below.
 Source: Block 118 "Follow-ups". Dawn sets five driver-bug workarounds in Tint's
 writer options; the yawgpu shim sets none. Every option defaults to off, so a device
 that needs one silently runs the unmitigated shader. The CTS cannot see this on the
@@ -142,10 +143,41 @@ reports `missing Buffer binding at index 0 for tint_immediate_data[0]` and the r
 e2e fails.
 
 Not exercised:
-- Native Vulkan. The SPIR-V flags ran only on MoltenVK, which is reference-only, so a
-  forced e2e run on a native Vulkan host is still owed.
+- Native Vulkan, at the time of this run. It ran later; see the next section.
 - A device that matches a gate. The gates are proven by unit tests at each boundary.
 - The tiled subpass path with a forced flag. Delivery was checked by reading the code.
+
+### Windows native Vulkan (2026-11-02)
+
+Run on Windows 11 with an NVIDIA RTX 5060 Ti, driver 617.14, at yawgpu `2b3f4a7`. The
+code under test is the same as at `36f2719`. No Vulkan gate matches this host, so the
+three SPIR-V workarounds ran through `YAWGPU_FORCE_SHADER_WORKAROUNDS`.
+
+| Gate | Result |
+|---|---|
+| Vulkan e2e (`vulkan,tiled,shader-passthrough`, `--ignored`) under the Khronos layer | 152 passed, 0 failed, 0 VUIDs |
+| `e2e_vulkan_shader_workarounds`, all three SPIR-V flags forced in the child | 2 passed |
+| webgpu-native-cts (CTS `a5cbf67`), related queries, default | pass 6,872, skip 1,898, fail 1, xfail 1, xpass 1 |
+| The same queries, all three SPIR-V flags forced | pass 6,872, skip 1,898, fail 1, xfail 1, xpass 1 |
+
+The CTS run covered only the queries the three flags can reach, not `webgpu:*`:
+`shader,execution,expression,call,builtin,atomics,*`, `shader,execution,memory_model,*`,
+`shader,execution,expression,binary,u32_comparison:*`, `shader,execution,flow_control,*`,
+`shader,execution,expression,access,vector,*`, `shader,execution,statement,*`,
+`shader,execution,expression,binary,bool_logical:*`,
+`shader,execution,expression,unary,bool_conversion:*`, and `api,operation,compute,*`. It
+used `--workers 8` and `expectations/yawgpu-vulkan.txt`. The two runs together took 2
+minutes.
+
+The xfail and the xpass are the F-141 and F-152 `memory_model,coherence:corr` cases.
+Which of them fires depends on the host. The single fail was a different
+`memory_model,weak` case in each run: `store` (`atomic_storage`, 2 weak results) in the
+default run, and `read` (`atomic_storage`, 1 weak result) in the forced run. Every
+other subcase gave the same status in both runs. `memory_model,weak:*` then passed
+12/12 three times with default flags and three times with the flags forced. These are
+statistical tests on storage atomics. The atomic-store workaround rewrites only
+workgroup atomic stores, so the flags do not cause these failures. They are
+intermittent behaviour of this driver.
 
 ## Phase Review findings left open
 

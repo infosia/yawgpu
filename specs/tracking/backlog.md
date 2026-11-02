@@ -55,6 +55,7 @@ below are stable IDs, not the rank.
 | — | CTS findings F-161 to F-164 | Block 119 |
 | — | Tint driver workarounds from Block 118 | Block 120, see A12 |
 | — | F-151 real-GPU confirmation | Metal CTS case passes, 2026-11-02 |
+| A12 | Block 120 on native Vulkan | Windows native Vulkan e2e and forced CTS, 2026-11-02 |
 
 ---
 
@@ -62,7 +63,6 @@ below are stable IDs, not the rank.
 
 | # | Item | Difficulty | Evidence |
 |---|---|---|---|
-| A12 | **Block 120 on native Vulkan**: the three SPIR-V workarounds ran only on MoltenVK, which is reference-only. Run the forced `e2e_vulkan_shader_workarounds` on a native host. | Manual | `specs/blocks/120-tint-driver-workarounds.md` Verification |
 | A13 | **Dawn workarounds still unset**: AMD Mesa below 25.3 float polyfills, Imagination `polyfill_case_switch`, MSL `polyfill_clamp_float`, and others. Each needs a gate survey against Dawn. | M | `specs/blocks/120-tint-driver-workarounds.md` Out of scope |
 | A3 | **Lazy zero-init GLES clear paths (Block 104 S4)** — core marks and un-marks on every backend, but the GLES HAL has no `ClearTexture` lowering for the Stage-2 eligibility set (sampled reads of uninitialized depth/stencil, compressed and MSAA textures). Tier-2 catalogue item; passes today only where the driver hands back zeroed memory. | M | `specs/blocks/104-lazy-zero-init-stage2.md` S4; `specs/blocks/67-gles-backend.md` mapping matrix |
 | A7 | GLES `SetImmediates` is recorded and bounds-checked but never read by the draw path — a silent gap. Unreachable today because `max_immediate_size` is 0 and core rejects first; must become an explicit `HalError` if the limit is ever raised. | S | `specs/blocks/67-gles-backend.md:282`, `yawgpu-hal/src/gles/adapter.rs` |
