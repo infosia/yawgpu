@@ -21,6 +21,10 @@ pub struct HalShaderWorkarounds {
     pub native_dot_4x8_packed: bool,
     /// SPIR-V: initialize workgroup variables with OpConstantNull.
     pub use_zero_initialize_workgroup_memory: bool,
+    /// SPIR-V: add MaximallyReconvergesKHR to entry points.
+    pub use_maximal_reconvergence: bool,
+    /// SPIR-V: add SubgroupUniformControlFlowKHR to compute and fragment entry points.
+    pub use_subgroup_uniform_control_flow: bool,
     /// MSL: inject a non-constant zero into unsigned divide and modulo.
     pub fix_u32_div_mod: bool,
     /// MSL/SPIR-V: polyfill dynamically indexed boolean-vector stores.
@@ -96,6 +100,8 @@ impl HalShaderWorkarounds {
             use_demote_to_helper_invocation: self.use_demote_to_helper_invocation,
             native_dot_4x8_packed: self.native_dot_4x8_packed,
             use_zero_initialize_workgroup_memory: self.use_zero_initialize_workgroup_memory,
+            use_maximal_reconvergence: self.use_maximal_reconvergence,
+            use_subgroup_uniform_control_flow: self.use_subgroup_uniform_control_flow,
             fix_u32_div_mod: self.fix_u32_div_mod || forced.fix_u32_div_mod,
             polyfill_bool_vec_dynamic_store: self.polyfill_bool_vec_dynamic_store
                 || forced.polyfill_bool_vec_dynamic_store,
@@ -115,6 +121,8 @@ mod tests {
     #[test]
     fn vulkan_default_writer_flags_disable_native_dot_products() {
         assert!(!HalShaderWorkarounds::default().native_dot_4x8_packed);
+        assert!(!HalShaderWorkarounds::default().use_maximal_reconvergence);
+        assert!(!HalShaderWorkarounds::default().use_subgroup_uniform_control_flow);
     }
 
     #[test]
@@ -204,8 +212,13 @@ mod tests {
             " {},unknown,{},{} ",
             names[0], names[1], names[0]
         )));
-        let gate = HalShaderWorkarounds::for_vulkan(0x144d, 24 << 22, true, false);
+        let gate = HalShaderWorkarounds {
+            use_maximal_reconvergence: true,
+            ..HalShaderWorkarounds::for_vulkan(0x144d, 24 << 22, true, false)
+        };
         let combined = gate.with_forced(flags);
+        assert!(combined.use_maximal_reconvergence);
+        assert!(!combined.use_subgroup_uniform_control_flow);
         assert!(
             combined.fix_u32_div_mod
                 && combined.polyfill_bool_vec_dynamic_store

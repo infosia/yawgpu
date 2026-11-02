@@ -286,18 +286,20 @@ pub(super) fn create_compute_pipeline(
             return Err(shader_error("pipeline layout creation failed"));
         }
     };
+    let (pipeline_subgroup_size, subgroup_flags) = compute_stage_subgroup_config(
+        required_subgroup_size,
+        device.default_compute_subgroup_size,
+        device.subgroup_size_control,
+    );
     let mut required_subgroup_size_info =
         vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo::default()
-            .required_subgroup_size(required_subgroup_size.unwrap_or(0));
+            .required_subgroup_size(pipeline_subgroup_size.unwrap_or(0));
     let mut stage = vk::PipelineShaderStageCreateInfo::default()
-        .flags(compute_stage_subgroup_flags(
-            required_subgroup_size,
-            device.subgroup_size_control,
-        ))
+        .flags(subgroup_flags)
         .stage(vk::ShaderStageFlags::COMPUTE)
         .module(shader_module)
         .name(&entry_point);
-    if required_subgroup_size.is_some() {
+    if pipeline_subgroup_size.is_some() {
         stage = stage.push_next(&mut required_subgroup_size_info);
     }
     let pipeline_info = vk::ComputePipelineCreateInfo::default()
@@ -371,29 +373,33 @@ fn check_required_subgroup_size_supported(
     }
 }
 
-/// Selects the compute stage's subgroup create flags (Block 108 R5, Dawn
+/// Selects the compute stage's required size and create flags (Blocks 108/127, Dawn
 /// `ComputePipelineVk.cpp` parity).
 ///
 /// - `Some(_)` (WGSL `@subgroup_size`): `REQUIRE_FULL_SUBGROUPS` only; the
 ///   caller chains the required size.
-/// - `None` with `VK_EXT_subgroup_size_control` enabled:
+/// - A device default requires that size, without full or varying flags.
+/// - No explicit or default size with `VK_EXT_subgroup_size_control` enabled:
 ///   `ALLOW_VARYING_SUBGROUP_SIZE` only, so `@builtin(subgroup_size)` reports
 ///   the dispatched width on variable-width GPUs.
-/// - `None` without the extension: no flags.
+/// - No size without the extension: no flags.
 ///
 /// Never both flags: `ALLOW_VARYING_SUBGROUP_SIZE` is illegal alongside a
 /// required size (VUID-VkPipelineShaderStageCreateInfo-pNext-02754).
-fn compute_stage_subgroup_flags(
-    required_subgroup_size: Option<u32>,
+fn compute_stage_subgroup_config(
+    explicit_size: Option<u32>,
+    default_size: Option<u32>,
     subgroup_size_control_enabled: bool,
-) -> vk::PipelineShaderStageCreateFlags {
-    match required_subgroup_size {
-        Some(_) => vk::PipelineShaderStageCreateFlags::REQUIRE_FULL_SUBGROUPS,
-        None if subgroup_size_control_enabled => {
-            vk::PipelineShaderStageCreateFlags::ALLOW_VARYING_SUBGROUP_SIZE
-        }
-        None => vk::PipelineShaderStageCreateFlags::empty(),
-    }
+) -> (Option<u32>, vk::PipelineShaderStageCreateFlags) {
+    let required_size = explicit_size.or(default_size);
+    let flags = if explicit_size.is_some() {
+        vk::PipelineShaderStageCreateFlags::REQUIRE_FULL_SUBGROUPS
+    } else if required_size.is_none() && subgroup_size_control_enabled {
+        vk::PipelineShaderStageCreateFlags::ALLOW_VARYING_SUBGROUP_SIZE
+    } else {
+        vk::PipelineShaderStageCreateFlags::empty()
+    };
+    (required_size, flags)
 }
 
 /// Extracts storage access from Tint's per-entry-point render SPIR-V. HAL
@@ -2452,19 +2458,22 @@ mod tests {
     use ash::vk::Handle;
 
     #[test]
-    fn compute_stage_subgroup_flags_selects_full_varying_or_none() {
+    fn compute_stage_subgroup_config_prefers_explicit_then_default_then_varying() {
         let full = vk::PipelineShaderStageCreateFlags::REQUIRE_FULL_SUBGROUPS;
         let varying = vk::PipelineShaderStageCreateFlags::ALLOW_VARYING_SUBGROUP_SIZE;
-
-        assert_eq!(compute_stage_subgroup_flags(Some(32), true), full);
-        // Unreachable after validation (the caller rejects it first), but
-        // the flags still never include ALLOW_VARYING for a required size.
-        assert_eq!(compute_stage_subgroup_flags(Some(32), false), full);
-        assert_eq!(compute_stage_subgroup_flags(None, true), varying);
-        assert_eq!(
-            compute_stage_subgroup_flags(None, false),
-            vk::PipelineShaderStageCreateFlags::empty()
-        );
+        let empty = vk::PipelineShaderStageCreateFlags::empty();
+        for (explicit, default, enabled, expected) in [
+            (Some(32), Some(16), true, (Some(32), full)),
+            (Some(32), None, true, (Some(32), full)),
+            (None, Some(16), true, (Some(16), empty)),
+            (None, None, true, (None, varying)),
+            (None, None, false, (None, empty)),
+        ] {
+            assert_eq!(
+                compute_stage_subgroup_config(explicit, default, enabled),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -2490,12 +2499,17 @@ mod tests {
         let both = vk::PipelineShaderStageCreateFlags::REQUIRE_FULL_SUBGROUPS
             | vk::PipelineShaderStageCreateFlags::ALLOW_VARYING_SUBGROUP_SIZE;
         for required in [None, Some(4), Some(32), Some(128)] {
-            for enabled in [false, true] {
-                let flags = compute_stage_subgroup_flags(required, enabled);
-                assert!(
-                    !flags.contains(both),
-                    "{required:?}/{enabled}: both subgroup flags set"
-                );
+            for default in [None, Some(16)] {
+                for enabled in [false, true] {
+                    let (size, flags) = compute_stage_subgroup_config(required, default, enabled);
+                    assert!(!flags.contains(both), "{required:?}/{default:?}/{enabled}");
+                    assert!(
+                        !(size.is_some()
+                            && flags.contains(
+                                vk::PipelineShaderStageCreateFlags::ALLOW_VARYING_SUBGROUP_SIZE
+                            ))
+                    );
+                }
             }
         }
     }

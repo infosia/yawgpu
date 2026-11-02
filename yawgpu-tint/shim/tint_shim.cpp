@@ -2430,6 +2430,8 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
                                 bool use_demote_to_helper_invocation,
                                 bool native_dot_4x8_packed,
                                 bool use_zero_initialize_workgroup_memory,
+                                bool use_maximal_reconvergence,
+                                bool use_subgroup_uniform_control_flow,
                                 bool emit_vertex_point_size,
                                 bool use_vulkan_memory_model,
                                 bool use_storage_input_output_16,
@@ -2473,6 +2475,8 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
         options.extensions.use_demote_to_helper_invocation = use_demote_to_helper_invocation;
         options.extensions.dot_4x8_packed = !native_dot_4x8_packed;
         options.extensions.use_zero_initialize_workgroup_memory = use_zero_initialize_workgroup_memory;
+        options.extensions.use_maximal_reconvergence = use_maximal_reconvergence;
+        options.extensions.use_subgroup_uniform_control_flow = use_subgroup_uniform_control_flow;
         options.extensions.use_vulkan_memory_model = use_vulkan_memory_model;
         options.extensions.use_storage_input_output_16 = use_storage_input_output_16;
         options.multisampled_input_attachment = multisampled_input_attachment;

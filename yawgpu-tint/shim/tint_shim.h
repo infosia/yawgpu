@@ -368,6 +368,7 @@ YAWGPU_TINT_API bool yawgpu_tint_generate_msl(const YawgpuTintProgram*,
 
 /* Native demote and zero-initialization options must match enabled Vulkan
    features. `native_dot_4x8_packed` requires shaderIntegerDotProduct; false selects Tint polyfills.
+   Reconvergence options require the matching enabled Vulkan features; maximal takes precedence.
    `emit_vertex_point_size` is true only for point-list vertex stages.
    `use_vulkan_memory_model` requires both the model and device-scope features.
    `use_storage_input_output_16` must match the enabled Vulkan
@@ -392,6 +393,8 @@ YAWGPU_TINT_API bool yawgpu_tint_generate_spirv(const YawgpuTintProgram*,
                                 bool use_demote_to_helper_invocation,
                                 bool native_dot_4x8_packed,
                                 bool use_zero_initialize_workgroup_memory,
+                                bool use_maximal_reconvergence,
+                                bool use_subgroup_uniform_control_flow,
                                 bool emit_vertex_point_size,
                                 bool use_vulkan_memory_model,
                                 bool use_storage_input_output_16,

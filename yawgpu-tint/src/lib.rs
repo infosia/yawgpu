@@ -42,6 +42,10 @@ pub struct SpirvWorkarounds {
     pub native_dot_4x8_packed: bool,
     /// Initialize workgroup memory with OpConstantNull.
     pub use_zero_initialize_workgroup_memory: bool,
+    /// Add MaximallyReconvergesKHR to entry points; takes precedence over uniform control flow.
+    pub use_maximal_reconvergence: bool,
+    /// Add SubgroupUniformControlFlowKHR to compute and fragment entry points.
+    pub use_subgroup_uniform_control_flow: bool,
     /// Polyfill dynamically indexed boolean-vector stores.
     pub polyfill_bool_vec_dynamic_store: bool,
     /// Replace workgroup atomic stores with atomic exchanges.
@@ -1564,6 +1568,8 @@ mod real {
             use_demote_to_helper_invocation: bool,
             native_dot_4x8_packed: bool,
             use_zero_initialize_workgroup_memory: bool,
+            use_maximal_reconvergence: bool,
+            use_subgroup_uniform_control_flow: bool,
             emit_vertex_point_size: bool,
             use_vulkan_memory_model: bool,
             use_storage_input_output_16: bool,
@@ -2285,6 +2291,8 @@ mod real {
                     workarounds.use_demote_to_helper_invocation,
                     workarounds.native_dot_4x8_packed,
                     workarounds.use_zero_initialize_workgroup_memory,
+                    workarounds.use_maximal_reconvergence,
+                    workarounds.use_subgroup_uniform_control_flow,
                     emit_vertex_point_size,
                     use_vulkan_memory_model,
                     use_storage_input_output_16,
@@ -2817,6 +2825,65 @@ fn cs(@builtin(local_invocation_index) index: u32) {
                 flags,
             )
             .unwrap()
+    }
+
+    #[test]
+    fn spirv_reconvergence_options_add_execution_modes() {
+        let program = Program::parse(
+            r#"
+@compute @workgroup_size(1) fn cs() {}
+@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0, 0, 0, 1); }
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1); }
+"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        for maximal in [false, true] {
+            for uniform in [false, true] {
+                let flags = SpirvWorkarounds {
+                    use_maximal_reconvergence: maximal,
+                    use_subgroup_uniform_control_flow: uniform,
+                    ..Default::default()
+                };
+                for entry in ["cs", "fs", "vs"] {
+                    let words = program
+                        .generate_spirv(
+                            entry,
+                            &Bindings::default(),
+                            &[],
+                            true,
+                            false,
+                            0,
+                            false,
+                            None,
+                            false,
+                            0,
+                            true,
+                            false,
+                            flags,
+                        )
+                        .unwrap();
+                    let instructions = spirv_instructions(&words);
+                    let has_mode = |mode| {
+                        instructions
+                            .iter()
+                            .any(|i| i[0] & 0xffff == 16 && i.get(2) == Some(&mode))
+                    };
+                    assert_eq!(has_mode(6023), maximal, "{entry}: maximal={maximal}");
+                    assert_eq!(
+                        has_mode(4421),
+                        !maximal && uniform && entry != "vs",
+                        "{entry}: maximal={maximal}, uniform={uniform}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

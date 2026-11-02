@@ -3,6 +3,8 @@ use super::*;
 /// Holds shared state for the vulkan device handle.
 pub(super) struct VulkanDeviceInner {
     pub(super) shader_workarounds: crate::HalShaderWorkarounds,
+    /// Reconvergence features enabled at device creation, independent of Tint choice.
+    pub(super) reconvergence_features: ReconvergenceFeatures,
     pub(super) _instance: Arc<VulkanInstanceInner>,
     pub(super) device: ash::Device,
     pub(super) physical_device: vk::PhysicalDevice,
@@ -27,11 +29,13 @@ pub(super) struct VulkanDeviceInner {
     pub(super) image_format_list: bool,
     /// Whether the swapchain mutable format extension and its dependencies are enabled.
     pub(super) swapchain_mutable_format: bool,
-    /// Whether `VK_EXT_subgroup_size_control` with `subgroupSizeControl` and
-    /// `computeFullSubgroups` was enabled (Block 108 R5). Compute pipelines
+    /// Whether `VK_EXT_subgroup_size_control` with `subgroupSizeControl`
+    /// was enabled (Block 108 R5). Compute pipelines
     /// need it for a required subgroup size and for
     /// `ALLOW_VARYING_SUBGROUP_SIZE`.
     pub(super) subgroup_size_control: bool,
+    /// Required size for compute pipelines without an explicit WGSL subgroup size.
+    pub(super) default_compute_subgroup_size: Option<u32>,
     /// Whether `VK_KHR_16bit_storage` / `storageBuffer16BitAccess` was enabled.
     pub(super) storage_buffer16_bit_access: bool,
     /// Whether `VK_KHR_16bit_storage` / `uniformAndStorageBuffer16BitAccess` was enabled.
@@ -53,6 +57,7 @@ impl fmt::Debug for VulkanDeviceInner {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("VulkanDeviceInner")
+            .field("reconvergence_features", &self.reconvergence_features)
             .field(
                 "shader_demote_to_helper_invocation",
                 &self.shader_demote_to_helper_invocation,
@@ -61,6 +66,10 @@ impl fmt::Debug for VulkanDeviceInner {
             .field("vulkan_memory_model", &self.vulkan_memory_model)
             .field("image_format_list", &self.image_format_list)
             .field("subgroup_size_control", &self.subgroup_size_control)
+            .field(
+                "default_compute_subgroup_size",
+                &self.default_compute_subgroup_size,
+            )
             .field(
                 "storage_buffer16_bit_access",
                 &self.storage_buffer16_bit_access,
@@ -185,7 +194,8 @@ impl VulkanDevice {
     /// `required_subgroup_size` is `Some(S)` when the entry point declares WGSL
     /// `@subgroup_size(S)` (Block 108): the stage requires subgroup size `S`
     /// with full subgroups. It returns a [`HalError`] when the device did not
-    /// enable `VK_EXT_subgroup_size_control`.
+    /// enable `VK_EXT_subgroup_size_control`. Without an explicit size the
+    /// device-selected default is required, when present, without full subgroups.
     pub fn create_compute_pipeline(
         &self,
         shader: HalShaderSource,
@@ -359,6 +369,142 @@ mod tests {
                 None,
             )
             .expect("create compute pipeline");
+        assert_ne!(pipeline.inner.pipeline, vk::Pipeline::null());
+    }
+
+    #[test]
+    #[ignore = "requires real Vulkan with VK_LAYER_KHRONOS_validation; Block 127 S2 manual run"]
+    fn vulkan_device_reconvergence_and_default_compute_pipeline() {
+        let instance = VulkanInstance::new().expect("create Vulkan instance");
+        let adapter = instance
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .expect("Vulkan adapter");
+        let query = adapter.subgroup_query();
+        let device = adapter.create_device().expect("create Vulkan device");
+        let flags = device.shader_workarounds();
+        let maximal_extension =
+            adapter.has_device_extension(vk::KHR_SHADER_MAXIMAL_RECONVERGENCE_NAME);
+        let uniform_extension =
+            adapter.has_device_extension(vk::KHR_SHADER_SUBGROUP_UNIFORM_CONTROL_FLOW_NAME);
+        let mut maximal_features =
+            vk::PhysicalDeviceShaderMaximalReconvergenceFeaturesKHR::default();
+        let mut uniform_features =
+            vk::PhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR::default();
+        let mut features = vk::PhysicalDeviceFeatures2::default();
+        if maximal_extension {
+            features = features.push_next(&mut maximal_features);
+        }
+        if uniform_extension {
+            features = features.push_next(&mut uniform_features);
+        }
+        unsafe {
+            instance
+                .inner
+                .instance
+                .get_physical_device_features2(adapter.physical_device, &mut features);
+        }
+        let expected_enabled = enabled_reconvergence_features(
+            maximal_extension,
+            maximal_features.shader_maximal_reconvergence,
+            uniform_extension,
+            uniform_features.shader_subgroup_uniform_control_flow,
+        );
+        assert_eq!(device.inner.reconvergence_features, expected_enabled);
+        let properties = unsafe {
+            instance
+                .inner
+                .instance
+                .get_physical_device_properties(adapter.physical_device)
+        };
+        let expected_tint = select_reconvergence(
+            expected_enabled,
+            query.supported_stages,
+            cfg!(target_os = "android"),
+            properties.vendor_id,
+        );
+        assert_eq!(
+            flags.use_maximal_reconvergence,
+            expected_tint == Reconvergence::Maximal
+        );
+        assert_eq!(
+            flags.use_subgroup_uniform_control_flow,
+            expected_tint == Reconvergence::UniformControlFlow
+        );
+        eprintln!(
+            "reconvergence extensions: maximal={maximal_extension}, subgroup_uniform_control_flow={uniform_extension}; enabled features={:?}",
+            device.inner.reconvergence_features,
+        );
+        eprintln!(
+            "Tint reconvergence: maximal={}, subgroup_uniform_control_flow={}; default compute subgroup size={:?}",
+            flags.use_maximal_reconvergence,
+            flags.use_subgroup_uniform_control_flow,
+            device.inner.default_compute_subgroup_size,
+        );
+        eprintln!(
+            "subgroupSizeControl enabled={}; requiredSubgroupSizeStages={:?}",
+            device.inner.subgroup_size_control, query.required_subgroup_size_stages,
+        );
+        if !device.inner.subgroup_size_control
+            || !query
+                .required_subgroup_size_stages
+                .contains(vk::ShaderStageFlags::COMPUTE)
+        {
+            assert_eq!(device.inner.default_compute_subgroup_size, None);
+        }
+        if let Some(default_size) = device.inner.default_compute_subgroup_size {
+            let subgroup_budget =
+                u64::from(query.max_compute_workgroup_subgroups) * u64::from(default_size);
+            assert!(subgroup_budget >= 256);
+            assert!(
+                u64::from(adapter.limits().max_compute_invocations_per_workgroup)
+                    <= subgroup_budget
+            );
+        }
+        assert!(!(flags.use_maximal_reconvergence && flags.use_subgroup_uniform_control_flow));
+        let program = yawgpu_tint::Program::parse(
+            "@compute @workgroup_size(1) fn main() {}",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .expect("parse compute shader without @subgroup_size");
+        let mut writer = yawgpu_tint::SpirvWorkarounds::default();
+        writer.use_maximal_reconvergence = flags.use_maximal_reconvergence;
+        writer.use_subgroup_uniform_control_flow = flags.use_subgroup_uniform_control_flow;
+        let words = program
+            .generate_spirv(
+                "main",
+                &Default::default(),
+                &[],
+                true,
+                false,
+                0,
+                false,
+                None,
+                false,
+                0,
+                true,
+                false,
+                writer,
+            )
+            .expect("generate compute SPIR-V");
+        // A one-invocation workgroup also checks that defaults do not require full subgroups.
+        let pipeline = device
+            .create_compute_pipeline(
+                HalShaderSource::SpirV(words),
+                "main",
+                (1, 1, 1),
+                &[],
+                0,
+                None,
+            )
+            .expect("create compute pipeline without @subgroup_size");
         assert_ne!(pipeline.inner.pipeline, vk::Pipeline::null());
     }
 

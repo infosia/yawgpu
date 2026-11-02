@@ -339,7 +339,14 @@ impl VulkanAdapter {
             vk.max_push_constants_size
         );
 
-        hal_limits_from_vk(vk, max_buffer_size)
+        let mut limits = hal_limits_from_vk(vk, max_buffer_size);
+        let subgroup_query = self.subgroup_query();
+        limits.max_compute_invocations_per_workgroup = clamp_compute_invocations_per_workgroup(
+            limits.max_compute_invocations_per_workgroup,
+            subgroup_query.max_compute_workgroup_subgroups,
+            subgroup_query.default_compute_subgroup_size(),
+        );
+        limits
     }
 
     fn max_buffer_size(&self) -> u64 {
@@ -762,6 +769,7 @@ impl VulkanAdapter {
             }
         }
         SubgroupQuery {
+            supported_stages: subgroup.supported_stages,
             range,
             extension_present,
             subgroup_size_control: features.subgroup_size_control,
@@ -860,7 +868,21 @@ impl VulkanAdapter {
         let mut integer_dot_features = vk::PhysicalDeviceShaderIntegerDotProductFeatures::default();
         let mut zero_initialize_features =
             vk::PhysicalDeviceZeroInitializeWorkgroupMemoryFeatures::default();
+        let maximal_reconvergence_extension =
+            self.has_device_extension(vk::KHR_SHADER_MAXIMAL_RECONVERGENCE_NAME);
+        let uniform_control_flow_extension =
+            self.has_device_extension(vk::KHR_SHADER_SUBGROUP_UNIFORM_CONTROL_FLOW_NAME);
+        let mut maximal_reconvergence_features =
+            vk::PhysicalDeviceShaderMaximalReconvergenceFeaturesKHR::default();
+        let mut uniform_control_flow_features =
+            vk::PhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR::default();
         let mut writer_features = vk::PhysicalDeviceFeatures2::default();
+        if maximal_reconvergence_extension {
+            writer_features = writer_features.push_next(&mut maximal_reconvergence_features);
+        }
+        if uniform_control_flow_extension {
+            writer_features = writer_features.push_next(&mut uniform_control_flow_features);
+        }
         if writer_feature_available(effective_api_version, shader_demote_extension) {
             writer_features = writer_features.push_next(&mut demote_features);
         }
@@ -891,6 +913,24 @@ impl VulkanAdapter {
             zero_initialize_features.shader_zero_initialize_workgroup_memory,
             device_properties.vendor_id,
         );
+        let reconvergence_features = enabled_reconvergence_features(
+            maximal_reconvergence_extension,
+            maximal_reconvergence_features.shader_maximal_reconvergence,
+            uniform_control_flow_extension,
+            uniform_control_flow_features.shader_subgroup_uniform_control_flow,
+        );
+        let reconvergence = select_reconvergence(
+            reconvergence_features,
+            self.subgroup_query().supported_stages,
+            cfg!(target_os = "android"),
+            device_properties.vendor_id,
+        );
+        if reconvergence_features.maximal {
+            extension_names.push(vk::KHR_SHADER_MAXIMAL_RECONVERGENCE_NAME.as_ptr());
+        }
+        if reconvergence_features.uniform_control_flow {
+            extension_names.push(vk::KHR_SHADER_SUBGROUP_UNIFORM_CONTROL_FLOW_NAME.as_ptr());
+        }
         // These features were promoted in Vulkan 1.3. Use the effective API
         // version, so a 1.1 instance still enables the extension names.
         if effective_api_version < vk::API_VERSION_1_3 {
@@ -1062,8 +1102,8 @@ impl VulkanAdapter {
         // VK_EXT_subgroup_size_control whenever WGSL subgroups are supported
         // and the driver reports `subgroupSizeControl`, independent of the
         // requested WebGPU features and of whether `subgroup-size-control`
-        // is advertised. Compute pipelines without `@subgroup_size` then use
-        // ALLOW_VARYING_SUBGROUP_SIZE; a required size + REQUIRE_FULL_SUBGROUPS
+        // is advertised. Pipelines without `@subgroup_size` use the selected
+        // default size or ALLOW_VARYING_SUBGROUP_SIZE; REQUIRE_FULL_SUBGROUPS
         // additionally needs `computeFullSubgroups`, which is enabled only
         // when the driver reports it (the WebGPU feature requires it).
         let subgroup_query = *self.subgroup_query();
@@ -1075,6 +1115,13 @@ impl VulkanAdapter {
             vk::PhysicalDeviceSubgroupSizeControlFeatures::default()
                 .subgroup_size_control(true)
                 .compute_full_subgroups(subgroup_query.compute_full_subgroups == vk::TRUE);
+        let default_compute_subgroup_size = subgroup_query.default_compute_subgroup_size();
+        let mut maximal_reconvergence_enable_features =
+            vk::PhysicalDeviceShaderMaximalReconvergenceFeaturesKHR::default()
+                .shader_maximal_reconvergence(true);
+        let mut uniform_control_flow_enable_features =
+            vk::PhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR::default()
+                .shader_subgroup_uniform_control_flow(true);
         let mut depth_clip_enable_features =
             vk::PhysicalDeviceDepthClipEnableFeaturesEXT::default().depth_clip_enable(true);
         let mut shader_demote_features =
@@ -1127,6 +1174,12 @@ impl VulkanAdapter {
         if subgroup_size_control {
             create_info = create_info.push_next(&mut subgroup_size_control_features);
         }
+        if reconvergence_features.maximal {
+            create_info = create_info.push_next(&mut maximal_reconvergence_enable_features);
+        }
+        if reconvergence_features.uniform_control_flow {
+            create_info = create_info.push_next(&mut uniform_control_flow_enable_features);
+        }
         let device = unsafe {
             self.instance
                 .instance
@@ -1154,9 +1207,11 @@ impl VulkanAdapter {
             shader_demote_to_helper_invocation,
             shader_integer_dot_product,
             zero_initialize_workgroup_memory,
+            reconvergence,
         );
         let inner = Arc::new(VulkanDeviceInner {
             shader_workarounds,
+            reconvergence_features,
             _instance: Arc::clone(&self.instance),
             device,
             physical_device: self.physical_device,
@@ -1171,6 +1226,7 @@ impl VulkanAdapter {
             image_format_list,
             swapchain_mutable_format,
             subgroup_size_control,
+            default_compute_subgroup_size,
             storage_buffer16_bit_access: storage_16bit_features.storage_buffer16_bit_access,
             uniform_and_storage_buffer16_bit_access: storage_16bit_features
                 .uniform_and_storage_buffer16_bit_access,
@@ -1440,8 +1496,9 @@ fn subgroups_supported(
     // VK_EXT_subgroup_size_control. When the extension is enabled (Block 108
     // R5: present with `subgroupSizeControl`, see
     // `subgroup_size_control_extension_usable`), compute pipelines without
-    // `@subgroup_size` are created with ALLOW_VARYING_SUBGROUP_SIZE; without
-    // it they use the driver's default.
+    // `@subgroup_size` require the selected default size when sizes vary,
+    // otherwise ALLOW_VARYING_SUBGROUP_SIZE; without the extension they use
+    // the driver's default.
     supported_operations.contains(required_operations) && supported_stages.contains(required_stages)
 }
 
@@ -1550,13 +1607,104 @@ fn vulkan_writer_flags(
     demote_enabled: bool,
     integer_dot_enabled: bool,
     zero_init_enabled: bool,
+    reconvergence: Reconvergence,
 ) -> crate::HalShaderWorkarounds {
     crate::HalShaderWorkarounds {
         use_demote_to_helper_invocation: demote_enabled,
         native_dot_4x8_packed: integer_dot_enabled,
         use_zero_initialize_workgroup_memory: zero_init_enabled,
+        use_maximal_reconvergence: reconvergence == Reconvergence::Maximal,
+        use_subgroup_uniform_control_flow: reconvergence == Reconvergence::UniformControlFlow,
         ..workarounds
     }
+}
+
+/// Reconvergence features enabled independently for generated and passthrough SPIR-V.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReconvergenceFeatures {
+    maximal: bool,
+    uniform_control_flow: bool,
+}
+
+/// Dawn enables each supported device feature independently of its Tint toggles.
+fn enabled_reconvergence_features(
+    maximal_extension: bool,
+    maximal_feature: vk::Bool32,
+    uniform_extension: bool,
+    uniform_feature: vk::Bool32,
+) -> ReconvergenceFeatures {
+    ReconvergenceFeatures {
+        maximal: maximal_extension && maximal_feature == vk::TRUE,
+        uniform_control_flow: uniform_extension && uniform_feature == vk::TRUE,
+    }
+}
+
+/// Mutually exclusive Tint execution modes; device features may both be enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reconvergence {
+    None,
+    Maximal,
+    UniformControlFlow,
+}
+
+/// Dawn prefers maximal reconvergence, then uniform control flow in both stages.
+fn select_reconvergence(
+    enabled: ReconvergenceFeatures,
+    supported_stages: vk::ShaderStageFlags,
+    is_android: bool,
+    vendor_id: u32,
+) -> Reconvergence {
+    // Dawn's IsAndroidImgTec tests the vendor regardless of driver identity.
+    if is_android && vendor_id == 0x1010 {
+        Reconvergence::None
+    } else if enabled.maximal {
+        Reconvergence::Maximal
+    } else if enabled.uniform_control_flow
+        && supported_stages.contains(vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT)
+    {
+        Reconvergence::UniformControlFlow
+    } else {
+        Reconvergence::None
+    }
+}
+
+/// Dawn's FindDefaultComputeSubgroupSize heuristic, independent of WebGPU requests.
+fn find_default_compute_subgroup_size(
+    size_control_enabled: bool,
+    required_subgroup_size_stages: vk::ShaderStageFlags,
+    min_size: u32,
+    max_size: u32,
+    max_compute_workgroup_subgroups: u32,
+) -> Option<u32> {
+    // Dawn's FindDefaultComputeSubgroupSize lacks this stage check. Deliberately
+    // deviate to avoid VUID-02755 on drivers such as MoltenVK.
+    if !size_control_enabled
+        || !required_subgroup_size_stages.contains(vk::ShaderStageFlags::COMPUTE)
+        || min_size == max_size
+    {
+        return None;
+    }
+    let size = match min_size.checked_mul(2) {
+        Some(size) if size <= max_size => size,
+        _ => min_size,
+    };
+    // Core raises the invocation limit to at least 256. A smaller subgroup
+    // budget would make a valid 256-invocation workgroup violate VUID-02756.
+    if u64::from(max_compute_workgroup_subgroups) * u64::from(size) < 256 {
+        return None;
+    }
+    Some(size)
+}
+
+/// Required compute sizes constrain invocations even without full subgroups.
+fn clamp_compute_invocations_per_workgroup(
+    invocations: u32,
+    max_workgroup_subgroups: u32,
+    default_size: Option<u32>,
+) -> u32 {
+    default_size.map_or(invocations, |size| {
+        invocations.min(max_workgroup_subgroups.saturating_mul(size))
+    })
 }
 
 /// Whether a Vulkan 1.3 writer feature can be queried or enabled.
@@ -1627,6 +1775,8 @@ fn subgroup_size_control_extension_usable(
 /// so feature enumeration and device creation read the same snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SubgroupQuery {
+    /// Stages supporting subgroups, used by the reconvergence decision.
+    supported_stages: vk::ShaderStageFlags,
     /// Validated WGSL subgroup size range; `None` when WGSL `subgroups` is
     /// unsupported.
     range: Option<(u32, u32)>,
@@ -1645,6 +1795,18 @@ struct SubgroupQuery {
 }
 
 impl SubgroupQuery {
+    /// Default required size for compute stages without a WGSL attribute.
+    fn default_compute_subgroup_size(&self) -> Option<u32> {
+        let (min, max) = self.range?;
+        find_default_compute_subgroup_size(
+            self.extension_usable(),
+            self.required_subgroup_size_stages,
+            min,
+            max,
+            self.max_compute_workgroup_subgroups,
+        )
+    }
+
     /// Whether device creation enables `VK_EXT_subgroup_size_control`.
     fn extension_usable(&self) -> bool {
         subgroup_size_control_extension_usable(
@@ -1870,6 +2032,8 @@ mod tests {
             use_demote_to_helper_invocation: true,
             native_dot_4x8_packed: true,
             use_zero_initialize_workgroup_memory: true,
+            use_maximal_reconvergence: true,
+            use_subgroup_uniform_control_flow: true,
             ..Default::default()
         };
         for enabled in [
@@ -1882,7 +2046,15 @@ mod tests {
             [false, true, true],
             [true, true, true],
         ] {
-            let flags = vulkan_writer_flags(workarounds, enabled[0], enabled[1], enabled[2]);
+            let flags = vulkan_writer_flags(
+                workarounds,
+                enabled[0],
+                enabled[1],
+                enabled[2],
+                Reconvergence::None,
+            );
+            assert!(!flags.use_maximal_reconvergence);
+            assert!(!flags.use_subgroup_uniform_control_flow);
             assert_eq!(
                 [
                     flags.use_demote_to_helper_invocation,
@@ -1894,6 +2066,250 @@ mod tests {
             assert!(flags.replace_unsigned_compare_zero);
             assert!(flags.polyfill_bool_vec_dynamic_store);
         }
+    }
+
+    #[test]
+    fn vulkan_reconvergence_device_features_enable_independently() {
+        let present = (true, vk::TRUE);
+        let absent = (false, vk::FALSE);
+        for (maximal, uniform, expected) in [
+            (present, present, (true, true)),
+            (present, absent, (true, false)),
+            (absent, present, (false, true)),
+            (absent, absent, (false, false)),
+            ((true, vk::FALSE), present, (false, true)),
+            ((false, vk::TRUE), present, (false, true)),
+            (present, (true, vk::FALSE), (true, false)),
+            (present, (false, vk::TRUE), (true, false)),
+        ] {
+            let enabled =
+                enabled_reconvergence_features(maximal.0, maximal.1, uniform.0, uniform.1);
+            assert_eq!((enabled.maximal, enabled.uniform_control_flow), expected);
+            // The Android/Imagination restriction applies only to Tint's mode.
+            assert_eq!(
+                select_reconvergence(
+                    enabled,
+                    vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT,
+                    true,
+                    0x1010
+                ),
+                Reconvergence::None
+            );
+        }
+    }
+
+    #[test]
+    fn vulkan_reconvergence_selection_matches_dawn_branches() {
+        use Reconvergence::{Maximal, None as Disabled, UniformControlFlow as Uniform};
+        let both = vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT;
+        let present = (true, vk::TRUE);
+        let absent = (false, vk::FALSE);
+        for (maximal, uniform, expected) in [
+            (present, present, Maximal),
+            (present, absent, Maximal),
+            (absent, present, Uniform),
+            ((true, vk::FALSE), present, Uniform),
+            ((false, vk::TRUE), present, Uniform),
+            (absent, (true, vk::FALSE), Disabled),
+            (absent, (false, vk::TRUE), Disabled),
+            (absent, absent, Disabled),
+        ] {
+            assert_eq!(
+                select_reconvergence(
+                    enabled_reconvergence_features(maximal.0, maximal.1, uniform.0, uniform.1),
+                    both,
+                    false,
+                    0x8086
+                ),
+                expected,
+                "{maximal:?}/{uniform:?}"
+            );
+        }
+        let enabled_both = ReconvergenceFeatures {
+            maximal: true,
+            uniform_control_flow: true,
+        };
+        let uniform_only = ReconvergenceFeatures {
+            maximal: false,
+            uniform_control_flow: true,
+        };
+        for (stages, expected) in [
+            (vk::ShaderStageFlags::empty(), Disabled),
+            (vk::ShaderStageFlags::COMPUTE, Disabled),
+            (vk::ShaderStageFlags::FRAGMENT, Disabled),
+            (both, Uniform),
+            (both | vk::ShaderStageFlags::VERTEX, Uniform),
+        ] {
+            assert_eq!(
+                select_reconvergence(uniform_only, stages, false, 0x8086),
+                expected
+            );
+            // Maximal reconvergence does not need the uniform-flow stage check.
+            assert_eq!(
+                select_reconvergence(enabled_both, stages, false, 0x8086),
+                Maximal
+            );
+        }
+        // Android/Imagination excludes both Tint modes, leaving device features enabled.
+        for (android, vendor, maximal, uniform) in [
+            (true, 0x1010, Disabled, Disabled),
+            (false, 0x1010, Maximal, Uniform),
+            (true, 0x8086, Maximal, Uniform),
+            (false, 0x8086, Maximal, Uniform),
+        ] {
+            assert_eq!(
+                select_reconvergence(enabled_both, both, android, vendor),
+                maximal
+            );
+            assert_eq!(
+                select_reconvergence(uniform_only, both, android, vendor),
+                uniform
+            );
+        }
+        for (selected, maximal, uniform) in [
+            (Disabled, false, false),
+            (Maximal, true, false),
+            (Uniform, false, true),
+        ] {
+            let flags = vulkan_writer_flags(Default::default(), false, false, false, selected);
+            assert_eq!(flags.use_maximal_reconvergence, maximal);
+            assert_eq!(flags.use_subgroup_uniform_control_flow, uniform);
+        }
+    }
+
+    #[test]
+    fn vulkan_default_compute_subgroup_size_matches_dawn_heuristic() {
+        let compute = vk::ShaderStageFlags::COMPUTE;
+        assert_eq!(
+            find_default_compute_subgroup_size(false, compute, 8, 32, 32),
+            None
+        );
+        assert_eq!(
+            find_default_compute_subgroup_size(true, compute, 32, 32, 32),
+            None
+        );
+        assert_eq!(
+            find_default_compute_subgroup_size(true, compute, 8, 32, 32),
+            Some(16)
+        );
+        assert_eq!(
+            find_default_compute_subgroup_size(true, compute, 8, 16, 32),
+            Some(16)
+        );
+        assert_eq!(
+            find_default_compute_subgroup_size(true, compute, 8, 12, 32),
+            Some(8)
+        );
+        assert_eq!(
+            find_default_compute_subgroup_size(true, compute, u32::MAX - 1, u32::MAX, 32),
+            Some(u32::MAX - 1)
+        );
+        let query = full_subgroup_query();
+        assert_eq!(query.default_compute_subgroup_size(), Some(32));
+        // Defaults do not require computeFullSubgroups, unlike explicit WGSL sizes.
+        assert_eq!(
+            SubgroupQuery {
+                compute_full_subgroups: vk::FALSE,
+                ..query
+            }
+            .default_compute_subgroup_size(),
+            Some(32)
+        );
+        assert_eq!(
+            SubgroupQuery {
+                extension_present: false,
+                ..query
+            }
+            .default_compute_subgroup_size(),
+            None
+        );
+    }
+
+    #[test]
+    fn vulkan_default_compute_subgroup_size_respects_core_invocation_floor() {
+        let compute = vk::ShaderStageFlags::COMPUTE;
+        assert_eq!(
+            find_default_compute_subgroup_size(true, compute, 8, 32, 15),
+            None
+        );
+        assert_eq!(
+            find_default_compute_subgroup_size(true, compute, 8, 32, 16),
+            Some(16)
+        );
+        let query = SubgroupQuery {
+            range: Some((8, 32)),
+            max_compute_workgroup_subgroups: 15,
+            ..full_subgroup_query()
+        };
+        let default_size = query.default_compute_subgroup_size();
+        assert_eq!(default_size, None);
+        assert_eq!(
+            clamp_compute_invocations_per_workgroup(
+                1024,
+                query.max_compute_workgroup_subgroups,
+                default_size
+            ),
+            1024
+        );
+    }
+
+    #[test]
+    fn vulkan_default_compute_subgroup_size_requires_enabled_compute_support() {
+        for (enabled, stages) in [
+            (false, vk::ShaderStageFlags::COMPUTE),
+            (true, vk::ShaderStageFlags::empty()),
+            (true, vk::ShaderStageFlags::FRAGMENT),
+        ] {
+            assert_eq!(
+                find_default_compute_subgroup_size(enabled, stages, 8, 32, 32),
+                None
+            );
+        }
+        for query in [
+            SubgroupQuery {
+                subgroup_size_control: vk::FALSE,
+                ..full_subgroup_query()
+            },
+            SubgroupQuery {
+                required_subgroup_size_stages: vk::ShaderStageFlags::empty(),
+                ..full_subgroup_query()
+            },
+            SubgroupQuery {
+                required_subgroup_size_stages: vk::ShaderStageFlags::FRAGMENT,
+                ..full_subgroup_query()
+            },
+        ] {
+            let default_size = query.default_compute_subgroup_size();
+            assert_eq!(default_size, None);
+            assert_eq!(
+                clamp_compute_invocations_per_workgroup(
+                    1024,
+                    query.max_compute_workgroup_subgroups,
+                    default_size,
+                ),
+                1024
+            );
+        }
+    }
+
+    #[test]
+    fn vulkan_compute_invocations_clamp_uses_default_subgroup_size() {
+        assert_eq!(
+            clamp_compute_invocations_per_workgroup(1024, 32, Some(16)),
+            512
+        );
+        assert_eq!(
+            clamp_compute_invocations_per_workgroup(256, 32, Some(16)),
+            256
+        );
+        assert_eq!(
+            clamp_compute_invocations_per_workgroup(1024, 32, None),
+            1024
+        );
+        assert_eq!(
+            clamp_compute_invocations_per_workgroup(1024, u32::MAX, Some(16)),
+            1024
+        );
     }
 
     #[test]
@@ -3310,6 +3726,7 @@ diagnostic(off, derivative_uniformity);
     /// A snapshot that satisfies the full Block 108 R2 predicate.
     fn full_subgroup_query() -> SubgroupQuery {
         SubgroupQuery {
+            supported_stages: vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT,
             range: Some((16, 64)),
             extension_present: true,
             subgroup_size_control: vk::TRUE,

@@ -336,6 +336,9 @@ impl ReflectedModule {
         tint_workarounds.native_dot_4x8_packed = workarounds.native_dot_4x8_packed;
         tint_workarounds.use_zero_initialize_workgroup_memory =
             workarounds.use_zero_initialize_workgroup_memory;
+        tint_workarounds.use_maximal_reconvergence = workarounds.use_maximal_reconvergence;
+        tint_workarounds.use_subgroup_uniform_control_flow =
+            workarounds.use_subgroup_uniform_control_flow;
         tint_workarounds.polyfill_bool_vec_dynamic_store =
             workarounds.polyfill_bool_vec_dynamic_store;
         tint_workarounds.replace_workgroup_atomic_store_with_exchange =
@@ -3397,12 +3400,14 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
         let mut variants = vec![(false, false, yawgpu_hal::HalShaderWorkarounds::default())];
         variants.push((true, false, Default::default()));
         variants.push((false, true, Default::default()));
-        for index in 0..3 {
+        for index in 0..5 {
             let mut flags = yawgpu_hal::HalShaderWorkarounds::default();
             match index {
                 0 => flags.use_demote_to_helper_invocation = true,
                 1 => flags.native_dot_4x8_packed = true,
-                _ => flags.use_zero_initialize_workgroup_memory = true,
+                2 => flags.use_zero_initialize_workgroup_memory = true,
+                3 => flags.use_maximal_reconvergence = true,
+                _ => flags.use_subgroup_uniform_control_flow = true,
             }
             variants.push((false, false, flags));
         }
