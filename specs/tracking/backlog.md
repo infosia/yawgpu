@@ -35,9 +35,10 @@ reach.
 
 **Priority rationale:** silently-wrong behaviour that the CTS cannot
 catch ranks above a missing standard API, which ranks above
-platform/presentation coverage, then perf/refactor, then doc drift. Tier-2
-GLES gaps rank last, by user direction (2026-11-02). The letters below are
-stable IDs, not the rank.
+platform/presentation coverage, then perf/refactor, then doc drift. By user
+direction (2026-11-02), three groups rank below all of that, in this order: CI
+(C4), binding arrays (B2), and Tier-2 GLES gaps (D, plus A3, A7, C3). The letters
+below are stable IDs, not the rank.
 
 ---
 
@@ -72,7 +73,7 @@ stable IDs, not the rank.
 
 | # | Item | Difficulty | Evidence |
 |---|---|---|---|
-| B2 | **Binding arrays**: `bindingArraySize > 1` rejected outright in core. | M–L | `yawgpu-core/src/bind_group_layout.rs` |
+| B2 | **Binding arrays**: `bindingArraySize > 1` rejected outright in core. Dawn also rejects it unless `AllowUnsafeAPIs` is on, supports it then only for sampled textures, and Tint's `sized_binding_array` is experimental, so today's rejection matches default Dawn (`BindGroupLayoutInternal.cpp:362-367`). | M–L | `yawgpu-core/src/bind_group_layout.rs` |
 | B3 | **External textures are Metal-only.** Vulkan is deterministically rejected in core (the HAL would need the multiplanar plane/params bindings, not just driver acceptance of Tint's SPIR-V); GLES is a `HalError`. | L / L | `yawgpu-core/src/compute_pipeline.rs`; `specs/blocks/36-external-textures.md:165-174` |
 | B6 | Tier-2 read-write storage format breadth ambiguous against the current spec (yawgpu grants `R32Float`, `RGBA16Float`, `RGBA32Float`). Needs a spec check more than code. | S | `specs/tracking/format-completeness-audit.md:23-27` |
 | B7 | Multi-threading correctness beyond what the ported tests exercise. | L | `specs/SPEC.md:53` |
@@ -157,10 +158,11 @@ reference `> i32::MAX`, `first_instance` indirect, external textures,
 1. **A12** when a native Vulkan host is available.
 2. **E1**, which decides **E11** and part of **E3**.
 3. **A13**, starting with the most widely used hardware (AMD Mesa).
-4. **C4** feature-gated clippy in CI.
-5. **B2** binding arrays, then **C2 / C1** surfaces as separate initiatives.
+4. **A10**, small, and Block 119 raised its stakes.
+5. **C2 / C1** surfaces as separate initiatives.
 6. **F1 to F3** alongside any of the above.
-7. **D12** and the rest of **D** as separate initiatives.
+7. Lowered by user direction: **C4** feature-gated clippy in CI, then **B2**
+   binding arrays, then **D12** and the rest of the GLES rows.
 
 ---
 
@@ -283,3 +285,4 @@ Re-verification after the fixes: `cargo test --workspace` 1093/0, clippy default
 - Tables rebuilt after Blocks 108-120. A6 closed as stale. New rows: A12, A13, D12, D13, D14, E11, E12, F1 to F3. GLES moved to last by user direction. The Method section lists which rows were not re-checked against the source.
 - The Haswell indirect wedge moved out of the list: it was confirmed in 2026-07 and the user decided against a workaround, so Block 119 R5d's "unconfirmed" was wrong and is corrected.
 - F-151 confirmed on real hardware; Block 113 status, `SPEC.md` Phases 13, 14, and 16, and `threading-audit.md` corrected.
+- Later the same day: C4, B2 and GLES ranked last by user direction; B2 records that default Dawn rejects binding arrays too.
