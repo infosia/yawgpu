@@ -7248,6 +7248,62 @@ mod tests {
     }
 
     #[test]
+    fn draw_time_order_2_incompatible_group_without_draw_submits_without_device_error() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let errors = Arc::new(Mutex::new(Vec::new()));
+            let captured = errors.clone();
+            borrow_handle(device, "WGPUDevice").set_uncaptured_error_callback(Some(move |error| {
+                captured.lock().unwrap().push(error);
+            }));
+            let module = create_wgsl_module(
+                device,
+                "@group(0) @binding(0) var<uniform> color: vec4f;
+                 @vertex fn vs() -> @builtin(position) vec4f { return vec4f(0, 0, 0, 1); }
+                 @fragment fn fs() -> @location(0) vec4f { return color; }",
+            );
+            let pipeline = wgpuDeviceCreateRenderPipeline(
+                device,
+                &render_pipeline_descriptor(module, module, std::ptr::null()),
+            );
+            assert!(!borrow_handle(pipeline, "WGPURenderPipeline")
+                ._core
+                .is_error());
+            // An empty group is valid itself, but lacks the pipeline's uniform binding.
+            let (layout, group) = noop_bind_group(device);
+            let (texture, view) = noop_render_attachment(device);
+            let attachments = [render_pass_color_attachment(view)];
+            let descriptor = noop_render_pass_descriptor(&attachments, std::ptr::null());
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let pass = wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
+            wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+            wgpuRenderPassEncoderSetBindGroup(pass, 0, group, 0, std::ptr::null());
+            wgpuRenderPassEncoderEnd(pass);
+            let commands = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            assert!(!borrow_handle(commands, "WGPUCommandBuffer").core.is_error());
+            assert!(errors.lock().unwrap().is_empty());
+            let queue = wgpuDeviceGetQueue(device);
+            wgpuQueueSubmit(queue, 1, &commands);
+            let observed = errors.lock().unwrap().clone();
+            wgpuQueueRelease(queue);
+            wgpuCommandBufferRelease(commands);
+            wgpuRenderPassEncoderRelease(pass);
+            wgpuCommandEncoderRelease(encoder);
+            wgpuTextureViewRelease(view);
+            wgpuTextureRelease(texture);
+            wgpuBindGroupRelease(group);
+            wgpuBindGroupLayoutRelease(layout);
+            wgpuRenderPipelineRelease(pipeline);
+            wgpuShaderModuleRelease(module);
+            release_handles(instance, adapter, device);
+            assert!(
+                observed.is_empty(),
+                "unexpected submit errors: {observed:?}"
+            );
+        }
+    }
+
+    #[test]
     fn wgpuQueueOnSubmittedWorkDone_and_wgpuQueueSubmit_cover_empty_and_command_buffer() {
         unsafe {
             let (instance, adapter, device) = noop_chain();

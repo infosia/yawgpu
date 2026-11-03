@@ -2454,6 +2454,7 @@ pub(crate) fn hal_render_pass_execution(
 struct RenderCommandLoweringState {
     pipeline: Option<Arc<RenderPipeline>>,
     bind_groups: BTreeMap<u32, BoundBindGroup>,
+    dirty_bind_groups: BTreeSet<u32>,
     vertex_buffers: BTreeMap<u32, BoundVertexBuffer>,
 }
 
@@ -2467,28 +2468,28 @@ fn hal_render_commands(
             RenderCommand::SetPipeline(pipeline) => {
                 state.pipeline = Some(Arc::clone(pipeline));
                 lowered.push(HalRenderPassCommand::SetPipeline(pipeline.hal()?));
-                for (&index, group) in &state.bind_groups {
-                    lowered.push(hal_set_bind_group(pipeline, index, Some(group))?);
-                }
+                state
+                    .dirty_bind_groups
+                    .extend(state.bind_groups.keys().copied());
                 for (&slot, buffer) in &state.vertex_buffers {
                     if let Some(command) = hal_set_vertex_buffer(pipeline, slot, Some(buffer))? {
                         lowered.push(command);
                     }
                 }
             }
-            RenderCommand::SetBindGroup { index, group } => {
-                match group {
-                    Some(group) => {
-                        state.bind_groups.insert(*index, group.clone());
-                    }
-                    None => {
-                        state.bind_groups.remove(index);
+            RenderCommand::SetBindGroup { index, group } => match group {
+                Some(group) => {
+                    state.bind_groups.insert(*index, group.clone());
+                    state.dirty_bind_groups.insert(*index);
+                }
+                None => {
+                    state.bind_groups.remove(index);
+                    state.dirty_bind_groups.remove(index);
+                    if let Some(pipeline) = &state.pipeline {
+                        lowered.push(hal_set_bind_group(pipeline, *index, None)?);
                     }
                 }
-                if let Some(pipeline) = &state.pipeline {
-                    lowered.push(hal_set_bind_group(pipeline, *index, group.as_ref())?);
-                }
-            }
+            },
             RenderCommand::SetVertexBuffer { slot, buffer } => {
                 match buffer {
                     Some(buffer) => {
@@ -2532,7 +2533,15 @@ fn hal_render_commands(
             RenderCommand::EndOcclusionQuery => {
                 lowered.push(HalRenderPassCommand::EndOcclusionQuery);
             }
-            RenderCommand::Draw(draw) => lowered.push(hal_render_draw_command(draw)?),
+            RenderCommand::Draw(draw) => {
+                let pipeline = state.pipeline.as_ref()?;
+                for &index in &state.dirty_bind_groups {
+                    let group = state.bind_groups.get(&index)?;
+                    lowered.push(hal_set_bind_group(pipeline, index, Some(group))?);
+                }
+                state.dirty_bind_groups.clear();
+                lowered.push(hal_render_draw_command(draw)?);
+            }
             RenderCommand::ExecuteRenderBundle(bundle) => {
                 let mut bundle_state = RenderCommandLoweringState::default();
                 let commands = hal_render_commands(bundle.commands(), &mut bundle_state)?;
@@ -2541,6 +2550,7 @@ fn hal_render_commands(
                 lowered.push(HalRenderPassCommand::ExecuteRenderBundle(hal_bundle));
                 state.pipeline = None;
                 state.bind_groups.clear();
+                state.dirty_bind_groups.clear();
                 state.vertex_buffers.clear();
             }
         }
@@ -4281,6 +4291,310 @@ fn fs() -> @location(0) vec4<f32> {
             ] if clear.mip_level == 0 && clear.base_array_layer == 0
         ));
         assert!(texture.is_initialized(0, 0, InitAspect::Color));
+    }
+
+    fn draw_time_pipeline(device: &Device, binding: u32) -> Arc<RenderPipeline> {
+        draw_time_pipeline_with_groups(device, binding, false)
+    }
+
+    fn draw_time_pipeline_with_groups(
+        device: &Device,
+        binding: u32,
+        two_groups: bool,
+    ) -> Arc<RenderPipeline> {
+        let second_binding = if two_groups {
+            format!("@group(1) @binding({binding}) var<uniform> b: vec4f;")
+        } else {
+            String::new()
+        };
+        let color = if two_groups { "a + b" } else { "a" };
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(format!(
+                "@group(0) @binding({binding}) var<uniform> a: vec4f;
+             {second_binding}
+             @vertex fn vs() -> @builtin(position) vec4f {{ return vec4f(0, 0, 0, 1); }}
+             @fragment fn fs() -> @location(0) vec4f {{ return {color}; }}"
+            ))),
+        );
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding,
+                visibility: SHADER_STAGE_FRAGMENT,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: 16,
+                }),
+            }],
+            error: None,
+        }));
+        let mut descriptor = render_pipeline_descriptor(module);
+        descriptor.layout = RenderPipelineLayout::Explicit(Arc::new(
+            device.create_pipeline_layout(PipelineLayoutDescriptor {
+                bind_group_layouts: vec![layout; if two_groups { 2 } else { 1 }],
+                immediate_size: 0,
+                error: None,
+            }),
+        ));
+        let pipeline = Arc::new(device.create_render_pipeline(descriptor));
+        assert!(!pipeline.is_error());
+        pipeline
+    }
+
+    fn draw_time_group(
+        device: &Device,
+        pipeline: &RenderPipeline,
+        index: u32,
+        offset: u64,
+    ) -> Arc<BindGroup> {
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::UNIFORM,
+            size: 512,
+            mapped_at_creation: false,
+        }));
+        let layout = pipeline.bind_group_layouts()[index as usize].clone();
+        let binding = layout.entries()[0].binding;
+        let group = Arc::new(device.create_bind_group(
+            layout,
+            vec![BindGroupEntry {
+                binding,
+                resource: BindGroupResource::Buffer {
+                    buffer,
+                    device: Arc::new(device.clone()),
+                    offset,
+                    size: 16,
+                },
+            }],
+        ));
+        assert!(!group.is_error());
+        group
+    }
+
+    fn draw_time_bind(index: u32, group: Arc<BindGroup>) -> RenderCommand {
+        RenderCommand::SetBindGroup {
+            index,
+            group: Some(BoundBindGroup {
+                group,
+                dynamic_offsets: Vec::new(),
+            }),
+        }
+    }
+
+    fn draw_time_draw() -> RenderCommand {
+        RenderCommand::Draw(RenderDrawExecution::Direct {
+            vertex_count: 3,
+            instance_count: 1,
+            first_vertex: 0,
+            first_instance: 0,
+        })
+    }
+
+    fn draw_time_lower(commands: Vec<RenderCommand>) -> Option<Vec<HalRenderPassCommand>> {
+        let pass = RenderPassCommand {
+            color_attachments: Vec::new(),
+            depth_stencil_attachment: None,
+            attachment_textures: Vec::new(),
+            occlusion_query_set: None,
+            written_occlusion_queries: BTreeSet::new(),
+            commands,
+        };
+        match hal_render_pass_execution(&pass, &RenderPassInitPlan::default())? {
+            HalCopy::RenderPassCommandStream(stream) => Some(stream.commands),
+            _ => panic!("expected render stream"),
+        }
+    }
+
+    #[test]
+    fn draw_time_order_2_incompatible_group_without_draw_lowers_and_submits() {
+        let device = noop_device();
+        let a = draw_time_pipeline(&device, 0);
+        let b = draw_time_pipeline(&device, 1);
+        let group = draw_time_group(&device, &b, 0, 256);
+        let commands = draw_time_lower(vec![
+            RenderCommand::SetPipeline(a.clone()),
+            draw_time_bind(0, group.clone()),
+        ])
+        .expect("no draw must not resolve the group");
+        assert!(matches!(
+            commands.as_slice(),
+            [HalRenderPassCommand::SetPipeline(_)]
+        ));
+        let encoder = device.create_command_encoder();
+        let (pass, error) = encoder.begin_render_pass(&noop_render_pass_descriptor(
+            noop_render_attachment(&device),
+            None,
+        ));
+        assert_eq!(error, None);
+        assert_eq!(pass.set_pipeline(a), None);
+        assert_eq!(
+            pass.set_bind_group(0, Some(group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(pass.end(), None);
+        let (buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert_eq!(device.queue().submit(&[Arc::new(buffer)]), None);
+        assert!(matches!(
+            submitted_render_stream(&device.queue()).commands.as_slice(),
+            [HalRenderPassCommand::SetPipeline(_)]
+        ));
+    }
+
+    #[test]
+    fn draw_time_order_1_resolves_only_against_final_pipeline() {
+        let device = noop_device();
+        let a = draw_time_pipeline(&device, 0);
+        let b = draw_time_pipeline(&device, 1);
+        let group = draw_time_group(&device, &b, 0, 256);
+        let commands = draw_time_lower(vec![
+            RenderCommand::SetPipeline(a),
+            draw_time_bind(0, group),
+            RenderCommand::SetPipeline(b),
+            draw_time_draw(),
+        ])
+        .expect("intermediate incompatible pairing must not resolve");
+        assert!(
+            matches!(commands.as_slice(), [HalRenderPassCommand::SetPipeline(_), HalRenderPassCommand::SetPipeline(_), HalRenderPassCommand::SetBindGroup { index: 0, buffers, .. }, HalRenderPassCommand::Draw { .. }] if buffers.len() == 1 && buffers[0].binding == 1 && buffers[0].offset == 256)
+        );
+    }
+
+    #[test]
+    fn draw_time_two_draws_track_dirty_indices() {
+        // No change, one changed group, and a pipeline change respectively.
+        for change in 0..3 {
+            let device = noop_device();
+            let pipeline = draw_time_pipeline_with_groups(&device, 0, true);
+            let g0 = draw_time_group(&device, &pipeline, 0, 0);
+            let g1 = draw_time_group(&device, &pipeline, 1, 0);
+            let mut commands = vec![
+                RenderCommand::SetPipeline(pipeline.clone()),
+                draw_time_bind(1, g1),
+                draw_time_bind(0, g0),
+                draw_time_draw(),
+            ];
+            if change == 1 {
+                commands.push(draw_time_bind(
+                    1,
+                    draw_time_group(&device, &pipeline, 1, 256),
+                ));
+            } else if change == 2 {
+                let replacement = draw_time_pipeline_with_groups(&device, 0, true);
+                assert!(!Arc::ptr_eq(&pipeline, &replacement));
+                commands.push(RenderCommand::SetPipeline(replacement));
+            }
+            commands.push(draw_time_draw());
+            let commands = draw_time_lower(commands).unwrap();
+            assert!(matches!(
+                &commands[..4],
+                [
+                    HalRenderPassCommand::SetPipeline(_),
+                    HalRenderPassCommand::SetBindGroup { index: 0, .. },
+                    HalRenderPassCommand::SetBindGroup { index: 1, .. },
+                    HalRenderPassCommand::Draw { .. }
+                ]
+            ));
+            match change {
+                0 => assert!(matches!(
+                    &commands[4..],
+                    [HalRenderPassCommand::Draw { .. }]
+                )),
+                1 => assert!(
+                    matches!(&commands[4..], [HalRenderPassCommand::SetBindGroup { index: 1, buffers, .. }, HalRenderPassCommand::Draw { .. }] if buffers.len() == 1 && buffers[0].offset == 256)
+                ),
+                _ => assert!(matches!(
+                    &commands[4..],
+                    [
+                        HalRenderPassCommand::SetPipeline(_),
+                        HalRenderPassCommand::SetBindGroup { index: 0, .. },
+                        HalRenderPassCommand::SetBindGroup { index: 1, .. },
+                        HalRenderPassCommand::Draw { .. }
+                    ]
+                )),
+            }
+        }
+    }
+
+    #[test]
+    fn draw_time_unbind_clears_dirty_group_immediately() {
+        let device = noop_device();
+        let pipeline = draw_time_pipeline(&device, 0);
+        let group = draw_time_group(&device, &pipeline, 0, 0);
+        let commands = draw_time_lower(vec![
+            RenderCommand::SetPipeline(pipeline),
+            draw_time_bind(0, group),
+            RenderCommand::SetBindGroup {
+                index: 0,
+                group: None,
+            },
+            draw_time_draw(),
+        ])
+        .unwrap();
+        assert!(
+            matches!(commands.as_slice(), [HalRenderPassCommand::SetPipeline(_), HalRenderPassCommand::SetBindGroup { index: 0, buffers, textures, samplers, external_textures }, HalRenderPassCommand::Draw { .. }] if buffers.is_empty() && textures.is_empty() && samplers.is_empty() && external_textures.is_empty())
+        );
+    }
+
+    #[test]
+    fn draw_time_incompatible_group_at_draw_and_missing_pipeline_fail() {
+        let device = noop_device();
+        let a = draw_time_pipeline(&device, 0);
+        let b = draw_time_pipeline(&device, 1);
+        let group = draw_time_group(&device, &b, 0, 0);
+        assert!(draw_time_lower(vec![
+            RenderCommand::SetPipeline(a),
+            draw_time_bind(0, group),
+            draw_time_draw()
+        ])
+        .is_none());
+        assert!(draw_time_lower(vec![draw_time_draw()]).is_none());
+    }
+
+    #[test]
+    fn draw_time_bundle_uses_fresh_state_and_resets_outer_state() {
+        let device = noop_device();
+        let a = draw_time_pipeline(&device, 0);
+        let b = draw_time_pipeline(&device, 1);
+        let group = draw_time_group(&device, &b, 0, 256);
+        let (encoder, error) = RenderBundleEncoder::new(
+            RenderBundleEncoderDescriptor {
+                max_color_attachments: device.limits().max_color_attachments,
+                color_formats: vec![Some(rgba8_unorm())],
+                depth_stencil_format: None,
+                sample_count: 1,
+                depth_read_only: false,
+                stencil_read_only: false,
+            },
+            device.limits(),
+            device.features(),
+        );
+        assert_eq!(error, None);
+        assert_eq!(encoder.set_pipeline(a.clone()), None);
+        assert_eq!(
+            encoder.set_bind_group(0, Some(group), Vec::new(), device.limits()),
+            None
+        );
+        assert_eq!(encoder.set_pipeline(b.clone()), None);
+        assert_eq!(encoder.draw(3, 1, 0, 0, device.limits()), None);
+        let (bundle, error) = encoder.finish();
+        assert_eq!(error, None);
+        let outer_group = draw_time_group(&device, &a, 0, 0);
+        let commands = draw_time_lower(vec![
+            RenderCommand::SetPipeline(a.clone()),
+            draw_time_bind(0, outer_group),
+            RenderCommand::ExecuteRenderBundle(Arc::new(bundle.clone())),
+            RenderCommand::SetPipeline(a),
+            draw_time_draw(),
+        ])
+        .unwrap();
+        assert!(
+            matches!(commands.as_slice(), [HalRenderPassCommand::SetPipeline(_), HalRenderPassCommand::ExecuteRenderBundle(bundle), HalRenderPassCommand::SetPipeline(_), HalRenderPassCommand::Draw { .. }] if matches!(bundle.commands.as_slice(), [HalRenderPassCommand::SetPipeline(_), HalRenderPassCommand::SetPipeline(_), HalRenderPassCommand::SetBindGroup { index: 0, buffers, .. }, HalRenderPassCommand::Draw { .. }] if buffers.len() == 1 && buffers[0].binding == 1 && buffers[0].offset == 256))
+        );
+        assert!(draw_time_lower(vec![
+            RenderCommand::ExecuteRenderBundle(Arc::new(bundle)),
+            draw_time_draw()
+        ])
+        .is_none());
     }
 
     #[test]
