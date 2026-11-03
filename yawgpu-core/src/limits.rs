@@ -621,6 +621,38 @@ mod tests {
     }
 
     #[test]
+    fn from_hal_preserves_vulkan_storage_cap_and_color_bytes() {
+        let cap = (1_u64 << 31) - 4;
+        let mut hal = yawgpu_hal::HalLimits::DEFAULT;
+        hal.max_buffer_size = u64::from(u32::MAX);
+        hal.max_storage_buffer_binding_size = cap;
+        hal.max_color_attachment_bytes_per_sample = 256;
+        hal.max_immediate_size = 64;
+        let supported = Limits::from_hal(hal);
+        assert_eq!(supported.max_storage_buffer_binding_size, cap);
+        assert_eq!(supported.max_color_attachment_bytes_per_sample, 256);
+
+        let mut required = Limits {
+            max_buffer_size: cap + 4,
+            max_storage_buffer_binding_size: cap,
+            max_color_attachment_bytes_per_sample: 256,
+            ..Limits::DEFAULT
+        };
+        let effective = supported.validate_required_limits(Some(&required)).unwrap();
+        assert_eq!(effective.max_storage_buffer_binding_size, cap);
+        assert_eq!(effective.max_color_attachment_bytes_per_sample, 256);
+        required.max_storage_buffer_binding_size = cap + 4;
+        assert_eq!(
+            supported.validate_required_limits(Some(&required)),
+            Err(format!(
+                "required limit max_storage_buffer_binding_size={} exceeds supported {}",
+                cap + 4,
+                cap
+            ))
+        );
+    }
+
+    #[test]
     fn from_hal_clamps_default_floor_and_alignment_ceiling() {
         let mut hal = yawgpu_hal::HalLimits::DEFAULT;
         hal.max_texture_dimension_2d = Limits::DEFAULT.max_texture_dimension_2d - 1;

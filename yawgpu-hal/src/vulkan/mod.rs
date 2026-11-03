@@ -339,7 +339,7 @@ impl VulkanAdapter {
             vk.max_push_constants_size
         );
 
-        let mut limits = hal_limits_from_vk(vk, max_buffer_size);
+        let mut limits = hal_limits_from_vk(vk, max_buffer_size, properties.vendor_id);
         let subgroup_query = self.subgroup_query();
         limits.max_compute_invocations_per_workgroup = clamp_compute_invocations_per_workgroup(
             limits.max_compute_invocations_per_workgroup,
@@ -1625,15 +1625,28 @@ fn select_max_buffer_size(maintenance4: u64, maintenance3: u64) -> u64 {
 }
 
 /// Maps a Vulkan-reported `VkPhysicalDeviceLimits` (plus the separately queried
-/// `maxBufferSize`) onto the HAL's supported-limits view.
+/// `maxBufferSize` and vendor ID) onto the HAL's supported-limits view.
 ///
 /// Split out of [`VulkanAdapter::limits`] so the driver-value mapping is
 /// testable without a live device (Block 92 P92.4).
-fn hal_limits_from_vk(vk: vk::PhysicalDeviceLimits, max_buffer_size: u64) -> HalLimits {
-    // Ported from Dawn PhysicalDeviceVk.cpp:744-918.
-    // Deferred: NVIDIA's 2GB-4 storage buffer cap and Dawn's
-    // maxFragmentCombinedOutputResources redistribution.
-    HalLimits {
+fn hal_limits_from_vk(
+    vk: vk::PhysicalDeviceLimits,
+    max_buffer_size: u64,
+    vendor_id: u32,
+) -> HalLimits {
+    // Ported from Dawn's PhysicalDeviceVk.cpp InitializeSupportedLimitsImpl
+    // and Limits.cpp NormalizeLimits.
+    let max_storage_buffer_binding_size = if vendor_id == 0x10de {
+        // NVIDIA's OpArrayLength can return zero for bindings of 2 GiB or more.
+        u64::from(vk.max_storage_buffer_range)
+            .min(max_buffer_size)
+            .min((1_u64 << 31) - 4)
+    } else {
+        u64::from(vk.max_storage_buffer_range)
+    };
+    let max_storage_buffer_binding_size =
+        max_storage_buffer_binding_size.min(max_buffer_size) / 4 * 4;
+    let mut limits = HalLimits {
         max_texture_dimension_1d: vk.max_image_dimension1_d,
         max_texture_dimension_2d: vk
             .max_image_dimension2_d
@@ -1659,8 +1672,9 @@ fn hal_limits_from_vk(vk: vk::PhysicalDeviceLimits, max_buffer_size: u64) -> Hal
         max_storage_buffers_per_shader_stage: vk.max_per_stage_descriptor_storage_buffers.min(16),
         max_storage_textures_per_shader_stage: vk.max_per_stage_descriptor_storage_images.min(8),
         max_uniform_buffers_per_shader_stage: vk.max_per_stage_descriptor_uniform_buffers.min(12),
-        max_uniform_buffer_binding_size: u64::from(vk.max_uniform_buffer_range / 16 * 16),
-        max_storage_buffer_binding_size: u64::from(vk.max_storage_buffer_range),
+        max_uniform_buffer_binding_size: u64::from(vk.max_uniform_buffer_range / 16 * 16)
+            .min(max_buffer_size),
+        max_storage_buffer_binding_size,
         min_uniform_buffer_offset_alignment: vk.min_uniform_buffer_offset_alignment as u32,
         min_storage_buffer_offset_alignment: vk.min_storage_buffer_offset_alignment as u32,
         max_vertex_buffers: vk.max_vertex_input_bindings.min(8),
@@ -1680,6 +1694,7 @@ fn hal_limits_from_vk(vk: vk::PhysicalDeviceLimits, max_buffer_size: u64) -> Hal
             / 4)
         .saturating_sub(2),
         max_color_attachments: vk.max_color_attachments.min(8),
+        max_color_attachment_bytes_per_sample: 32_u32.saturating_mul(vk.max_color_attachments),
         max_compute_workgroup_storage_size: vk.max_compute_shared_memory_size,
         max_compute_invocations_per_workgroup: vk.max_compute_work_group_invocations,
         max_compute_workgroup_size_x: vk.max_compute_work_group_size[0],
@@ -1697,7 +1712,39 @@ fn hal_limits_from_vk(vk: vk::PhysicalDeviceLimits, max_buffer_size: u64) -> Hal
         // (Tier 2) stays 0 via `HalLimits::DEFAULT`.
         max_immediate_size: 64,
         ..HalLimits::DEFAULT
+    };
+    let base = HalLimits::DEFAULT;
+    let minimum = base.max_storage_buffers_per_shader_stage
+        + base.max_storage_textures_per_shader_stage
+        + base.max_color_attachments;
+    let maximum = limits.max_storage_buffers_per_shader_stage
+        + limits.max_storage_textures_per_shader_stage
+        + limits.max_color_attachments;
+    let combined = vk.max_fragment_combined_output_resources;
+    if combined > minimum && combined < maximum {
+        let mut extra = combined - minimum;
+        limits.max_color_attachments =
+            (base.max_color_attachments + extra / 3).min(vk.max_color_attachments);
+        // Saturating subtraction also tolerates synthetic, below-default driver facts.
+        extra -= limits
+            .max_color_attachments
+            .saturating_sub(base.max_color_attachments);
+        limits.max_storage_textures_per_shader_stage = (base.max_storage_textures_per_shader_stage
+            + extra / 2)
+            .min(vk.max_per_stage_descriptor_storage_images);
+        extra -= limits
+            .max_storage_textures_per_shader_stage
+            .saturating_sub(base.max_storage_textures_per_shader_stage);
+        limits.max_storage_buffers_per_shader_stage = (base.max_storage_buffers_per_shader_stage
+            + extra)
+            .min(vk.max_per_stage_descriptor_storage_buffers);
     }
+    limits.max_color_attachments = limits.max_color_attachments.min(8);
+    limits.max_storage_textures_per_shader_stage =
+        limits.max_storage_textures_per_shader_stage.min(8);
+    limits.max_storage_buffers_per_shader_stage =
+        limits.max_storage_buffers_per_shader_stage.min(16);
+    limits
 }
 
 /// Matches Dawn's extension-only availability, regardless of the device API version.
@@ -3110,6 +3157,201 @@ diagnostic(off, derivative_uniformity);
 
     use super::*;
 
+    #[test]
+    fn hal_limits_from_vk_caps_nvidia_storage_bindings() {
+        let cap = (1_u64 << 31) - 4;
+        for (vendor_id, range, buffer_size, expected) in [
+            (0x10de, u32::MAX, u64::from(u32::MAX), cap),
+            (
+                0x1002,
+                u32::MAX,
+                u64::from(u32::MAX),
+                u64::from(u32::MAX) - 3,
+            ),
+            (0x10de, u32::MAX, 1 << 30, 1 << 30),
+            (0x10de, u32::MAX, (1 << 30) + 3, 1 << 30),
+            (0x1002, u32::MAX, (1 << 30) + 3, 1 << 30),
+            (0x10de, 1 << 29, 1 << 30, 1 << 29),
+        ] {
+            let raw = vk::PhysicalDeviceLimits {
+                max_storage_buffer_range: range,
+                ..Default::default()
+            };
+            let limits = hal_limits_from_vk(raw, buffer_size, vendor_id);
+            assert_eq!(limits.max_storage_buffer_binding_size, expected);
+        }
+    }
+
+    #[test]
+    fn hal_limits_from_vk_caps_uniform_bindings_to_buffer_size() {
+        let raw = vk::PhysicalDeviceLimits {
+            max_uniform_buffer_range: 65536,
+            ..Default::default()
+        };
+        for vendor_id in [0x10de, 0x1002] {
+            let limits = hal_limits_from_vk(raw, 32771, vendor_id);
+            assert_eq!(limits.max_uniform_buffer_binding_size, 32771);
+        }
+    }
+
+    #[test]
+    fn hal_limits_from_vk_saturates_color_attachment_bytes_per_sample() {
+        let raw = vk::PhysicalDeviceLimits {
+            max_color_attachments: u32::MAX,
+            ..Default::default()
+        };
+        let limits = hal_limits_from_vk(raw, ASSUMED_MAX_BUFFER_SIZE, 0);
+        assert_eq!(limits.max_color_attachment_bytes_per_sample, u32::MAX);
+        assert_eq!(limits.max_color_attachments, 8);
+    }
+
+    #[test]
+    fn hal_limits_from_vk_ignores_nonbinding_combined_output_limits() {
+        // The already-clamped maximum is 16 + 8 + 8 = 32; the default is 20.
+        for combined in [0, 19, 20, 32, 33, u32::MAX] {
+            let raw = vk::PhysicalDeviceLimits {
+                max_color_attachments: 16,
+                max_per_stage_descriptor_storage_images: 32,
+                max_per_stage_descriptor_storage_buffers: 32,
+                max_fragment_combined_output_resources: combined,
+                ..Default::default()
+            };
+            let limits = hal_limits_from_vk(raw, ASSUMED_MAX_BUFFER_SIZE, 0);
+            assert_eq!(limits.max_color_attachments, 8);
+            assert_eq!(limits.max_storage_textures_per_shader_stage, 8);
+            assert_eq!(limits.max_storage_buffers_per_shader_stage, 16);
+            assert_eq!(limits.max_color_attachment_bytes_per_sample, 512);
+        }
+    }
+
+    #[test]
+    fn hal_limits_from_vk_redistributes_combined_outputs_in_dawn_order() {
+        // Each raw clamp is reached, and the one-extra case checks rounding.
+        for (colors, textures, buffers, combined, expected) in [
+            (8, 8, 16, 21, (8, 4, 9)),
+            (8, 8, 16, 26, (8, 7, 11)),
+            (9, 8, 16, 30, (8, 8, 13)),
+            (8, 5, 16, 28, (8, 5, 15)),
+            (8, 8, 9, 24, (8, 6, 9)),
+            (16, 32, 32, 26, (8, 6, 10)),
+            // Redistribution produces 9 textures; only the final clamp lowers it to 8.
+            (8, 32, 32, 31, (8, 8, 14)),
+        ] {
+            let raw = vk::PhysicalDeviceLimits {
+                max_color_attachments: colors,
+                max_per_stage_descriptor_storage_images: textures,
+                max_per_stage_descriptor_storage_buffers: buffers,
+                max_fragment_combined_output_resources: combined,
+                ..Default::default()
+            };
+            let limits = hal_limits_from_vk(raw, ASSUMED_MAX_BUFFER_SIZE, 0);
+            assert_eq!(
+                (
+                    limits.max_color_attachments,
+                    limits.max_storage_textures_per_shader_stage,
+                    limits.max_storage_buffers_per_shader_stage,
+                ),
+                expected,
+                "raw=({colors}, {textures}, {buffers}), combined={combined}"
+            );
+            assert_eq!(limits.max_color_attachment_bytes_per_sample, 32 * colors);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual real-backend test"]
+    fn vulkan_adapter_limits_match_raw_storage_color_and_combined_outputs() {
+        let instance = VulkanInstance::new().expect("Vulkan instance");
+        let adapters = instance.enumerate_adapters();
+        assert!(!adapters.is_empty(), "no Vulkan adapter");
+        for adapter in adapters {
+            let properties = unsafe {
+                adapter
+                    .instance
+                    .instance
+                    .get_physical_device_properties(adapter.physical_device)
+            };
+            let raw = properties.limits;
+            let limits = adapter.limits();
+            eprintln!(
+                "{}: storageBindingSize={}, colorBytesPerSample={}, combinedOutputs={} (colors={}, storageTextures={}, storageBuffers={})",
+                adapter.name(),
+                limits.max_storage_buffer_binding_size,
+                limits.max_color_attachment_bytes_per_sample,
+                raw.max_fragment_combined_output_resources,
+                limits.max_color_attachments,
+                limits.max_storage_textures_per_shader_stage,
+                limits.max_storage_buffers_per_shader_stage,
+            );
+            let expected_storage = if properties.vendor_id == 0x10de {
+                u64::from(raw.max_storage_buffer_range)
+                    .min(adapter.max_buffer_size())
+                    .min((1_u64 << 31) - 4)
+            } else {
+                u64::from(raw.max_storage_buffer_range)
+            };
+            let expected_storage = expected_storage.min(adapter.max_buffer_size()) / 4 * 4;
+            assert_eq!(limits.max_storage_buffer_binding_size, expected_storage);
+            assert_eq!(
+                limits.max_uniform_buffer_binding_size,
+                u64::from(raw.max_uniform_buffer_range / 16 * 16).min(adapter.max_buffer_size())
+            );
+            assert_eq!(
+                limits.max_color_attachment_bytes_per_sample,
+                32_u32.saturating_mul(raw.max_color_attachments)
+            );
+
+            let base = HalLimits::DEFAULT;
+            let minimum = base
+                .max_color_attachments
+                .saturating_add(base.max_storage_textures_per_shader_stage)
+                .saturating_add(base.max_storage_buffers_per_shader_stage);
+            let maximum = raw
+                .max_color_attachments
+                .min(8)
+                .saturating_add(raw.max_per_stage_descriptor_storage_images.min(8))
+                .saturating_add(raw.max_per_stage_descriptor_storage_buffers.min(16));
+            let combined = raw.max_fragment_combined_output_resources;
+            let mut expected = (
+                raw.max_color_attachments.min(8),
+                raw.max_per_stage_descriptor_storage_images.min(8),
+                raw.max_per_stage_descriptor_storage_buffers.min(16),
+            );
+            if combined > minimum && combined < maximum {
+                let mut extra = combined.saturating_sub(minimum);
+                expected.0 = base
+                    .max_color_attachments
+                    .saturating_add(extra / 3)
+                    .min(raw.max_color_attachments);
+                extra = extra.saturating_sub(expected.0.saturating_sub(base.max_color_attachments));
+                expected.1 = base
+                    .max_storage_textures_per_shader_stage
+                    .saturating_add(extra / 2)
+                    .min(raw.max_per_stage_descriptor_storage_images);
+                extra = extra.saturating_sub(
+                    expected
+                        .1
+                        .saturating_sub(base.max_storage_textures_per_shader_stage),
+                );
+                expected.2 = base
+                    .max_storage_buffers_per_shader_stage
+                    .saturating_add(extra)
+                    .min(raw.max_per_stage_descriptor_storage_buffers);
+            }
+            expected.0 = expected.0.min(8);
+            expected.1 = expected.1.min(8);
+            expected.2 = expected.2.min(16);
+            assert_eq!(
+                (
+                    limits.max_color_attachments,
+                    limits.max_storage_textures_per_shader_stage,
+                    limits.max_storage_buffers_per_shader_stage
+                ),
+                expected
+            );
+        }
+    }
+
     fn extension_names_from_pointers(extension_names: &[*const c_char]) -> Vec<&CStr> {
         extension_names
             .iter()
@@ -3129,7 +3371,7 @@ diagnostic(off, derivative_uniformity);
             ..Default::default()
         };
 
-        let limits = hal_limits_from_vk(vk, ASSUMED_MAX_BUFFER_SIZE);
+        let limits = hal_limits_from_vk(vk, ASSUMED_MAX_BUFFER_SIZE, 0);
 
         assert_eq!(limits.max_vertex_buffer_array_stride, 2048);
     }
@@ -3144,7 +3386,7 @@ diagnostic(off, derivative_uniformity);
             ..Default::default()
         };
 
-        let limits = hal_limits_from_vk(vk, ASSUMED_MAX_BUFFER_SIZE);
+        let limits = hal_limits_from_vk(vk, ASSUMED_MAX_BUFFER_SIZE, 0);
 
         assert_eq!(limits.max_vertex_buffer_array_stride, 2048);
 
@@ -3154,7 +3396,7 @@ diagnostic(off, derivative_uniformity);
             ..Default::default()
         };
 
-        let limits = hal_limits_from_vk(vk, ASSUMED_MAX_BUFFER_SIZE);
+        let limits = hal_limits_from_vk(vk, ASSUMED_MAX_BUFFER_SIZE, 0);
 
         assert_eq!(limits.max_vertex_buffer_array_stride, 1024);
     }
