@@ -160,6 +160,13 @@ pub(super) fn create_buffer(
         }
         return Err(map_buffer_error(error, "buffer memory bind failed"));
     }
+    let mapped_size = usize::try_from(requirements.size).map_err(|_| {
+        unsafe {
+            device.device.destroy_buffer(buffer, None);
+            device.device.free_memory(memory, None);
+        }
+        buffer_error("buffer allocation size is too large")
+    })?;
     let mapped = match unsafe {
         device
             .device
@@ -174,6 +181,10 @@ pub(super) fn create_buffer(
             return Err(map_buffer_error(error, "buffer memory map failed"));
         }
     };
+    // Block 129: Vulkan allocations are not guaranteed zeroed; drivers reuse freed memory.
+    unsafe {
+        std::ptr::write_bytes(mapped, 0, mapped_size);
+    }
     Ok(VulkanBufferInner {
         device,
         buffer,
@@ -267,6 +278,37 @@ mod tests {
         let heap_size = memory_heap_size(&props, 0);
         // any realistic requirement fits inside a max-sized heap
         assert!(68_719_476_736_u64 <= heap_size); // 64 GiB fits
+    }
+
+    #[test]
+    #[ignore = "manual real-backend test"]
+    #[cfg(feature = "vulkan")]
+    fn vulkan_buffer_create_zeroes_whole_allocation_after_reuse() {
+        let device = vulkan_device();
+        let size = 4 * 1024 * 1024 + 4;
+        for round in 0..5 {
+            let buffer = device
+                .create_buffer(size, HalBufferUsage::default())
+                .expect("Vulkan buffer allocation should succeed");
+            let inner = buffer.inner().expect("buffer backing allocation");
+            let requirements = unsafe {
+                inner
+                    .device
+                    .device
+                    .get_buffer_memory_requirements(inner.buffer)
+            };
+            assert!(requirements.size >= size);
+            let len = usize::try_from(requirements.size).expect("allocation size fits usize");
+            assert!(!inner.mapped.is_null());
+            // Inspect allocation padding too, then poison it before releasing the memory.
+            let bytes = unsafe { std::slice::from_raw_parts_mut(inner.mapped, len) };
+            assert!(
+                bytes.iter().all(|&byte| byte == 0),
+                "whole allocation must be zero in round {round}"
+            );
+            bytes.fill(0xa5);
+            drop(buffer);
+        }
     }
 
     #[test]
