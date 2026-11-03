@@ -675,6 +675,67 @@ impl WGPUInstanceImpl {
             .complete(core::FutureId::from_raw(future.id));
     }
 
+    fn complete_device_lost(&self, future: native::WGPUFuture, reason: core::DeviceLostReason) {
+        let spontaneous = {
+            let mut callbacks = self
+                .pending_callbacks
+                .lock()
+                .expect("pending callback lock is not poisoned");
+            let spontaneous = match callbacks.get_mut(&future.id) {
+                Some(PendingCallback::DeviceLost {
+                    mode,
+                    reason: stored,
+                    ..
+                }) => {
+                    *stored = reason;
+                    *mode == native::WGPUCallbackMode_AllowSpontaneous
+                }
+                _ => false,
+            };
+            // Complete even when another delivery path already removed the callback:
+            // GetLostFuture and WaitAny must keep observing a completed future.
+            self.complete_future(future);
+            if spontaneous {
+                callbacks.remove(&future.id)
+            } else {
+                None
+            }
+        };
+        // No callback-map, future-registry, or device mutex guard survives here.
+        if let Some(callback) = spontaneous {
+            unsafe { callback.fire() };
+        }
+    }
+
+    fn observe_device_loss(&self, device: &core::Device) {
+        let Some(reason) = device.lost_reason() else {
+            return;
+        };
+        self.abort_pending_device_callbacks(device);
+        let futures = {
+            let callbacks = self
+                .pending_callbacks
+                .lock()
+                .expect("pending callback lock is not poisoned");
+            callbacks
+                .iter()
+                .filter_map(|(&id, callback)| match callback {
+                    PendingCallback::DeviceLost { device: weak, .. } => weak
+                        .upgrade()
+                        .map(|owner| (native::WGPUFuture { id }, owner)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        // Retain upgraded owners until the callback-map guard is gone: the last
+        // owner's Drop can itself schedule device loss and reenter the map.
+        for (future, owner) in futures {
+            if owner.core.same(device) {
+                self.complete_device_lost(future, reason);
+            }
+        }
+    }
+
     fn abort_pending_device_callbacks(&self, device: &core::Device) {
         let mut callbacks = self
             .pending_callbacks
@@ -881,7 +942,7 @@ impl WGPUDeviceImpl {
     }
 
     fn schedule_device_lost(&self, reason: core::DeviceLostReason) {
-        let Some(reason) = self.core.lose(reason) else {
+        let Some(reason) = self.core.lose(reason).or_else(|| self.core.lost_reason()) else {
             return;
         };
         self.instance.abort_pending_device_callbacks(&self.core);
@@ -890,20 +951,8 @@ impl WGPUDeviceImpl {
             .lock()
             .expect("device lost future lock is not poisoned");
         if let Some(future_id) = future {
-            {
-                let mut callbacks = self
-                    .instance
-                    .pending_callbacks
-                    .lock()
-                    .expect("pending callback lock is not poisoned");
-                if let Some(PendingCallback::DeviceLost { reason: stored, .. }) =
-                    callbacks.get_mut(&future_id)
-                {
-                    *stored = reason;
-                }
-            }
             self.instance
-                .complete_future(native::WGPUFuture { id: future_id });
+                .complete_device_lost(native::WGPUFuture { id: future_id }, reason);
         }
     }
 
@@ -946,19 +995,12 @@ impl WGPUDeviceImpl {
         drop(lost_future);
         let future = native::WGPUFuture { id: future_id };
         if is_lost && newly_registered {
-            if let Some(PendingCallback::DeviceLost { reason, .. }) = self
-                .instance
-                .pending_callbacks
-                .lock()
-                .expect("pending callback lock is not poisoned")
-                .get_mut(&future_id)
-            {
-                *reason = self
-                    .core
+            self.instance.complete_device_lost(
+                future,
+                self.core
                     .lost_reason()
-                    .unwrap_or(core::DeviceLostReason::Unknown);
-            }
-            self.instance.complete_future(future);
+                    .unwrap_or(core::DeviceLostReason::Unknown),
+            );
         }
         future
     }
@@ -3497,6 +3539,204 @@ mod tests {
             assert_eq!(info.completed, 1);
             drop(pin);
             release_handles(instance, adapter, device);
+        }
+    }
+
+    #[derive(Default)]
+    struct DeviceLostDeliveryState {
+        fired: usize,
+        device: native::WGPUDevice,
+        reason: native::WGPUDeviceLostReason,
+        release_queue: native::WGPUQueue,
+        future: u64,
+        locks_free: Option<[bool; 3]>,
+    }
+
+    unsafe extern "C" fn record_device_lost_delivery(
+        device: *const native::WGPUDevice,
+        reason: native::WGPUDeviceLostReason,
+        _: native::WGPUStringView,
+        data: *mut c_void,
+        _: *mut c_void,
+    ) {
+        let state = &mut *data.cast::<DeviceLostDeliveryState>();
+        state.fired += 1;
+        state.device = *device;
+        state.reason = reason;
+        if !(*device).is_null() {
+            let owner = borrow_handle(*device, "WGPUDevice");
+            state.locks_free = Some([
+                owner.device_lost_future.try_lock().is_ok(),
+                owner.instance.pending_callbacks.try_lock().is_ok(),
+                owner.default_queue.try_lock().is_ok(),
+            ]);
+            // Let the test report failed observations before attempting reentry
+            // that could block on one of these locks.
+            if state.locks_free != Some([true; 3]) {
+                return;
+            }
+            state.future = wgpuDeviceGetLostFuture(*device).id;
+        }
+        if !state.release_queue.is_null() {
+            // Reenter queue submission as well as release: neither the submit
+            // mutex nor the callback-map mutex may be held by the caller.
+            let queue = std::mem::replace(&mut state.release_queue, std::ptr::null());
+            wgpuQueueSubmit(queue, 0, std::ptr::null());
+            wgpuQueueRelease(queue);
+        }
+    }
+
+    unsafe fn device_with_lost_delivery(
+        mode: native::WGPUCallbackMode,
+        state: &mut DeviceLostDeliveryState,
+    ) -> (
+        native::WGPUInstance,
+        native::WGPUAdapter,
+        native::WGPUDevice,
+    ) {
+        let instance = make_noop_instance();
+        let adapter = request_noop_adapter(instance);
+        let descriptor = native::WGPUDeviceDescriptor {
+            deviceLostCallbackInfo: native::WGPUDeviceLostCallbackInfo {
+                mode,
+                callback: Some(record_device_lost_delivery),
+                userdata1: (state as *mut DeviceLostDeliveryState).cast(),
+                ..std::mem::zeroed()
+            },
+            ..std::mem::zeroed()
+        };
+        let device = request_noop_device_with_descriptor(instance, adapter, &descriptor);
+        (instance, adapter, device)
+    }
+
+    unsafe fn assert_lost_future_complete(
+        instance: native::WGPUInstance,
+        future: native::WGPUFuture,
+    ) {
+        let mut wait = native::WGPUFutureWaitInfo {
+            future,
+            completed: 0,
+        };
+        assert_eq!(
+            wgpuInstanceWaitAny(instance, 1, &mut wait, 0),
+            native::WGPUWaitStatus_Success
+        );
+        assert_eq!(wait.completed, 1);
+    }
+
+    #[test]
+    fn spontaneous_device_destroy_delivers_once_and_allows_queue_release() {
+        unsafe {
+            let mut state = DeviceLostDeliveryState::default();
+            let (instance, adapter, device) =
+                device_with_lost_delivery(native::WGPUCallbackMode_AllowSpontaneous, &mut state);
+            state.release_queue = wgpuDeviceGetQueue(device);
+            let future = wgpuDeviceGetLostFuture(device);
+            assert_eq!(state.fired, 0);
+            wgpuDeviceDestroy(device);
+            assert_eq!(state.fired, 1);
+            assert_eq!(state.locks_free, Some([true; 3]));
+            assert_eq!(state.reason, native::WGPUDeviceLostReason_Destroyed);
+            assert_eq!(state.device, device);
+            assert_eq!(state.future, future.id);
+            assert!(state.release_queue.is_null());
+            assert_eq!(wgpuDeviceGetLostFuture(device).id, future.id);
+            assert_lost_future_complete(instance, future);
+            wgpuInstanceProcessEvents(instance);
+            wgpuDeviceDestroy(device);
+            release_handles(instance, adapter, device);
+            assert_eq!(state.fired, 1);
+        }
+    }
+
+    #[test]
+    fn spontaneous_last_device_release_delivers_destroyed_with_null_once() {
+        unsafe {
+            let mut state = DeviceLostDeliveryState::default();
+            let (instance, adapter, device) =
+                device_with_lost_delivery(native::WGPUCallbackMode_AllowSpontaneous, &mut state);
+            state.release_queue = wgpuDeviceGetQueue(device);
+            let future = wgpuDeviceGetLostFuture(device);
+            // Prove an internal owner does not change the null-device contract.
+            let pin = clone_handle(device, "WGPUDevice");
+            wgpuDeviceAddRef(device);
+            wgpuDeviceRelease(device);
+            assert_eq!(state.fired, 0);
+            wgpuDeviceRelease(device);
+            assert_eq!(state.fired, 1);
+            assert_eq!(state.locks_free, None);
+            assert_eq!(state.reason, native::WGPUDeviceLostReason_Destroyed);
+            assert!(state.device.is_null());
+            assert!(state.release_queue.is_null());
+            assert_lost_future_complete(instance, future);
+            wgpuInstanceProcessEvents(instance);
+            drop(pin);
+            wgpuAdapterRelease(adapter);
+            wgpuInstanceRelease(instance);
+            assert_eq!(state.fired, 1);
+        }
+    }
+
+    #[test]
+    fn spontaneous_core_device_loss_observed_by_submit_delivers_unknown_once() {
+        unsafe {
+            let mut state = DeviceLostDeliveryState::default();
+            let (instance, adapter, device) =
+                device_with_lost_delivery(native::WGPUCallbackMode_AllowSpontaneous, &mut state);
+            let queue = wgpuDeviceGetQueue(device);
+            state.release_queue = queue;
+            let future = wgpuDeviceGetLostFuture(device);
+            let core = borrow_handle(device, "WGPUDevice").core.clone();
+            assert_eq!(
+                core.lose(core::DeviceLostReason::Unknown),
+                Some(core::DeviceLostReason::Unknown)
+            );
+            wgpuQueueSubmit(queue, 0, std::ptr::null());
+            assert_eq!(state.fired, 1);
+            assert_eq!(state.locks_free, Some([true; 3]));
+            assert_eq!(state.reason, native::WGPUDeviceLostReason_Unknown);
+            assert_eq!(state.device, device);
+            assert_eq!(state.future, future.id);
+            assert!(state.release_queue.is_null());
+            assert_lost_future_complete(instance, future);
+            wgpuInstanceProcessEvents(instance);
+            release_handles(instance, adapter, device);
+            assert_eq!(state.fired, 1);
+        }
+    }
+
+    #[test]
+    fn process_events_device_destroy_defers_destroyed_until_process_events() {
+        unsafe {
+            let mut state = DeviceLostDeliveryState::default();
+            let (instance, adapter, device) =
+                device_with_lost_delivery(native::WGPUCallbackMode_AllowProcessEvents, &mut state);
+            wgpuDeviceDestroy(device);
+            assert_eq!(state.fired, 0);
+            wgpuInstanceProcessEvents(instance);
+            assert_eq!(state.fired, 1);
+            assert_eq!(state.locks_free, Some([true; 3]));
+            assert_eq!(state.reason, native::WGPUDeviceLostReason_Destroyed);
+            assert_eq!(state.device, device);
+            release_handles(instance, adapter, device);
+            assert_eq!(state.fired, 1);
+        }
+    }
+
+    #[test]
+    fn process_events_last_device_release_without_processing_is_cancelled() {
+        unsafe {
+            let mut state = DeviceLostDeliveryState::default();
+            let (instance, adapter, device) =
+                device_with_lost_delivery(native::WGPUCallbackMode_AllowProcessEvents, &mut state);
+            wgpuDeviceRelease(device);
+            assert_eq!(state.fired, 0);
+            wgpuAdapterRelease(adapter);
+            wgpuInstanceRelease(instance);
+            assert_eq!(state.fired, 1);
+            assert_eq!(state.locks_free, None);
+            assert_eq!(state.reason, native::WGPUDeviceLostReason_CallbackCancelled);
+            assert!(state.device.is_null());
         }
     }
 

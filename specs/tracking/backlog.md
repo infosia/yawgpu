@@ -63,6 +63,8 @@ below are stable IDs, not the rank.
 | — | F-151 real-GPU confirmation | Metal CTS case passes, 2026-11-02 |
 | A12 | Block 120 on native Vulkan | Windows native Vulkan e2e and forced CTS, 2026-11-02 |
 | A18 | Vulkan buffers were not zero-initialized | Block 129, 2026-11-03 |
+| A10 | A pass that failed to lower was dropped silently | Block 130, 2026-11-03 |
+| A14 | Device-lost reason at teardown. The premise was wrong: yawgpu already destroyed on last release. The real gap was spontaneous delivery, and the bench exit code was a bench bug | Block 130, 2026-11-03 |
 
 ---
 
@@ -71,11 +73,11 @@ below are stable IDs, not the rank.
 | # | Item | Difficulty | Evidence |
 |---|---|---|---|
 | A17 | **Native hardware owed for Blocks 126 and 127.** The Windows NVIDIA run took the feature-present paths. Still unexercised: the `frag_depth` shader clamp on a device without `VK_EXT_depth_clip_enable`, and the default compute subgroup size and invocation clamp on a device whose subgroup sizes vary (Intel). | Manual | `specs/blocks/126-vulkan-frag-depth-clamp.md`, `specs/blocks/127-vulkan-subgroup-parity.md` Verification |
-| A14 | Releasing the last device reference does not destroy the device, so the device-lost callback reports `CallbackCancelled` at instance release. Dawn destroys and reports `Destroyed` (`DeviceBase::WillDropLastExternalRef`). Seen as the bench's exit code; check against Dawn before changing. | S | `specs/tracking/perf-dawn-baseline.md` Run 7, Teardown note |
+| A19 | Releasing the instance while a device is alive cancels the device's callbacks (`CallbackCancelled`). Dawn keeps the instance alive through the device and later reports `Destroyed`. | M | `specs/blocks/130-dropped-pass-and-spontaneous-device-lost.md` Problem, point 3 |
+| A20 | A `FailedCreation` device-lost callback in `AllowSpontaneous` mode waits for `ProcessEvents`; Dawn fires it inside `RequestDevice`. | S | `specs/blocks/130-dropped-pass-and-spontaneous-device-lost.md` Out of scope |
 | A13 | **Dawn workarounds still unset**: AMD Mesa below 25.3 float polyfills, Imagination `polyfill_case_switch`, MSL `polyfill_clamp_float`, and others. Each needs a gate survey against Dawn. | M | `specs/blocks/120-tint-driver-workarounds.md` Out of scope |
 | A3 | **Lazy zero-init GLES clear paths (Block 104 S4)** — core marks and un-marks on every backend, but the GLES HAL has no `ClearTexture` lowering for the Stage-2 eligibility set (sampled reads of uninitialized depth/stencil, compressed and MSAA textures). Tier-2 catalogue item; passes today only where the driver hands back zeroed memory. | M | `specs/blocks/104-lazy-zero-init-stage2.md` S4; `specs/blocks/67-gles-backend.md` mapping matrix |
 | A7 | GLES `SetImmediates` is recorded and bounds-checked but never read by the draw path — a silent gap. Unreachable today because `max_immediate_size` is 0 and core rejects first; must become an explicit `HalError` if the limit is ever raised. | S | `specs/blocks/67-gles-backend.md:282`, `yawgpu-hal/src/gles/adapter.rs` |
-| A10 | Block 102 m4: `hal_compute_pass_execution` returning `None` drops the pass silently (`queue.rs:1389`). This row said to revisit when a second internal compute pass appeared, and Block 119's indirect validation is one. The stakes are higher: a dropped validation pass leaves the user's dispatch reading stale arguments. It stays unreachable by construction, because the internal pipeline is non-error and the bind group binds a submit-validated buffer. Thread a result through the lowering walk. | S | `yawgpu-core/src/queue.rs`; `specs/tracking/backlog.md` Phase Review Blocks 99–102, m4 |
 | A11 | Block 107 F2 (documented, not a bug): `wgpuSurfacePresent` is the one consumer core does not lazily clear for, so a surface texture Discarded then presented shows `DONT_CARE` contents on Vulkan. Matches Metal and Dawn; listed so nobody re-adds the eager clear. | — | `specs/blocks/107-vulkan-discard-epilogue-shared-layout.md` R1 |
 
 ## Priority B — missing standard WebGPU surface
@@ -166,7 +168,6 @@ reference `> i32::MAX`, `first_instance` indirect, external textures,
 1. The Block 124 survey's larger items: robustness2 / pipeline robustness, SPIR-V 1.4, extended
    dynamic state, `VkPipelineCache` (E3).
 2. **A13**, starting with the most widely used hardware (AMD Mesa).
-3. **A10**, small, and Block 119 raised its stakes.
 4. **C2 / C1** surfaces as separate initiatives.
 5. **F1 to F3** alongside any of the above.
 6. Lowered by user direction: **C4** feature-gated clippy in CI, then **B2**
@@ -306,3 +307,4 @@ Re-verification after the fixes: `cargo test --workspace` 1093/0, clippy default
 - Block 128 ran on Windows native Vulkan at `5ecaafc`: e2e 160/160 and HAL ignored 76/76 with 0 VUIDs, buffer and image robustness paths both taken; CTS `webgpu:*` `fail=3 crash=1`. 2 are the R9 cases, the crash is F-165, and the third is a pre-existing `copyTextureToTexture` failure traced to unzeroed Vulkan buffer memory (A18, opened).
 - A18 done by Block 129: Vulkan `create_buffer` zero-fills the whole mapping on the host. `copyTextureToTexture:*` 0 failures in 3 of 3 runs (was 2-3 in every run); Windows native Vulkan `webgpu:*` `fail=2 crash=0`. Metal check owed to a Mac host.
 - Block 129 Metal check (R3) on the M2 at `019bd3b`: `e2e_metal_buffer_zero_init` 2/2; CTS `copyTextureToTexture:*` and `resource_init,buffer:*` 0 failures in 3 of 3 runs each. No Metal block opened.
+- Block 130 done (A10, A14): a pass that fails to lower now aborts the submit with an internal error; `AllowSpontaneous` device-lost callbacks fire inside destroy and release, as Dawn. The A14 premise was wrong (yawgpu already destroyed on last release); the bench now calls `ProcessEvents` before instance release and exits 0. A19 and A20 opened. Metal e2e 161/0; MoltenVK e2e 159/1 (known).

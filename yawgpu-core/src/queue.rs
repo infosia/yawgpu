@@ -312,9 +312,9 @@ impl PendingWriteBatch {
 /// they are retired against the index of the submission that reads them.
 struct BufferWriteStaging<'a> {
     batch: &'a mut PendingWriteBatch,
-    /// First staging failure; the walk stops at it and `Queue::submit`
-    /// reports it as a device error (`device_error_from_staging`).
-    error: Option<yawgpu_hal::HalError>,
+    /// First staging or pass-lowering failure; the walk stops at it and `Queue::submit`
+    /// reports it as a device error.
+    error: Option<DeviceError>,
 }
 
 fn align_up(value: u64, alignment: u64) -> Option<u64> {
@@ -942,7 +942,7 @@ impl Queue {
                 break;
             }
         }
-        let staging_error = staging.error.take().map(device_error_from_staging);
+        let staging_error = staging.error.take();
         let staged = pending.take_submission();
         // Unreachable with the batch lock held: lowering calls stage but
         // never appends queue writes. Keep a release-build check nevertheless.
@@ -1354,7 +1354,7 @@ fn append_hal_command_execution(
                 {
                     Ok(staged) => staged,
                     Err(error) => {
-                        staging.error = Some(error);
+                        staging.error = Some(device_error_from_staging(error));
                         return;
                     }
                 };
@@ -1447,6 +1447,8 @@ fn append_hal_command_execution(
             append_bound_texture_init_clears(copies, &pass.bind_groups, overlay);
             if let Some(copy) = hal_compute_pass_execution(pass) {
                 copies.push(copy);
+            } else {
+                staging.error = Some(DeviceError::internal("compute pass lowering failed"));
             }
         }
         CommandExecution::RenderPass(pass) => {
@@ -1471,6 +1473,8 @@ fn append_hal_command_execution(
                     );
                 }
                 copies.push(copy);
+            } else {
+                staging.error = Some(DeviceError::internal("render pass lowering failed"));
             }
         }
         #[cfg(feature = "tiled")]
@@ -1486,6 +1490,9 @@ fn append_hal_command_execution(
             }
             if let Some(copy) = hal_subpass_render_pass_execution(pass) {
                 copies.push(copy);
+            } else {
+                staging.error = Some(DeviceError::internal("subpass render pass lowering failed"));
+                return;
             }
             // The pass ends: every aspect the layout discards goes back to
             // uninitialized, exactly as in the non-tiled render pass path
@@ -5471,6 +5478,185 @@ fn fs() -> @location(0) vec4<f32> {
         assert_eq!(a_hal.read(0, 32).expect("read"), expected_after);
     }
 
+    fn assert_pass_lowering_failure_aborts_submit(
+        kind: &str,
+        record: impl FnOnce(&Device, &CommandEncoder, &Arc<Texture>),
+    ) {
+        let device = noop_device();
+        let queue = device.queue();
+        let texture = lazy_init_texture(
+            &device,
+            TextureUsage::RENDER_ATTACHMENT,
+            rgba8_unorm(),
+            Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            1,
+            1,
+        );
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 16,
+            mapped_at_creation: false,
+        }));
+        assert_eq!(
+            queue.write_buffer(QueueBufferWrite {
+                device: device.hal(),
+                buffer: &buffer,
+                offset: 0,
+                data: &[1; 4],
+            }),
+            None
+        );
+        let encoder = device.create_command_encoder();
+        // Plan an initialization mark and stage an encoder write before the
+        // failing pass. Both must be discarded, and both chunks retired.
+        let (prefix, error) = encoder.begin_render_pass(&color_attachment(
+            whole_texture_view(&texture),
+            LoadOp::Load,
+            StoreOp::Store,
+        ));
+        assert_eq!(error, None);
+        assert_eq!(prefix.end(), None);
+        assert_eq!(encoder.write_buffer(buffer.clone(), 8, &[2; 4]), None);
+        let (prefix_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        let encoder = device.create_command_encoder();
+        record(&device, &encoder, &texture);
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert_eq!(
+            queue.submit(&[Arc::new(prefix_buffer), Arc::new(command_buffer)]),
+            Some(DeviceError::internal(format!("{kind} lowering failed")))
+        );
+        assert!(
+            matches!(submitted_copies(&queue).as_slice(), [HalCopy::Buffer(copy)]
+            if copy.destination_offset == 0 && copy.size == 4)
+        );
+        assert_eq!(
+            buffer.hal().unwrap().read(0, 12).unwrap(),
+            vec![1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert!(!texture.is_initialized(0, 0, InitAspect::Color));
+        let submitted = queue.latest_submission_index();
+        assert_eq!(
+            queue
+                .inner
+                .pending_writes
+                .lock()
+                .in_flight_submission_indices(),
+            vec![submitted; 2]
+        );
+        assert!(queue.submission_complete(submitted).unwrap());
+        assert_eq!(queue.inner.pending_writes.lock().pool_sizes(), (0, 2));
+    }
+
+    #[test]
+    fn submit_compute_pass_without_hal_aborts_and_preserves_queued_writes_and_init() {
+        assert_pass_lowering_failure_aborts_submit("compute pass", |device, encoder, _| {
+            let mut pipeline = noop_compute_pipeline(device);
+            // Test-only state: retain validation metadata but remove the HAL object.
+            Arc::get_mut(&mut Arc::get_mut(&mut pipeline).unwrap().inner)
+                .unwrap()
+                .hal = None;
+            assert!(!pipeline.is_error());
+            let (pass, error) = encoder.begin_compute_pass(None);
+            assert_eq!(error, None);
+            assert_eq!(pass.set_pipeline(pipeline), None);
+            assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
+            assert_eq!(pass.end(), None);
+        });
+    }
+
+    #[test]
+    fn submit_render_pass_without_hal_aborts_and_preserves_queued_writes_and_init() {
+        assert_pass_lowering_failure_aborts_submit("render pass", |device, encoder, texture| {
+            let mut pipeline = noop_render_pipeline(device);
+            Arc::get_mut(&mut Arc::get_mut(&mut pipeline).unwrap().inner)
+                .unwrap()
+                .hal = None;
+            assert!(!pipeline.is_error());
+            let (pass, error) = encoder.begin_render_pass(&color_attachment(
+                whole_texture_view(texture),
+                LoadOp::Load,
+                StoreOp::Discard,
+            ));
+            assert_eq!(error, None);
+            assert_eq!(pass.set_pipeline(pipeline), None);
+            assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+            assert_eq!(pass.end(), None);
+        });
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn submit_subpass_without_hal_aborts_and_preserves_queued_writes_and_init() {
+        assert_pass_lowering_failure_aborts_submit(
+            "subpass render pass",
+            |device, encoder, texture| {
+                let layout = Arc::new(device.create_subpass_pass_layout(
+                    SubpassPassLayoutDescriptor {
+                        color_attachments: vec![AttachmentLayout {
+                            format: rgba8_unorm(),
+                            sample_count: 1,
+                        }],
+                        depth_stencil_attachment: None,
+                        subpasses: vec![SubpassLayoutDesc {
+                            color_attachment_indices: vec![0],
+                            uses_depth_stencil: false,
+                            input_attachments: Vec::new(),
+                        }],
+                        dependencies: Vec::new(),
+                        error: None,
+                    },
+                ));
+                assert!(!layout.is_error());
+                let mut pipeline =
+                    device.create_subpass_render_pipeline(SubpassRenderPipelineDescriptor {
+                        base: render_pipeline_descriptor(render_shader_module(device)),
+                        pass_layout: layout.clone(),
+                        subpass_index: 0,
+                        error: None,
+                    });
+                assert!(!pipeline.is_error());
+                Arc::get_mut(&mut pipeline.inner).unwrap().hal = None;
+                let (pass, error) = encoder.begin_subpass_render_pass(
+                    device,
+                    SubpassRenderPassDescriptor {
+                        pass_layout: layout,
+                        extent: Extent3d {
+                            width: 4,
+                            height: 4,
+                            depth_or_array_layers: 1,
+                        },
+                        color_attachments: vec![SubpassColorAttachmentBinding {
+                            resource: SubpassAttachmentResource::Persistent {
+                                view: whole_texture_view(texture),
+                                resolve_target: None,
+                            },
+                            load_op: LoadOp::Load,
+                            store_op: StoreOp::Discard,
+                            clear_value: Color {
+                                r: 0.0,
+                                g: 0.0,
+                                b: 0.0,
+                                a: 0.0,
+                            },
+                        }],
+                        depth_stencil_attachment: None,
+                        error: None,
+                    },
+                );
+                assert_eq!(error, None);
+                assert_eq!(pass.set_pipeline(Arc::new(pipeline)), None);
+                assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+                assert_eq!(pass.end(), None);
+            },
+        );
+    }
+
     #[test]
     fn submit_with_failing_staging_reports_device_error_and_submits_no_command_buffer_copies() {
         let device = noop_device();
@@ -7313,7 +7499,7 @@ fn fs() -> @location(0) vec4<f32> {
         let queue = device.queue();
         // A texture with no HAL object: it is not an error texture, so it
         // validates as an attachment, but `hal_render_pass_execution` cannot
-        // lower the color target and drops the whole pass.
+        // lower the color target and aborts the submit.
         let texture = Arc::new(Texture::new(
             TextureDescriptor {
                 usage: TextureUsage::RENDER_ATTACHMENT,
@@ -7334,9 +7520,19 @@ fn fs() -> @location(0) vec4<f32> {
         ));
         assert!(texture.is_lazy_init_eligible());
 
-        submit_empty_render_pass(
-            &device,
-            &color_attachment(whole_texture_view(&texture), LoadOp::Clear, StoreOp::Store),
+        let encoder = device.create_command_encoder();
+        let (pass, error) = encoder.begin_render_pass(&color_attachment(
+            whole_texture_view(&texture),
+            LoadOp::Clear,
+            StoreOp::Store,
+        ));
+        assert_eq!(error, None);
+        assert_eq!(pass.end(), None);
+        let (command_buffer, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert_eq!(
+            queue.submit(&[Arc::new(command_buffer)]),
+            Some(DeviceError::internal("render pass lowering failed"))
         );
 
         assert!(submitted_copies(&queue).is_empty());

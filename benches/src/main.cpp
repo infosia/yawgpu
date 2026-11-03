@@ -447,6 +447,8 @@ void destroyFixture(Fixture& f) {
     wgpuBufferRelease(f.storageBuffer);
     wgpuQueueRelease(f.queue);
     wgpuDeviceRelease(f.device);
+    // Deliver the Destroyed device-lost callback before the instance goes away.
+    wgpuInstanceProcessEvents(f.instance);
     wgpuAdapterRelease(f.adapter);
     wgpuInstanceRelease(f.instance);
 }

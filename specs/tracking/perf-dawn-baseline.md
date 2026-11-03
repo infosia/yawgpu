@@ -550,6 +550,13 @@ destroys the device when its last external reference is released
 `Destroyed`. yawgpu does not, so the callback reports `CallbackCancelled` when the
 instance is released. The Dawn bench exits 0. This does not affect any figure.
 
+**Corrected by Block 130 (2026-11-03).** The explanation above is wrong. yawgpu already
+destroyed the device on the last release. The bench releases the instance without
+calling `ProcessEvents`, so yawgpu cancels the pending callback, which `webgpu.h` asks
+for. Dawn never fires it, because a reference cycle keeps its instance alive. The bench
+now calls `ProcessEvents` after releasing the device, and both libraries exit 0. See
+`specs/blocks/130-dropped-pass-and-spontaneous-device-lost.md`.
+
 ### CTS
 
 Covered by runs of the same library code: Metal `webgpu:*` `fail=2 crash=0`

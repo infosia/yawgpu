@@ -85,8 +85,9 @@ pub unsafe extern "C" fn wgpuQueueSubmit(
     command_count: usize,
     commands: *const native::WGPUCommandBuffer,
 ) {
-    let queue = borrow_handle(queue, "WGPUQueue");
+    let queue = clone_handle(queue, "WGPUQueue");
     if queue.device.is_lost() {
+        queue.instance.observe_device_loss(&queue.device);
         return;
     }
     if command_count > 0 && commands.is_null() {
@@ -118,7 +119,10 @@ pub unsafe extern "C" fn wgpuQueueSubmit(
     let Some(commands) = commands else {
         return;
     };
-    dispatch_optional_device_error(&queue.device, queue.core.submit(&commands));
+    let error = queue.core.submit(&commands);
+    // Core submit has released its locks before a reentrant lost callback runs.
+    queue.instance.observe_device_loss(&queue.device);
+    dispatch_optional_device_error(&queue.device, error);
 }
 
 /// Writes CPU data into a buffer through the queue.
