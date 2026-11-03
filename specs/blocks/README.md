@@ -92,6 +92,7 @@ file is created.
 | `135-adapter-info-parity.md` | `WGPUAdapterInfo` reports the GPU, as Dawn |
 | `136-msvc-tint-optimization.md` | Optimize the Tint shim on MSVC release builds |
 | `137-spontaneous-ready-callbacks.md` | Spontaneous callbacks that are ready when registered |
+| `138-instance-lifetime.md` | The instance stays in use while its adapters and devices are |
 
 Vendor-extension blocks (33, 55) are **not** Dawn ports — their rules are
 exercised by direct unit tests (principle 1) + GPU-gated e2e, and they live
