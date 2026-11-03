@@ -1,7 +1,7 @@
 # Block 135 — `WGPUAdapterInfo` reports the GPU, as Dawn
 
 Status: **COMPLETE (2026-11-03)**. Phase Review: 0 CRITICAL, 1 MAJOR, 3 MINOR; all fixed, see
-below. Metal is owed on a Mac host.
+below. Metal verified on the M2 at `d3e574b`.
 Source: backlog A23, found in Block 134. Started by user request on 2026-11-03.
 Oracle: Dawn at the pinned `third_party/dawn` (paths relative to `src/dawn/`):
 - `native/Adapter.cpp` (`AdapterBase::APIGetInfo`: which physical-device value fills which
@@ -162,8 +162,20 @@ fixes. The fixes change Metal, iOS, the Intel-on-Windows version decode, a GLES 
 detail, comments, and tests; none changes a value reported on this host, and the two
 e2e above ran after them.
 
-Not exercised: Metal (R3) and GLES (R4) on real drivers. The Metal ignored test is owed to
-a Mac host; GLES is covered by unit tests only.
+Not exercised: GLES (R4) on a real driver; it is covered by unit tests only.
+
+### Mac host (2026-11-03)
+
+Run on Apple M2, macOS 27.2, at yawgpu `d3e574b`. The Metal code in this block was
+first compiled here.
+
+| Gate | Result |
+|---|---|
+| clippy `-D warnings`, `metal,tiled` (`yawgpu-hal`, `yawgpu-core`, `yawgpu`), all targets | clean |
+| `cargo test --workspace` | 1,375 passed, 0 failed |
+| HAL lib tests, `metal,tiled`, `--include-ignored` | 254 passed, 0 failed; `adapter_info_reports_apple_identity` logs vendor `0x106B` `apple`, device 0, integrated, architecture `metal-3`, `"Metal driver on macOS Version 27.2 (Build 26B123)"` |
+| Every ignored `yawgpu` test, `metal,tiled` | 162 passed, 0 failed |
+| C probe calling `wgpuAdapterGetInfo` on Metal, linked once against Dawn `v20261030` and once against yawgpu | identical output in every field: vendor, architecture, device, description, backend type, adapter type, vendor and device ids, subgroup sizes |
 
 ## Phase Review
 
