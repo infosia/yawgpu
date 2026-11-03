@@ -1,8 +1,8 @@
 # Block 128 — Vulkan robustness2 and pipeline robustness, as Dawn
 
 Status: **COMPLETE (2026-11-03)**. Phase Review: 0 CRITICAL, 0 MAJOR, 5 MINOR; all
-resolved, see below. Native Vulkan with `robustBufferAccess2` (NVIDIA) is owed for the
-buffer path.
+resolved, see below. Native Vulkan (NVIDIA, buffer and image paths) ran on 2026-11-03;
+see "Windows native Vulkan" below.
 Source: the Block 124 survey's remaining items (backlog "Recommended order" 1), started
 by user request on 2026-11-03.
 Oracle: Dawn at the pinned `third_party/dawn`:
@@ -145,6 +145,65 @@ The MoltenVK failures that exist before and after are known MoltenVK artifacts:
 Metal CTS was not rerun, because the change touches only SPIR-V options and the Vulkan
 HAL. A native Vulkan run on NVIDIA is owed. It is the only host here that takes the
 `robustBufferAccess2` path. Record F-141 (`memory_model,coherence:corr`) in that run.
+
+### Windows native Vulkan (2026-11-03)
+
+Run on Windows 11, NVIDIA GeForce RTX 5060 Ti, driver 617.14, Vulkan 1.4.351, at yawgpu
+`5ecaafc`. The Khronos validation layer was on for the e2e and HAL runs. This host
+takes every path: the HAL test logs `robustBufferAccess2=1, robustImageAccess2=1,
+nullDescriptor=1, descriptorIndexing=true, robustBufferAccessUpdateAfterBind=1,
+pipelineRobustness=true, imageDecision=true, bufferDecision=true`.
+
+| Gate | Result |
+|---|---|
+| Vulkan HAL ignored tests | 76 passed, 0 failed, 0 VUIDs |
+| Vulkan e2e, `vulkan,tiled,shader-passthrough`, `--ignored` | 160 passed, 0 failed, 0 VUIDs |
+| `e2e_vulkan_robust_access`, 3 cases | pass |
+| webgpu-native-cts (CTS `a5cbf67`), `webgpu:*`, `expectations/yawgpu-vulkan.txt` | `fail=3 crash=1`; none caused by this block, see below |
+
+The out-of-bounds results on the buffer path:
+
+| Case | Native NVIDIA, driver buffer and image robustness |
+|---|---|
+| Out-of-bounds runtime-sized storage reads | `[0, 0, 0, 0]` |
+| Out-of-bounds runtime-sized storage writes | dropped; the binding keeps `[1040, 1041, 1042, 1043]` |
+| `textureLoad` on a sampled texture | in-bounds `[3, 2, 2, 7]`, every out-of-bounds load `(0, 0, 0, 0)` |
+| `textureLoad` on a read-write storage texture | `0` |
+| Out-of-bounds `textureStore` | dropped |
+
+All of these are values WGSL allows.
+
+The CTS ran as four per-area runs with `--workers 8` and took 29 minutes.
+
+| Area | pass | skip | fail | crash | xfail | Block 125 run |
+|---|---:|---:|---:|---:|---:|---:|
+| `api,validation` | 246,484 | 111,283 | 0 | 0 | 4 | 246,484 |
+| `api,operation` | 180,778 | 152,819 | 1 | 0 | 0 | 180,779 |
+| `shader,execution` | 562,543 | 320,680 | 0 | 1 | 25 | 562,548 |
+| `shader,validation` | 662,535 | 20,299 | 2 | 0 | 0 | 662,535 |
+| **total** | **1,652,340** | **605,081** | **3** | **1** | **29** | **1,652,346** |
+
+- The 2 `shader,validation` failures are the Block 119 R9 cases.
+- The crash is F-165, the intermittent NVIDIA driver crash on `bufferArrayView`
+  `mixed_types_aliasing` (workgroup, `vec4i_vec4h`). It accounts for the 5 missing
+  `shader,execution` passes. The Block 125 run did not hit it; the 2026-11-01 baseline did.
+- F-141: `memory_model,coherence:corr` on `atomic_storage` observed the disallowed
+  weak behaviour again (`testResults[3] == 4`), so it stays `xfail`. The
+  `atomic_workgroup` variant (F-152) passed and shows as `xpass`. The storage index
+  clamp that F-112 targeted is now off on this host, and the result is unchanged.
+- The `api,operation` failure is
+  `copyTextureToTexture:color_textures,non_compressed,array` for `r8snorm` 3d,
+  "texture padding mismatch". **It is not caused by this block.** Running
+  `copyTextureToTexture:*` alone gives 2 or 3 such failures (`r8snorm`, `r8uint`,
+  `r8sint`, all 3d) on every run, with this block's library, with the `6264d93`
+  library (before Block 128), and with the `2b3f4a7` library (before Block 121). The
+  single case run by itself passes 5 of 5. The cause is that Vulkan buffer memory is
+  not zero-initialized. `create_buffer` (`yawgpu-hal/src/vulkan/buffer.rs`) allocates
+  and maps each buffer and never clears it. Vulkan does not guarantee that new memory
+  reads as zero, and the driver hands back memory freed earlier in the process. A
+  diagnostic build that zero-filled the mapped memory, not committed, gave 0 failures
+  in 4 of 4 runs of `copyTextureToTexture:*`. This is the same failure GLES had before
+  its zero-init fix (`specs/blocks/67-gles-backend.md`, buffer row). Backlog A18.
 
 ## Phase Review
 
