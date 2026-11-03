@@ -245,13 +245,10 @@ pub unsafe extern "C" fn wgpuSupportedInstanceFeaturesFreeMembers(
 pub unsafe extern "C" fn wgpuInstanceRelease(instance: native::WGPUInstance) {
     let _ = borrow_handle(instance, "WGPUInstance");
     let owned = Arc::from_raw(instance);
-    if owned
+    owned
         .external_refs
-        .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
-        == 1
-    {
-        owned.cancel_callbacks();
-    }
+        .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    owned.release_use_ref();
 }
 
 /// Adds one owned reference to an instance handle.
@@ -262,7 +259,9 @@ pub unsafe extern "C" fn wgpuInstanceRelease(instance: native::WGPUInstance) {
 /// Returns WGPU instance add ref.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuInstanceAddRef(instance: native::WGPUInstance) {
-    borrow_handle(instance, "WGPUInstance")
+    let instance_impl = borrow_handle(instance, "WGPUInstance");
+    instance_impl.add_use_ref();
+    instance_impl
         .external_refs
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     add_ref_handle(instance, "WGPUInstance");
@@ -473,6 +472,7 @@ pub unsafe extern "C" fn wgpuInstanceRequestAdapter(
     }
     .map(|adapter| {
         Arc::new(WGPUAdapterImpl {
+            external_refs: std::sync::atomic::AtomicUsize::new(0),
             core: Arc::new(adapter),
             instance: clone_handle(instance_handle, "WGPUInstance"),
         })

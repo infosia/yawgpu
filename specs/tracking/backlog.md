@@ -73,6 +73,7 @@ below are stable IDs, not the rank.
 | F2 | Block 108 Mac follow-up | Metal compile covered; MoltenVK `computeFullSubgroups = true`, e2e 3/3, 2026-11-04 |
 | F3 | Block 109 sync-validation owed | Satisfied by the Windows run at `decfd69` (contains the R9 fix), 2026-11-04 |
 | A20 | Spontaneous callbacks ready at registration waited for `ProcessEvents` | Block 137, 2026-11-04 |
+| A19 | Releasing the instance while a device was alive cancelled every callback | Block 138, 2026-11-04 |
 
 ---
 
@@ -81,7 +82,6 @@ below are stable IDs, not the rank.
 | # | Item | Difficulty | Evidence |
 |---|---|---|---|
 | A17 | **Native hardware owed for Blocks 126 and 127.** The Windows NVIDIA run took the feature-present paths. Still unexercised: the `frag_depth` shader clamp on a device without `VK_EXT_depth_clip_enable`, and the default compute subgroup size and invocation clamp on a device whose subgroup sizes vary (Intel). | Manual | `specs/blocks/126-vulkan-frag-depth-clamp.md`, `specs/blocks/127-vulkan-subgroup-parity.md` Verification |
-| A19 | Releasing the instance while a device is alive cancels the device's callbacks (`CallbackCancelled`). Dawn keeps the instance alive through the device and later reports `Destroyed`. | M | `specs/blocks/130-dropped-pass-and-spontaneous-device-lost.md` Problem, point 3 |
 | A21 | Intel Gen9 subgroups gate and `polyfill_subgroup_broadcast_f16`. Dawn hides Subgroups and SubgroupSizeControl on Intel Gen9 unless `EnableSubgroupsIntelGen9` is set, and that toggle enables the polyfill. This needs the PCI device id on both backends. | S-M | `specs/blocks/131-dawn-vendor-gated-tint-workarounds.md` Out of scope |
 | A3 | **Lazy zero-init GLES clear paths (Block 104 S4)** — core marks and un-marks on every backend, but the GLES HAL has no `ClearTexture` lowering for the Stage-2 eligibility set (sampled reads of uninitialized depth/stencil, compressed and MSAA textures). Tier-2 catalogue item; passes today only where the driver hands back zeroed memory. | M | `specs/blocks/104-lazy-zero-init-stage2.md` S4; `specs/blocks/67-gles-backend.md` mapping matrix |
 | A7 | GLES `SetImmediates` is recorded and bounds-checked but never read by the draw path — a silent gap. Unreachable today because `max_immediate_size` is 0 and core rejects first; must become an explicit `HalError` if the limit is ever raised. | S | `specs/blocks/67-gles-backend.md:282`, `yawgpu-hal/src/gles/adapter.rs` |
@@ -173,7 +173,6 @@ reference `> i32::MAX`, `first_instance` indirect, external textures,
    state is off by default in Dawn, so yawgpu already matches; `VkPipelineCache` was
    measured and dropped (E3, Block 136).
 2. **C2 / C1** surfaces as separate initiatives.
-3. A19 (next).
 4. Lowered by user direction: **C4** feature-gated clippy in CI, then **B2**
    binding arrays, then **D12** and the rest of the GLES rows.
 
@@ -323,3 +322,4 @@ Re-verification after the fixes: `cargo test --workspace` 1093/0, clippy default
 - Block 136 done: the Windows Tint shim was built without optimization (the `cmake` crate drops MSVC's `/O2` with the VS generator). Restored per configuration in `shim/CMakeLists.txt`. Windows NVIDIA: `shader/create_unique` 432 µs to 36 µs (Dawn 44 µs), `pipeline/compute_unique` 1,279 µs to 307 µs (Dawn 495 µs). CTS `webgpu:*` unchanged apart from known intermittents. E3's `VkPipelineCache` dropped; extended dynamic state stays off as Dawn's default.
 - F1-F3 closed (doc drift): full `specs/blocks/README.md` index; Block 108 Mac follow-up recorded (MoltenVK `computeFullSubgroups = true`); Block 109 sync-validation owed item satisfied by `decfd69`. A20 widened into Block 137: Dawn fires every `AllowSpontaneous` callback that is ready at registration inside the call (probe on the M2).
 - A20 done by Block 137: every `AllowSpontaneous` callback that is ready at registration fires inside the call, older ready spontaneous callbacks first, as Dawn's `TrackEvent`; `FailedCreation` message carries the cause. Probe matches Dawn on Metal; workspace 1,391/0; Metal e2e 162/0; CTS `api,*` fail=0. A19 probe: after instance release yawgpu cancels every callback and stops reporting uncaptured errors, while Dawn's device keeps working.
+- A19 done by Block 138: the instance stays in use while it, an adapter, or a device has an external reference; callbacks are cancelled only when none is left. After the instance release a device keeps reporting errors, error scopes, and spontaneous callbacks, as Dawn. Probe matches Dawn on Metal apart from `AllowProcessEvents` callbacks that Dawn never fires (yawgpu cancels them at the last release). Workspace 1,398/0; Metal e2e 162/0; CTS `api,*` fail=0.

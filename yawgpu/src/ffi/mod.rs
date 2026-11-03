@@ -177,6 +177,7 @@ enum InstanceBackendSelection {
 
 /// Owns the core object and retained handles for the WGPU Adapter handle.
 pub struct WGPUAdapterImpl {
+    pub(crate) external_refs: std::sync::atomic::AtomicUsize,
     pub(crate) core: Arc<core::Adapter>,
     pub(crate) instance: Arc<WGPUInstanceImpl>,
 }
@@ -232,6 +233,9 @@ pub struct WGPUDeviceImpl {
 /// Owns the core object and retained handles for the WGPU Instance handle.
 pub struct WGPUInstanceImpl {
     pub(crate) external_refs: std::sync::atomic::AtomicUsize,
+    // Sum of C-owned instance, adapter, and device references. A device release
+    // retains its contribution until implicit destruction and callbacks finish.
+    pub(crate) in_use_refs: std::sync::atomic::AtomicUsize,
     pub(crate) core: Arc<core::Instance>,
     pub(crate) timed_wait_any_enabled: bool,
     pub(crate) pending_callbacks: Mutex<BTreeMap<u64, PendingCallback>>,
@@ -611,7 +615,40 @@ impl WGPUInstanceImpl {
             timed_wait_any_enabled,
             pending_callbacks: Mutex::new(BTreeMap::new()),
             external_refs: std::sync::atomic::AtomicUsize::new(1),
+            in_use_refs: std::sync::atomic::AtomicUsize::new(1),
         })
+    }
+
+    fn add_use_ref(&self) {
+        self.in_use_refs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn try_add_use_ref(&self) -> bool {
+        // A ready result may already have left the callback map when an older
+        // callback releases the last holder. Never resurrect use after zero.
+        self.in_use_refs
+            .try_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |refs| (refs != 0).then(|| refs + 1),
+            )
+            .is_ok()
+    }
+
+    fn release_use_ref(&self) {
+        // Only the thread observing 1 -> 0 drains the callbacks. No lifetime
+        // lock is held across callbacks, so releases can safely reenter here.
+        let previous = self
+            .in_use_refs
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        debug_assert!(
+            previous != 0,
+            "application released an unowned instance use reference"
+        );
+        if previous == 1 {
+            self.cancel_callbacks();
+        }
     }
 
     fn cancel_callbacks(&self) {
@@ -699,11 +736,7 @@ impl WGPUInstanceImpl {
             .pending_callbacks
             .lock()
             .expect("pending callback lock is not poisoned");
-        if self
-            .external_refs
-            .load(std::sync::atomic::Ordering::Acquire)
-            == 0
-        {
+        if self.in_use_refs.load(std::sync::atomic::Ordering::Acquire) == 0 {
             drop(callbacks);
             self.core.future_registry().complete(future);
             unsafe {
@@ -2277,6 +2310,28 @@ impl PendingCallback {
     }
 
     unsafe fn fire(self) {
+        let first_external_ref = match &self {
+            Self::RequestAdapter {
+                callback: Some(_),
+                result: Ok(adapter),
+                ..
+            } => Some((&adapter.instance, &adapter.external_refs)),
+            Self::RequestDevice {
+                callback: Some(_),
+                result: Ok(device),
+                ..
+            } => Some((&device.instance, &device.external_refs)),
+            _ => None,
+        };
+        if let Some((instance, external_refs)) = first_external_ref {
+            // Pending results are internal owners. Count their first external
+            // reference only when handing them to the application's callback.
+            if !instance.try_add_use_ref() {
+                self.cancel();
+                return;
+            }
+            external_refs.store(1, std::sync::atomic::Ordering::Release);
+        }
         match self {
             Self::RequestAdapter {
                 callback,
@@ -3551,6 +3606,17 @@ mod tests {
             );
             let pin = clone_handle(instance, "WGPUInstance");
             wgpuInstanceRelease(instance);
+            assert_eq!(requested.fired, 0);
+            assert_eq!(lost_state.0, 0);
+            assert_eq!(mapped.fired, 0);
+            assert_eq!(work.fired, 0);
+            assert_eq!(compilation.fired, 0);
+            assert_eq!(compute.fired, 0);
+            assert_eq!(render.fired, 0);
+            assert_eq!(scope.fired, 0);
+            wgpuAdapterRelease(adapter);
+            assert_eq!(requested.fired, 0);
+            wgpuDeviceRelease(device);
             assert_eq!(requested.fired, 1);
             assert_eq!(
                 requested.status,
@@ -3594,8 +3660,6 @@ mod tests {
             wgpuShaderModuleRelease(module);
             wgpuBufferRelease(buffer);
             wgpuQueueRelease(queue);
-            wgpuDeviceRelease(device);
-            wgpuAdapterRelease(adapter);
             assert_eq!(pin.process_callbacks(), 0);
         }
     }
@@ -3812,6 +3876,8 @@ mod tests {
                 ] {
                     let instance = make_noop_instance();
                     let adapter = request_noop_adapter(instance);
+                    let pin = clone_handle(instance, "WGPUInstance");
+                    assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 2);
                     let mut state = FailedCreationDeliveryState::default();
                     let data = (&mut state as *mut FailedCreationDeliveryState).cast();
                     let mut limits =
@@ -3837,6 +3903,7 @@ mod tests {
                             ..std::mem::zeroed()
                         },
                     );
+                    assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 2);
                     let mut expected = Vec::new();
                     if request_mode == native::WGPUCallbackMode_AllowSpontaneous {
                         expected.push("request");
@@ -3846,6 +3913,7 @@ mod tests {
                     }
                     assert_eq!(state.order, expected);
                     check_ready_future(instance, future);
+                    assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 2);
                     if request_mode != native::WGPUCallbackMode_AllowSpontaneous {
                         expected.push("request");
                     }
@@ -3866,7 +3934,9 @@ mod tests {
                         format!("Failed to create device:\n{}", state.request_message)
                     );
                     wgpuAdapterRelease(adapter);
+                    assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 1);
                     wgpuInstanceRelease(instance);
+                    assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 0);
                     assert_eq!(state.order, expected);
                 }
             }
@@ -4405,7 +4475,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_request_device_spontaneous_callback_releases_last_instance_ref_cancels_failed_creation(
+    fn failed_request_device_spontaneous_callback_releases_last_instance_ref_delivers_failed_creation(
     ) {
         unsafe {
             let instance = make_noop_instance();
@@ -4444,10 +4514,13 @@ mod tests {
             assert!(!state.request_message.is_empty());
             assert_eq!(
                 state.lost_reason,
-                native::WGPUDeviceLostReason_CallbackCancelled
+                native::WGPUDeviceLostReason_FailedCreation
             );
             assert!(state.lost_device.is_null());
-            assert_eq!(state.lost_message, "Instance released");
+            assert_eq!(
+                state.lost_message,
+                format!("Failed to create device:\n{}", state.request_message)
+            );
             assert_eq!(
                 borrow_handle(adapter, "WGPUAdapter")
                     .instance
@@ -4876,6 +4949,705 @@ mod tests {
             drop(pin);
             wgpuAdapterRelease(adapter);
             wgpuInstanceRelease(instance);
+        }
+    }
+
+    struct InstanceLifetimeState {
+        instance: Arc<WGPUInstanceImpl>,
+        device: Option<Arc<WGPUDeviceImpl>>,
+        order: Vec<usize>,
+        request_status: native::WGPURequestAdapterStatus,
+        lost_reason: native::WGPUDeviceLostReason,
+        scopes: Vec<native::WGPUPopErrorScopeStatus>,
+        locks_free: bool,
+        destroyed: bool,
+    }
+
+    impl InstanceLifetimeState {
+        fn observe(&mut self, tag: usize) {
+            self.order.push(tag);
+            self.locks_free &= self.instance.pending_callbacks.try_lock().is_ok();
+            if let Some(device) = &self.device {
+                self.locks_free &= device.device_lost_future.try_lock().is_ok()
+                    && device.default_queue.try_lock().is_ok();
+                self.destroyed &= device.core.is_lost();
+            }
+        }
+    }
+
+    unsafe extern "C" fn lifetime_request_cancelled(
+        status: native::WGPURequestAdapterStatus,
+        _: native::WGPUAdapter,
+        _: native::WGPUStringView,
+        data: *mut c_void,
+        _: *mut c_void,
+    ) {
+        let state = &mut *data.cast::<InstanceLifetimeState>();
+        state.observe(1);
+        state.request_status = status;
+    }
+
+    unsafe extern "C" fn lifetime_device_lost(
+        _: *const native::WGPUDevice,
+        reason: native::WGPUDeviceLostReason,
+        _: native::WGPUStringView,
+        data: *mut c_void,
+        _: *mut c_void,
+    ) {
+        let state = &mut *data.cast::<InstanceLifetimeState>();
+        state.observe(0);
+        state.lost_reason = reason;
+    }
+
+    unsafe extern "C" fn lifetime_scope_cancelled(
+        status: native::WGPUPopErrorScopeStatus,
+        _: native::WGPUErrorType,
+        _: native::WGPUStringView,
+        data: *mut c_void,
+        tag: *mut c_void,
+    ) {
+        let state = &mut *data.cast::<InstanceLifetimeState>();
+        state.observe(tag as usize);
+        state.scopes.push(status);
+    }
+
+    #[test]
+    fn request_device_loss_before_delivery_reports_null_and_suppresses_uncaptured_errors() {
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+            let pin = clone_handle(instance, "WGPUInstance");
+            let mut errors = UncapturedErrorState::default();
+            let mut lost = DeviceLostDeliveryState::default();
+            let mut descriptor = device_descriptor_with_uncaptured_error_callback(&mut errors, 0);
+            descriptor.deviceLostCallbackInfo = native::WGPUDeviceLostCallbackInfo {
+                mode: native::WGPUCallbackMode_AllowSpontaneous,
+                callback: Some(record_device_lost_delivery),
+                userdata1: (&mut lost as *mut DeviceLostDeliveryState).cast(),
+                ..std::mem::zeroed()
+            };
+            let mut requested = RequestDeviceState::default();
+            let future = wgpuAdapterRequestDevice(
+                adapter,
+                &descriptor,
+                native::WGPURequestDeviceCallbackInfo {
+                    mode: native::WGPUCallbackMode_AllowProcessEvents,
+                    callback: Some(request_device_callback),
+                    userdata1: (&mut requested as *mut RequestDeviceState).cast(),
+                    ..std::mem::zeroed()
+                },
+            );
+            let pending = {
+                let callbacks = pin.pending_callbacks.lock().unwrap();
+                match callbacks.get(&future.id) {
+                    Some(PendingCallback::RequestDevice {
+                        result: Ok(device), ..
+                    }) => Arc::clone(device),
+                    _ => panic!("request must hold a successful pending device"),
+                }
+            };
+            assert_eq!(requested.fired, 0);
+            assert_eq!(pending.external_refs.load(Ordering::Acquire), 0);
+            assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 2);
+            // Dispatch while the core device is still alive: this must exercise
+            // the FFI external-reference guard, rather than core loss suppression.
+            pending.dispatch_error(core::ErrorKind::Validation, "before request delivery");
+            assert_eq!(errors.fired, 0);
+            // Reuse the existing internal loss path without publishing a C handle.
+            pending.schedule_device_lost(core::DeviceLostReason::Destroyed);
+            assert_eq!(lost.fired, 1);
+            assert!(lost.device.is_null());
+            assert_eq!(lost.reason, native::WGPUDeviceLostReason_Destroyed);
+            assert_eq!(requested.fired, 0);
+            assert_eq!(errors.fired, 0);
+            assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 2);
+
+            wgpuInstanceProcessEvents(instance);
+            assert_eq!(requested.fired, 1);
+            assert_eq!(requested.status, native::WGPURequestDeviceStatus_Success);
+            assert_eq!(requested.device, Arc::as_ptr(&pending));
+            assert_eq!(pending.external_refs.load(Ordering::Acquire), 1);
+            assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 3);
+            assert!(pending.core.is_lost());
+            assert_eq!(lost.fired, 1);
+            assert_eq!(errors.fired, 0);
+            release_handles(instance, adapter, requested.device);
+            assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 0);
+            assert_eq!(lost.fired, 1);
+        }
+    }
+
+    #[test]
+    fn wgpuInstanceWaitAny_request_device_counts_only_the_delivered_handle() {
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+            let pin = clone_handle(instance, "WGPUInstance");
+            assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 2);
+            let mut state = RequestDeviceState::default();
+            let future = wgpuAdapterRequestDevice(
+                adapter,
+                std::ptr::null(),
+                native::WGPURequestDeviceCallbackInfo {
+                    mode: native::WGPUCallbackMode_WaitAnyOnly,
+                    callback: Some(request_device_callback),
+                    userdata1: (&mut state as *mut RequestDeviceState).cast(),
+                    ..std::mem::zeroed()
+                },
+            );
+            assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 2);
+            wgpuInstanceProcessEvents(instance);
+            assert_eq!(state.fired, 0);
+            assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 2);
+            assert_lost_future_complete(instance, future);
+            assert_eq!(state.fired, 1);
+            assert_eq!(state.status, native::WGPURequestDeviceStatus_Success);
+            assert!(!state.device.is_null());
+            assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 3);
+            assert_lost_future_complete(instance, future);
+            assert_eq!(state.fired, 1);
+            assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 3);
+            wgpuDeviceRelease(state.device);
+            assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 2);
+            wgpuAdapterRelease(adapter);
+            assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 1);
+            wgpuInstanceRelease(instance);
+            assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 0);
+        }
+    }
+
+    #[test]
+    fn null_request_callbacks_never_add_instance_use_references() {
+        unsafe {
+            for mode in [
+                native::WGPUCallbackMode_AllowSpontaneous,
+                native::WGPUCallbackMode_AllowProcessEvents,
+                native::WGPUCallbackMode_WaitAnyOnly,
+            ] {
+                let instance = make_noop_instance();
+                let pin = clone_handle(instance, "WGPUInstance");
+                assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 1);
+                let adapter_future = wgpuInstanceRequestAdapter(
+                    instance,
+                    std::ptr::null(),
+                    native::WGPURequestAdapterCallbackInfo {
+                        mode,
+                        callback: None,
+                        ..std::mem::zeroed()
+                    },
+                );
+                assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 1);
+                if mode != native::WGPUCallbackMode_AllowSpontaneous {
+                    assert!(matches!(
+                        pin.pending_callbacks
+                            .lock()
+                            .unwrap()
+                            .get(&adapter_future.id),
+                        Some(PendingCallback::RequestAdapter { result: Ok(_), .. })
+                    ));
+                }
+                check_ready_future(instance, adapter_future);
+                assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 1);
+
+                let adapter = request_noop_adapter(instance);
+                assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 2);
+                let device_future = wgpuAdapterRequestDevice(
+                    adapter,
+                    std::ptr::null(),
+                    native::WGPURequestDeviceCallbackInfo {
+                        mode,
+                        callback: None,
+                        ..std::mem::zeroed()
+                    },
+                );
+                assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 2);
+                if mode != native::WGPUCallbackMode_AllowSpontaneous {
+                    assert!(matches!(
+                        pin.pending_callbacks.lock().unwrap().get(&device_future.id),
+                        Some(PendingCallback::RequestDevice { result: Ok(_), .. })
+                    ));
+                }
+                check_ready_future(instance, device_future);
+                assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 2);
+                wgpuAdapterRelease(adapter);
+                assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 1);
+                wgpuInstanceRelease(instance);
+                assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 0);
+                assert!(pin.pending_callbacks.lock().unwrap().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn instance_release_keeps_device_callbacks_until_ordered_last_release() {
+        unsafe {
+            for lost_mode in [
+                native::WGPUCallbackMode_AllowSpontaneous,
+                native::WGPUCallbackMode_AllowProcessEvents,
+            ] {
+                let instance = make_noop_instance();
+                let adapter = request_noop_adapter(instance);
+                let mut state = InstanceLifetimeState {
+                    instance: clone_handle(instance, "WGPUInstance"),
+                    device: None,
+                    order: Vec::new(),
+                    request_status: 0,
+                    lost_reason: 0,
+                    scopes: Vec::new(),
+                    locks_free: true,
+                    destroyed: true,
+                };
+                let data = (&mut state as *mut InstanceLifetimeState).cast();
+                // An older pending result must not count as an external adapter.
+                wgpuInstanceRequestAdapter(
+                    instance,
+                    std::ptr::null(),
+                    native::WGPURequestAdapterCallbackInfo {
+                        mode: native::WGPUCallbackMode_WaitAnyOnly,
+                        callback: Some(lifetime_request_cancelled),
+                        userdata1: data,
+                        ..std::mem::zeroed()
+                    },
+                );
+                let mut errors = UncapturedErrorState::default();
+                let mut descriptor =
+                    device_descriptor_with_uncaptured_error_callback(&mut errors, 0);
+                descriptor.deviceLostCallbackInfo = native::WGPUDeviceLostCallbackInfo {
+                    mode: lost_mode,
+                    callback: Some(lifetime_device_lost),
+                    userdata1: data,
+                    ..std::mem::zeroed()
+                };
+                let device = request_noop_device_with_descriptor(instance, adapter, &descriptor);
+                state.device = Some(clone_handle(device, "WGPUDevice"));
+                wgpuAdapterRelease(adapter);
+                wgpuInstanceRelease(instance);
+                assert!(state.order.is_empty());
+                assert_eq!(state.instance.in_use_refs.load(Ordering::Acquire), 1);
+
+                wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+                let bad = wgpuDeviceCreateBuffer(
+                    device,
+                    &buffer_descriptor(native::WGPUBufferUsage_None, 4),
+                );
+                let mut scope = PopErrorScopeState::default();
+                wgpuDevicePopErrorScope(
+                    device,
+                    native::WGPUPopErrorScopeCallbackInfo {
+                        mode: native::WGPUCallbackMode_AllowSpontaneous,
+                        callback: Some(pop_error_scope_callback),
+                        userdata1: (&mut scope as *mut PopErrorScopeState).cast(),
+                        ..std::mem::zeroed()
+                    },
+                );
+                assert_eq!(scope.fired, 1);
+                assert_eq!(scope.status, native::WGPUPopErrorScopeStatus_Success);
+                assert_eq!(scope.error_type, native::WGPUErrorType_Validation);
+                assert!(scope.message.contains("buffer usage"));
+                assert_eq!(errors.fired, 0);
+                wgpuBufferRelease(bad);
+                let bad = wgpuDeviceCreateBuffer(
+                    device,
+                    &buffer_descriptor(native::WGPUBufferUsage_None, 4),
+                );
+                assert_eq!(errors.fired, 1);
+                assert_eq!(errors.error_type, native::WGPUErrorType_Validation);
+                assert!(errors.saw_device);
+                wgpuBufferRelease(bad);
+
+                let buffer = wgpuDeviceCreateBuffer(
+                    device,
+                    &buffer_descriptor(
+                        native::WGPUBufferUsage_MapRead | native::WGPUBufferUsage_CopyDst,
+                        4,
+                    ),
+                );
+                let mut mapped = BufferMapAsyncState::default();
+                wgpuBufferMapAsync(
+                    buffer,
+                    native::WGPUMapMode_Read,
+                    0,
+                    4,
+                    native::WGPUBufferMapCallbackInfo {
+                        mode: native::WGPUCallbackMode_AllowSpontaneous,
+                        callback: Some(buffer_map_async_callback),
+                        userdata1: (&mut mapped as *mut BufferMapAsyncState).cast(),
+                        ..std::mem::zeroed()
+                    },
+                );
+                assert_eq!(mapped.fired, 1);
+                assert_eq!(mapped.status, native::WGPUMapAsyncStatus_Success);
+                wgpuBufferUnmap(buffer);
+                let queue = wgpuDeviceGetQueue(device);
+                let mut work = QueueWorkDoneState::default();
+                wgpuQueueOnSubmittedWorkDone(
+                    queue,
+                    native::WGPUQueueWorkDoneCallbackInfo {
+                        mode: native::WGPUCallbackMode_AllowSpontaneous,
+                        callback: Some(queue_work_done_callback),
+                        userdata1: (&mut work as *mut QueueWorkDoneState).cast(),
+                        ..std::mem::zeroed()
+                    },
+                );
+                assert_eq!(work.fired, 1);
+                assert_eq!(work.status, native::WGPUQueueWorkDoneStatus_Success);
+
+                for (mode, tag) in [
+                    (native::WGPUCallbackMode_AllowProcessEvents, 2usize),
+                    (native::WGPUCallbackMode_WaitAnyOnly, 3),
+                ] {
+                    wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+                    wgpuDevicePopErrorScope(
+                        device,
+                        native::WGPUPopErrorScopeCallbackInfo {
+                            mode,
+                            callback: Some(lifetime_scope_cancelled),
+                            userdata1: data,
+                            userdata2: tag as *mut c_void,
+                            ..std::mem::zeroed()
+                        },
+                    );
+                }
+                wgpuDeviceAddRef(device);
+                wgpuDeviceRelease(device);
+                assert!(state.order.is_empty());
+                assert!(!state.device.as_ref().unwrap().core.is_lost());
+                wgpuDeviceRelease(device);
+                if lost_mode == native::WGPUCallbackMode_AllowSpontaneous {
+                    assert_eq!(state.order, [0, 1, 2, 3]);
+                    assert_eq!(state.lost_reason, native::WGPUDeviceLostReason_Destroyed);
+                } else {
+                    assert_eq!(state.order, [1, 0, 2, 3]);
+                    assert_eq!(
+                        state.lost_reason,
+                        native::WGPUDeviceLostReason_CallbackCancelled
+                    );
+                }
+                assert_eq!(
+                    state.request_status,
+                    native::WGPURequestAdapterStatus_CallbackCancelled
+                );
+                assert_eq!(
+                    state.scopes,
+                    [native::WGPUPopErrorScopeStatus_CallbackCancelled; 2]
+                );
+                assert!(state.locks_free && state.destroyed);
+                assert!(state.instance.pending_callbacks.lock().unwrap().is_empty());
+                assert_eq!(state.instance.in_use_refs.load(Ordering::Acquire), 0);
+                // A child and internal FFI owners do not keep use alive. New
+                // registrations are cancelled even with their Arcs retained.
+                let mut late = QueueWorkDoneState::default();
+                wgpuQueueOnSubmittedWorkDone(
+                    queue,
+                    native::WGPUQueueWorkDoneCallbackInfo {
+                        mode: native::WGPUCallbackMode_AllowSpontaneous,
+                        callback: Some(queue_work_done_callback),
+                        userdata1: (&mut late as *mut QueueWorkDoneState).cast(),
+                        ..std::mem::zeroed()
+                    },
+                );
+                assert_eq!(late.fired, 1);
+                assert_eq!(
+                    late.status,
+                    native::WGPUQueueWorkDoneStatus_CallbackCancelled
+                );
+                wgpuBufferRelease(buffer);
+                wgpuQueueRelease(queue);
+            }
+        }
+    }
+
+    #[test]
+    fn surviving_adapter_requests_device_and_addref_defers_cancellation() {
+        unsafe {
+            for adapter_last in [false, true] {
+                let instance = make_noop_instance();
+                let adapter = request_noop_adapter(instance);
+                let pin = clone_handle(adapter, "WGPUAdapter");
+                let weak = Arc::downgrade(&pin.instance);
+                wgpuAdapterAddRef(adapter);
+                wgpuInstanceRelease(instance);
+                let mut requested = RequestDeviceState::default();
+                wgpuAdapterRequestDevice(
+                    adapter,
+                    std::ptr::null(),
+                    native::WGPURequestDeviceCallbackInfo {
+                        mode: native::WGPUCallbackMode_AllowSpontaneous,
+                        callback: Some(request_device_callback),
+                        userdata1: (&mut requested as *mut RequestDeviceState).cast(),
+                        ..std::mem::zeroed()
+                    },
+                );
+                assert_eq!(requested.fired, 1);
+                assert_eq!(requested.status, native::WGPURequestDeviceStatus_Success);
+                let device = requested.device;
+                assert!(!device.is_null());
+                let mut pending = [RequestDeviceState::default(), RequestDeviceState::default()];
+                for (mode, state) in [
+                    native::WGPUCallbackMode_AllowProcessEvents,
+                    native::WGPUCallbackMode_WaitAnyOnly,
+                ]
+                .into_iter()
+                .zip(pending.iter_mut())
+                {
+                    wgpuAdapterRequestDevice(
+                        adapter,
+                        std::ptr::null(),
+                        native::WGPURequestDeviceCallbackInfo {
+                            mode,
+                            callback: Some(request_device_callback),
+                            userdata1: (state as *mut RequestDeviceState).cast(),
+                            ..std::mem::zeroed()
+                        },
+                    );
+                }
+                wgpuAdapterRelease(adapter);
+                assert!(pending.iter().all(|state| state.fired == 0));
+                assert_eq!(pin.external_refs.load(Ordering::Acquire), 1);
+                if adapter_last {
+                    wgpuDeviceRelease(device);
+                    assert!(pending.iter().all(|state| state.fired == 0));
+                    wgpuAdapterRelease(adapter);
+                } else {
+                    wgpuAdapterRelease(adapter);
+                    assert!(pending.iter().all(|state| state.fired == 0));
+                    wgpuDeviceRelease(device);
+                }
+                for state in pending {
+                    assert_eq!(state.fired, 1);
+                    assert_eq!(
+                        state.status,
+                        native::WGPURequestDeviceStatus_CallbackCancelled
+                    );
+                    assert!(state.device.is_null());
+                }
+                assert_eq!(pin.instance.in_use_refs.load(Ordering::Acquire), 0);
+                drop(pin);
+                assert!(weak.upgrade().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn batched_ready_results_do_not_resurrect_instance_use_after_last_release() {
+        #[derive(Default)]
+        struct State {
+            instance: native::WGPUInstance,
+            adapter: native::WGPUAdapter,
+            adapter_statuses: Vec<native::WGPURequestAdapterStatus>,
+            device_statuses: Vec<native::WGPURequestDeviceStatus>,
+        }
+        unsafe extern "C" fn adapter_ready(
+            status: native::WGPURequestAdapterStatus,
+            adapter: native::WGPUAdapter,
+            _: native::WGPUStringView,
+            data: *mut c_void,
+            _: *mut c_void,
+        ) {
+            let state = &mut *data.cast::<State>();
+            state.adapter_statuses.push(status);
+            if !adapter.is_null() {
+                wgpuAdapterRelease(adapter);
+            }
+            if state.adapter_statuses.len() == 1 {
+                wgpuInstanceRelease(state.instance);
+            }
+        }
+        unsafe extern "C" fn device_ready(
+            status: native::WGPURequestDeviceStatus,
+            device: native::WGPUDevice,
+            _: native::WGPUStringView,
+            data: *mut c_void,
+            _: *mut c_void,
+        ) {
+            let state = &mut *data.cast::<State>();
+            state.device_statuses.push(status);
+            if !device.is_null() {
+                wgpuDeviceRelease(device);
+            }
+            if state.device_statuses.len() == 1 {
+                wgpuAdapterRelease(state.adapter);
+                wgpuInstanceRelease(state.instance);
+            }
+        }
+        unsafe {
+            for devices in [false, true] {
+                let instance = make_noop_instance();
+                let pin = clone_handle(instance, "WGPUInstance");
+                let weak = Arc::downgrade(&pin);
+                let mut state = State {
+                    instance,
+                    ..Default::default()
+                };
+                if devices {
+                    state.adapter = request_noop_adapter(instance);
+                }
+                let second_adapter = if devices {
+                    request_noop_adapter(instance)
+                } else {
+                    std::ptr::null()
+                };
+                let data = (&mut state as *mut State).cast();
+                for index in 0..2 {
+                    if devices {
+                        wgpuAdapterRequestDevice(
+                            if index == 0 {
+                                state.adapter
+                            } else {
+                                second_adapter
+                            },
+                            std::ptr::null(),
+                            native::WGPURequestDeviceCallbackInfo {
+                                mode: native::WGPUCallbackMode_AllowProcessEvents,
+                                callback: Some(device_ready),
+                                userdata1: data,
+                                ..std::mem::zeroed()
+                            },
+                        );
+                    } else {
+                        wgpuInstanceRequestAdapter(
+                            instance,
+                            std::ptr::null(),
+                            native::WGPURequestAdapterCallbackInfo {
+                                mode: native::WGPUCallbackMode_AllowProcessEvents,
+                                callback: Some(adapter_ready),
+                                userdata1: data,
+                                ..std::mem::zeroed()
+                            },
+                        );
+                    }
+                }
+                if devices {
+                    wgpuAdapterRelease(second_adapter);
+                }
+                wgpuInstanceProcessEvents(instance);
+                if devices {
+                    assert_eq!(
+                        state.device_statuses,
+                        [
+                            native::WGPURequestDeviceStatus_Success,
+                            native::WGPURequestDeviceStatus_CallbackCancelled
+                        ]
+                    );
+                } else {
+                    assert_eq!(
+                        state.adapter_statuses,
+                        [
+                            native::WGPURequestAdapterStatus_Success,
+                            native::WGPURequestAdapterStatus_CallbackCancelled
+                        ]
+                    );
+                }
+                assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 0);
+                assert!(pin.pending_callbacks.lock().unwrap().is_empty());
+                drop(pin);
+                assert!(weak.upgrade().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn concurrent_last_adapter_release_waits_for_device_destroyed_delivery() {
+        struct State {
+            instance: Arc<WGPUInstanceImpl>,
+            entered: std::sync::mpsc::Sender<()>,
+            resume: Mutex<std::sync::mpsc::Receiver<()>>,
+            order: Mutex<Vec<usize>>,
+            reason: AtomicUsize,
+            locks_free: std::sync::atomic::AtomicBool,
+        }
+        unsafe extern "C" fn lost(
+            _: *const native::WGPUDevice,
+            reason: native::WGPUDeviceLostReason,
+            _: native::WGPUStringView,
+            data: *mut c_void,
+            _: *mut c_void,
+        ) {
+            let state = &*data.cast::<State>();
+            state.reason.store(reason as usize, Ordering::Release);
+            state.order.lock().unwrap().push(0);
+            state.locks_free.store(
+                state.instance.pending_callbacks.try_lock().is_ok(),
+                Ordering::Release,
+            );
+            let _ = state.entered.send(());
+            let _ = state.resume.lock().unwrap().recv();
+        }
+        unsafe extern "C" fn cancelled(
+            status: native::WGPUPopErrorScopeStatus,
+            _: native::WGPUErrorType,
+            _: native::WGPUStringView,
+            data: *mut c_void,
+            _: *mut c_void,
+        ) {
+            let state = &*data.cast::<State>();
+            state.order.lock().unwrap().push(status as usize);
+            state.locks_free.fetch_and(
+                state.instance.pending_callbacks.try_lock().is_ok(),
+                Ordering::AcqRel,
+            );
+        }
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+            let state = State {
+                instance: clone_handle(instance, "WGPUInstance"),
+                entered: entered_tx,
+                resume: Mutex::new(resume_rx),
+                order: Mutex::new(Vec::new()),
+                reason: AtomicUsize::new(0),
+                locks_free: std::sync::atomic::AtomicBool::new(false),
+            };
+            let data = (&state as *const State).cast_mut().cast();
+            let descriptor = native::WGPUDeviceDescriptor {
+                deviceLostCallbackInfo: native::WGPUDeviceLostCallbackInfo {
+                    mode: native::WGPUCallbackMode_AllowSpontaneous,
+                    callback: Some(lost),
+                    userdata1: data,
+                    ..std::mem::zeroed()
+                },
+                ..std::mem::zeroed()
+            };
+            let device = request_noop_device_with_descriptor(instance, adapter, &descriptor);
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            wgpuDevicePopErrorScope(
+                device,
+                native::WGPUPopErrorScopeCallbackInfo {
+                    mode: native::WGPUCallbackMode_AllowProcessEvents,
+                    callback: Some(cancelled),
+                    userdata1: data,
+                    ..std::mem::zeroed()
+                },
+            );
+            wgpuInstanceRelease(instance);
+            let address = device as usize;
+            let releaser =
+                std::thread::spawn(move || wgpuDeviceRelease(address as native::WGPUDevice));
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            wgpuAdapterRelease(adapter);
+            let during = state.order.lock().unwrap().clone();
+            let refs_during = state.instance.in_use_refs.load(Ordering::Acquire);
+            resume_tx.send(()).unwrap();
+            releaser.join().unwrap();
+            assert_eq!(during, [0]);
+            assert_eq!(refs_during, 1);
+            assert_eq!(
+                state.reason.load(Ordering::Acquire),
+                native::WGPUDeviceLostReason_Destroyed as usize
+            );
+            assert_eq!(
+                *state.order.lock().unwrap(),
+                [
+                    0,
+                    native::WGPUPopErrorScopeStatus_CallbackCancelled as usize
+                ]
+            );
+            assert!(state.locks_free.load(Ordering::Acquire));
+            assert_eq!(state.instance.in_use_refs.load(Ordering::Acquire), 0);
         }
     }
 
@@ -7349,6 +8121,8 @@ mod tests {
     fn wgpuInstanceWaitAny_wait_any_only_request_adapter_fires_callback() {
         unsafe {
             let instance = make_noop_instance();
+            let pin = clone_handle(instance, "WGPUInstance");
+            assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 1);
             let mut state = RequestAdapterState::default();
             let callback_info = native::WGPURequestAdapterCallbackInfo {
                 nextInChain: std::ptr::null_mut(),
@@ -7358,6 +8132,7 @@ mod tests {
                 userdata2: std::ptr::null_mut(),
             };
             let future = wgpuInstanceRequestAdapter(instance, std::ptr::null(), callback_info);
+            assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 1);
             let mut wait_info = native::WGPUFutureWaitInfo {
                 future,
                 completed: 0,
@@ -7365,6 +8140,7 @@ mod tests {
 
             wgpuInstanceProcessEvents(instance);
             assert_eq!(state.fired, 0);
+            assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 1);
 
             assert_eq!(
                 wgpuInstanceWaitAny(instance, 1, &mut wait_info, 0),
@@ -7374,9 +8150,15 @@ mod tests {
             assert_eq!(state.fired, 1);
             assert_eq!(state.status, native::WGPURequestAdapterStatus_Success);
             assert!(!state.adapter.is_null());
+            assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 2);
+            assert_lost_future_complete(instance, future);
+            assert_eq!(state.fired, 1);
+            assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 2);
 
             wgpuAdapterRelease(state.adapter);
+            assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 1);
             wgpuInstanceRelease(instance);
+            assert_eq!(pin.in_use_refs.load(Ordering::Acquire), 0);
         }
     }
 

@@ -171,6 +171,7 @@ mod tests {
             timed_wait_any_enabled: false,
             pending_callbacks: Mutex::new(BTreeMap::new()),
             external_refs: std::sync::atomic::AtomicUsize::new(1),
+            in_use_refs: std::sync::atomic::AtomicUsize::new(1),
         })
     }
 
@@ -185,6 +186,9 @@ mod tests {
         let device = adapter
             .create_device(None, &[], "device", "queue")
             .expect("Noop device");
+        instance
+            .in_use_refs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Arc::new(WGPUDeviceImpl {
             core: Arc::new(device),
             instance,

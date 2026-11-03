@@ -8,10 +8,7 @@ use super::*;
 /// Returns WGPU device release.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceRelease(device: native::WGPUDevice) {
-    let device = device
-        .as_ref()
-        .map(|_| device)
-        .unwrap_or_else(|| panic!("WGPUDevice must not be null"));
+    let _ = borrow_handle(device, "WGPUDevice");
     let owned = Arc::from_raw(device);
     if owned
         .external_refs
@@ -20,6 +17,9 @@ pub unsafe extern "C" fn wgpuDeviceRelease(device: native::WGPUDevice) {
     {
         owned.implicit_destroy_on_last_release();
     }
+    // Keep the instance in use until spontaneous Destroyed delivery finishes,
+    // even if another thread releases the last adapter or instance meanwhile.
+    owned.instance.release_use_ref();
 }
 
 /// Adds one owned reference to a device handle.
@@ -30,7 +30,9 @@ pub unsafe extern "C" fn wgpuDeviceRelease(device: native::WGPUDevice) {
 /// Returns WGPU device add ref.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuDeviceAddRef(device: native::WGPUDevice) {
-    borrow_handle(device, "WGPUDevice")
+    let device_impl = borrow_handle(device, "WGPUDevice");
+    device_impl.instance.add_use_ref();
+    device_impl
         .external_refs
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     add_ref_handle(device, "WGPUDevice");

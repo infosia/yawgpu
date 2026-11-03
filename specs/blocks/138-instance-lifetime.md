@@ -1,6 +1,7 @@
 # Block 138 — The instance stays in use while its adapters and devices are
 
-Status: **IN PROGRESS (2026-11-04)**.
+Status: **COMPLETE (2026-11-04)**. Phase Review: 0 CRITICAL, 0 MAJOR, 5 MINOR; all resolved,
+see below.
 Source: backlog A19 (Block 130 Problem, point 3), started by user request on 2026-11-04.
 Oracle: Dawn at the pinned `third_party/dawn` (paths relative to `src/dawn/native/`):
 `Adapter.h` (`AdapterBase::mInstance` is a `Ref<InstanceBase>`), `Instance.cpp`
@@ -68,6 +69,13 @@ destroy and the spontaneous `Destroyed` device-lost callback (Block 130). Then R
 cancels whatever is still pending, including an `AllowProcessEvents` device-lost
 callback, which fires `CallbackCancelled`.
 
+R4a. **Before delivery.** An adapter or device that a request has created but not yet
+delivered to the application has no external reference. It counts toward R1 only from
+the moment its request callback receives it. If such a device is lost before delivery,
+its device-lost callback receives a null device and its uncaptured errors are not
+reported, because the application holds no handle to it. A result that is cancelled
+instead of delivered never counts.
+
 R5. **Unchanged.**
 - With an instance reference held, nothing changes.
 - An instance with no adapter and no device: its last release cancels at once, as today.
@@ -112,7 +120,40 @@ R5. **Unchanged.**
   release already destroys the device (Block 109), so their callbacks resolve as aborted
   or lost at that point.
 
+- Surfaces keeping the instance in use. In Dawn a surface holds its instance. R1 does not
+  count surfaces; a surface used after its instance stopped being in use keeps today's
+  behaviour.
+
 ## Slices
 
 - **S1 (coding agent):** R1-R5 with the unit tests.
 - **S2 (Claude):** probe re-run, e2e, CTS, Phase Review.
+
+## Verification (2026-11-04)
+
+Run on Apple M2, macOS 27.2. Vulkan here is MoltenVK under the Khronos layer, which is
+reference-only.
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace` (after the Phase Review fixes) | 1,398 passed, 0 failed |
+| fmt; clippy `-D warnings` on default, `metal`, `vulkan`, `gles`, `metal,tiled`, `vulkan,tiled`, `shader-passthrough` (`yawgpu-core`, `yawgpu-hal`, `yawgpu`, all targets) | clean |
+| A19 probe against yawgpu, Metal | after the instance release, `createBuffer`, a spontaneous `PopErrorScope` (`Validation`), the uncaptured-error callback, and spontaneous `mapAsync` and `onSubmittedWorkDone` with no pending work all behave as Dawn. Device release with a spontaneous device-lost gives `Destroyed` inside the call, as Dawn. The two expected differences: an `AllowProcessEvents` device-lost and the `mapAsync` pending since before the release, which Dawn never fires, are cancelled at the device release (R2, R4) |
+| Block 130 teardown probe, Noop | instance released first, then the device, `AllowSpontaneous`: now `Destroyed` inside `wgpuDeviceRelease`, as Dawn (was `CallbackCancelled`). `AllowProcessEvents` rows that Dawn never fires give `CallbackCancelled` at the last release |
+| Metal e2e and every other ignored `yawgpu` test, `metal,tiled` | 162 passed, 0 failed |
+| Vulkan e2e, `vulkan,tiled` | 155 passed, 1 failed (the known `imageView2DOn3DImage`); every VUID comes from that test |
+| webgpu-native-cts, Metal, `webgpu:api,*` | pass 586,611, skip 104,756, fail 0, crash 0, xfail 2; the same counts as Block 137 |
+
+The probes, the e2e runs, and the CTS used the library before the Phase Review fixes.
+Those fixes add tests and a `debug_assert`, and change nothing a release build does.
+
+## Phase Review
+
+| ID | Finding | Disposition |
+|---|---|---|
+| m1 | An adapter or device not yet delivered has no external reference, so a device lost before delivery reports a null device and no uncaptured errors | Intended; stated as R4a, pinned by a test |
+| m2 | No `in_use_refs` checks for results delivered through `WaitAny`, for a null callback, or for a failed request | Added |
+| m3 | A double release by the application wraps the count silently | `debug_assert!` on the 1-to-0 path |
+| m4 | Surfaces do not keep the instance in use, unlike Dawn | Out of scope, recorded |
+| m5 | `AtomicUsize::try_update` is a recent std API | Kept: the workspace sets no MSRV and CI uses stable. `fetch_update` is deprecated on the current toolchain |
+

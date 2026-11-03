@@ -1,13 +1,34 @@
 use super::*;
 
-wgpu_handle_exports!(
-    refcount:
-    WGPUAdapterImpl,
-    native::WGPUAdapter,
-    "WGPUAdapter",
-    wgpuAdapterAddRef,
-    wgpuAdapterRelease
-);
+/// Adds one owned reference to an adapter handle.
+///
+/// # Safety
+///
+/// `adapter` must be a non-null live yawgpu adapter handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuAdapterAddRef(adapter: native::WGPUAdapter) {
+    let adapter_impl = borrow_handle(adapter, "WGPUAdapter");
+    adapter_impl.instance.add_use_ref();
+    adapter_impl
+        .external_refs
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    add_ref_handle(adapter, "WGPUAdapter");
+}
+
+/// Releases one owned reference to an adapter handle.
+///
+/// # Safety
+///
+/// `adapter` must be a non-null live yawgpu adapter handle.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuAdapterRelease(adapter: native::WGPUAdapter) {
+    let _ = borrow_handle(adapter, "WGPUAdapter");
+    let owned = Arc::from_raw(adapter);
+    owned
+        .external_refs
+        .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    owned.instance.release_use_ref();
+}
 
 /// Gets the supported limits for an adapter.
 ///
@@ -196,7 +217,7 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
                 lost_future_test_hook: Mutex::new(None),
                 #[cfg(test)]
                 destroy_test_error: Mutex::new(None),
-                external_refs: std::sync::atomic::AtomicUsize::new(1),
+                external_refs: std::sync::atomic::AtomicUsize::new(0),
                 default_queue: Mutex::new(None),
                 shader_module_cache: ObjectCache::new(),
                 pipeline_layout_cache: ObjectCache::new(),
