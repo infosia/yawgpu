@@ -1,7 +1,7 @@
 # Block 129 — Vulkan buffers read as zero
 
 Status: **COMPLETE (2026-11-03)**. Phase Review: 0 CRITICAL, 0 MAJOR, 4 MINOR; all fixed,
-see below. Metal is owed on a Mac host (R3).
+see below. The Metal check (R3) ran on a Mac host and found no failure.
 Source: backlog A18, found in the Block 128 Windows native Vulkan CTS run.
 Oracle: Dawn at the pinned `third_party/dawn`: `native/vulkan/BufferVk.cpp`
 (`Buffer::Initialize`, `Buffer::EnsureDataInitialized`, `Buffer::ClearBuffer`).
@@ -120,8 +120,20 @@ failure either. That failure is intermittent at full-suite scale.
 The heavier e2e variant described in `common/buffer_zero_init.rs` failed once in four
 runs before the fix. The committed e2e is the lighter variant, as a regression guard.
 
-Not exercised: Metal (R3). The Metal e2e and the Mac CTS check in R3 are owed to a Mac
-host.
+### Mac host (2026-11-03)
+
+Run on Apple M2, macOS 27.2, at `019bd3b`.
+
+| Gate | Result |
+|---|---|
+| Metal e2e `e2e_metal_buffer_zero_init` | 2 passed, 0 failed |
+| R3 check, Metal: CTS `api,operation,command_buffer,copyTextureToTexture:*`, 3 runs | pass 77,916, fail 0 in each run |
+| R3 check, Metal: CTS `api,operation,resource_init,buffer:*`, 3 runs | pass 6, fail 0 in each run |
+| MoltenVK (reference only), Khronos layer: the HAL zero-fill test and `e2e_vulkan_buffer_zero_init` | 3 passed, 0 VUIDs |
+
+R3 found no Metal failure, so no Metal block is opened. This is not proof that Metal
+buffers read as zero. It shows only that this driver did not hand back dirty memory in
+these runs.
 
 ## Phase Review
 
