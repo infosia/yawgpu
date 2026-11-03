@@ -1,7 +1,7 @@
 # Block 132 — Render bind groups are resolved at draw time
 
 Status: **COMPLETE (2026-11-03)**. Phase Review: 0 CRITICAL, 0 MAJOR, 5 MINOR; m1-m4 fixed,
-m5 needed no change, see below. Metal is owed on a Mac host.
+m5 needed no change, see below. Metal verified on the M2 at `ba0b289`.
 Source: backlog A22, found in the Windows native Vulkan CTS run of Blocks 130 and 131.
 Oracle: Dawn at the pinned `third_party/dawn`: `native/BindGroupTracker.h`
 (`BindGroupTrackerBase::OnSetBindGroup`, `OnSetPipeline`, `BeforeApply`: bind groups
@@ -135,8 +135,15 @@ intermittent storage-atomics behaviour of this driver recorded in Block 120:
 The GPU runs and the CTS used the library before the m2 and m4 test fixes. Those change
 only `#[cfg(test)]` code; `cargo test --workspace` above ran after them.
 
-Not exercised: Metal. `e2e_metal_render_bind_groups_at_draw` and the CTS red check are
-owed to a Mac host.
+### Mac host (2026-11-03)
+
+Run on Apple M2, macOS 27.2, at yawgpu `ba0b289`, CTS `a5cbf67`, release `metal` dylib.
+
+| Gate | Result |
+|---|---|
+| Red check: CTS `pipeline_bind_group_compat:*`, Metal | before (`f3a63e9` library): pass 2,088, fail 432, the same count as Windows, so Metal was affected; after: pass 2,520, fail 0 |
+| Metal e2e and every other ignored test, `metal,tiled`, `--ignored` | 162 passed, 0 failed (161 before, plus `group_set_under_another_pipeline_draws_with_the_next`) |
+| webgpu-native-cts, Metal, `webgpu:api,operation,*` | pass 285,177, skip 48,421, fail 0, crash 0 |
 
 ## Phase Review
 
