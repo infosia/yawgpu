@@ -21,6 +21,7 @@
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[must_use]
 #[non_exhaustive]
+#[repr(C)]
 pub struct MslWorkarounds {
     /// Skip the demote-to-helper transform on non-Apple GPUs.
     pub disable_demote_to_helper: bool,
@@ -28,12 +29,45 @@ pub struct MslWorkarounds {
     pub fix_u32_div_mod: bool,
     /// Polyfill dynamically indexed boolean-vector stores.
     pub polyfill_bool_vec_dynamic_store: bool,
+    /// Keep f16 constants out of module scope.
+    pub disable_module_constant_f16: bool,
+    /// Polyfill signed normalized 16-bit unpacking.
+    pub polyfill_unpack_2x16_snorm: bool,
+    /// Polyfill unsigned normalized 16-bit unpacking.
+    pub polyfill_unpack_2x16_unorm: bool,
+    /// Polyfill hyperbolic tangent of f16 values.
+    pub polyfill_tanh_f16: bool,
+    /// Polyfill floating-point clamp.
+    pub polyfill_clamp_float: bool,
+    /// Collapse nested subgroup minimum and maximum operations.
+    pub collapse_subgroup_min_max: bool,
+    /// Represent workgroup booleans as u32.
+    pub replace_workgroup_bool_with_u32: bool,
+    /// Scalarize vector maximum, minimum and clamp operations.
+    pub scalarize_max_min_clamp: bool,
 }
+
+const _: () = {
+    assert!(core::mem::size_of::<MslWorkarounds>() == 11);
+    assert!(core::mem::align_of::<MslWorkarounds>() == 1);
+    assert!(core::mem::offset_of!(MslWorkarounds, disable_demote_to_helper) == 0);
+    assert!(core::mem::offset_of!(MslWorkarounds, fix_u32_div_mod) == 1);
+    assert!(core::mem::offset_of!(MslWorkarounds, polyfill_bool_vec_dynamic_store) == 2);
+    assert!(core::mem::offset_of!(MslWorkarounds, disable_module_constant_f16) == 3);
+    assert!(core::mem::offset_of!(MslWorkarounds, polyfill_unpack_2x16_snorm) == 4);
+    assert!(core::mem::offset_of!(MslWorkarounds, polyfill_unpack_2x16_unorm) == 5);
+    assert!(core::mem::offset_of!(MslWorkarounds, polyfill_tanh_f16) == 6);
+    assert!(core::mem::offset_of!(MslWorkarounds, polyfill_clamp_float) == 7);
+    assert!(core::mem::offset_of!(MslWorkarounds, collapse_subgroup_min_max) == 8);
+    assert!(core::mem::offset_of!(MslWorkarounds, replace_workgroup_bool_with_u32) == 9);
+    assert!(core::mem::offset_of!(MslWorkarounds, scalarize_max_min_clamp) == 10);
+};
 
 /// Device-selected features and workarounds consumed by the SPIR-V writer.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[must_use]
 #[non_exhaustive]
+#[repr(C)]
 pub struct SpirvWorkarounds {
     /// Use the enabled Vulkan demote-to-helper feature.
     pub use_demote_to_helper_invocation: bool,
@@ -56,7 +90,68 @@ pub struct SpirvWorkarounds {
     pub replace_workgroup_atomic_store_with_exchange: bool,
     /// Replace unsigned comparisons against zero.
     pub replace_unsigned_compare_zero: bool,
+    /// Polyfill floating-point negation.
+    pub polyfill_float_negation: bool,
+    /// Polyfill floating-point absolute value.
+    pub polyfill_float_abs: bool,
+    /// Polyfill length of scalar floating-point values.
+    pub polyfill_length_scalar_float: bool,
+    /// Polyfill distance between scalar floating-point values.
+    pub polyfill_distance_scalar_float: bool,
+    /// Lower switch statements to if/else statements.
+    pub polyfill_case_switch: bool,
+    /// Polyfill depth comparisons on 2D textures.
+    pub texture_sample_compare_2d_polyfill: bool,
+    /// Scalarize vector maximum, minimum and clamp operations.
+    pub scalarize_max_min_clamp: bool,
+    /// Polyfill normalized 8-bit packing and unpacking.
+    pub polyfill_pack_unpack_4x8_norm: bool,
+    /// Specialize handle parameters using direct variable access.
+    pub dva_transform_handle: bool,
+    /// Lower f16 saturate to minimum and maximum operations.
+    pub polyfill_saturate_as_min_max_f16: bool,
+    /// Collapse nested subgroup minimum and maximum operations.
+    pub collapse_subgroup_min_max: bool,
+    /// Pass matrix arguments to user functions by pointer.
+    pub pass_matrix_by_pointer: bool,
 }
+
+const _: () = {
+    assert!(core::mem::size_of::<SpirvWorkarounds>() == 22);
+    assert!(core::mem::align_of::<SpirvWorkarounds>() == 1);
+    assert!(core::mem::offset_of!(SpirvWorkarounds, use_demote_to_helper_invocation) == 0);
+    assert!(core::mem::offset_of!(SpirvWorkarounds, native_dot_4x8_packed) == 1);
+    assert!(core::mem::offset_of!(SpirvWorkarounds, disable_image_robustness) == 2);
+    assert!(
+        core::mem::offset_of!(
+            SpirvWorkarounds,
+            disable_storage_runtime_sized_array_index_clamping
+        ) == 3
+    );
+    assert!(core::mem::offset_of!(SpirvWorkarounds, use_zero_initialize_workgroup_memory) == 4);
+    assert!(core::mem::offset_of!(SpirvWorkarounds, use_maximal_reconvergence) == 5);
+    assert!(core::mem::offset_of!(SpirvWorkarounds, use_subgroup_uniform_control_flow) == 6);
+    assert!(core::mem::offset_of!(SpirvWorkarounds, polyfill_bool_vec_dynamic_store) == 7);
+    assert!(
+        core::mem::offset_of!(
+            SpirvWorkarounds,
+            replace_workgroup_atomic_store_with_exchange
+        ) == 8
+    );
+    assert!(core::mem::offset_of!(SpirvWorkarounds, replace_unsigned_compare_zero) == 9);
+    assert!(core::mem::offset_of!(SpirvWorkarounds, polyfill_float_negation) == 10);
+    assert!(core::mem::offset_of!(SpirvWorkarounds, polyfill_float_abs) == 11);
+    assert!(core::mem::offset_of!(SpirvWorkarounds, polyfill_length_scalar_float) == 12);
+    assert!(core::mem::offset_of!(SpirvWorkarounds, polyfill_distance_scalar_float) == 13);
+    assert!(core::mem::offset_of!(SpirvWorkarounds, polyfill_case_switch) == 14);
+    assert!(core::mem::offset_of!(SpirvWorkarounds, texture_sample_compare_2d_polyfill) == 15);
+    assert!(core::mem::offset_of!(SpirvWorkarounds, scalarize_max_min_clamp) == 16);
+    assert!(core::mem::offset_of!(SpirvWorkarounds, polyfill_pack_unpack_4x8_norm) == 17);
+    assert!(core::mem::offset_of!(SpirvWorkarounds, dva_transform_handle) == 18);
+    assert!(core::mem::offset_of!(SpirvWorkarounds, polyfill_saturate_as_min_max_f16) == 19);
+    assert!(core::mem::offset_of!(SpirvWorkarounds, collapse_subgroup_min_max) == 20);
+    assert!(core::mem::offset_of!(SpirvWorkarounds, pass_matrix_by_pointer) == 21);
+};
 
 /// Whether this build links the Tint backend.
 pub const HAVE_TINT: bool = cfg!(have_tint);
@@ -1548,9 +1643,7 @@ mod real {
             ov: *const RawOverrideValue,
             n_ov: usize,
             disable_robustness: bool,
-            fix_u32_div_mod: bool,
-            disable_demote_to_helper: bool,
-            polyfill_bool_vec_dynamic_store: bool,
+            workarounds: *const MslWorkarounds,
             emit_vertex_point_size: bool,
             vertex_buffers: *const RawVertexBuffer,
             n_vertex_buffers: usize,
@@ -1566,16 +1659,7 @@ mod real {
             ov: *const RawOverrideValue,
             n_ov: usize,
             disable_robustness: bool,
-            disable_image_robustness: bool,
-            disable_storage_runtime_sized_array_index_clamping: bool,
-            polyfill_bool_vec_dynamic_store: bool,
-            replace_workgroup_atomic_store_with_exchange: bool,
-            replace_unsigned_compare_zero: bool,
-            use_demote_to_helper_invocation: bool,
-            native_dot_4x8_packed: bool,
-            use_zero_initialize_workgroup_memory: bool,
-            use_maximal_reconvergence: bool,
-            use_subgroup_uniform_control_flow: bool,
+            workarounds: *const SpirvWorkarounds,
             emit_vertex_point_size: bool,
             use_vulkan_memory_model: bool,
             use_storage_input_output_16: bool,
@@ -2177,9 +2261,7 @@ mod real {
                     raw_overrides.as_ptr(),
                     raw_overrides.len(),
                     !robust,
-                    workarounds.fix_u32_div_mod,
-                    workarounds.disable_demote_to_helper,
-                    workarounds.polyfill_bool_vec_dynamic_store,
+                    &workarounds,
                     emit_vertex_point_size,
                     raw_vertex_buffers.as_ptr(),
                     raw_vertex_buffers.len(),
@@ -2291,16 +2373,7 @@ mod real {
                     raw_overrides.as_ptr(),
                     raw_overrides.len(),
                     !robust,
-                    workarounds.disable_image_robustness,
-                    workarounds.disable_storage_runtime_sized_array_index_clamping,
-                    workarounds.polyfill_bool_vec_dynamic_store,
-                    workarounds.replace_workgroup_atomic_store_with_exchange,
-                    workarounds.replace_unsigned_compare_zero,
-                    workarounds.use_demote_to_helper_invocation,
-                    workarounds.native_dot_4x8_packed,
-                    workarounds.use_zero_initialize_workgroup_memory,
-                    workarounds.use_maximal_reconvergence,
-                    workarounds.use_subgroup_uniform_control_flow,
+                    &workarounds,
                     emit_vertex_point_size,
                     use_vulkan_memory_model,
                     use_storage_input_output_16,
@@ -2833,6 +2906,370 @@ fn cs(@builtin(local_invocation_index) index: u32) {
                 flags,
             )
             .unwrap()
+    }
+
+    // Each vendor workaround is exercised through the real shim, using its
+    // affected construct and only that option enabled. Storage writes keep
+    // the operation observable; inputs derived from invocation IDs stay dynamic.
+    #[test]
+    fn msl_disable_module_constant_f16_changes_generated_code() {
+        let program = Program::parse(
+            r#"enable f16;
+@group(0) @binding(0) var<storage, read_write> result: f32;
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) {
+    const values = array<f16, 3>(1h, 2h, 3h); result = f32(values[i % 3u]);
+}"#,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let mut flags = MslWorkarounds::default();
+        let off = workaround_msl(&program, "cs", flags).source;
+        flags.disable_module_constant_f16 = true;
+        let on = workaround_msl(&program, "cs", flags).source;
+        assert_ne!(
+            off, on,
+            "disable_module_constant_f16 must change its affected construct"
+        );
+    }
+
+    #[test]
+    fn msl_polyfill_unpack_2x16_snorm_changes_generated_code() {
+        let program = Program::parse(r#"@group(0) @binding(0) var<storage, read_write> result: vec2f;
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = unpack2x16snorm(i); }"#, false, false, false, false, false, false, &[]).unwrap();
+        let mut flags = MslWorkarounds::default();
+        let off = workaround_msl(&program, "cs", flags).source;
+        flags.polyfill_unpack_2x16_snorm = true;
+        let on = workaround_msl(&program, "cs", flags).source;
+        assert_ne!(
+            off, on,
+            "polyfill_unpack_2x16_snorm must change its affected construct"
+        );
+    }
+
+    #[test]
+    fn msl_polyfill_unpack_2x16_unorm_changes_generated_code() {
+        let program = Program::parse(r#"@group(0) @binding(0) var<storage, read_write> result: vec2f;
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = unpack2x16unorm(i); }"#, false, false, false, false, false, false, &[]).unwrap();
+        let mut flags = MslWorkarounds::default();
+        let off = workaround_msl(&program, "cs", flags).source;
+        flags.polyfill_unpack_2x16_unorm = true;
+        let on = workaround_msl(&program, "cs", flags).source;
+        assert_ne!(
+            off, on,
+            "polyfill_unpack_2x16_unorm must change its affected construct"
+        );
+    }
+
+    #[test]
+    fn msl_polyfill_tanh_f16_changes_generated_code() {
+        let program = Program::parse(r#"enable f16;
+@group(0) @binding(0) var<storage, read_write> result: f32;
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = f32(tanh(f16(i))); }"#, true, false, false, false, false, false, &[]).unwrap();
+        let mut flags = MslWorkarounds::default();
+        let off = workaround_msl(&program, "cs", flags).source;
+        flags.polyfill_tanh_f16 = true;
+        let on = workaround_msl(&program, "cs", flags).source;
+        assert_ne!(
+            off, on,
+            "polyfill_tanh_f16 must change its affected construct"
+        );
+    }
+
+    #[test]
+    fn msl_polyfill_clamp_float_changes_generated_code() {
+        let program = Program::parse(r#"@group(0) @binding(0) var<storage, read_write> result: f32;
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = clamp(f32(i), 0.25, 0.75); }"#, false, false, false, false, false, false, &[]).unwrap();
+        let mut flags = MslWorkarounds::default();
+        let off = workaround_msl(&program, "cs", flags).source;
+        flags.polyfill_clamp_float = true;
+        let on = workaround_msl(&program, "cs", flags).source;
+        assert_ne!(
+            off, on,
+            "polyfill_clamp_float must change its affected construct"
+        );
+    }
+
+    #[test]
+    fn msl_collapse_subgroup_min_max_changes_generated_code() {
+        let program = Program::parse(r#"enable subgroups;
+@group(0) @binding(0) var<storage, read_write> result: u32;
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = subgroupMax(subgroupMin(i)); }"#, false, true, false, false, false, false, &[]).unwrap();
+        let mut flags = MslWorkarounds::default();
+        let off = workaround_msl(&program, "cs", flags).source;
+        flags.collapse_subgroup_min_max = true;
+        let on = workaround_msl(&program, "cs", flags).source;
+        assert_ne!(
+            off, on,
+            "collapse_subgroup_min_max must change its affected construct"
+        );
+    }
+
+    #[test]
+    fn msl_replace_workgroup_bool_with_u32_changes_generated_code() {
+        let program = Program::parse(
+            r#"var<workgroup> flag: bool;
+@group(0) @binding(0) var<storage, read_write> result: u32;
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) {
+    flag = i != 0u; workgroupBarrier(); result = select(0u, 1u, flag);
+}"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let mut flags = MslWorkarounds::default();
+        let off = workaround_msl(&program, "cs", flags).source;
+        flags.replace_workgroup_bool_with_u32 = true;
+        let on = workaround_msl(&program, "cs", flags).source;
+        assert_ne!(
+            off, on,
+            "replace_workgroup_bool_with_u32 must change its affected construct"
+        );
+    }
+
+    #[test]
+    fn msl_scalarize_max_min_clamp_changes_generated_code() {
+        let program = Program::parse(r#"@group(0) @binding(0) var<storage, read_write> result: vec4f;
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = clamp(vec4f(f32(i)), vec4f(0.25), vec4f(0.75)); }"#, false, false, false, false, false, false, &[]).unwrap();
+        let mut flags = MslWorkarounds::default();
+        let off = workaround_msl(&program, "cs", flags).source;
+        flags.scalarize_max_min_clamp = true;
+        let on = workaround_msl(&program, "cs", flags).source;
+        assert_ne!(
+            off, on,
+            "scalarize_max_min_clamp must change its affected construct"
+        );
+    }
+
+    #[test]
+    fn spirv_polyfill_float_negation_changes_generated_code() {
+        let program = Program::parse(
+            r#"@group(0) @binding(0) var<storage, read_write> result: f32;
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = -f32(i); }"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let mut flags = SpirvWorkarounds::default();
+        let off = workaround_spirv(&program, flags);
+        flags.polyfill_float_negation = true;
+        let on = workaround_spirv(&program, flags);
+        assert_ne!(
+            off, on,
+            "polyfill_float_negation must change its affected construct"
+        );
+    }
+
+    #[test]
+    fn spirv_polyfill_float_abs_changes_generated_code() {
+        let program = Program::parse(r#"@group(0) @binding(0) var<storage, read_write> result: f32;
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = abs(f32(i)); }"#, false, false, false, false, false, false, &[]).unwrap();
+        let mut flags = SpirvWorkarounds::default();
+        let off = workaround_spirv(&program, flags);
+        flags.polyfill_float_abs = true;
+        let on = workaround_spirv(&program, flags);
+        assert_ne!(
+            off, on,
+            "polyfill_float_abs must change its affected construct"
+        );
+    }
+
+    #[test]
+    fn spirv_polyfill_length_scalar_float_changes_generated_code() {
+        let program = Program::parse(r#"@group(0) @binding(0) var<storage, read_write> result: f32;
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = length(f32(i)); }"#, false, false, false, false, false, false, &[]).unwrap();
+        let mut flags = SpirvWorkarounds::default();
+        let off = workaround_spirv(&program, flags);
+        flags.polyfill_length_scalar_float = true;
+        let on = workaround_spirv(&program, flags);
+        assert_ne!(
+            off, on,
+            "polyfill_length_scalar_float must change its affected construct"
+        );
+    }
+
+    #[test]
+    fn spirv_polyfill_distance_scalar_float_changes_generated_code() {
+        let program = Program::parse(r#"@group(0) @binding(0) var<storage, read_write> result: f32;
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = distance(f32(i), 0.5); }"#, false, false, false, false, false, false, &[]).unwrap();
+        let mut flags = SpirvWorkarounds::default();
+        let off = workaround_spirv(&program, flags);
+        flags.polyfill_distance_scalar_float = true;
+        let on = workaround_spirv(&program, flags);
+        assert_ne!(
+            off, on,
+            "polyfill_distance_scalar_float must change its affected construct"
+        );
+    }
+
+    #[test]
+    fn spirv_polyfill_case_switch_changes_generated_code() {
+        let program = Program::parse(
+            r#"@group(0) @binding(0) var<storage, read_write> result: u32;
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) {
+    switch i { case 0u: { result = 1u; } case 4294967295u: { result = 2u; } default: { result = 3u; } }
+}"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let mut flags = SpirvWorkarounds::default();
+        let off = workaround_spirv(&program, flags);
+        flags.polyfill_case_switch = true;
+        let on = workaround_spirv(&program, flags);
+        assert_ne!(
+            off, on,
+            "polyfill_case_switch must change its affected construct"
+        );
+    }
+
+    #[test]
+    fn spirv_texture_sample_compare_2d_polyfill_changes_generated_code() {
+        let program = Program::parse(
+            r#"@group(0) @binding(0) var image: texture_depth_2d;
+@group(0) @binding(1) var sampler: sampler_comparison;
+@group(0) @binding(2) var<storage, read_write> result: f32;
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) {
+    result = textureSampleCompareLevel(image, sampler, vec2f(f32(i)), 0.5);
+}"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let mut flags = SpirvWorkarounds::default();
+        let off = workaround_spirv(&program, flags);
+        flags.texture_sample_compare_2d_polyfill = true;
+        let on = workaround_spirv(&program, flags);
+        assert_ne!(
+            off, on,
+            "texture_sample_compare_2d_polyfill must change its affected construct"
+        );
+    }
+
+    #[test]
+    fn spirv_scalarize_max_min_clamp_changes_generated_code() {
+        let program = Program::parse(r#"@group(0) @binding(0) var<storage, read_write> result: vec4f;
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = clamp(vec4f(f32(i)), vec4f(0.25), vec4f(0.75)); }"#, false, false, false, false, false, false, &[]).unwrap();
+        let mut flags = SpirvWorkarounds::default();
+        let off = workaround_spirv(&program, flags);
+        flags.scalarize_max_min_clamp = true;
+        let on = workaround_spirv(&program, flags);
+        assert_ne!(
+            off, on,
+            "scalarize_max_min_clamp must change its affected construct"
+        );
+    }
+
+    #[test]
+    fn spirv_polyfill_pack_unpack_4x8_norm_changes_generated_code() {
+        let program = Program::parse(
+            r#"@group(0) @binding(0) var<storage, read_write> result: vec4f;
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) {
+    result = unpack4x8snorm(pack4x8snorm(vec4f(f32(i))));
+}"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let mut flags = SpirvWorkarounds::default();
+        let off = workaround_spirv(&program, flags);
+        flags.polyfill_pack_unpack_4x8_norm = true;
+        let on = workaround_spirv(&program, flags);
+        assert_ne!(
+            off, on,
+            "polyfill_pack_unpack_4x8_norm must change its affected construct"
+        );
+    }
+
+    #[test]
+    fn spirv_dva_transform_handle_changes_generated_code() {
+        let program = Program::parse(r#"@group(0) @binding(0) var image: texture_2d<u32>;
+@group(0) @binding(1) var<storage, read_write> result: vec4u;
+fn read_image(t: texture_2d<u32>, coords: vec2i) -> vec4u { return textureLoad(t, coords, 0); }
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = read_image(image, vec2i(i32(i))); }"#, false, false, false, false, false, false, &[]).unwrap();
+        let mut flags = SpirvWorkarounds::default();
+        let off = workaround_spirv(&program, flags);
+        flags.dva_transform_handle = true;
+        let on = workaround_spirv(&program, flags);
+        assert_ne!(
+            off, on,
+            "dva_transform_handle must change its affected construct"
+        );
+    }
+
+    #[test]
+    fn spirv_polyfill_saturate_as_min_max_f16_changes_generated_code() {
+        let program = Program::parse(r#"enable f16;
+@group(0) @binding(0) var<storage, read_write> result: vec4f;
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = vec4f(saturate(vec4h(f16(i)))); }"#, true, false, false, false, false, false, &[]).unwrap();
+        let mut flags = SpirvWorkarounds::default();
+        let off = workaround_spirv(&program, flags);
+        flags.polyfill_saturate_as_min_max_f16 = true;
+        let on = workaround_spirv(&program, flags);
+        assert_ne!(
+            off, on,
+            "polyfill_saturate_as_min_max_f16 must change its affected construct"
+        );
+    }
+
+    #[test]
+    fn spirv_collapse_subgroup_min_max_changes_generated_code() {
+        let program = Program::parse(r#"enable subgroups;
+@group(0) @binding(0) var<storage, read_write> result: u32;
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = subgroupMax(subgroupMin(i)); }"#, false, true, false, false, false, false, &[]).unwrap();
+        let mut flags = SpirvWorkarounds::default();
+        let off = workaround_spirv(&program, flags);
+        flags.collapse_subgroup_min_max = true;
+        let on = workaround_spirv(&program, flags);
+        assert_ne!(
+            off, on,
+            "collapse_subgroup_min_max must change its affected construct"
+        );
+    }
+
+    #[test]
+    fn spirv_pass_matrix_by_pointer_changes_generated_code() {
+        let program = Program::parse(r#"@group(0) @binding(0) var<storage, read_write> result: vec2f;
+fn use_matrix(m: mat2x2f) -> vec2f { return m[0] + m[1]; }
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = use_matrix(mat2x2f(vec2f(f32(i)), vec2f(2))); }"#, false, false, false, false, false, false, &[]).unwrap();
+        let mut flags = SpirvWorkarounds::default();
+        let off = workaround_spirv(&program, flags);
+        flags.pass_matrix_by_pointer = true;
+        let on = workaround_spirv(&program, flags);
+        assert_ne!(
+            off, on,
+            "pass_matrix_by_pointer must change its affected construct"
+        );
     }
 
     #[test]

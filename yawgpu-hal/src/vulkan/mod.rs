@@ -1261,10 +1261,13 @@ impl VulkanAdapter {
         };
         // Query the device property limit for anisotropy so create_sampler can clamp.
         let max_sampler_anisotropy = device_properties.limits.max_sampler_anisotropy;
+        let driver_id = query_driver_id(&self.instance, self.physical_device);
         let forced = std::env::var("YAWGPU_FORCE_SHADER_WORKAROUNDS").ok();
         let shader_workarounds = crate::HalShaderWorkarounds::for_vulkan(
             device_properties.vendor_id,
             device_properties.driver_version,
+            device_properties.device_id,
+            driver_id,
             cfg!(target_os = "android"),
             cfg!(target_os = "windows"),
         )
@@ -2049,6 +2052,32 @@ fn enabled_16bit_storage_features(
     }
 }
 
+/// Queries driver properties only when the physical device advertises the extension.
+fn query_driver_id(
+    instance: &Arc<VulkanInstanceInner>,
+    physical_device: vk::PhysicalDevice,
+) -> Option<u32> {
+    let extension_present = has_device_extension_for_physical_device(
+        instance,
+        physical_device,
+        vk::KHR_DRIVER_PROPERTIES_NAME,
+    );
+    // Dawn's DeviceExt::DriverProperties is extension-name only, with no 1.2 promotion.
+    if !extension_present {
+        return None;
+    }
+    let mut driver = vk::PhysicalDeviceDriverProperties::default();
+    let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut driver);
+    // SAFETY: physical_device belongs to instance; driver is a supported pNext
+    // structure and both output structures stay alive throughout the call.
+    unsafe {
+        instance
+            .instance
+            .get_physical_device_properties2(physical_device, &mut properties);
+    }
+    Some(driver.driver_id.as_raw() as u32)
+}
+
 fn has_device_extension_for_physical_device(
     instance: &Arc<VulkanInstanceInner>,
     physical_device: vk::PhysicalDevice,
@@ -2104,6 +2133,28 @@ pub use texture::{VulkanSampler, VulkanTexture};
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires a real Vulkan GPU; Block 131 S2 device-fact logging"]
+    fn vulkan_driver_workaround_predicates() {
+        let device = test_helpers::vulkan_device();
+        let instance = &device.inner._instance;
+        let physical = device.inner.physical_device;
+        let properties = unsafe { instance.instance.get_physical_device_properties(physical) };
+        let driver_id = query_driver_id(instance, physical);
+        let predicates = crate::shader_workarounds::VulkanDriverPredicates::new(
+            properties.vendor_id,
+            properties.device_id,
+            driver_id,
+            cfg!(target_os = "android"),
+            cfg!(target_os = "windows"),
+        );
+        // Debug includes every R3 predicate, even when none of the gates fires.
+        eprintln!(
+            "vendorID={:#06x}, deviceID={:#06x}, driverID={driver_id:?}, {predicates:?}",
+            properties.vendor_id, properties.device_id
+        );
+    }
+
     #[test]
     #[ignore = "manual real-backend test"]
     fn forced_shader_workarounds_reach_vulkan_device() {

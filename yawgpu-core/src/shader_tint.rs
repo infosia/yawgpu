@@ -12,6 +12,61 @@ use std::sync::{Mutex, OnceLock};
 use crate::shader::{CompilationMessage, CompilationSeverity};
 pub(crate) use crate::shader_types::*;
 
+/// Converts HAL flags to the corresponding Tint SPIR-V writer flags.
+fn tint_spirv_workarounds(
+    workarounds: yawgpu_hal::HalShaderWorkarounds,
+) -> yawgpu_tint::SpirvWorkarounds {
+    let mut tint_workarounds = yawgpu_tint::SpirvWorkarounds::default();
+    tint_workarounds.use_demote_to_helper_invocation = workarounds.use_demote_to_helper_invocation;
+    tint_workarounds.native_dot_4x8_packed = workarounds.native_dot_4x8_packed;
+    tint_workarounds.disable_image_robustness = workarounds.disable_image_robustness;
+    tint_workarounds.disable_storage_runtime_sized_array_index_clamping =
+        workarounds.disable_storage_runtime_sized_array_index_clamping;
+    tint_workarounds.use_zero_initialize_workgroup_memory =
+        workarounds.use_zero_initialize_workgroup_memory;
+    tint_workarounds.use_maximal_reconvergence = workarounds.use_maximal_reconvergence;
+    tint_workarounds.use_subgroup_uniform_control_flow =
+        workarounds.use_subgroup_uniform_control_flow;
+    tint_workarounds.polyfill_bool_vec_dynamic_store = workarounds.polyfill_bool_vec_dynamic_store;
+    tint_workarounds.replace_workgroup_atomic_store_with_exchange =
+        workarounds.replace_workgroup_atomic_store_with_exchange;
+    tint_workarounds.replace_unsigned_compare_zero = workarounds.replace_unsigned_compare_zero;
+    tint_workarounds.polyfill_float_negation = workarounds.polyfill_float_negation;
+    tint_workarounds.polyfill_float_abs = workarounds.polyfill_float_abs;
+    tint_workarounds.polyfill_length_scalar_float = workarounds.polyfill_length_scalar_float;
+    tint_workarounds.polyfill_distance_scalar_float = workarounds.polyfill_distance_scalar_float;
+    tint_workarounds.polyfill_case_switch = workarounds.polyfill_case_switch;
+    tint_workarounds.texture_sample_compare_2d_polyfill =
+        workarounds.texture_sample_compare_2d_polyfill;
+    tint_workarounds.scalarize_max_min_clamp = workarounds.scalarize_max_min_clamp;
+    tint_workarounds.polyfill_pack_unpack_4x8_norm = workarounds.polyfill_pack_unpack_4x8_norm;
+    tint_workarounds.dva_transform_handle = workarounds.dva_transform_handle;
+    tint_workarounds.polyfill_saturate_as_min_max_f16 =
+        workarounds.polyfill_saturate_as_min_max_f16;
+    tint_workarounds.collapse_subgroup_min_max = workarounds.collapse_subgroup_min_max;
+    tint_workarounds.pass_matrix_by_pointer = workarounds.pass_matrix_by_pointer;
+    tint_workarounds
+}
+
+/// Converts HAL flags to the corresponding Tint MSL writer flags.
+fn tint_msl_workarounds(
+    workarounds: yawgpu_hal::HalShaderWorkarounds,
+) -> yawgpu_tint::MslWorkarounds {
+    let mut tint_workarounds = yawgpu_tint::MslWorkarounds::default();
+    tint_workarounds.disable_demote_to_helper = workarounds.disable_demote_to_helper;
+    tint_workarounds.fix_u32_div_mod = workarounds.fix_u32_div_mod;
+    tint_workarounds.polyfill_bool_vec_dynamic_store = workarounds.polyfill_bool_vec_dynamic_store;
+    tint_workarounds.disable_module_constant_f16 = workarounds.disable_module_constant_f16;
+    tint_workarounds.polyfill_unpack_2x16_snorm = workarounds.polyfill_unpack_2x16_snorm;
+    tint_workarounds.polyfill_unpack_2x16_unorm = workarounds.polyfill_unpack_2x16_unorm;
+    tint_workarounds.polyfill_tanh_f16 = workarounds.polyfill_tanh_f16;
+    tint_workarounds.polyfill_clamp_float = workarounds.polyfill_clamp_float;
+    tint_workarounds.collapse_subgroup_min_max = workarounds.collapse_subgroup_min_max;
+    tint_workarounds.replace_workgroup_bool_with_u32 = workarounds.replace_workgroup_bool_with_u32;
+    tint_workarounds.scalarize_max_min_clamp = workarounds.scalarize_max_min_clamp;
+    tint_workarounds
+}
+
 /// Canonical, order-insensitive, hashable form of `PipelineConstants`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CanonicalConstants(Vec<(String, u64)>);
@@ -330,24 +385,7 @@ impl ReflectedModule {
         emit_vertex_point_size: bool,
         workarounds: yawgpu_hal::HalShaderWorkarounds,
     ) -> Result<Vec<u32>, String> {
-        let mut tint_workarounds = yawgpu_tint::SpirvWorkarounds::default();
-        tint_workarounds.use_demote_to_helper_invocation =
-            workarounds.use_demote_to_helper_invocation;
-        tint_workarounds.native_dot_4x8_packed = workarounds.native_dot_4x8_packed;
-        tint_workarounds.disable_image_robustness = workarounds.disable_image_robustness;
-        tint_workarounds.disable_storage_runtime_sized_array_index_clamping =
-            workarounds.disable_storage_runtime_sized_array_index_clamping;
-        tint_workarounds.use_zero_initialize_workgroup_memory =
-            workarounds.use_zero_initialize_workgroup_memory;
-        tint_workarounds.use_maximal_reconvergence = workarounds.use_maximal_reconvergence;
-        tint_workarounds.use_subgroup_uniform_control_flow =
-            workarounds.use_subgroup_uniform_control_flow;
-        tint_workarounds.polyfill_bool_vec_dynamic_store =
-            workarounds.polyfill_bool_vec_dynamic_store;
-        tint_workarounds.replace_workgroup_atomic_store_with_exchange =
-            workarounds.replace_workgroup_atomic_store_with_exchange;
-        tint_workarounds.replace_unsigned_compare_zero = workarounds.replace_unsigned_compare_zero;
-        let workarounds = tint_workarounds;
+        let workarounds = tint_spirv_workarounds(workarounds);
         let key = SpirvCodegenKey {
             emit_vertex_point_size,
             workarounds,
@@ -579,12 +617,7 @@ impl ReflectedModule {
         user_immediate_size: u32,
         workarounds: yawgpu_hal::HalShaderWorkarounds,
     ) -> Result<GeneratedMsl, String> {
-        let mut tint_workarounds = yawgpu_tint::MslWorkarounds::default();
-        tint_workarounds.disable_demote_to_helper = workarounds.disable_demote_to_helper;
-        tint_workarounds.fix_u32_div_mod = workarounds.fix_u32_div_mod;
-        tint_workarounds.polyfill_bool_vec_dynamic_store =
-            workarounds.polyfill_bool_vec_dynamic_store;
-        let workarounds = tint_workarounds;
+        let workarounds = tint_msl_workarounds(workarounds);
         let key = MslCodegenKey {
             workarounds,
             entry_point: entry_name.to_owned(),
@@ -1892,15 +1925,132 @@ fn reflected_override(override_: yawgpu_tint::Override) -> ReflectedOverride {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn hal_workarounds_map_only_to_same_named_tint_flags() {
+        macro_rules! one_hot_hal_flags {
+            ($($field:ident),* $(,)?) => {
+                [$(
+                    {
+                        let mut flags = yawgpu_hal::HalShaderWorkarounds::default();
+                        flags.$field = true;
+                        (stringify!($field), flags)
+                    },
+                )*]
+            };
+        }
+        macro_rules! named_tint_flags {
+            ($flags:ident; $($field:ident),* $(,)?) => {
+                [$( (stringify!($field), $flags.$field), )*]
+            };
+        }
+        assert_eq!(
+            tint_msl_workarounds(Default::default()),
+            yawgpu_tint::MslWorkarounds::default()
+        );
+        assert_eq!(
+            tint_spirv_workarounds(Default::default()),
+            yawgpu_tint::SpirvWorkarounds::default()
+        );
+        for (enabled_name, hal) in one_hot_hal_flags!(
+            disable_demote_to_helper,
+            use_demote_to_helper_invocation,
+            native_dot_4x8_packed,
+            disable_image_robustness,
+            disable_storage_runtime_sized_array_index_clamping,
+            use_zero_initialize_workgroup_memory,
+            use_maximal_reconvergence,
+            use_subgroup_uniform_control_flow,
+            fix_u32_div_mod,
+            polyfill_bool_vec_dynamic_store,
+            replace_workgroup_atomic_store_with_exchange,
+            replace_unsigned_compare_zero,
+            disable_module_constant_f16,
+            polyfill_unpack_2x16_snorm,
+            polyfill_unpack_2x16_unorm,
+            polyfill_tanh_f16,
+            polyfill_clamp_float,
+            collapse_subgroup_min_max,
+            replace_workgroup_bool_with_u32,
+            scalarize_max_min_clamp,
+            polyfill_float_negation,
+            polyfill_float_abs,
+            polyfill_length_scalar_float,
+            polyfill_distance_scalar_float,
+            polyfill_case_switch,
+            texture_sample_compare_2d_polyfill,
+            polyfill_pack_unpack_4x8_norm,
+            dva_transform_handle,
+            polyfill_saturate_as_min_max_f16,
+            pass_matrix_by_pointer,
+        ) {
+            let msl = tint_msl_workarounds(hal);
+            let spirv = tint_spirv_workarounds(hal);
+            let msl_flags = named_tint_flags!(msl;
+                disable_demote_to_helper,
+                fix_u32_div_mod,
+                polyfill_bool_vec_dynamic_store,
+                disable_module_constant_f16,
+                polyfill_unpack_2x16_snorm,
+                polyfill_unpack_2x16_unorm,
+                polyfill_tanh_f16,
+                polyfill_clamp_float,
+                collapse_subgroup_min_max,
+                replace_workgroup_bool_with_u32,
+                scalarize_max_min_clamp,
+            );
+            let spirv_flags = named_tint_flags!(spirv;
+                use_demote_to_helper_invocation,
+                native_dot_4x8_packed,
+                disable_image_robustness,
+                disable_storage_runtime_sized_array_index_clamping,
+                use_zero_initialize_workgroup_memory,
+                use_maximal_reconvergence,
+                use_subgroup_uniform_control_flow,
+                polyfill_bool_vec_dynamic_store,
+                replace_workgroup_atomic_store_with_exchange,
+                replace_unsigned_compare_zero,
+                polyfill_float_negation,
+                polyfill_float_abs,
+                polyfill_length_scalar_float,
+                polyfill_distance_scalar_float,
+                polyfill_case_switch,
+                texture_sample_compare_2d_polyfill,
+                scalarize_max_min_clamp,
+                polyfill_pack_unpack_4x8_norm,
+                dva_transform_handle,
+                polyfill_saturate_as_min_max_f16,
+                collapse_subgroup_min_max,
+                pass_matrix_by_pointer,
+            );
+            for (writer, flags) in [
+                ("MSL", msl_flags.as_slice()),
+                ("SPIR-V", spirv_flags.as_slice()),
+            ] {
+                for &(name, enabled) in flags {
+                    assert_eq!(enabled, name == enabled_name,
+                        "HAL {enabled_name} must only enable the same-named {writer} flag, checked {name}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn codegen_workaround_flags_each_cause_a_cache_miss() {
         let module = parse_and_validate_wgsl("@compute @workgroup_size(1) fn cs() {}").unwrap();
         let constants = PipelineConstants::default();
         let bindings = MslBindingMap {
             resources: Vec::new(),
         };
-        let mut msl_flags = [yawgpu_hal::HalShaderWorkarounds::default(); 3];
+        let mut msl_flags = [yawgpu_hal::HalShaderWorkarounds::default(); 11];
         msl_flags[1].fix_u32_div_mod = true;
         msl_flags[2].polyfill_bool_vec_dynamic_store = true;
+        msl_flags[3].disable_module_constant_f16 = true;
+        msl_flags[4].polyfill_unpack_2x16_snorm = true;
+        msl_flags[5].polyfill_unpack_2x16_unorm = true;
+        msl_flags[6].polyfill_tanh_f16 = true;
+        msl_flags[7].polyfill_clamp_float = true;
+        msl_flags[8].collapse_subgroup_min_max = true;
+        msl_flags[9].replace_workgroup_bool_with_u32 = true;
+        msl_flags[10].scalarize_max_min_clamp = true;
         for (i, flags) in msl_flags.into_iter().enumerate() {
             for _ in 0..2 {
                 module
@@ -1909,12 +2059,24 @@ mod tests {
                 assert_eq!(module.codegen_miss_count(), i + 1);
             }
         }
-        let mut spirv_flags = [yawgpu_hal::HalShaderWorkarounds::default(); 6];
+        let mut spirv_flags = [yawgpu_hal::HalShaderWorkarounds::default(); 18];
         spirv_flags[1].polyfill_bool_vec_dynamic_store = true;
         spirv_flags[2].replace_workgroup_atomic_store_with_exchange = true;
         spirv_flags[3].replace_unsigned_compare_zero = true;
         spirv_flags[4].disable_image_robustness = true;
         spirv_flags[5].disable_storage_runtime_sized_array_index_clamping = true;
+        spirv_flags[6].polyfill_float_negation = true;
+        spirv_flags[7].polyfill_float_abs = true;
+        spirv_flags[8].polyfill_length_scalar_float = true;
+        spirv_flags[9].polyfill_distance_scalar_float = true;
+        spirv_flags[10].polyfill_case_switch = true;
+        spirv_flags[11].texture_sample_compare_2d_polyfill = true;
+        spirv_flags[12].scalarize_max_min_clamp = true;
+        spirv_flags[13].polyfill_pack_unpack_4x8_norm = true;
+        spirv_flags[14].dva_transform_handle = true;
+        spirv_flags[15].polyfill_saturate_as_min_max_f16 = true;
+        spirv_flags[16].collapse_subgroup_min_max = true;
+        spirv_flags[17].pass_matrix_by_pointer = true;
         for (i, flags) in spirv_flags.into_iter().enumerate() {
             for _ in 0..2 {
                 module
@@ -1933,7 +2095,7 @@ mod tests {
                         flags,
                     )
                     .unwrap();
-                assert_eq!(module.codegen_miss_count(), 3 + i + 1);
+                assert_eq!(module.codegen_miss_count(), 11 + i + 1);
             }
         }
     }

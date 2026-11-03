@@ -427,6 +427,78 @@ static_assert(static_cast<uint8_t>(tint::inspector::Override::Type::kFloat16) ==
 // 64-bit ABIs, so these constants hold on every yawgpu target platform.
 // ---------------------------------------------------------------------------
 
+static_assert(sizeof(YawgpuTintMslWorkarounds) == 11, "YawgpuTintMslWorkarounds layout changed");
+static_assert(alignof(YawgpuTintMslWorkarounds) == 1, "YawgpuTintMslWorkarounds alignment changed");
+static_assert(offsetof(YawgpuTintMslWorkarounds, disable_demote_to_helper) == 0,
+              "YawgpuTintMslWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintMslWorkarounds, fix_u32_div_mod) == 1,
+              "YawgpuTintMslWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintMslWorkarounds, polyfill_bool_vec_dynamic_store) == 2,
+              "YawgpuTintMslWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintMslWorkarounds, disable_module_constant_f16) == 3,
+              "YawgpuTintMslWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintMslWorkarounds, polyfill_unpack_2x16_snorm) == 4,
+              "YawgpuTintMslWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintMslWorkarounds, polyfill_unpack_2x16_unorm) == 5,
+              "YawgpuTintMslWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintMslWorkarounds, polyfill_tanh_f16) == 6,
+              "YawgpuTintMslWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintMslWorkarounds, polyfill_clamp_float) == 7,
+              "YawgpuTintMslWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintMslWorkarounds, collapse_subgroup_min_max) == 8,
+              "YawgpuTintMslWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintMslWorkarounds, replace_workgroup_bool_with_u32) == 9,
+              "YawgpuTintMslWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintMslWorkarounds, scalarize_max_min_clamp) == 10,
+              "YawgpuTintMslWorkarounds layout changed");
+
+static_assert(sizeof(YawgpuTintSpirvWorkarounds) == 22, "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(alignof(YawgpuTintSpirvWorkarounds) == 1, "YawgpuTintSpirvWorkarounds alignment changed");
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, use_demote_to_helper_invocation) == 0,
+              "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, native_dot_4x8_packed) == 1,
+              "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, disable_image_robustness) == 2,
+              "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, disable_storage_runtime_sized_array_index_clamping) == 3,
+              "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, use_zero_initialize_workgroup_memory) == 4,
+              "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, use_maximal_reconvergence) == 5,
+              "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, use_subgroup_uniform_control_flow) == 6,
+              "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, polyfill_bool_vec_dynamic_store) == 7,
+              "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, replace_workgroup_atomic_store_with_exchange) == 8,
+              "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, replace_unsigned_compare_zero) == 9,
+              "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, polyfill_float_negation) == 10,
+              "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, polyfill_float_abs) == 11,
+              "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, polyfill_length_scalar_float) == 12,
+              "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, polyfill_distance_scalar_float) == 13,
+              "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, polyfill_case_switch) == 14,
+              "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, texture_sample_compare_2d_polyfill) == 15,
+              "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, scalarize_max_min_clamp) == 16,
+              "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, polyfill_pack_unpack_4x8_norm) == 17,
+              "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, dva_transform_handle) == 18,
+              "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, polyfill_saturate_as_min_max_f16) == 19,
+              "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, collapse_subgroup_min_max) == 20,
+              "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, pass_matrix_by_pointer) == 21,
+              "YawgpuTintSpirvWorkarounds layout changed");
+
 static_assert(sizeof(YawgpuTintEntryPoint) == 48, "YawgpuTintEntryPoint layout changed");
 static_assert(offsetof(YawgpuTintEntryPoint, name) == 0, "YawgpuTintEntryPoint layout changed");
 static_assert(offsetof(YawgpuTintEntryPoint, stage) == 8, "YawgpuTintEntryPoint layout changed");
@@ -2197,9 +2269,7 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
                               const YawgpuTintOverrideValue* ov,
                               size_t n_ov,
                               bool disable_robustness,
-                              bool fix_u32_div_mod,
-                              bool disable_demote_to_helper,
-                              bool polyfill_bool_vec_dynamic_store,
+                              const YawgpuTintMslWorkarounds* workarounds,
                               bool emit_vertex_point_size,
                               const YawgpuTintVertexBuffer* vertex_buffers,
                               size_t n_vertex_buffers,
@@ -2229,7 +2299,7 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
     }
     MslOutputGuard out_guard(out);
     try {
-        if (program == nullptr || out == nullptr) {
+        if (program == nullptr || workarounds == nullptr || out == nullptr) {
             set_error_string(err, "invalid NULL argument");
             return false;
         }
@@ -2242,11 +2312,21 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
         }
         tint::msl::writer::Options options;
         options.entry_point_name = entry_point;
+        options.workarounds.disable_module_constant_f16 = workarounds->disable_module_constant_f16;
+        options.workarounds.polyfill_unpack_2x16_snorm = workarounds->polyfill_unpack_2x16_snorm;
+        options.workarounds.polyfill_unpack_2x16_unorm = workarounds->polyfill_unpack_2x16_unorm;
+        options.workarounds.polyfill_tanh_f16 = workarounds->polyfill_tanh_f16;
+        options.workarounds.polyfill_clamp_float = workarounds->polyfill_clamp_float;
+        options.workarounds.collapse_subgroup_min_max = workarounds->collapse_subgroup_min_max;
+        options.workarounds.replace_workgroup_bool_with_u32 =
+            workarounds->replace_workgroup_bool_with_u32;
+        options.workarounds.scalarize_max_min_clamp = workarounds->scalarize_max_min_clamp;
         options.remapped_entry_point_name = remapped_entry_point;
         options.disable_robustness = disable_robustness;
-        options.workarounds.fix_u32_div_mod = fix_u32_div_mod;
-        options.extensions.disable_demote_to_helper = disable_demote_to_helper;
-        options.workarounds.polyfill_bool_vec_dynamic_store = polyfill_bool_vec_dynamic_store;
+        options.workarounds.fix_u32_div_mod = workarounds->fix_u32_div_mod;
+        options.extensions.disable_demote_to_helper = workarounds->disable_demote_to_helper;
+        options.workarounds.polyfill_bool_vec_dynamic_store =
+            workarounds->polyfill_bool_vec_dynamic_store;
         // Point-list topology on Metal requires every vertex to set [[point_size]];
         // Tint emits it (= 1.0) when asked. yawgpu threads this from the render
         // pipeline's force_point_size.
@@ -2315,7 +2395,8 @@ bool yawgpu_tint_generate_msl(const YawgpuTintProgram* program,
         const auto num_buffer_sizes = num_storage + static_cast<uint32_t>(n_vertex_buffers);
         const bool has_buffer_sizes = num_buffer_sizes > 0;
         const bool uses_immediates =
-            entry_has_user_immediates || has_frag_depth_clamp || has_buffer_sizes || fix_u32_div_mod;
+            entry_has_user_immediates || has_frag_depth_clamp || has_buffer_sizes ||
+            workarounds->fix_u32_div_mod;
 
         options.immediate_binding_point = choose_immediate_binding_point(options.bindings);
         if (uses_immediates && !options.immediate_binding_point.has_value()) {
@@ -2424,16 +2505,7 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
                                 const YawgpuTintOverrideValue* ov,
                                 size_t n_ov,
                                 bool disable_robustness,
-                                bool disable_image_robustness,
-                                bool disable_storage_runtime_sized_array_index_clamping,
-                                bool polyfill_bool_vec_dynamic_store,
-                                bool replace_workgroup_atomic_store_with_exchange,
-                                bool replace_unsigned_compare_zero,
-                                bool use_demote_to_helper_invocation,
-                                bool native_dot_4x8_packed,
-                                bool use_zero_initialize_workgroup_memory,
-                                bool use_maximal_reconvergence,
-                                bool use_subgroup_uniform_control_flow,
+                                const YawgpuTintSpirvWorkarounds* workarounds,
                                 bool emit_vertex_point_size,
                                 bool use_vulkan_memory_model,
                                 bool use_storage_input_output_16,
@@ -2456,7 +2528,8 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
         *n_words_out = 0;
     }
     try {
-        if (program == nullptr || words_out == nullptr || n_words_out == nullptr) {
+        if (program == nullptr || workarounds == nullptr || words_out == nullptr ||
+            n_words_out == nullptr) {
             set_error_string(err, "invalid NULL argument");
             return false;
         }
@@ -2468,22 +2541,39 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
         }
         tint::spirv::writer::Options options;
         options.entry_point_name = entry_point;
+        options.workarounds.polyfill_float_negation = workarounds->polyfill_float_negation;
+        options.workarounds.polyfill_float_abs = workarounds->polyfill_float_abs;
+        options.workarounds.polyfill_length_scalar_float = workarounds->polyfill_length_scalar_float;
+        options.workarounds.polyfill_distance_scalar_float =
+            workarounds->polyfill_distance_scalar_float;
+        options.workarounds.polyfill_case_switch = workarounds->polyfill_case_switch;
+        options.workarounds.texture_sample_compare_2d_polyfill =
+            workarounds->texture_sample_compare_2d_polyfill;
+        options.workarounds.scalarize_max_min_clamp = workarounds->scalarize_max_min_clamp;
+        options.workarounds.polyfill_pack_unpack_4x8_norm = workarounds->polyfill_pack_unpack_4x8_norm;
+        options.workarounds.dva_transform_handle = workarounds->dva_transform_handle;
+        options.workarounds.polyfill_saturate_as_min_max_f16 =
+            workarounds->polyfill_saturate_as_min_max_f16;
+        options.workarounds.collapse_subgroup_min_max = workarounds->collapse_subgroup_min_max;
+        options.workarounds.pass_matrix_by_pointer = workarounds->pass_matrix_by_pointer;
         options.disable_robustness = disable_robustness;
-        options.extensions.disable_image_robustness = disable_image_robustness;
+        options.extensions.disable_image_robustness = workarounds->disable_image_robustness;
         options.extensions.disable_storage_runtime_sized_array_index_clamping =
-            disable_storage_runtime_sized_array_index_clamping;
+            workarounds->disable_storage_runtime_sized_array_index_clamping;
         // yawgpu does not round uniform allocations to Dawn's 16-byte boundary.
         options.extensions.disable_uniform_runtime_sized_array_index_clamping = false;
-        options.workarounds.polyfill_bool_vec_dynamic_store = polyfill_bool_vec_dynamic_store;
+        options.workarounds.polyfill_bool_vec_dynamic_store =
+            workarounds->polyfill_bool_vec_dynamic_store;
         options.workarounds.replace_workgroup_atomic_store_with_exchange =
-            replace_workgroup_atomic_store_with_exchange;
-        options.workarounds.replace_unsigned_compare_zero = replace_unsigned_compare_zero;
+            workarounds->replace_workgroup_atomic_store_with_exchange;
+        options.workarounds.replace_unsigned_compare_zero = workarounds->replace_unsigned_compare_zero;
         options.emit_vertex_point_size = emit_vertex_point_size;
-        options.extensions.use_demote_to_helper_invocation = use_demote_to_helper_invocation;
-        options.extensions.dot_4x8_packed = !native_dot_4x8_packed;
-        options.extensions.use_zero_initialize_workgroup_memory = use_zero_initialize_workgroup_memory;
-        options.extensions.use_maximal_reconvergence = use_maximal_reconvergence;
-        options.extensions.use_subgroup_uniform_control_flow = use_subgroup_uniform_control_flow;
+        options.extensions.use_demote_to_helper_invocation = workarounds->use_demote_to_helper_invocation;
+        options.extensions.dot_4x8_packed = !workarounds->native_dot_4x8_packed;
+        options.extensions.use_zero_initialize_workgroup_memory =
+            workarounds->use_zero_initialize_workgroup_memory;
+        options.extensions.use_maximal_reconvergence = workarounds->use_maximal_reconvergence;
+        options.extensions.use_subgroup_uniform_control_flow = workarounds->use_subgroup_uniform_control_flow;
         options.extensions.use_vulkan_memory_model = use_vulkan_memory_model;
         options.extensions.use_storage_input_output_16 = use_storage_input_output_16;
         options.multisampled_input_attachment = multisampled_input_attachment;

@@ -543,11 +543,14 @@ impl MetalAdapter {
         #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         let supports_relaxed_math = false;
         let forced = std::env::var("YAWGPU_FORCE_SHADER_WORKAROUNDS").ok();
+        let (is_intel, is_amd) = crate::shader_workarounds::metal_vendor_flags(&self.name);
         let shader_workarounds = crate::HalShaderWorkarounds::for_metal(
             cfg!(target_os = "macos"),
             self.gpu_family().is_apple(),
-            self.name.to_ascii_lowercase().contains("intel"),
+            is_intel,
             os_at_least_26_6_1,
+            is_amd,
+            self.device.supportsFamily(MTLGPUFamily::Apple9),
         )
         .with_forced(crate::HalShaderWorkarounds::parse_forced(forced.as_deref()));
         Ok(MetalDevice {

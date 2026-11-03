@@ -341,6 +341,47 @@ typedef struct {
     uint32_t texture_metadata_ubo_binding;
 } YawgpuTintGlslOutput;
 
+/* Device-selected MSL writer features and workarounds. */
+typedef struct {
+    bool disable_demote_to_helper;
+    bool fix_u32_div_mod;
+    bool polyfill_bool_vec_dynamic_store;
+    bool disable_module_constant_f16;
+    bool polyfill_unpack_2x16_snorm;
+    bool polyfill_unpack_2x16_unorm;
+    bool polyfill_tanh_f16;
+    bool polyfill_clamp_float;
+    bool collapse_subgroup_min_max;
+    bool replace_workgroup_bool_with_u32;
+    bool scalarize_max_min_clamp;
+} YawgpuTintMslWorkarounds;
+
+/* Device-selected SPIR-V writer features and workarounds. */
+typedef struct {
+    bool use_demote_to_helper_invocation;
+    bool native_dot_4x8_packed;
+    bool disable_image_robustness;
+    bool disable_storage_runtime_sized_array_index_clamping;
+    bool use_zero_initialize_workgroup_memory;
+    bool use_maximal_reconvergence;
+    bool use_subgroup_uniform_control_flow;
+    bool polyfill_bool_vec_dynamic_store;
+    bool replace_workgroup_atomic_store_with_exchange;
+    bool replace_unsigned_compare_zero;
+    bool polyfill_float_negation;
+    bool polyfill_float_abs;
+    bool polyfill_length_scalar_float;
+    bool polyfill_distance_scalar_float;
+    bool polyfill_case_switch;
+    bool texture_sample_compare_2d_polyfill;
+    bool scalarize_max_min_clamp;
+    bool polyfill_pack_unpack_4x8_norm;
+    bool dva_transform_handle;
+    bool polyfill_saturate_as_min_max_f16;
+    bool collapse_subgroup_min_max;
+    bool pass_matrix_by_pointer;
+} YawgpuTintSpirvWorkarounds;
+
 /* `user_immediate_size` is the owning pipeline layout's reserved
    user-immediate byte budget (PipelineLayout.immediateSize, 0..=64, Block
    94) -- NOT this entry point's own smaller reflected immediate_data_size.
@@ -355,9 +396,7 @@ YAWGPU_TINT_API bool yawgpu_tint_generate_msl(const YawgpuTintProgram*,
                               const YawgpuTintOverrideValue* ov,
                               size_t n_ov,
                               bool disable_robustness,
-                              bool fix_u32_div_mod,
-                              bool disable_demote_to_helper,
-                              bool polyfill_bool_vec_dynamic_store,
+                              const YawgpuTintMslWorkarounds* workarounds,
                               bool emit_vertex_point_size,
                               const YawgpuTintVertexBuffer* vertex_buffers,
                               size_t n_vertex_buffers,
@@ -388,16 +427,7 @@ YAWGPU_TINT_API bool yawgpu_tint_generate_spirv(const YawgpuTintProgram*,
                                 const YawgpuTintOverrideValue* ov,
                                 size_t n_ov,
                                 bool disable_robustness,
-                                bool disable_image_robustness,
-                                bool disable_storage_runtime_sized_array_index_clamping,
-                                bool polyfill_bool_vec_dynamic_store,
-                                bool replace_workgroup_atomic_store_with_exchange,
-                                bool replace_unsigned_compare_zero,
-                                bool use_demote_to_helper_invocation,
-                                bool native_dot_4x8_packed,
-                                bool use_zero_initialize_workgroup_memory,
-                                bool use_maximal_reconvergence,
-                                bool use_subgroup_uniform_control_flow,
+                                const YawgpuTintSpirvWorkarounds* workarounds,
                                 bool emit_vertex_point_size,
                                 bool use_vulkan_memory_model,
                                 bool use_storage_input_output_16,
