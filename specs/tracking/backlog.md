@@ -173,7 +173,7 @@ reference `> i32::MAX`, `first_instance` indirect, external textures,
    state is off by default in Dawn, so yawgpu already matches; `VkPipelineCache` was
    measured and dropped (E3, Block 136).
 2. **C2 / C1** surfaces as separate initiatives.
-4. Lowered by user direction: **C4** feature-gated clippy in CI, then **B2**
+3. Lowered by user direction: **C4** feature-gated clippy in CI, then **B2**
    binding arrays, then **D12** and the rest of the GLES rows.
 
 ---
