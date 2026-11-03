@@ -51,7 +51,7 @@ pub unsafe extern "C" fn wgpuBufferMapAsync(
     if !valid_callback_mode(callback_info.mode) {
         return native::WGPUFuture { id: 0 };
     }
-    let buffer = borrow_handle(buffer, "WGPUBuffer");
+    let buffer = clone_handle(buffer, "WGPUBuffer");
     if buffer.device.is_lost() {
         return buffer
             .instance
@@ -67,7 +67,7 @@ pub unsafe extern "C" fn wgpuBufferMapAsync(
                 userdata2: callback_info.userdata2 as usize,
             });
     }
-    match validate_map_async(buffer, mode, offset, size) {
+    match validate_map_async(&buffer, mode, offset, size) {
         Ok((mode, offset, size)) => match buffer.core.begin_map(mode, offset, size) {
             Ok(serial) => {
                 let queue = buffer.device.queue();

@@ -129,7 +129,7 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
     if !valid_callback_mode(callback_info.mode) {
         return native::WGPUFuture { id: 0 };
     }
-    let adapter = borrow_handle(adapter, "WGPUAdapter");
+    let adapter = clone_handle(adapter, "WGPUAdapter");
     let required_limits = descriptor.as_ref().and_then(|descriptor| {
         descriptor.requiredLimits.as_ref().map(|wgpu_limits| {
             let mut limits = map_limits(wgpu_limits);
@@ -231,7 +231,10 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
             device_impl.get_lost_future(Arc::as_ptr(&device_impl));
             device_impl
         });
-    let failed = result.is_err();
+    let failure_message = result
+        .as_ref()
+        .err()
+        .map(|message| format!("Failed to create device:\n{message}"));
 
     let future = adapter
         .instance
@@ -243,7 +246,7 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
             userdata2: callback_info.userdata2 as usize,
         });
 
-    if failed && device_lost_callback.has_callback() {
+    if let Some(message) = failure_message.filter(|_| device_lost_callback.has_callback()) {
         adapter
             .instance
             .register_callback(PendingCallback::DeviceLost {
@@ -251,6 +254,7 @@ pub unsafe extern "C" fn wgpuAdapterRequestDevice(
                 callback: device_lost_callback.callback,
                 device: std::sync::Weak::new(),
                 reason: core::DeviceLostReason::FailedCreation,
+                message: Some(message),
                 userdata1: device_lost_callback.userdata1,
                 userdata2: device_lost_callback.userdata2,
             });

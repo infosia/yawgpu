@@ -19,7 +19,7 @@ enum Event {
 }
 
 #[test]
-fn request_device_failure_device_lost_allow_spontaneous_orders_after_request() {
+fn request_device_failure_spontaneous_device_lost_precedes_deferred_request() {
     unsafe {
         let fixture = Fixture::new();
         let mut recorder = Recorder::default();
@@ -33,13 +33,20 @@ fn request_device_failure_device_lost_allow_spontaneous_orders_after_request() {
         let callback_info = request_device_callback_info(&mut recorder);
 
         let _future = yawgpu::wgpuAdapterRequestDevice(fixture.adapter, &descriptor, callback_info);
+        assert_eq!(
+            recorder.events,
+            vec![Event::DeviceLost(
+                native::WGPUDeviceLostReason_FailedCreation,
+                true
+            )]
+        );
         yawgpu::wgpuInstanceProcessEvents(fixture.instance);
 
         assert_eq!(
             recorder.events,
             vec![
-                Event::RequestDevice(native::WGPURequestDeviceStatus_Error),
                 Event::DeviceLost(native::WGPUDeviceLostReason_FailedCreation, true),
+                Event::RequestDevice(native::WGPURequestDeviceStatus_Error),
             ]
         );
     }
@@ -57,9 +64,14 @@ fn request_device_failure_device_lost_allow_process_events_waits_for_process_eve
             &mut recorder,
             &limits,
         );
-        let callback_info = request_device_callback_info(&mut recorder);
+        let mut callback_info = request_device_callback_info(&mut recorder);
+        callback_info.mode = native::WGPUCallbackMode_AllowSpontaneous;
 
         let future = yawgpu::wgpuAdapterRequestDevice(fixture.adapter, &descriptor, callback_info);
+        assert_eq!(
+            recorder.events,
+            vec![Event::RequestDevice(native::WGPURequestDeviceStatus_Error)]
+        );
         wait_one(fixture.instance, future);
 
         assert_eq!(

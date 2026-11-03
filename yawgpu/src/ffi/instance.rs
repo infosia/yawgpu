@@ -443,7 +443,7 @@ pub unsafe extern "C" fn wgpuInstanceRequestAdapter(
     if !valid_callback_mode(callback_info.mode) {
         return native::WGPUFuture { id: 0 };
     }
-    let instance = borrow_handle(instance_handle, "WGPUInstance");
+    let instance = clone_handle(instance_handle, "WGPUInstance");
     let mut options_error = None;
     let feature_level = options
         .as_ref()

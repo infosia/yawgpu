@@ -24,7 +24,7 @@ pub unsafe extern "C" fn wgpuShaderModuleGetCompilationInfo(
     if !valid_callback_mode(callback_info.mode) {
         return native::WGPUFuture { id: 0 };
     }
-    let shader_module = borrow_handle(shader_module, "WGPUShaderModule");
+    let shader_module = clone_handle(shader_module, "WGPUShaderModule");
     shader_module
         ._instance
         .register_callback(PendingCallback::CompilationInfo {
