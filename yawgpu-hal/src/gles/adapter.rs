@@ -19,6 +19,7 @@ pub struct GlesAdapter {
     /// returning `&str`. It is a sibling of `inner` rather than a per-variant
     /// field so both the EGL and the WGL arm share one code path.
     name: String,
+    info: Box<crate::HalAdapterInfo>,
 }
 
 #[derive(Clone)]
@@ -48,6 +49,8 @@ pub(super) struct GlesAdapterCaps {
 /// rather than stored in it: `GlesAdapterCaps` is `Copy` and consumed by value
 /// at several call sites.
 pub(super) struct GlesDriverInfo {
+    /// `GL_VENDOR`, used for Dawn's vendor-name fallback.
+    pub(super) vendor: String,
     /// `GL_RENDERER`, empty when the driver reported nothing usable.
     pub(super) renderer: String,
     /// `GL_VERSION`, empty when the driver reported nothing usable.
@@ -68,6 +71,10 @@ impl std::fmt::Debug for GlesAdapter {
 }
 
 impl GlesAdapter {
+    pub(crate) fn info(&self) -> crate::HalAdapterInfo {
+        self.info.as_ref().clone()
+    }
+
     pub(super) fn new_egl(
         instance: Arc<GlesInstanceInner>,
         config: EglConfig,
@@ -83,6 +90,11 @@ impl GlesAdapter {
                 caps,
             },
             name: format_adapter_name("EGL", &driver.renderer, &driver.version),
+            info: Box::new(crate::adapter_info::gles_info(
+                &driver.vendor,
+                &driver.renderer,
+                &driver.version,
+            )),
         })
     }
 
@@ -95,6 +107,11 @@ impl GlesAdapter {
         Ok(Self {
             inner: GlesAdapterInner::Wgl { instance, caps },
             name: format_adapter_name("WGL", &driver.renderer, &driver.version),
+            info: Box::new(crate::adapter_info::gles_info(
+                &driver.vendor,
+                &driver.renderer,
+                &driver.version,
+            )),
         })
     }
 
@@ -526,9 +543,10 @@ pub(super) fn query_gles_adapter_caps(
 /// already use for `GL_VERSION`.
 pub(super) fn query_gles_driver_info(gl: &glow::Context) -> GlesDriverInfo {
     // SAFETY: the caller holds a current GLES context, which is what
-    // `glGetString` requires; both parameters are core GLES 2.0 queries.
+    // `glGetString` requires; all three parameters are core GLES 2.0 queries.
     unsafe {
         GlesDriverInfo {
+            vendor: gl.get_parameter_string(glow::VENDOR),
             renderer: gl.get_parameter_string(glow::RENDERER),
             version: gl.get_parameter_string(glow::VERSION),
         }

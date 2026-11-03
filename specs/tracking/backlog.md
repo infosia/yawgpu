@@ -64,6 +64,7 @@ below are stable IDs, not the rank.
 | A12 | Block 120 on native Vulkan | Windows native Vulkan e2e and forced CTS, 2026-11-02 |
 | A18 | Vulkan buffers were not zero-initialized | Block 129, 2026-11-03 |
 | A22 | Valid render passes failed the submit (Block 130 regression) | Block 132, 2026-11-03 |
+| A23 | `WGPUAdapterInfo` reported constants (vendor/device ids 0) | Block 135, 2026-11-03 |
 | E6 | Vulkan limits: NVIDIA storage cap, color bytes per sample, fragment combined output resources | Block 134, 2026-11-03 |
 | A10 | A pass that failed to lower was dropped silently | Block 130, 2026-11-03 |
 | A13 | Dawn's vendor-gated Tint workarounds were unset | Block 131, 2026-11-03 |
@@ -75,7 +76,6 @@ below are stable IDs, not the rank.
 
 | # | Item | Difficulty | Evidence |
 |---|---|---|---|
-| A23 | `wgpuAdapterGetInfo` reports `vendorID` and `deviceID` as 0 on every backend (`yawgpu/src/ffi/mod.rs`, `adapter_info_from_core`); `adapterType` is `Unknown` for real GPUs. Dawn reports the PCI ids (`AdapterBase::APIGetInfo`) and the adapter type. Applications and tests cannot identify the GPU vendor through the API. The HALs already hold the ids (Vulkan `VkPhysicalDeviceProperties`). | S | `specs/blocks/134-vulkan-limits-parity.md` Verification |
 | A17 | **Native hardware owed for Blocks 126 and 127.** The Windows NVIDIA run took the feature-present paths. Still unexercised: the `frag_depth` shader clamp on a device without `VK_EXT_depth_clip_enable`, and the default compute subgroup size and invocation clamp on a device whose subgroup sizes vary (Intel). | Manual | `specs/blocks/126-vulkan-frag-depth-clamp.md`, `specs/blocks/127-vulkan-subgroup-parity.md` Verification |
 | A19 | Releasing the instance while a device is alive cancels the device's callbacks (`CallbackCancelled`). Dawn keeps the instance alive through the device and later reports `Destroyed`. | M | `specs/blocks/130-dropped-pass-and-spontaneous-device-lost.md` Problem, point 3 |
 | A20 | A `FailedCreation` device-lost callback in `AllowSpontaneous` mode waits for `ProcessEvents`; Dawn fires it inside `RequestDevice`. | S | `specs/blocks/130-dropped-pass-and-spontaneous-device-lost.md` Out of scope |
@@ -316,3 +316,4 @@ Re-verification after the fixes: `cargo test --workspace` 1093/0, clippy default
 - Block 132 Metal check on the M2 at `ba0b289`: CTS `pipeline_bind_group_compat:*` 432 failures before (the `f3a63e9` library) to 0 after; Metal e2e 162/0; CTS `api,operation` fail=0.
 - Block 133 done: Vulkan SPIR-V 1.4 as Dawn (`VK_KHR_spirv_1_4` + `VK_KHR_shader_float_controls`; 1.3 on Android ARM and Adreno 7xx). Windows native Vulkan e2e 163/163, HAL 79/79, 0 VUIDs; CTS `webgpu:*` `fail=2 crash=5`. The crashes are F-165, which SPIR-V 1.4 makes far more frequent on NVIDIA (bufferView/bufferArrayView workgroup f16 aliasing: 4-12 crashes per run vs 0 with 1.3). Kept as Dawn by user decision. Block 134 (E6, Vulkan limits) specified next.
 - E6 done by Block 134: Vulkan adapter limits follow Dawn (NVIDIA storage binding size 2 GiB - 4, `maxColorAttachmentBytesPerSample` 32 x attachments, `maxFragmentCombinedOutputResources` redistribution, `NormalizeLimits` clamps). Windows native Vulkan CTS `webgpu:*` `fail=2 crash=0`, `api,validation` +182 passes. A23 opened (adapter info vendorID/deviceID are 0).
+- A23 done by Block 135: `WGPUAdapterInfo` reports vendor and device ids, adapter type, driver description, and Dawn's `gpu_info.json` vendor and architecture names (generated table, `tools/gen_gpu_info.py`). Windows NVIDIA: `nvidia` / `blackwell` / `0x10de:0x2d04` / discrete. Metal owed to a Mac host.

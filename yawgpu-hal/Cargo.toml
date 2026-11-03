@@ -34,4 +34,5 @@ windows-sys = { version = "0.59", features = [
 ], optional = true }
 
 [dev-dependencies]
+serde_json = { version = "=1.0.140", features = ["preserve_order"] }
 yawgpu-tint = { path = "../yawgpu-tint" }

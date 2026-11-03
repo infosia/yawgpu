@@ -31,6 +31,10 @@ macro_rules! hal_dispatch {
     };
 }
 
+mod adapter_info;
+mod gpu_info;
+pub use adapter_info::{HalAdapterInfo, HalAdapterType};
+
 mod command;
 mod descriptors;
 mod error;
@@ -471,6 +475,21 @@ pub enum HalAdapter {
 }
 
 impl HalAdapter {
+    /// Returns the adapter's hardware and driver identity.
+    #[must_use]
+    pub fn info(&self) -> HalAdapterInfo {
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(_) => HalAdapterInfo::new(0, 0, HalAdapterType::Cpu, String::new()),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter.info(),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.info(),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.info(),
+        }
+    }
+
     /// Returns whether the backend reports a software CPU adapter.
     #[must_use]
     pub fn is_fallback(&self) -> bool {
@@ -1473,6 +1492,20 @@ pub enum HalRenderPipeline {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hal_adapter_info_noop_is_cpu_with_empty_identity() {
+        let adapter = super::HalInstance::new_noop()
+            .enumerate_adapters()
+            .remove(0);
+        let info = adapter.info();
+        assert_eq!(info.vendor_id, 0);
+        assert_eq!(info.device_id, 0);
+        assert_eq!(info.adapter_type, super::HalAdapterType::Cpu);
+        assert!(info.vendor_name.is_empty());
+        assert!(info.architecture_name.is_empty());
+        assert!(info.driver_description.is_empty());
+    }
+
     #[test]
     fn audit_e11_noop_is_not_a_real_fallback_adapter() {
         let adapter = HalInstance::new_noop().enumerate_adapters().remove(0);

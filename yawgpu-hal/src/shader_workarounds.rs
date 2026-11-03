@@ -10,17 +10,8 @@ pub(crate) static FORCE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new((
 /// Returns (Intel, AMD) flags using Dawn's case-sensitive vendor-name fallback order.
 #[cfg(any(test, feature = "metal"))]
 pub(crate) fn metal_vendor_flags(name: &str) -> (bool, bool) {
-    [
-        ("AMD", (false, true)),
-        ("Apple", (false, false)),
-        ("Radeon", (false, true)),
-        ("Intel", (true, false)),
-        ("Geforce", (false, false)),
-        ("Quadro", (false, false)),
-    ]
-    .into_iter()
-    .find_map(|(trademark, flags)| name.contains(trademark).then_some(flags))
-    .unwrap_or((false, false))
+    let vendor = crate::adapter_info::metal_vendor_id(name);
+    (vendor == 0x8086, vendor == 0x1002)
 }
 
 /// ARM's Vulkan vendor ID, shared by Dawn-derived device gates.

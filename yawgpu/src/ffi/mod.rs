@@ -2655,28 +2655,41 @@ fn backend_type_from_hal(backend: yawgpu_hal::HalBackend) -> native::WGPUBackend
 }
 
 fn adapter_info_from_core(adapter: &core::Adapter) -> native::WGPUAdapterInfo {
-    let backend = adapter.backend();
+    adapter_info_from_hal(
+        &adapter.name(),
+        adapter.backend(),
+        &adapter.info(),
+        adapter.subgroup_min_size(),
+        adapter.subgroup_max_size(),
+    )
+}
+
+fn adapter_info_from_hal(
+    name: &str,
+    backend: yawgpu_hal::HalBackend,
+    info: &yawgpu_hal::HalAdapterInfo,
+    subgroup_min: u32,
+    subgroup_max: u32,
+) -> native::WGPUAdapterInfo {
     let backend_type = backend_type_from_hal(backend);
-    let adapter_type = if adapter.hal().is_fallback() {
-        native::WGPUAdapterType_CPU
-    } else {
-        match backend {
-            yawgpu_hal::HalBackend::Noop => native::WGPUAdapterType_CPU,
-            _ => native::WGPUAdapterType_Unknown,
-        }
+    let adapter_type = match info.adapter_type {
+        yawgpu_hal::HalAdapterType::Discrete => native::WGPUAdapterType_DiscreteGPU,
+        yawgpu_hal::HalAdapterType::Integrated => native::WGPUAdapterType_IntegratedGPU,
+        yawgpu_hal::HalAdapterType::Cpu => native::WGPUAdapterType_CPU,
+        _ => native::WGPUAdapterType_Unknown,
     };
     native::WGPUAdapterInfo {
         nextInChain: std::ptr::null_mut(),
-        vendor: owned_string_view("yawgpu"),
-        architecture: owned_string_view(""),
-        device: owned_string_view(&adapter.name()),
-        description: owned_string_view(""),
+        vendor: owned_string_view(&info.vendor_name),
+        architecture: owned_string_view(&info.architecture_name),
+        device: owned_string_view(name),
+        description: owned_string_view(&info.driver_description),
         backendType: backend_type,
         adapterType: adapter_type,
-        vendorID: 0,
-        deviceID: 0,
-        subgroupMinSize: adapter.subgroup_min_size(),
-        subgroupMaxSize: adapter.subgroup_max_size(),
+        vendorID: info.vendor_id,
+        deviceID: info.device_id,
+        subgroupMinSize: subgroup_min,
+        subgroupMaxSize: subgroup_max,
     }
 }
 
@@ -3000,6 +3013,69 @@ pub unsafe fn testing_get_queue_label(queue: native::WGPUQueue) -> String {
 #[cfg(test)]
 mod tests {
     #![allow(non_snake_case)]
+
+    #[test]
+    fn adapter_info_mapping_copies_all_hal_fields_and_owns_strings() {
+        let adapter = yawgpu_hal::HalInstance::new_noop()
+            .enumerate_adapters()
+            .remove(0);
+        let mut hal_info = adapter.info();
+        hal_info.vendor_id = 0x10de;
+        hal_info.device_id = 0x2684;
+        hal_info.vendor_name = "nvidia".into();
+        hal_info.architecture_name = "lovelace".into();
+        hal_info.driver_description = "driver: details 1.2.3".into();
+        for (kind, expected) in [
+            (
+                yawgpu_hal::HalAdapterType::Discrete,
+                native::WGPUAdapterType_DiscreteGPU,
+            ),
+            (
+                yawgpu_hal::HalAdapterType::Integrated,
+                native::WGPUAdapterType_IntegratedGPU,
+            ),
+            (yawgpu_hal::HalAdapterType::Cpu, native::WGPUAdapterType_CPU),
+            (
+                yawgpu_hal::HalAdapterType::Unknown,
+                native::WGPUAdapterType_Unknown,
+            ),
+        ] {
+            hal_info.adapter_type = kind;
+            let info =
+                adapter_info_from_hal("GPU name", yawgpu_hal::HalBackend::Vulkan, &hal_info, 8, 64);
+            let other =
+                adapter_info_from_hal("GPU name", yawgpu_hal::HalBackend::Vulkan, &hal_info, 8, 64);
+            unsafe {
+                for (view, second, text) in [
+                    (info.vendor, other.vendor, hal_info.vendor_name.as_str()),
+                    (
+                        info.architecture,
+                        other.architecture,
+                        hal_info.architecture_name.as_str(),
+                    ),
+                    (info.device, other.device, "GPU name"),
+                    (
+                        info.description,
+                        other.description,
+                        hal_info.driver_description.as_str(),
+                    ),
+                ] {
+                    assert_eq!(string_view_to_string(view), text);
+                    assert_ne!(view.data, second.data);
+                    assert_ne!(view.data.cast::<u8>(), text.as_ptr());
+                }
+                assert_eq!(info.vendorID, hal_info.vendor_id);
+                assert_eq!(info.deviceID, hal_info.device_id);
+                assert_eq!(info.adapterType, expected);
+                assert_eq!(info.backendType, native::WGPUBackendType_Vulkan);
+                assert_eq!((info.subgroupMinSize, info.subgroupMaxSize), (8, 64));
+                assert!(info.nextInChain.is_null());
+                wgpuAdapterInfoFreeMembers(info);
+                wgpuAdapterInfoFreeMembers(other);
+            }
+        }
+    }
+
     #[cfg(feature = "tiled")]
     #[test]
     fn phase_review_major_m1_tiled_entries_retain_device_during_release() {
@@ -6749,6 +6825,28 @@ mod tests {
         }
     }
 
+    unsafe fn assert_info_matches_hal(info: &native::WGPUAdapterInfo, adapter: &core::Adapter) {
+        let hal = adapter.info();
+        assert_eq!(string_view_to_string(info.vendor), hal.vendor_name);
+        assert_eq!(
+            string_view_to_string(info.architecture),
+            hal.architecture_name
+        );
+        assert_eq!(
+            string_view_to_string(info.description),
+            hal.driver_description
+        );
+        assert_eq!(string_view_to_string(info.device), adapter.name());
+        assert_eq!(info.vendorID, hal.vendor_id);
+        assert_eq!(info.deviceID, hal.device_id);
+        assert_eq!(hal.adapter_type, yawgpu_hal::HalAdapterType::Cpu);
+        assert_eq!(info.adapterType, native::WGPUAdapterType_CPU);
+        assert_eq!(info.backendType, backend_type_from_hal(adapter.backend()));
+        assert_eq!(info.subgroupMinSize, adapter.subgroup_min_size());
+        assert_eq!(info.subgroupMaxSize, adapter.subgroup_max_size());
+        assert!(info.nextInChain.is_null());
+    }
+
     #[test]
     fn wgpuAdapterGetInfo_populates_noop_info_and_free_members() {
         unsafe {
@@ -6760,7 +6858,8 @@ mod tests {
                 wgpuAdapterGetInfo(adapter, &mut info),
                 native::WGPUStatus_Success
             );
-            assert_eq!(string_view_to_string(info.vendor), "yawgpu");
+            assert_eq!(string_view_to_string(info.vendor), "");
+            assert_info_matches_hal(&info, &(*adapter).core);
             assert_eq!(string_view_to_string(info.architecture), "");
             assert_eq!(string_view_to_string(info.device), "yawgpu Noop Adapter");
             assert_eq!(string_view_to_string(info.description), "");
@@ -6795,7 +6894,9 @@ mod tests {
                 wgpuDeviceGetAdapterInfo(device, &mut device_info),
                 native::WGPUStatus_Success
             );
-            assert_eq!(string_view_to_string(device_info.vendor), "yawgpu");
+            assert_eq!(string_view_to_string(device_info.vendor), "");
+            assert_info_matches_hal(&adapter_info, &(*adapter).core);
+            assert_info_matches_hal(&device_info, &(*device).adapter);
             assert_eq!(
                 string_view_to_string(device_info.vendor),
                 string_view_to_string(adapter_info.vendor)
@@ -6818,7 +6919,7 @@ mod tests {
             assert_eq!(device_info.deviceID, adapter_info.deviceID);
             assert_eq!(device_info.subgroupMinSize, adapter_info.subgroupMinSize);
             assert_eq!(device_info.subgroupMaxSize, adapter_info.subgroupMaxSize);
-            assert_ne!(device_info.vendor.data, adapter_info.vendor.data);
+            assert_ne!(device_info.device.data, adapter_info.device.data);
             assert_eq!(
                 wgpuDeviceGetAdapterInfo(device, std::ptr::null_mut()),
                 native::WGPUStatus_Error

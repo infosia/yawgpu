@@ -71,24 +71,14 @@ fn four_rgba32float_targets_are_accepted() {
         assert!(adapter_limits.maxColorAttachmentBytesPerSample >= 64);
 
         // R1: on NVIDIA the storage binding size stays below 2 GiB, where some drivers'
-        // `OpArrayLength` returns 0 (crbug.com/435684920). yawgpu reports vendorID 0 in
-        // `WGPUAdapterInfo` (backlog), so the vendor is taken from the device name.
+        // `OpArrayLength` returns 0 (crbug.com/435684920).
         let mut info: native::WGPUAdapterInfo = std::mem::zeroed();
         assert_eq!(
             yawgpu::wgpuAdapterGetInfo(adapter, &mut info),
             native::WGPUStatus_Success
         );
-        let name = if info.device.data.is_null() {
-            String::new()
-        } else {
-            String::from_utf8_lossy(std::slice::from_raw_parts(
-                info.device.data.cast::<u8>(),
-                info.device.length,
-            ))
-            .into_owned()
-        };
-        eprintln!("adapter device={name}");
-        if name.to_ascii_uppercase().contains("NVIDIA") {
+        eprintln!("adapter vendorID={:#x}", info.vendorID);
+        if info.vendorID == 0x10de {
             assert!(adapter_limits.maxStorageBufferBindingSize <= (1 << 31) - 4);
         }
         // R1, every vendor: within maxBufferSize and a multiple of 4.

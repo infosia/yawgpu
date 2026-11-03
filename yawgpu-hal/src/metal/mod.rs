@@ -203,6 +203,46 @@ impl std::fmt::Debug for MetalAdapter {
 }
 
 impl MetalAdapter {
+    pub(crate) fn info(&self) -> crate::HalAdapterInfo {
+        #[cfg(not(target_os = "ios"))]
+        let vendor = crate::adapter_info::metal_vendor_id(&self.name);
+        #[cfg(target_os = "ios")]
+        let vendor = 0;
+        #[cfg(target_os = "macos")]
+        let unified = self.device.hasUnifiedMemory();
+        #[cfg(not(target_os = "macos"))]
+        let unified = true;
+        let ios = cfg!(target_os = "ios");
+        let system = if ios { "iOS" } else { "macOS" };
+        let process = objc2_foundation::NSProcessInfo::processInfo();
+        let description = format!(
+            "Metal driver on {system} {}",
+            process.operatingSystemVersionString()
+        );
+        // Metal3 is only queried on operating systems that introduced it.
+        let metal3_available =
+            process.isOperatingSystemAtLeastVersion(objc2_foundation::NSOperatingSystemVersion {
+                majorVersion: if ios { 16 } else { 13 },
+                minorVersion: 0,
+                patchVersion: 0,
+            });
+        let mut info = crate::HalAdapterInfo::new(
+            vendor,
+            0,
+            crate::adapter_info::metal_adapter_type(ios, unified),
+            description,
+        );
+        info.architecture_name = crate::adapter_info::metal_architecture(
+            metal3_available,
+            metal3_available && self.device.supportsFamily(MTLGPUFamily::Metal3),
+            self.device.supportsFamily(MTLGPUFamily::Common3),
+            self.device.supportsFamily(MTLGPUFamily::Common2),
+            self.device.supportsFamily(MTLGPUFamily::Common1),
+        )
+        .to_owned();
+        info
+    }
+
     /// Creates a new instance.
     #[must_use]
     pub fn new(device: Retained<ProtocolObject<dyn MTLDevice>>) -> Self {
@@ -709,6 +749,31 @@ pub use texture::{MetalSampler, MetalTexture};
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires a real Metal GPU; Block 135 adapter identity"]
+    fn adapter_info_reports_apple_identity() {
+        let Some(device) = test_helpers::metal_device_or_skip() else {
+            return;
+        };
+        let adapter = MetalAdapter::new(device.device.clone());
+        let apple = adapter.name().contains("Apple");
+        let info = crate::HalAdapter::Metal(adapter).info();
+        eprintln!("{info:?}");
+        if cfg!(target_os = "ios") {
+            assert_eq!(info.vendor_id, 0);
+            assert_eq!(info.vendor_name, "");
+        } else if apple {
+            assert_eq!(info.vendor_id, 0x106b);
+            assert_eq!(info.vendor_name, "apple");
+            assert!(
+                info.architecture_name == "metal-3"
+                    || info.architecture_name.starts_with("common-")
+            );
+        }
+        assert_eq!(info.device_id, 0);
+        assert!(info.driver_description.starts_with("Metal driver on "));
+    }
+
     #[test]
     #[ignore = "manual real-backend test"]
     fn forced_shader_workarounds_reach_metal_device() {

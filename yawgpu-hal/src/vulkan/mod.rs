@@ -277,6 +277,42 @@ fn is_fallback_device_type(device_type: vk::PhysicalDeviceType) -> bool {
 }
 
 impl VulkanAdapter {
+    pub(crate) fn info(&self) -> crate::HalAdapterInfo {
+        let properties = unsafe {
+            self.instance
+                .instance
+                .get_physical_device_properties(self.physical_device)
+        };
+        let version = crate::adapter_info::vulkan_driver_version(
+            properties.vendor_id,
+            properties.driver_version,
+            cfg!(target_os = "windows"),
+        );
+        let driver = query_driver_properties(&self.instance, self.physical_device);
+        let strings = driver.as_ref().map(|driver| {
+            let name = driver
+                .driver_name_as_c_str()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let info = driver
+                .driver_info_as_c_str()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            (name, info)
+        });
+        crate::HalAdapterInfo::new(
+            properties.vendor_id,
+            properties.device_id,
+            adapter_type(properties.device_type),
+            crate::adapter_info::vulkan_driver_description(
+                &version,
+                strings
+                    .as_ref()
+                    .map(|(name, info)| (name.as_str(), info.as_str())),
+            ),
+        )
+    }
+
     pub(crate) fn is_fallback(&self) -> bool {
         let properties = unsafe {
             self.instance
@@ -2142,6 +2178,14 @@ fn query_driver_id(
     instance: &Arc<VulkanInstanceInner>,
     physical_device: vk::PhysicalDevice,
 ) -> Option<u32> {
+    query_driver_properties(instance, physical_device)
+        .map(|driver| driver.driver_id.as_raw() as u32)
+}
+
+fn query_driver_properties(
+    instance: &Arc<VulkanInstanceInner>,
+    physical_device: vk::PhysicalDevice,
+) -> Option<vk::PhysicalDeviceDriverProperties<'static>> {
     let extension_present = has_device_extension_for_physical_device(
         instance,
         physical_device,
@@ -2160,7 +2204,18 @@ fn query_driver_id(
             .instance
             .get_physical_device_properties2(physical_device, &mut properties);
     }
-    Some(driver.driver_id.as_raw() as u32)
+    Some(driver)
+}
+
+fn adapter_type(device_type: vk::PhysicalDeviceType) -> crate::HalAdapterType {
+    match device_type {
+        vk::PhysicalDeviceType::INTEGRATED_GPU => crate::HalAdapterType::Integrated,
+        vk::PhysicalDeviceType::DISCRETE_GPU | vk::PhysicalDeviceType::VIRTUAL_GPU => {
+            crate::HalAdapterType::Discrete
+        }
+        vk::PhysicalDeviceType::CPU => crate::HalAdapterType::Cpu,
+        _ => crate::HalAdapterType::Unknown,
+    }
 }
 
 fn has_device_extension_for_physical_device(
@@ -2218,6 +2273,60 @@ pub use texture::{VulkanSampler, VulkanTexture};
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn adapter_type_maps_vulkan_hardware_classes() {
+        for (input, expected) in [
+            (
+                vk::PhysicalDeviceType::INTEGRATED_GPU,
+                crate::HalAdapterType::Integrated,
+            ),
+            (
+                vk::PhysicalDeviceType::DISCRETE_GPU,
+                crate::HalAdapterType::Discrete,
+            ),
+            (
+                vk::PhysicalDeviceType::VIRTUAL_GPU,
+                crate::HalAdapterType::Discrete,
+            ),
+            (vk::PhysicalDeviceType::CPU, crate::HalAdapterType::Cpu),
+            (
+                vk::PhysicalDeviceType::OTHER,
+                crate::HalAdapterType::Unknown,
+            ),
+            (
+                vk::PhysicalDeviceType::from_raw(12345),
+                crate::HalAdapterType::Unknown,
+            ),
+        ] {
+            assert_eq!(adapter_type(input), expected);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a real Vulkan GPU; Block 135 adapter identity"]
+    fn adapter_info_matches_physical_device_properties() {
+        let Ok(instance) = VulkanInstance::new() else {
+            eprintln!("skipping: Vulkan unavailable");
+            return;
+        };
+        let Some(adapter) = instance.enumerate_adapters().into_iter().next() else {
+            eprintln!("skipping: no Vulkan adapter");
+            return;
+        };
+        let properties = unsafe {
+            adapter
+                .instance
+                .instance
+                .get_physical_device_properties(adapter.physical_device)
+        };
+        let info = crate::HalAdapter::Vulkan(adapter).info();
+        eprintln!("{info:?}");
+        assert_eq!(info.vendor_id, properties.vendor_id);
+        assert_eq!(info.device_id, properties.device_id);
+        assert_eq!(info.adapter_type, adapter_type(properties.device_type));
+        assert!(!info.driver_description.is_empty());
+    }
+
     #[test]
     #[ignore = "requires a real Vulkan GPU; Block 131 S2 device-fact logging"]
     fn vulkan_driver_workaround_predicates() {
