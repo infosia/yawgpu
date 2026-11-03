@@ -114,10 +114,12 @@ pub struct SpirvWorkarounds {
     pub collapse_subgroup_min_max: bool,
     /// Pass matrix arguments to user functions by pointer.
     pub pass_matrix_by_pointer: bool,
+    /// Emit SPIR-V 1.4 instead of the default SPIR-V 1.3.
+    pub use_spirv_1_4: bool,
 }
 
 const _: () = {
-    assert!(core::mem::size_of::<SpirvWorkarounds>() == 22);
+    assert!(core::mem::size_of::<SpirvWorkarounds>() == 23);
     assert!(core::mem::align_of::<SpirvWorkarounds>() == 1);
     assert!(core::mem::offset_of!(SpirvWorkarounds, use_demote_to_helper_invocation) == 0);
     assert!(core::mem::offset_of!(SpirvWorkarounds, native_dot_4x8_packed) == 1);
@@ -151,6 +153,7 @@ const _: () = {
     assert!(core::mem::offset_of!(SpirvWorkarounds, polyfill_saturate_as_min_max_f16) == 19);
     assert!(core::mem::offset_of!(SpirvWorkarounds, collapse_subgroup_min_max) == 20);
     assert!(core::mem::offset_of!(SpirvWorkarounds, pass_matrix_by_pointer) == 21);
+    assert!(core::mem::offset_of!(SpirvWorkarounds, use_spirv_1_4) == 22);
 };
 
 /// Whether this build links the Tint backend.
@@ -3465,6 +3468,29 @@ fn use_matrix(m: mat2x2f) -> vec2f { return m[0] + m[1]; }
             assert!(spirv_instructions(&native)
                 .iter()
                 .any(|i| i[0] & 0xffff == opcode));
+        }
+    }
+
+    #[test]
+    fn spirv_version_option_sets_module_header() {
+        let program = Program::parse(
+            "@compute @workgroup_size(1) fn cs() {}",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        for enabled in [false, true] {
+            let flags = SpirvWorkarounds {
+                use_spirv_1_4: enabled,
+                ..Default::default()
+            };
+            let words = workaround_spirv(&program, flags);
+            assert_eq!(words[1], if enabled { 0x00010400 } else { 0x00010300 });
         }
     }
 

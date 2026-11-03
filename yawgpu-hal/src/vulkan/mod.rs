@@ -844,6 +844,21 @@ impl VulkanAdapter {
                 .instance
                 .get_physical_device_properties(self.physical_device)
         };
+        let spirv_extension = self.has_device_extension(vk::KHR_SPIRV_1_4_NAME);
+        let float_controls_extension =
+            self.has_device_extension(vk::KHR_SHADER_FLOAT_CONTROLS_NAME);
+        let use_spirv_1_4 = crate::shader_workarounds::use_spirv_1_4(
+            spirv_extension,
+            float_controls_extension,
+            cfg!(target_os = "android"),
+            device_properties.vendor_id,
+            device_properties.device_id,
+        );
+        append_spirv_1_4_extensions(
+            &mut extension_names,
+            spirv_extension,
+            float_controls_extension,
+        );
         // Promotion-to-core decisions must use the *effective enabled* Vulkan
         // version, not the physical device's *maximum supported* version
         // (`device_properties.api_version`). The effective version is
@@ -1272,7 +1287,7 @@ impl VulkanAdapter {
             cfg!(target_os = "windows"),
         )
         .with_forced(crate::HalShaderWorkarounds::parse_forced(forced.as_deref()));
-        let shader_workarounds = vulkan_writer_flags(
+        let mut shader_workarounds = vulkan_writer_flags(
             shader_workarounds,
             shader_demote_to_helper_invocation,
             shader_integer_dot_product,
@@ -1281,7 +1296,18 @@ impl VulkanAdapter {
             image_robust_access2,
             buffer_robust_access2,
         );
+        shader_workarounds.use_spirv_1_4 = use_spirv_1_4;
         let inner = Arc::new(VulkanDeviceInner {
+            #[cfg(test)]
+            spirv_1_4_extensions_enabled: [
+                vk::KHR_SPIRV_1_4_NAME,
+                vk::KHR_SHADER_FLOAT_CONTROLS_NAME,
+            ]
+            .map(|name| {
+                extension_names
+                    .iter()
+                    .any(|&enabled| (unsafe { CStr::from_ptr(enabled) }) == name)
+            }),
             shader_workarounds,
             reconvergence_features,
             pipeline_robustness,
@@ -1696,6 +1722,18 @@ fn use_buffer_robust_access2(
         && robust_buffer_access2
         && robust_buffer_access_enabled
         && (!descriptor_indexing_available || robust_buffer_access_update_after_bind)
+}
+
+/// Appends both SPIR-V 1.4 dependencies when both are reported, regardless of codegen.
+fn append_spirv_1_4_extensions(
+    extension_names: &mut Vec<*const c_char>,
+    spirv_extension: bool,
+    float_controls_extension: bool,
+) {
+    if spirv_extension && float_controls_extension {
+        extension_names.push(vk::KHR_SPIRV_1_4_NAME.as_ptr());
+        extension_names.push(vk::KHR_SHADER_FLOAT_CONTROLS_NAME.as_ptr());
+    }
 }
 
 /// Adds enabled writer features without changing device-selected driver workarounds.
@@ -2755,9 +2793,101 @@ mod tests {
         );
     }
 
+    #[test]
+    fn spirv_1_4_extensions_follow_availability() {
+        for spirv in [false, true] {
+            for controls in [false, true] {
+                let enabled = spirv && controls;
+                let mut names = vec![vk::KHR_SWAPCHAIN_NAME.as_ptr()];
+                append_spirv_1_4_extensions(&mut names, spirv, controls);
+                let names = extension_names_from_pointers(&names);
+                assert_eq!(names.contains(&vk::KHR_SPIRV_1_4_NAME), enabled);
+                assert_eq!(names.contains(&vk::KHR_SHADER_FLOAT_CONTROLS_NAME), enabled);
+                assert_eq!(names.len(), if enabled { 3 } else { 1 });
+                assert_eq!(names[0], vk::KHR_SWAPCHAIN_NAME);
+            }
+        }
+        for (android, vendor, device) in [(true, 0x13b5, 0), (false, 0x5143, 0x07000001)] {
+            let decision =
+                crate::shader_workarounds::use_spirv_1_4(true, true, android, vendor, device);
+            let mut names = Vec::new();
+            append_spirv_1_4_extensions(&mut names, true, true);
+            let names = extension_names_from_pointers(&names);
+            assert_eq!(
+                names,
+                [vk::KHR_SPIRV_1_4_NAME, vk::KHR_SHADER_FLOAT_CONTROLS_NAME]
+            );
+            assert!(!decision);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual real-backend test"]
+    fn vulkan_spirv_1_4_decision_and_pipelines() {
+        let Some(device) = test_helpers::vulkan_device_or_skip() else {
+            return;
+        };
+        let inner = &device.inner;
+        let properties = unsafe {
+            inner
+                ._instance
+                .instance
+                .get_physical_device_properties(inner.physical_device)
+        };
+        let has_extension = |name| {
+            has_device_extension_for_physical_device(&inner._instance, inner.physical_device, name)
+        };
+        let spirv_extension = has_extension(vk::KHR_SPIRV_1_4_NAME);
+        let float_controls_extension = has_extension(vk::KHR_SHADER_FLOAT_CONTROLS_NAME);
+        let expected = crate::shader_workarounds::use_spirv_1_4(
+            spirv_extension,
+            float_controls_extension,
+            cfg!(target_os = "android"),
+            properties.vendor_id,
+            properties.device_id,
+        );
+        let decision = device.shader_workarounds().use_spirv_1_4;
+        let [spirv_enabled, controls_enabled] = inner.spirv_1_4_extensions_enabled;
+        eprintln!("SPIR-V 1.4: vendorID={:#x}, deviceID={:#x}, decision={decision}, VK_KHR_spirv_1_4 enabled={spirv_enabled}, VK_KHR_shader_float_controls enabled={controls_enabled}", properties.vendor_id, properties.device_id);
+        assert_eq!(decision, expected);
+        assert_eq!(
+            [spirv_enabled, controls_enabled],
+            [spirv_extension && float_controls_extension; 2]
+        );
+        let source = "@compute @workgroup_size(1) fn cs() {} @vertex fn vs() -> @builtin(position) vec4f { return vec4f(0, 0, 0, 1); } @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }";
+        let compile = |entry| {
+            let words = compile_writer_test_spirv(&device, source, entry);
+            assert_eq!(words[1], if decision { 0x00010400 } else { 0x00010300 });
+            words
+        };
+        device
+            .create_compute_pipeline(
+                crate::HalShaderSource::SpirV(compile("cs")),
+                "cs",
+                (1, 1, 1),
+                &[],
+                0,
+                None,
+            )
+            .expect("create compute pipeline with selected SPIR-V version");
+        device
+            .create_render_pipeline(
+                crate::HalShaderSource::SpirVStages {
+                    vertex: compile("vs"),
+                    fragment: Some(compile("fs")),
+                },
+                "vs",
+                Some("fs"),
+                &test_helpers::render_descriptor(),
+                &[],
+            )
+            .expect("create render pipeline with selected SPIR-V version");
+    }
+
     fn compile_writer_test_spirv(device: &VulkanDevice, source: &str, entry: &str) -> Vec<u32> {
         let flags = device.shader_workarounds();
         let mut options = yawgpu_tint::SpirvWorkarounds::default();
+        options.use_spirv_1_4 = flags.use_spirv_1_4;
         options.use_demote_to_helper_invocation = flags.use_demote_to_helper_invocation;
         options.native_dot_4x8_packed = flags.native_dot_4x8_packed;
         options.disable_image_robustness = flags.disable_image_robustness;

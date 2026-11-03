@@ -380,6 +380,7 @@ typedef struct {
     bool polyfill_saturate_as_min_max_f16;
     bool collapse_subgroup_min_max;
     bool pass_matrix_by_pointer;
+    bool use_spirv_1_4;
 } YawgpuTintSpirvWorkarounds;
 
 /* `user_immediate_size` is the owning pipeline layout's reserved

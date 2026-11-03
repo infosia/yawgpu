@@ -23,11 +23,46 @@ pub(crate) fn metal_vendor_flags(name: &str) -> (bool, bool) {
     .unwrap_or((false, false))
 }
 
+/// ARM's Vulkan vendor ID, shared by Dawn-derived device gates.
+#[cfg(any(test, feature = "vulkan"))]
+const VENDOR_ARM: u32 = 0x13b5;
+/// Qualcomm's PCI Vulkan vendor ID.
+#[cfg(any(test, feature = "vulkan"))]
+const VENDOR_QUALCOMM: u32 = 0x5143;
+/// Qualcomm's ACPI Vulkan vendor ID.
+#[cfg(any(test, feature = "vulkan"))]
+const VENDOR_QUALCOMM_ACPI: u32 = 0x4d4f4351;
+
+/// Selects Dawn's SPIR-V 1.4 path from advertised extensions and device identity.
+#[cfg(any(test, feature = "vulkan"))]
+pub(crate) fn use_spirv_1_4(
+    spirv_extension: bool,
+    float_controls_extension: bool,
+    is_android: bool,
+    vendor_id: u32,
+    device_id: u32,
+) -> bool {
+    // Dawn gpu_info.json: Adreno 7xx has OpCopyLogical driver bugs.
+    let adreno_7xx = (vendor_id == VENDOR_QUALCOMM
+        && matches!(
+            device_id & 0xff000000,
+            0x07000000 | 0x43000000 | 0x36000000 | 0x37000000
+        ))
+        || (vendor_id == VENDOR_QUALCOMM_ACPI
+            && matches!(device_id & 0xffffff00, 0x37314400 | 0x36334300));
+    spirv_extension
+        && float_controls_extension
+        && !(is_android && vendor_id == VENDOR_ARM)
+        && !adreno_7xx
+}
+
 /// Writer features and driver workarounds selected once when a HAL device is created.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 #[must_use]
 pub struct HalShaderWorkarounds {
+    /// SPIR-V: emit version 1.4 with both required Vulkan extensions enabled.
+    pub use_spirv_1_4: bool,
     /// MSL: skip the demote transform on non-Apple GPUs.
     pub disable_demote_to_helper: bool,
     /// SPIR-V: use the enabled demote-to-helper feature.
@@ -201,6 +236,7 @@ impl HalShaderWorkarounds {
     #[cfg(any(test, feature = "metal", feature = "vulkan"))]
     pub(crate) fn with_forced(self, forced: Self) -> Self {
         Self {
+            use_spirv_1_4: self.use_spirv_1_4,
             disable_demote_to_helper: self.disable_demote_to_helper,
             use_demote_to_helper_invocation: self.use_demote_to_helper_invocation,
             native_dot_4x8_packed: self.native_dot_4x8_packed,
@@ -282,9 +318,7 @@ impl VulkanDriverPredicates {
         const VK_DRIVER_ID_ARM_PROPRIETARY: u32 = 9;
         const VENDOR_AMD: u32 = 0x1002;
         const VENDOR_IMAGINATION: u32 = 0x1010;
-        const VENDOR_ARM: u32 = 0x13b5;
         const VENDOR_GOOGLE: u32 = 0x1ae0;
-        const VENDOR_QUALCOMM: u32 = 0x5143;
         // Dawn src/dawn/gpu_info.json: Google SwiftShader.
         const DEVICE_SWIFTSHADER: u32 = 0xc0de;
         Self {
@@ -306,6 +340,45 @@ impl VulkanDriverPredicates {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spirv_1_4_decision_matches_dawn_device_gates() {
+        for (spirv, controls, android, vendor, device, expected) in [
+            (true, true, false, 0x10de, 0x2d04, true),
+            (false, true, false, 0x10de, 0x2d04, false),
+            (true, false, false, 0x10de, 0x2d04, false),
+            (false, false, false, 0x10de, 0x2d04, false),
+            (true, true, true, 0x13b5, 0, false),
+            (true, true, false, 0x13b5, 0, true),
+            (true, true, true, 0x10de, 0x2d04, true),
+            (true, true, false, 0x5143, 0x07000001, false),
+            (true, true, true, 0x5143, 0x430000ff, false),
+            (true, true, false, 0x5143, 0x3600ffff, false),
+            (true, true, false, 0x5143, 0x37ffffff, false),
+            (true, true, false, 0x4d4f4351, 0x37314401, false),
+            (true, true, true, 0x4d4f4351, 0x363343ff, false),
+            (true, true, true, 0x5143, 0x06000001, true),
+            (true, true, true, 0x5143, 0x44000001, true),
+            (true, true, false, 0x4d4f4351, 0x36334400, true),
+            (true, true, true, 0x4d4f4351, 0x41333801, true),
+            (true, true, true, 0x4d4f4351, 0x354646ff, true),
+            (true, true, false, 0x10de, 0x07000001, true),
+            (true, true, false, 0x5143, 0x37314401, false),
+            (true, true, false, 0x4d4f4351, 0x07000001, true),
+        ] {
+            assert_eq!(use_spirv_1_4(spirv, controls, android, vendor, device), expected,
+                "spirv={spirv}, controls={controls}, android={android}, vendor={vendor:#x}, device={device:#x}");
+        }
+        assert!(!HalShaderWorkarounds::default().use_spirv_1_4);
+        let flags = HalShaderWorkarounds {
+            use_spirv_1_4: true,
+            ..Default::default()
+        };
+        assert!(flags.with_forced(Default::default()).use_spirv_1_4);
+        assert!(
+            !HalShaderWorkarounds::for_metal(false, true, false, false, false, false).use_spirv_1_4
+        );
+    }
 
     #[test]
     fn metal_vendor_flags_match_dawn_name_fallback() {

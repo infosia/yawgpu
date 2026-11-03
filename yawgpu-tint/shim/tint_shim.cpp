@@ -452,7 +452,7 @@ static_assert(offsetof(YawgpuTintMslWorkarounds, replace_workgroup_bool_with_u32
 static_assert(offsetof(YawgpuTintMslWorkarounds, scalarize_max_min_clamp) == 10,
               "YawgpuTintMslWorkarounds layout changed");
 
-static_assert(sizeof(YawgpuTintSpirvWorkarounds) == 22, "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(sizeof(YawgpuTintSpirvWorkarounds) == 23, "YawgpuTintSpirvWorkarounds layout changed");
 static_assert(alignof(YawgpuTintSpirvWorkarounds) == 1, "YawgpuTintSpirvWorkarounds alignment changed");
 static_assert(offsetof(YawgpuTintSpirvWorkarounds, use_demote_to_helper_invocation) == 0,
               "YawgpuTintSpirvWorkarounds layout changed");
@@ -497,6 +497,9 @@ static_assert(offsetof(YawgpuTintSpirvWorkarounds, polyfill_saturate_as_min_max_
 static_assert(offsetof(YawgpuTintSpirvWorkarounds, collapse_subgroup_min_max) == 20,
               "YawgpuTintSpirvWorkarounds layout changed");
 static_assert(offsetof(YawgpuTintSpirvWorkarounds, pass_matrix_by_pointer) == 21,
+              "YawgpuTintSpirvWorkarounds layout changed");
+
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, use_spirv_1_4) == 22,
               "YawgpuTintSpirvWorkarounds layout changed");
 
 static_assert(sizeof(YawgpuTintEntryPoint) == 48, "YawgpuTintEntryPoint layout changed");
@@ -2568,6 +2571,9 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
             workarounds->replace_workgroup_atomic_store_with_exchange;
         options.workarounds.replace_unsigned_compare_zero = workarounds->replace_unsigned_compare_zero;
         options.emit_vertex_point_size = emit_vertex_point_size;
+        options.spirv_version = workarounds->use_spirv_1_4
+            ? tint::spirv::writer::SpvVersion::kSpv14
+            : tint::spirv::writer::SpvVersion::kSpv13;
         options.extensions.use_demote_to_helper_invocation = workarounds->use_demote_to_helper_invocation;
         options.extensions.dot_4x8_packed = !workarounds->native_dot_4x8_packed;
         options.extensions.use_zero_initialize_workgroup_memory =

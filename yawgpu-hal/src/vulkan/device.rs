@@ -2,6 +2,9 @@ use super::*;
 
 /// Holds shared state for the vulkan device handle.
 pub(super) struct VulkanDeviceInner {
+    /// Actual extension names submitted to vkCreateDevice, retained for the manual test.
+    #[cfg(test)]
+    pub(super) spirv_1_4_extensions_enabled: [bool; 2],
     pub(super) shader_workarounds: crate::HalShaderWorkarounds,
     /// Whether the pipeline robustness extension and feature were enabled.
     pub(super) pipeline_robustness: bool,

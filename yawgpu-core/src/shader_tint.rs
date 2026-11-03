@@ -17,6 +17,7 @@ fn tint_spirv_workarounds(
     workarounds: yawgpu_hal::HalShaderWorkarounds,
 ) -> yawgpu_tint::SpirvWorkarounds {
     let mut tint_workarounds = yawgpu_tint::SpirvWorkarounds::default();
+    tint_workarounds.use_spirv_1_4 = workarounds.use_spirv_1_4;
     tint_workarounds.use_demote_to_helper_invocation = workarounds.use_demote_to_helper_invocation;
     tint_workarounds.native_dot_4x8_packed = workarounds.native_dot_4x8_packed;
     tint_workarounds.disable_image_robustness = workarounds.disable_image_robustness;
@@ -100,6 +101,7 @@ struct MslCodegenKey {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SpirvCodegenKey {
     emit_vertex_point_size: bool,
+    // Includes use_spirv_1_4: the module version participates in cache identity.
     workarounds: yawgpu_tint::SpirvWorkarounds,
     entry_point: String,
     constants: CanonicalConstants,
@@ -1952,6 +1954,7 @@ mod tests {
         );
         for (enabled_name, hal) in one_hot_hal_flags!(
             disable_demote_to_helper,
+            use_spirv_1_4,
             use_demote_to_helper_invocation,
             native_dot_4x8_packed,
             disable_image_robustness,
@@ -1998,6 +2001,7 @@ mod tests {
                 scalarize_max_min_clamp,
             );
             let spirv_flags = named_tint_flags!(spirv;
+                use_spirv_1_4,
                 use_demote_to_helper_invocation,
                 native_dot_4x8_packed,
                 disable_image_robustness,
@@ -3557,6 +3561,62 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
     }
 
     #[test]
+    fn spirv_version_partitions_keys_and_reaches_writer_for_all_stages() {
+        let module = parse_and_validate_wgsl(
+            r#"
+@compute @workgroup_size(1) fn cs() {}
+@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0, 0, 0, 1); }
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1); }
+"#,
+        )
+        .unwrap();
+        for _ in 0..2 {
+            for enabled in [false, true] {
+                let mut flags = yawgpu_hal::HalShaderWorkarounds::default();
+                flags.use_spirv_1_4 = enabled;
+                for (entry, stage) in [
+                    ("cs", ShaderStage::Compute),
+                    ("vs", ShaderStage::Vertex),
+                    ("fs", ShaderStage::Fragment),
+                ] {
+                    let words = module
+                        .generate_spirv(
+                            entry,
+                            stage,
+                            &PipelineConstants::default(),
+                            false,
+                            0,
+                            false,
+                            None,
+                            false,
+                            0,
+                            false,
+                            false,
+                            flags,
+                        )
+                        .unwrap();
+                    assert_eq!(words[1], if enabled { 0x00010400 } else { 0x00010300 });
+                }
+            }
+            let cache = module.spirv_codegen_cache.lock().unwrap();
+            assert_eq!(cache.len(), 6);
+            for entry in ["cs", "vs", "fs"] {
+                let keys: Vec<_> = cache
+                    .keys()
+                    .filter(|key| key.entry_point == entry)
+                    .collect();
+                assert_eq!(keys.len(), 2);
+                assert_ne!(keys[0], keys[1]);
+                assert_ne!(
+                    keys[0].workarounds.use_spirv_1_4,
+                    keys[1].workarounds.use_spirv_1_4
+                );
+            }
+            assert_eq!(module.codegen_miss_count(), 6);
+        }
+    }
+
+    #[test]
     fn writer_feature_flags_partition_codegen_caches() {
         let module = parse_and_validate_wgsl(
             r#"
@@ -3567,14 +3627,15 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
         let mut variants = vec![(false, false, yawgpu_hal::HalShaderWorkarounds::default())];
         variants.push((true, false, Default::default()));
         variants.push((false, true, Default::default()));
-        for index in 0..5 {
+        for index in 0..6 {
             let mut flags = yawgpu_hal::HalShaderWorkarounds::default();
             match index {
                 0 => flags.use_demote_to_helper_invocation = true,
                 1 => flags.native_dot_4x8_packed = true,
                 2 => flags.use_zero_initialize_workgroup_memory = true,
                 3 => flags.use_maximal_reconvergence = true,
-                _ => flags.use_subgroup_uniform_control_flow = true,
+                4 => flags.use_subgroup_uniform_control_flow = true,
+                _ => flags.use_spirv_1_4 = true,
             }
             variants.push((false, false, flags));
         }
