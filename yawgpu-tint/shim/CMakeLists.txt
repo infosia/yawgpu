@@ -46,10 +46,20 @@ set(TINT_BUILD_HLSL_WRITER OFF CACHE BOOL "" FORCE)
 set(TINT_BUILD_NULL_WRITER OFF CACHE BOOL "" FORCE)
 
 # With a Visual Studio generator the Rust `cmake` crate replaces
-# CMAKE_<LANG>_FLAGS_RELEASE, which drops CMake's default /DNDEBUG. Dawn's
-# src/utils/compiler.h rejects a build with neither NDEBUG nor
+# CMAKE_<LANG>_FLAGS_RELEASE, which drops CMake's default /DNDEBUG and
+# optimization flags. The MSVC options below restore the optimization defaults.
+# Dawn's src/utils/compiler.h rejects a build with neither NDEBUG nor
 # DAWN_ENABLE_ASSERTS, so define it per configuration here.
 add_compile_definitions($<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
+
+add_compile_options(
+    "$<$<AND:$<COMPILE_LANG_AND_ID:C,MSVC>,$<CONFIG:Release>>:/O2;/Ob2>"
+    "$<$<AND:$<COMPILE_LANG_AND_ID:CXX,MSVC>,$<CONFIG:Release>>:/O2;/Ob2>"
+    "$<$<AND:$<COMPILE_LANG_AND_ID:C,MSVC>,$<CONFIG:RelWithDebInfo>>:/O2;/Ob1>"
+    "$<$<AND:$<COMPILE_LANG_AND_ID:CXX,MSVC>,$<CONFIG:RelWithDebInfo>>:/O2;/Ob1>"
+    "$<$<AND:$<COMPILE_LANG_AND_ID:C,MSVC>,$<CONFIG:MinSizeRel>>:/O1;/Ob1>"
+    "$<$<AND:$<COMPILE_LANG_AND_ID:CXX,MSVC>,$<CONFIG:MinSizeRel>>:/O1;/Ob1>"
+)
 
 # EXCLUDE_FROM_ALL: nothing in Dawn builds unless `tint_shim` depends on it, so
 # building target `tint_shim` pulls in only tint_api + tint_api_helpers and their

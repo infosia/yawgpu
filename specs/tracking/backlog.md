@@ -137,7 +137,7 @@ reference `> i32::MAX`, `first_instance` indirect, external textures,
 | # | Item | Difficulty | Evidence |
 |---|---|---|---|
 | E2 | Residual gaps vs Dawn with no structural lever: `write_buffer_then_wait` 1.53×, `bindgroup/create_destroy` 1.33×, `render_draw` 224 vs 99 ns. | Diffuse | `specs/tracking/perf-dawn-baseline.md:435-446` |
-| E3 | Deferred cache layers: real `VkPipelineCache`; Metal `MTLLibrary`-by-source cache (measure-first); whole-module Tint IR clone (needs an upstream Tint API). | M / M / L | `specs/blocks/95-shader-compile-cache.md:35-41`; `yawgpu-tint/src/lib.rs` |
+| E3 | Deferred cache layers: Metal `MTLLibrary`-by-source cache (measure-first); whole-module Tint IR clone (needs an upstream Tint API). A real `VkPipelineCache` was measured and dropped on 2026-11-03 (Block 136): Dawn's starts empty in standalone runs, and after the Block 136 fix yawgpu creates pipelines faster than Dawn on Windows NVIDIA. | M / L | `specs/blocks/95-shader-compile-cache.md:35-41`; `specs/blocks/136-msvc-tint-optimization.md`; `yawgpu-tint/src/lib.rs` |
 | E11 | Vulkan `VkRenderPass` / `VkFramebuffer` / `VkDescriptorPool` caches, left out of Block 117. Run 7 cannot decide it: no bench case isolates per-pass creation, so add one that submits many passes without waiting. | M | `specs/blocks/117-vulkan-submit-recycling.md` |
 | E4 | refactor-dedup deferrals: double `Arc<core::X>` in FFI Impl structs, Metal derived-view cache + per-draw scratch reuse, unified `HalRenderStreamState` interpreter, GLES draw-time dirty tracking + binding index maps, subpass attachment validation dedupe; **+ Block 107 F5**: a `RenderBindings<'_>` struct for the Vulkan render descriptor call chain (`update_render_descriptor_sets` `too_many_arguments`, `bind_textures` / `pass_textures` side by side). | M each | `specs/tracking/refactor-dedup.md:38-56, 98-101, 191-196`; `specs/blocks/107-vulkan-discard-epilogue-shared-layout.md` F5 |
 | E5 | `tiled`: depth-format transient attachments, MSAA subpass input (Dawn-deferred; 2-arg `inputAttachmentLoad` parked on a Dawn resolver issue), queries inside subpass passes, GLES mapping, `SubpassAttachmentResource::Transient` arm TODOs (the two remaining `TODO(tiled 2.4)` markers).; a forced-flag e2e on the subpass path (Block 120). | M / L / M / L | `specs/blocks/55-tiled-rendering.md:45-53, 501-507, 639-648`; `yawgpu-core/src/subpass.rs:244`, `yawgpu-hal/src/command.rs:779` |
@@ -168,8 +168,9 @@ reference `> i32::MAX`, `first_instance` indirect, external textures,
 
 ## Recommended order
 
-1. The Block 124 survey's larger items: SPIR-V 1.4, extended
-   dynamic state, `VkPipelineCache` (E3).
+1. The Block 124 survey's larger items. SPIR-V 1.4 is done (Block 133). Extended dynamic
+   state is off by default in Dawn, so yawgpu already matches; `VkPipelineCache` was
+   measured and dropped (E3, Block 136).
 2. **C2 / C1** surfaces as separate initiatives.
 3. **F1 to F3** alongside any of the above.
 4. Lowered by user direction: **C4** feature-gated clippy in CI, then **B2**
@@ -318,3 +319,4 @@ Re-verification after the fixes: `cargo test --workspace` 1093/0, clippy default
 - E6 done by Block 134: Vulkan adapter limits follow Dawn (NVIDIA storage binding size 2 GiB - 4, `maxColorAttachmentBytesPerSample` 32 x attachments, `maxFragmentCombinedOutputResources` redistribution, `NormalizeLimits` clamps). Windows native Vulkan CTS `webgpu:*` `fail=2 crash=0`, `api,validation` +182 passes. A23 opened (adapter info vendorID/deviceID are 0).
 - A23 done by Block 135: `WGPUAdapterInfo` reports vendor and device ids, adapter type, driver description, and Dawn's `gpu_info.json` vendor and architecture names (generated table, `tools/gen_gpu_info.py`). Windows NVIDIA: `nvidia` / `blackwell` / `0x10de:0x2d04` / discrete. Metal owed to a Mac host.
 - Blocks 133-135 on the M2 at `d3e574b`: Metal clippy clean (Block 135's Metal code was first compiled here), workspace 1,375/0, Metal ignored 162/0, and `wgpuAdapterGetInfo` on Metal identical to Dawn `v20261030` in every field. MoltenVK e2e (reference only) 155/1, the known `imageView2DOn3DImage`.
+- Block 136 done: the Windows Tint shim was built without optimization (the `cmake` crate drops MSVC's `/O2` with the VS generator). Restored per configuration in `shim/CMakeLists.txt`. Windows NVIDIA: `shader/create_unique` 432 µs to 36 µs (Dawn 44 µs), `pipeline/compute_unique` 1,279 µs to 307 µs (Dawn 495 µs). CTS `webgpu:*` unchanged apart from known intermittents. E3's `VkPipelineCache` dropped; extended dynamic state stays off as Dawn's default.
