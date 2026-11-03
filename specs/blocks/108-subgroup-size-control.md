@@ -245,9 +245,13 @@ Re-verification after the fixes:
 - All 56 ignored Vulkan HAL tests pass under `VK_LAYER_KHRONOS_validation`, including the new once-per-adapter test.
 - e2e passes with 0 VUID lines: `e2e_vulkan_subgroup_size_control` 3/3, `e2e_vulkan_subgroups` 4/4, `e2e_vulkan_compute` 3/3.
 
-Owed on the Mac:
-- a `--features metal` compile check;
-- a MoltenVK run of the e2e test (record whether `computeFullSubgroups` is exposed).
+Mac follow-up (closed 2026-11-04, backlog F2):
+- The `--features metal` compile check is covered by every later Metal build and clippy
+  run.
+- MoltenVK on the M2 (MoltenVK 1.2.11, Vulkan SDK `vulkaninfo`) exposes
+  `subgroupSizeControl = true` and `computeFullSubgroups = true`, with subgroup sizes 4
+  to 32. `e2e_vulkan_subgroup_size_control` passes 3 of 3 there under the Khronos layer
+  (the Block 135 Mac run at `d3e574b`). MoltenVK is reference-only.
 
 ## Slices
 

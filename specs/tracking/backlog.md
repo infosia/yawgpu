@@ -69,6 +69,9 @@ below are stable IDs, not the rank.
 | A10 | A pass that failed to lower was dropped silently | Block 130, 2026-11-03 |
 | A13 | Dawn's vendor-gated Tint workarounds were unset | Block 131, 2026-11-03 |
 | A14 | Device-lost reason at teardown. The premise was wrong: yawgpu already destroyed on last release. The real gap was spontaneous delivery, and the bench exit code was a bench bug | Block 130, 2026-11-03 |
+| F1 | `specs/blocks/README.md` indexed 12 of the block files | Full index, 2026-11-04 |
+| F2 | Block 108 Mac follow-up | Metal compile covered; MoltenVK `computeFullSubgroups = true`, e2e 3/3, 2026-11-04 |
+| F3 | Block 109 sync-validation owed | Satisfied by the Windows run at `decfd69` (contains the R9 fix), 2026-11-04 |
 
 ---
 
@@ -151,9 +154,7 @@ reference `> i32::MAX`, `first_instance` indirect, external textures,
 
 | # | Item | Difficulty | Evidence |
 |---|---|---|---|
-| F1 | `specs/blocks/README.md` indexes 12 blocks; `specs/blocks/` holds 55. | S | `specs/blocks/README.md` |
-| F2 | Block 108 lists a Metal compile check and a MoltenVK run as owed. The compile check has been covered by every later Metal build. Whether MoltenVK exposes `computeFullSubgroups` is still unrecorded. | S | `specs/blocks/108-subgroup-size-control.md:248` |
-| F3 | Block 109 "Owed" section: its sync-validation item looks satisfied by the Windows run at `decfd69`. Confirm and remove. | S | `specs/blocks/109-code-review-criticals.md:308`; `specs/tracking/code-review-2026-10.md` |
+| — | None open. | | |
 
 ---
 
@@ -172,7 +173,7 @@ reference `> i32::MAX`, `first_instance` indirect, external textures,
    state is off by default in Dawn, so yawgpu already matches; `VkPipelineCache` was
    measured and dropped (E3, Block 136).
 2. **C2 / C1** surfaces as separate initiatives.
-3. **F1 to F3** alongside any of the above.
+3. Block 137 (A20, in progress), then A19.
 4. Lowered by user direction: **C4** feature-gated clippy in CI, then **B2**
    binding arrays, then **D12** and the rest of the GLES rows.
 
@@ -320,3 +321,4 @@ Re-verification after the fixes: `cargo test --workspace` 1093/0, clippy default
 - A23 done by Block 135: `WGPUAdapterInfo` reports vendor and device ids, adapter type, driver description, and Dawn's `gpu_info.json` vendor and architecture names (generated table, `tools/gen_gpu_info.py`). Windows NVIDIA: `nvidia` / `blackwell` / `0x10de:0x2d04` / discrete. Metal owed to a Mac host.
 - Blocks 133-135 on the M2 at `d3e574b`: Metal clippy clean (Block 135's Metal code was first compiled here), workspace 1,375/0, Metal ignored 162/0, and `wgpuAdapterGetInfo` on Metal identical to Dawn `v20261030` in every field. MoltenVK e2e (reference only) 155/1, the known `imageView2DOn3DImage`.
 - Block 136 done: the Windows Tint shim was built without optimization (the `cmake` crate drops MSVC's `/O2` with the VS generator). Restored per configuration in `shim/CMakeLists.txt`. Windows NVIDIA: `shader/create_unique` 432 µs to 36 µs (Dawn 44 µs), `pipeline/compute_unique` 1,279 µs to 307 µs (Dawn 495 µs). CTS `webgpu:*` unchanged apart from known intermittents. E3's `VkPipelineCache` dropped; extended dynamic state stays off as Dawn's default.
+- F1-F3 closed (doc drift): full `specs/blocks/README.md` index; Block 108 Mac follow-up recorded (MoltenVK `computeFullSubgroups = true`); Block 109 sync-validation owed item satisfied by `decfd69`. A20 widened into Block 137: Dawn fires every `AllowSpontaneous` callback that is ready at registration inside the call (probe on the M2).

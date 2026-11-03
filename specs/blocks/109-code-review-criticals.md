@@ -310,5 +310,9 @@ Vulkan HAL ignored tests 58/58 with 0 VUID; `e2e_metal_surface` 6/6.
 - ~~`e2e_gles_render::gles_render_depth_test_occludes_later_far_draw` on
   real GLES~~ — passes on the Linux NVIDIA EGL host (`5cd8c6a`,
   2026-10-25).
-- The default Khronos layer does not run synchronization validation; a
-  sync-validation pass over the Vulkan e2e set would confirm R9 directly.
+- ~~The default Khronos layer does not run synchronization validation; a
+  sync-validation pass over the Vulkan e2e set would confirm R9 directly.~~ — done on
+  Windows native NVIDIA at `decfd69`, which contains the R9 fix (`3107bf8`): all 30
+  `e2e_vulkan_*` binaries, 131 tests, with `VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true`
+  and zero `SYNC-HAZARD-*` output (`specs/tracking/code-review-2026-10.md`). Closed
+  2026-11-04, backlog F3.
