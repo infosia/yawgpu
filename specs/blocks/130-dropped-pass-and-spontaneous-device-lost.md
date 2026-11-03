@@ -1,6 +1,8 @@
 # Block 130 — Dropped pass lowering and spontaneous device-lost delivery
 
-Status: **COMPLETE (2026-11-03)**. Phase Review: 0 CRITICAL, 0 MAJOR in code, 1 MAJOR in the spec, 5 MINOR; all resolved, see below.
+Status: **COMPLETE (2026-11-03)**, with a regression found afterwards. Phase Review: 0 CRITICAL, 0 MAJOR in code, 1 MAJOR in the spec, 5 MINOR; all resolved, see below. The
+Windows native Vulkan CTS found that R1 fails valid submits; see "Windows native
+Vulkan" below and backlog A22.
 Source: backlog A10 and A14, started by user request on 2026-11-03.
 Oracle: Dawn at the pinned `third_party/dawn`: `native/Device.cpp`
 (`DeviceBase::WillDropLastExternalRef`, `DeviceBase::Destroy`, `DeviceLostEvent::SetLost`,
@@ -157,6 +159,29 @@ reference-only.
 The CTS was not rerun. The CTS cannot see R1, because the abort path is unreachable
 with valid objects. Its harness does not use `AllowSpontaneous` device-lost callbacks
 (inferred).
+
+### Windows native Vulkan (2026-11-03): regression found
+
+Run on Windows 11, NVIDIA GeForce RTX 5060 Ti, driver 617.14, Vulkan 1.4.351, at yawgpu
+`f3a63e9`, CTS `a5cbf67`. The Khronos validation layer was on for the e2e and HAL runs.
+Vulkan e2e 162 passed, 0 failed, 0 VUIDs, and Vulkan HAL ignored tests 78 passed.
+
+The CTS, which this block did not run, finds a regression in R1. Unforced,
+`api,validation,encoding,programmable,pipeline_bind_group_compat:*` gives 432 failures
+(`bgl_binding_mismatch` 64, `bgl_resource_type_mismatch` 368), all render pass and
+render bundle cases, each with the uncaptured error "render pass lowering failed". At
+`019bd3b`, before this block, `api,validation` had 0 failures.
+
+The premise "the abort path is unreachable with valid objects" is wrong. The test sets
+a pipeline, then a bind group whose layout does not match the pipeline's, and finishes
+without a draw. That command buffer is valid. Render lowering
+(`hal_render_commands` in `yawgpu-core/src/queue.rs`) resolves each `SetBindGroup`
+against the current pipeline's bindings at once, and `hal_bind_group_resources` returns
+`None` when a binding the pipeline declares is missing from the group. Before this block
+that `None` dropped the whole pass silently. Since this block it fails the whole submit.
+The same command order is common and valid with a draw: `setPipeline(A)`,
+`setBindGroup(0, groupForB)`, `setPipeline(B)`, `draw`. It is core code, so Metal is
+affected too (inferred; not run). Compute passes pass these cases. Backlog A22.
 
 ## Phase Review
 

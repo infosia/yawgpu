@@ -1,7 +1,9 @@
 # Block 131 — Dawn's vendor-gated Tint workarounds
 
 Status: **COMPLETE (2026-11-03)**. Phase Review: 0 CRITICAL, 0 MAJOR, 5 MINOR; all fixed,
-see below. The forced native NVIDIA CTS is owed to the Windows host.
+see below. The forced native NVIDIA CTS ran on 2026-11-03: 11 of the 12 SPIR-V options
+change no result; `texture_sample_compare_2d_polyfill` fails 7,820 sampling subcases
+when forced, see "Windows native Vulkan" below.
 Source: backlog A13 (Block 120 "Out of scope"), started by user request on 2026-11-03.
 Oracle: Dawn at the pinned `third_party/dawn` (paths relative to `src/dawn/`):
 - `native/metal/PhysicalDeviceMTL.mm`: vendor detection (lines 70-159) and toggle defaults
@@ -163,6 +165,41 @@ vendor detection, a helper, and tests, not what a forced option emits.
 Owed to the Windows NVIDIA host: `webgpu:*` with the 12 SPIR-V options forced, and the
 HAL log of the driverID. NVIDIA takes no gate by default either, so its default output
 is unchanged.
+
+### Windows native Vulkan (2026-11-03)
+
+Run on Windows 11, NVIDIA GeForce RTX 5060 Ti, driver 617.14, Vulkan 1.4.351, at yawgpu
+`f3a63e9`, CTS `a5cbf67`. The Khronos validation layer was on for the e2e and HAL runs.
+The HAL test logs `vendorID=0x10de, deviceID=0x2d04, driverID=Some(4)` (NVIDIA
+proprietary) and every predicate false, so no gate fires by default. The forced runs
+set all 12 SPIR-V options through `YAWGPU_FORCE_SHADER_WORKAROUNDS`.
+
+| Gate | Result |
+|---|---|
+| Vulkan HAL ignored tests, default and forced | 78 passed each, 0 VUIDs |
+| Vulkan e2e, `vulkan,tiled,shader-passthrough`, default and forced | 162 passed each, 0 failed, 0 VUIDs |
+| webgpu-native-cts `webgpu:*`, 12 options forced, 4 per-area runs, `--workers 8`, 32 minutes | `fail=8,254 crash=0`; attributed below |
+
+| Area | pass | fail | cause of the failures |
+|---|---:|---:|---|
+| `api,validation` | 246,052 | 432 | not this block: Block 130, backlog A22; they fail unforced too |
+| `api,operation` | 180,159 | 620 | `texture_sample_compare_2d_polyfill`: `texture_component_swizzle:read_swizzle` with `textureSampleCompare(Level)` |
+| `shader,execution` | 555,348 | 7,200 | `texture_sample_compare_2d_polyfill`: `textureSampleCompare:2d_coords` and `arrayed_2d_coords` |
+| `shader,validation` | 662,535 | 2 | the Block 119 R9 cases |
+
+The `textureSampleCompare` and `read_swizzle` queries isolate the option. With no option
+forced, they give 0 failures. With `texture_sample_compare_2d_polyfill` alone, they give
+7,820, the full forced count. With the other 11 options forced, they give 0. The failures
+are split evenly between `nearest` and `linear` samplers. The polyfill replaces the
+sample with `OpImageDrefGather` plus manual bilinear weights computed from the level-0
+size (`spirv/writer/raise/builtin_polyfill.cc`). yawgpu only sets the option, so the
+generated code is Tint's. Whether Dawn with `vulkan_sample_compare_2d_workaround` fails
+the same cases is not verified: the CTS harness has no hook for Dawn toggles. The option
+fires only on Qualcomm proprietary drivers, which no host here has.
+
+The other 11 SPIR-V options forced change nothing on this host. In every area, pass
+plus the failures attributed above equals the pass count of the unforced `019bd3b` run
+(Block 129), and skips are unchanged.
 
 ## Phase Review
 
