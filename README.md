@@ -240,14 +240,16 @@ rustup target add aarch64-linux-android
 
 export ANDROID_NDK_HOME=/path/to/ndk           # e.g. ~/Library/Android/sdk/ndk/30.0.14904198
 export NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64/bin"
-export SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64/sysroot"
+# Not `SYSROOT`: clippy-driver reads that variable as the Rust sysroot, and
+# `cargo clippy` then fails with "can't find crate for `std`".
+export NDK_SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64/sysroot"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android24-clang"
 export CC_aarch64_linux_android="$NDK_BIN/aarch64-linux-android24-clang"
 export CXX_aarch64_linux_android="$NDK_BIN/aarch64-linux-android24-clang++"
 export AR_aarch64_linux_android="$NDK_BIN/llvm-ar"
 # Load-bearing: without this, build.rs's bindgen pass over webgpu.h
 # can't find <math.h> and the build fails.
-export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--target=aarch64-linux-android24 --sysroot=$SYSROOT"
+export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--target=aarch64-linux-android24 --sysroot=$NDK_SYSROOT"
 
 # Vulkan (Tier 1) — ash dynamically loads libvulkan.so at runtime,
 # which Android 7.0+ (API 24+) ships with the platform.
