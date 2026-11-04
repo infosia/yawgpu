@@ -267,7 +267,7 @@ impl HalSubgroupSizeControlCaps {
 /// Validation only produces `Some(_)` when the device has the
 /// `subgroup-size-control` feature, which such backends never advertise, so
 /// reaching this with `Some(_)` is a HAL error rather than a silent no-op.
-#[cfg_attr(not(any(feature = "metal", feature = "gles")), allow(dead_code))]
+#[cfg_attr(not(feature = "gles"), allow(dead_code))]
 fn reject_required_subgroup_size(
     backend: &'static str,
     required_subgroup_size: Option<u32>,
@@ -978,9 +978,9 @@ impl HalDevice {
     ///
     /// `required_subgroup_size` is `Some(S)` exactly when the compute entry
     /// point declares WGSL `@subgroup_size(S)` (Block 108). Noop ignores it;
-    /// Metal and GLES never advertise `subgroup-size-control` and return a
-    /// [`HalError`] for `Some(_)`. Vulkan requires subgroup size `S` with full
-    /// subgroups (`VK_EXT_subgroup_size_control`).
+    /// Metal uses its fixed width, with the required size checked by core.
+    /// GLES returns a [`HalError`] for `Some(_)`. Vulkan requires subgroup size
+    /// `S` with full subgroups (`VK_EXT_subgroup_size_control`).
     #[allow(clippy::too_many_arguments)]
     pub fn create_compute_pipeline(
         &self,
@@ -1017,7 +1017,9 @@ impl HalDevice {
                 .map(HalComputePipeline::Vulkan),
             #[cfg(feature = "metal")]
             Self::Metal(device) => {
-                reject_required_subgroup_size("metal", required_subgroup_size)?;
+                // Core validates the requested size against Metal's fixed width.
+                // MSL needs no option to select that width.
+                let _ = required_subgroup_size;
                 device
                     .create_compute_pipeline(shader, entry_point, workgroup_size, bindings)
                     .map(HalComputePipeline::Metal)
@@ -1778,7 +1780,7 @@ mod tests {
 
     #[test]
     fn reject_required_subgroup_size_accepts_none_and_rejects_some() {
-        assert!(reject_required_subgroup_size("metal", None).is_ok());
+        assert!(reject_required_subgroup_size("gles", None).is_ok());
         let error =
             reject_required_subgroup_size("gles", Some(32)).expect_err("Some(_) must be rejected");
         assert!(matches!(

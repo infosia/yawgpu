@@ -26,8 +26,6 @@ pub(super) struct VulkanDeviceInner {
     /// `discard`; otherwise it emulates discard. Derivatives (`fwidth`/`dpdx`/`dpdy`)
     /// after a non-uniform `discard` are well-defined (CTS finding F-129).
     pub(super) shader_demote_to_helper_invocation: bool,
-    /// Whether `VK_KHR_shader_float16_int8` / `shaderFloat16` was enabled.
-    pub(super) shader_float16: bool,
     /// Whether `VK_KHR_vulkan_memory_model` / `vulkanMemoryModel` was enabled.
     pub(super) vulkan_memory_model: bool,
     /// Whether `VkImageFormatListCreateInfo` is available for mutable image views.
@@ -41,14 +39,8 @@ pub(super) struct VulkanDeviceInner {
     pub(super) subgroup_size_control: bool,
     /// Required size for compute pipelines without an explicit WGSL subgroup size.
     pub(super) default_compute_subgroup_size: Option<u32>,
-    /// Whether `VK_KHR_16bit_storage` / `storageBuffer16BitAccess` was enabled.
-    pub(super) storage_buffer16_bit_access: bool,
-    /// Whether `VK_KHR_16bit_storage` / `uniformAndStorageBuffer16BitAccess` was enabled.
-    pub(super) uniform_and_storage_buffer16_bit_access: bool,
     /// Whether `VK_KHR_16bit_storage` / `storageInputOutput16` was enabled.
     pub(super) storage_input_output16: bool,
-    /// Whether `VK_KHR_16bit_storage` / `storagePushConstant16` was enabled.
-    pub(super) storage_push_constant16: bool,
     /// `VkPhysicalDeviceLimits.maxSamplerAnisotropy` — the hardware ceiling for
     /// anisotropic filtering. Used to clamp `VkSamplerCreateInfo.maxAnisotropy`
     /// per WebGPU semantics (clamp, never error).
@@ -68,7 +60,6 @@ impl fmt::Debug for VulkanDeviceInner {
                 "shader_demote_to_helper_invocation",
                 &self.shader_demote_to_helper_invocation,
             )
-            .field("shader_float16", &self.shader_float16)
             .field("vulkan_memory_model", &self.vulkan_memory_model)
             .field("image_format_list", &self.image_format_list)
             .field("subgroup_size_control", &self.subgroup_size_control)
@@ -76,16 +67,7 @@ impl fmt::Debug for VulkanDeviceInner {
                 "default_compute_subgroup_size",
                 &self.default_compute_subgroup_size,
             )
-            .field(
-                "storage_buffer16_bit_access",
-                &self.storage_buffer16_bit_access,
-            )
-            .field(
-                "uniform_and_storage_buffer16_bit_access",
-                &self.uniform_and_storage_buffer16_bit_access,
-            )
             .field("storage_input_output16", &self.storage_input_output16)
-            .field("storage_push_constant16", &self.storage_push_constant16)
             .finish_non_exhaustive()
     }
 }

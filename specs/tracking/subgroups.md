@@ -129,7 +129,7 @@ Spec: `specs/blocks/108-subgroup-size-control.md`.
 
 | Slice | Content | Status |
 |---|---|---|
-| S1 | core `Feature::SubgroupSizeControl` (⇒ `Subgroups`), FFI `0x17`, Tint `kSubgroupSizeControl` gate + override-resolved `subgroup_size`, core rules 4 → 1 → 2 → 3, HAL `subgroup_size_control_caps()` (Noop `{4,4,64}`, Metal/GLES/Vulkan `None`), `required_subgroup_size` HAL input | **DONE 2026-09-26** |
+| S1 | core `Feature::SubgroupSizeControl` (⇒ `Subgroups`), FFI `0x17`, Tint `kSubgroupSizeControl` gate + override-resolved `subgroup_size`, core rules 4 → 1 → 2 → 3, HAL `subgroup_size_control_caps()` (Noop `{4,4,64}`, GLES `None`; Vulkan per S2; Metal `{32,32,32}` on Apple GPUs since Block 140), `required_subgroup_size` HAL input | **DONE 2026-09-26** |
 | S2 | Vulkan advertisement (`VK_EXT_subgroup_size_control` + `subgroupSizeControl` + `computeFullSubgroups`), device enable, `RequiredSubgroupSize` + `REQUIRE_FULL_SUBGROUPS` / `ALLOW_VARYING_SUBGROUP_SIZE`; predicate also requires `requiredSubgroupSizeStages ∋ COMPUTE` (VUID-02755, stricter than Dawn) | **DONE 2026-09-26** — NVIDIA caps `{32, 32, 32}`, 55 ignored HAL tests validation-clean |
 | S3 | `e2e_vulkan_subgroup_size_control.rs` (Claude) | **DONE 2026-09-26** — 3/3 under the Khronos layer, 0 VUID; `e2e_vulkan_subgroups` 4/4 + `e2e_vulkan_compute` 3/3 regression |
 | S4 | webgpu-native-cts port update + CTS runs | **DONE 2026-09-26** — CTS `c77b620`; targets 6/0 + 87/0 + 1/0; full sweep +94 pass / −94 skip, fail set unchanged |
@@ -138,3 +138,5 @@ Spec: `specs/blocks/108-subgroup-size-control.md`.
 S1 finding: Tint validates a const `@subgroup_size` (zero / non-power-of-two rejected at parse) but not an override-driven one after `SubstituteOverrides`; core enforces rule 4.
 
 Owed on the Mac for Block 108: a `--features metal` compile check, and a MoltenVK run of `e2e_vulkan_subgroup_size_control` (is `computeFullSubgroups` exposed?).
+
+Block 140 (2026-11-04): Metal reports Dawn's subgroup range (Apple 32/32, other vendors and iOS 4/64) and advertises `subgroup-size-control` when the range is fixed. `e2e_metal_subgroup_size_control` 3/3 on the M2.

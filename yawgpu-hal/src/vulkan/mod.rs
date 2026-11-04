@@ -270,6 +270,7 @@ pub struct VulkanAdapter {
     name: String,
     astc_sliced_3d_support: Arc<OnceLock<bool>>,
     subgroup_query: Arc<OnceLock<SubgroupQuery>>,
+    float16_query: Arc<OnceLock<Float16Query>>,
 }
 
 fn is_fallback_device_type(device_type: vk::PhysicalDeviceType) -> bool {
@@ -341,6 +342,7 @@ impl VulkanAdapter {
             name,
             astc_sliced_3d_support: Arc::new(OnceLock::new()),
             subgroup_query: Arc::new(OnceLock::new()),
+            float16_query: Arc::new(OnceLock::new()),
         })
     }
 
@@ -625,12 +627,18 @@ impl VulkanAdapter {
     /// Returns true when WGSL `shader-f16` is supported by this physical device.
     #[must_use]
     pub(super) fn supports_shader_float16(&self) -> bool {
-        let extension_present = self.has_device_extension(vk::KHR_SHADER_FLOAT16_INT8_NAME);
-        if !extension_present {
-            return false;
-        }
+        self.float16_query().shader_float16
+    }
 
-        let mut features = vk::PhysicalDeviceShaderFloat16Int8Features::default();
+    /// Caches the float16 decision, base features, and enabled storage bits together
+    /// so advertisement and device creation share one physical-device query.
+    fn float16_query(&self) -> &Float16Query {
+        self.float16_query.get_or_init(|| self.query_float16())
+    }
+
+    fn query_float16(&self) -> Float16Query {
+        let extension_present = self.has_device_extension(vk::KHR_SHADER_FLOAT16_INT8_NAME);
+        let mut float16 = vk::PhysicalDeviceShaderFloat16Int8Features::default();
         let properties = unsafe {
             self.instance
                 .instance
@@ -641,7 +649,10 @@ impl VulkanAdapter {
             self.has_device_extension(vk::KHR_16BIT_STORAGE_NAME),
         );
         let mut storage = vk::PhysicalDevice16BitStorageFeatures::default();
-        let mut features2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut features);
+        let mut features2 = vk::PhysicalDeviceFeatures2::default();
+        if extension_present {
+            features2 = features2.push_next(&mut float16);
+        }
         if storage_available {
             features2 = features2.push_next(&mut storage);
         }
@@ -650,14 +661,18 @@ impl VulkanAdapter {
                 .instance
                 .get_physical_device_features2(self.physical_device, &mut features2);
         }
-        let shader_int16 = features2.features.shader_int16;
-        shader_float16_supported(
-            extension_present,
-            features.shader_float16,
-            shader_int16,
-            storage.storage_buffer16_bit_access,
-            storage.uniform_and_storage_buffer16_bit_access,
-        )
+        let supported_features = features2.features;
+        Float16Query {
+            supported_features,
+            shader_float16: shader_float16_supported(
+                extension_present,
+                float16.shader_float16,
+                supported_features.shader_int16,
+                storage.storage_buffer16_bit_access,
+                storage.uniform_and_storage_buffer16_bit_access,
+            ),
+            storage: enabled_16bit_storage_features(storage_available, storage),
+        }
     }
 
     /// Returns true when WGSL `subgroups` is supported by this physical device.
@@ -869,8 +884,6 @@ impl VulkanAdapter {
             extension_names.push(vk::KHR_SWAPCHAIN_NAME.as_ptr());
         }
         let depth_clip_enable_extension = self.has_device_extension(vk::EXT_DEPTH_CLIP_ENABLE_NAME);
-        let shader_float16_int8_extension =
-            self.has_device_extension(vk::KHR_SHADER_FLOAT16_INT8_NAME);
         let storage_16bit_extension = self.has_device_extension(vk::KHR_16BIT_STORAGE_NAME);
         let vulkan_memory_model_extension =
             self.has_device_extension(vk::KHR_VULKAN_MEMORY_MODEL_NAME);
@@ -1068,34 +1081,10 @@ impl VulkanAdapter {
         if swapchain_mutable_format {
             extension_names.push(vk::KHR_SWAPCHAIN_MUTABLE_FORMAT_NAME.as_ptr());
         }
-        let mut shader_float16_int8_features =
-            vk::PhysicalDeviceShaderFloat16Int8Features::default();
-        let mut storage_16bit_supported_features =
-            vk::PhysicalDevice16BitStorageFeatures::default();
-        let storage_available =
-            storage_16bit_available(effective_api_version, storage_16bit_extension);
-        let mut features2 = vk::PhysicalDeviceFeatures2::default();
-        if storage_available {
-            features2 = features2.push_next(&mut storage_16bit_supported_features);
-        }
-        if shader_float16_int8_extension {
-            features2 = features2.push_next(&mut shader_float16_int8_features);
-        }
-        unsafe {
-            self.instance
-                .instance
-                .get_physical_device_features2(self.physical_device, &mut features2);
-        }
-        let supported_features = features2.features;
-        let shader_float16 = shader_float16_supported(
-            shader_float16_int8_extension,
-            shader_float16_int8_features.shader_float16,
-            supported_features.shader_int16,
-            storage_16bit_supported_features.storage_buffer16_bit_access,
-            storage_16bit_supported_features.uniform_and_storage_buffer16_bit_access,
-        );
-        let storage_16bit_features =
-            enabled_16bit_storage_features(storage_available, storage_16bit_supported_features);
+        let float16_query = self.float16_query();
+        let supported_features = float16_query.supported_features;
+        let shader_float16 = float16_query.shader_float16;
+        let storage_16bit_features = float16_query.storage;
         let occlusion_query_precise = supported_features.occlusion_query_precise == vk::TRUE;
         // Enable samplerAnisotropy when the physical device supports it.
         // Setting anisotropyEnable = true without this feature enabled is a VUID
@@ -1356,17 +1345,12 @@ impl VulkanAdapter {
             depth_clip_control,
             sampler_anisotropy,
             shader_demote_to_helper_invocation,
-            shader_float16,
             vulkan_memory_model,
             image_format_list,
             swapchain_mutable_format,
             subgroup_size_control,
             default_compute_subgroup_size,
-            storage_buffer16_bit_access: storage_16bit_features.storage_buffer16_bit_access,
-            uniform_and_storage_buffer16_bit_access: storage_16bit_features
-                .uniform_and_storage_buffer16_bit_access,
             storage_input_output16: storage_16bit_features.storage_input_output16,
-            storage_push_constant16: storage_16bit_features.storage_push_constant16,
             max_sampler_anisotropy,
             surfaces: Mutex::new(Vec::new()),
             allocations: AtomicU64::new(0),
@@ -1406,6 +1390,14 @@ impl VulkanAdapter {
         has_device_extension_for_physical_device(&self.instance, self.physical_device, name)
     }
 }
+/// Pointer-free feature snapshot reused by adapter clones and device creation.
+#[derive(Debug, Clone, Copy)]
+struct Float16Query {
+    supported_features: vk::PhysicalDeviceFeatures,
+    shader_float16: bool,
+    storage: Enabled16BitStorageFeatures,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Enabled16BitStorageFeatures {
     enabled: bool,
@@ -4597,6 +4589,33 @@ diagnostic(off, derivative_uniformity);
             subgroup_size_range_from_properties(true, true, 32, 1, 64),
             None
         );
+    }
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    fn vulkan_adapter_float16_query_is_shared_with_clones_and_device_creation() {
+        let Ok(instance) = VulkanInstance::new() else {
+            eprintln!("SKIP: Vulkan instance unavailable");
+            return;
+        };
+        let Some(adapter) = instance.enumerate_adapters().into_iter().next() else {
+            eprintln!("SKIP: no Vulkan adapter available");
+            return;
+        };
+        let cloned = adapter.clone();
+        assert!(Arc::ptr_eq(&adapter.float16_query, &cloned.float16_query));
+        assert!(adapter.float16_query.get().is_none());
+        let supported = adapter.supports_shader_float16();
+        let query = adapter.float16_query();
+        assert_eq!(supported, query.shader_float16);
+        assert!(std::ptr::eq(query, cloned.float16_query()));
+        let device = cloned.create_device().expect("Vulkan device creation");
+        assert_eq!(
+            device.storage_input_output16(),
+            query.storage.storage_input_output16
+        );
+        assert!(std::ptr::eq(query, adapter.float16_query()));
+        assert_eq!(cloned.supports_shader_float16(), supported);
     }
 
     #[test]

@@ -65,7 +65,7 @@ with exactly subgroup size `S`, and `@builtin(subgroup_size)` reads `S`.
 
 | Aspect | Dawn | Source |
 |---|---|---|
-| Backends | D3D12 (SM 6.6 `[WaveSize]`) and **Vulkan**; **not Metal** | `docs/tint/extensions/subgroup_size_control.md` "Availability" |
+| Backends | D3D12 (SM 6.6 `[WaveSize]`), **Vulkan**, and **Metal when the subgroup size is fixed** (Apple GPUs, 32). Block 140 corrected this row: the Tint doc lists only D3D12 and Vulkan, but Dawn's `PhysicalDeviceMTL.mm` enables the feature when min equals max | `docs/tint/extensions/subgroup_size_control.md`; `native/metal/PhysicalDeviceMTL.mm` |
 | Vulkan advertisement | `Subgroups` supported **and** `VK_EXT_subgroup_size_control` with `subgroupSizeControl` **and** `computeFullSubgroups` | `native/vulkan/PhysicalDeviceVk.cpp` (`hasComputeFullSubgroups`, `EnableFeature(Feature::SubgroupSizeControl)`) |
 | Implied feature | enabling `SubgroupSizeControl` enables `Subgroups` | `native/Device.cpp` (feature implications) |
 | WGSL gate | `Extension::kSubgroupSizeControl` allowed iff the device has the feature | `native/Device.cpp` (`mWGSLAllowedFeatures`) |

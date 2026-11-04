@@ -203,11 +203,19 @@ impl std::fmt::Debug for MetalAdapter {
 }
 
 impl MetalAdapter {
-    pub(crate) fn info(&self) -> crate::HalAdapterInfo {
+    /// Returns Dawn's PCI vendor identity; iOS does not expose PCI information.
+    fn vendor_id(&self) -> u32 {
         #[cfg(not(target_os = "ios"))]
-        let vendor = crate::adapter_info::metal_vendor_id(&self.name);
+        {
+            crate::adapter_info::metal_vendor_id(&self.name)
+        }
         #[cfg(target_os = "ios")]
-        let vendor = 0;
+        {
+            0
+        }
+    }
+
+    pub(crate) fn info(&self) -> crate::HalAdapterInfo {
         #[cfg(target_os = "macos")]
         let unified = self.device.hasUnifiedMemory();
         #[cfg(not(target_os = "macos"))]
@@ -227,7 +235,7 @@ impl MetalAdapter {
                 patchVersion: 0,
             });
         let mut info = crate::HalAdapterInfo::new(
-            vendor,
+            self.vendor_id(),
             0,
             crate::adapter_info::metal_adapter_type(ios, unified),
             description,
@@ -525,16 +533,19 @@ impl MetalAdapter {
     /// Returns the supported subgroup size range.
     #[must_use]
     pub(super) fn subgroup_size_range(&self) -> Option<(u32, u32)> {
-        self.supports_subgroups().then_some((32, 32))
+        self.supports_subgroups()
+            .then(|| subgroup_size_range_for_vendor(self.vendor_id()))
     }
 
     /// Returns the explicit compute subgroup size capabilities.
     ///
-    /// Metal cannot require a subgroup size (Dawn does not support
-    /// `subgroup-size-control` on Metal; Apple GPUs have a fixed width of 32).
+    /// A fixed subgroup width satisfies an explicit size without an MSL option.
     #[must_use]
     pub(super) fn subgroup_size_control_caps(&self) -> Option<crate::HalSubgroupSizeControlCaps> {
-        None
+        subgroup_size_control_caps_for_range(
+            self.subgroup_size_range(),
+            MetalDeviceLimits::for_family(self.gpu_family()).max_threads_per_threadgroup,
+        )
     }
 
     /// Creates a device (and its default queue) on this adapter.
@@ -607,6 +618,31 @@ impl MetalAdapter {
             },
         })
     }
+}
+
+/// Apple GPUs have a fixed SIMD width; other vendors expose the derivative-group
+/// minimum and the 64-bit MSL ballot maximum, matching Dawn.
+fn subgroup_size_range_for_vendor(vendor_id: u32) -> (u32, u32) {
+    if vendor_id == 0x106b {
+        (32, 32)
+    } else {
+        (4, 64)
+    }
+}
+
+fn subgroup_size_control_caps_for_range(
+    range: Option<(u32, u32)>,
+    max_threads_per_threadgroup: u32,
+) -> Option<crate::HalSubgroupSizeControlCaps> {
+    let (min, max) = range?;
+    if min == 0 || min != max {
+        return None;
+    }
+    Some(crate::HalSubgroupSizeControlCaps::new(
+        min,
+        max,
+        max_threads_per_threadgroup / min,
+    ))
 }
 
 /// Returns true when `device.counterSets()` contains a set named
@@ -749,6 +785,82 @@ pub use texture::{MetalSampler, MetalTexture};
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn subgroup_vendor_zero_has_variable_range_without_size_control() {
+        let range = subgroup_size_range_for_vendor(0);
+        assert_eq!(range, (4, 64));
+        assert_eq!(
+            subgroup_size_control_caps_for_range(Some(range), 1024),
+            None
+        );
+    }
+
+    #[test]
+    fn subgroup_ranges_follow_adapter_vendor_detection() {
+        for (name, expected) in [
+            ("Apple M2", (32, 32)),
+            ("Intel Apple Radeon", (32, 32)),
+            ("AMD Apple", (4, 64)),
+            ("Intel HD Graphics", (4, 64)),
+            ("Radeon Pro", (4, 64)),
+            ("Geforce", (4, 64)),
+            ("unknown", (4, 64)),
+        ] {
+            assert_eq!(
+                subgroup_size_range_for_vendor(crate::adapter_info::metal_vendor_id(name)),
+                expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn subgroup_size_control_requires_a_supported_fixed_range() {
+        for range in [None, Some((4, 64)), Some((0, 0))] {
+            assert_eq!(subgroup_size_control_caps_for_range(range, 1024), None);
+        }
+        for (size, threads, count) in [(32, 1024, 32), (32, 512, 16), (16, 1024, 64)] {
+            assert_eq!(
+                subgroup_size_control_caps_for_range(Some((size, size)), threads),
+                Some(crate::HalSubgroupSizeControlCaps::new(size, size, count))
+            );
+        }
+        // Every family that supports Apple subgroups has a 1024-thread limit.
+        for family in [
+            MetalGpuFamily::Apple6,
+            MetalGpuFamily::Apple7,
+            MetalGpuFamily::Apple8,
+            MetalGpuFamily::Apple9,
+        ] {
+            let threads = MetalDeviceLimits::for_family(family).max_threads_per_threadgroup;
+            let caps = subgroup_size_control_caps_for_range(Some((32, 32)), threads).unwrap();
+            assert_eq!(caps.max_compute_workgroup_subgroups, 32);
+            assert_eq!(caps.max_compute_workgroup_subgroups * 32, threads);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a real Metal GPU; Block 140 subgroup-size-control"]
+    fn apple_gpu_advertises_fixed_subgroup_size_control() {
+        let Some(device) = test_helpers::metal_device_or_skip() else {
+            return;
+        };
+        let adapter = MetalAdapter::new(device.device.clone());
+        let apple = adapter.vendor_id() == 0x106b;
+        let range = adapter.subgroup_size_range();
+        let caps = adapter.subgroup_size_control_caps();
+        eprintln!("{}: range {range:?}, caps {caps:?}", adapter.name());
+        if apple && adapter.supports_subgroups() {
+            assert_eq!(range, Some((32, 32)));
+            let caps = caps.expect("Apple GPUs advertise subgroup-size-control");
+            assert_eq!((caps.min_size, caps.max_size), (32, 32));
+            assert_eq!(caps.max_compute_workgroup_subgroups, 1024 / 32);
+        } else if adapter.vendor_id() == 0 && adapter.supports_subgroups() {
+            assert_eq!(range, Some((4, 64)));
+            assert_eq!(caps, None);
+        }
+    }
+
     #[test]
     #[ignore = "requires a real Metal GPU; Block 135 adapter identity"]
     fn adapter_info_reports_apple_identity() {

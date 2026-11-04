@@ -1,6 +1,7 @@
 # Block 140 — Review MINORs and Metal subgroup parity
 
-Status: **IN PROGRESS (2026-11-04)**.
+Status: **COMPLETE (2026-11-04)**. Phase Review: 0 CRITICAL, 1 MAJOR, 5 MINOR; all resolved,
+see below.
 Source: backlog E12 and E7, started by user request on 2026-11-04.
 Oracle: Dawn at the pinned `third_party/dawn` (paths relative to `src/dawn/native/`):
 `metal/PhysicalDeviceMTL.mm` (subgroup sizes at lines 322-330, `SubgroupSizeControl` at
@@ -17,7 +18,7 @@ lists by name only, and Block 120 m5. Each was checked against the code at `e3a2
 | Item | State at `e3a2df9` | Here |
 |---|---|---|
 | `wgpuInstanceWaitAny` busy-spin | Open. With a timeout, the loop calls `std::thread::yield_now` until a future completes or the timeout ends, so a waiting thread keeps one core busy (`yawgpu/src/ffi/instance.rs`, the `wait_any` loop) | R1 |
-| Block 120 m5: `yawgpu-tint` workaround structs are not `#[non_exhaustive]` | Open. Block 131 added more fields to them | R2 |
+| Block 120 m5: `yawgpu-tint` workaround structs are not `#[non_exhaustive]` | Already done by Block 131 (`f3a63e9`): both structs are `#[non_exhaustive]`, and the construction sites outside the crate use `Default` and field assignment | R2 (no change) |
 | `destroy()` does not free GPU memory | Open. `Buffer::destroy` clears the map state and the host bytes, but the HAL buffer lives until the last `Arc` drops. Dawn frees the allocation at destroy, after the GPU is done with it. It needs the HAL resource to become optional across core, so it gets its own block | New backlog A24 |
 | Metal `StorageModeShared` textures | Open. Every single-sample, non-transient texture is `MTLStorageModeShared` (`yawgpu-hal/src/metal/texture.rs`). Dawn uses `Private`. On Apple GPUs that costs lossless compression; on Intel and AMD Macs some formats, depth among them, may not allow `Shared`. Changing it touches every CPU path into textures, so it gets its own block | New backlog A25 |
 | Vulkan per-submit object churn | Fixed by Block 117 | — |
@@ -53,15 +54,16 @@ Dawn blocks on the queue fence instead. yawgpu's HAL has no timed wait, so this
 bounded backoff is the accepted difference: a wait that ends after the backoff has
 started may return up to 1 ms late.
 
-R2. **Workaround structs are `#[non_exhaustive]`.** The Rust-side MSL and SPIR-V
+R2. **Workaround structs are `#[non_exhaustive]`.** Already true at `f3a63e9`; kept as a rule so it stays true. The Rust-side MSL and SPIR-V
 workaround structs in `yawgpu-tint` get `#[non_exhaustive]`. Code outside the crate
 builds them from `Default` and assigns fields. The `#[repr(C)]` layout, the ABI layout
 assertions, and the generated code do not change.
 
 R3. **Metal subgroup size range follows Dawn.** Apple GPUs report 32 to 32. Other Metal
-GPUs report 4 to 64. "Apple" uses the same vendor detection as Block 135
-(`metal_vendor_flags` and the vendor id). This covers `WGPUAdapterInfo`'s
-`subgroupMinSize` and `subgroupMaxSize`, and every other use of the range.
+GPUs report 4 to 64. "Apple" is the vendor id that `WGPUAdapterInfo` reports (Block 135),
+so iOS, whose vendor id is 0 as in Dawn, reports 4 to 64 and no `subgroup-size-control`.
+This covers `WGPUAdapterInfo`'s `subgroupMinSize` and `subgroupMaxSize`, and every other
+use of the range.
 
 R4. **`subgroup-size-control` on Metal.** When `subgroups` is supported and the minimum
 and maximum sizes are equal, Metal advertises `subgroup-size-control`. Its caps are
@@ -109,3 +111,35 @@ R6. **Unchanged.** Every other backend and every other feature.
 
 - **S1 (coding agent):** R1-R6 with the unit tests.
 - **S2 (Claude):** Metal ignored test and e2e, probe, CTS, Phase Review.
+
+## Verification (2026-11-04)
+
+Run on Apple M2, macOS 27.2. Vulkan here is MoltenVK under the Khronos layer, which is
+reference-only.
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace` | 1,405 passed, 0 failed |
+| fmt; clippy `-D warnings` on default, `metal`, `vulkan`, `gles`, `metal,tiled`, `vulkan,tiled`, `shader-passthrough` (host, all targets), and `metal` for `aarch64-apple-ios` and `aarch64-apple-ios-sim` | clean |
+| HAL `apple_gpu_advertises_fixed_subgroup_size_control`, M2 | range (32, 32); caps 32 / 32 / 32 |
+| `e2e_metal_subgroup_size_control` (new) and `e2e_metal_subgroups` | 3 of 3 and 3 of 3. `@subgroup_size(32)` runs at width 32; each `subgroup_invocation_id` in `0..32` occurs once per subgroup |
+| `e2e_vulkan_subgroup_size_control` (now a wrapper over the shared scenarios) and `e2e_vulkan_subgroups`, MoltenVK | 3 of 3 and 3 of 3, 0 VUIDs |
+| Feature-list probe against Dawn `v20261030`, Metal | `SubgroupSizeControl` (`0x17`) now listed by both. The only standard features still listed by Dawn alone are `0x18` and `0x19` (B8) |
+| Metal e2e and every other ignored `yawgpu` test, `metal,tiled` | 165 passed, 0 failed |
+| webgpu-native-cts, Metal, `webgpu:api,*` | pass 586,612, skip 104,755, fail 0, crash 0 (Block 139: 586,611 / 104,756) |
+| webgpu-native-cts, Metal, `webgpu:shader,execution,*` | pass 853,793, skip 29,460, fail 0, crash 0 (Block 139: 853,787 / 29,466) |
+
+The CTS and the full e2e ran on the library before the Phase Review fixes. Those fixes
+change iOS only (vendor 0), revert test-only edits, and widen a test bound.
+
+## Phase Review
+
+| ID | Finding | Disposition |
+|---|---|---|
+| M1 | The subgroup range used the device name on iOS, where `WGPUAdapterInfo` and Dawn use vendor 0, so iOS reported 32/32 and `subgroup-size-control` while Dawn reports 4/64 without it | Fixed: one `vendor_id()` helper feeds both; R3 amended |
+| m1 | R2 was already done by Block 131; the diff only rewrote in-crate tests and added a module-wide clippy allow | Reverted; the spec row says so |
+| m2 | The `WaitAny` timeout test allowed 50 ms of overshoot | 500 ms |
+| m3 | The e2e did not read back `subgroup_invocation_id` as the Tests section asks | Added to the shared scenario |
+| m4 | The Metal `subgroups` gate is `Apple6 || Metal3`; Dawn's is `Apple6 || Mac2`, and Dawn reports the range even without subgroups | Outside this block: backlog A26 |
+| m5 | Block 108 and `tracking/subgroups.md` still said Metal never advertises the feature | Updated |
+

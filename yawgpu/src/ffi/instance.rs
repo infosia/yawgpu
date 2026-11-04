@@ -557,6 +557,15 @@ pub unsafe extern "C" fn wgpuInstanceProcessEvents(instance: native::WGPUInstanc
     instance.process_callbacks();
 }
 
+/// Yields for four polls, then doubles sleeps from 50 microseconds to 1 millisecond.
+/// The caller supplies the time remaining so a sleep never exceeds the timeout.
+fn wait_any_backoff(attempt: u32, remaining: std::time::Duration) -> std::time::Duration {
+    if attempt < 4 {
+        return std::time::Duration::ZERO;
+    }
+    std::time::Duration::from_micros((50u64 << (attempt - 4).min(5)).min(1000)).min(remaining)
+}
+
 /// Waits for any listed future and fires callbacks for completed futures.
 ///
 /// # Safety
@@ -590,6 +599,7 @@ pub unsafe extern "C" fn wgpuInstanceWaitAny(
         .collect::<Vec<_>>();
     let timeout = std::time::Duration::from_nanos(timeout_ns);
     let started = std::time::Instant::now();
+    let mut attempt = 0u32;
     let mut callbacks_to_fire = Vec::new();
     let result = loop {
         let result = instance.wait_any(&future_ids, &mut callbacks_to_fire);
@@ -599,7 +609,13 @@ pub unsafe extern "C" fn wgpuInstanceWaitAny(
         {
             break result;
         }
-        std::thread::yield_now();
+        let sleep = wait_any_backoff(attempt, timeout.saturating_sub(started.elapsed()));
+        if sleep.is_zero() {
+            std::thread::yield_now();
+        } else {
+            std::thread::sleep(sleep);
+        }
+        attempt = attempt.saturating_add(1);
     };
 
     let completed = result.completed.iter().copied().collect::<HashSet<_>>();
@@ -619,6 +635,62 @@ pub unsafe extern "C" fn wgpuInstanceWaitAny(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wait_any_backoff_yields_doubles_caps_and_respects_remaining_time() {
+        use std::time::Duration;
+        let remaining = Duration::from_secs(1);
+        for attempt in 0..4 {
+            assert_eq!(wait_any_backoff(attempt, remaining), Duration::ZERO);
+        }
+        for (attempt, micros) in (4..).zip([50, 100, 200, 400, 800, 1000, 1000]) {
+            assert_eq!(
+                wait_any_backoff(attempt, remaining),
+                Duration::from_micros(micros)
+            );
+        }
+        assert_eq!(
+            wait_any_backoff(u32::MAX, remaining),
+            Duration::from_millis(1)
+        );
+        for attempt in [4, 5, 9, u32::MAX] {
+            for remaining in [
+                Duration::ZERO,
+                Duration::from_nanos(1),
+                Duration::from_micros(25),
+            ] {
+                assert_eq!(wait_any_backoff(attempt, remaining), remaining);
+            }
+        }
+    }
+
+    #[test]
+    fn wait_any_pending_future_times_out_with_bounded_delay() {
+        use std::time::{Duration, Instant};
+        let instance = WGPUInstanceImpl::new_noop(true);
+        let future = instance
+            .core
+            .future_registry()
+            .register(core::FutureCallbackMode::WaitAnyOnly);
+        let handle = Arc::into_raw(instance);
+        let mut info = native::WGPUFutureWaitInfo {
+            future: native::WGPUFuture { id: future.get() },
+            completed: 1,
+        };
+        let timeout = Duration::from_millis(10);
+        let started = Instant::now();
+        let status =
+            unsafe { wgpuInstanceWaitAny(handle, 1, &mut info, timeout.as_nanos() as u64) };
+        let elapsed = started.elapsed();
+        unsafe { wgpuInstanceRelease(handle) };
+        assert_eq!(status, native::WGPUWaitStatus_TimedOut);
+        assert_eq!(info.completed, 0);
+        assert!(elapsed >= timeout, "elapsed: {elapsed:?}");
+        assert!(
+            elapsed <= timeout + Duration::from_millis(500),
+            "elapsed: {elapsed:?}"
+        );
+    }
 
     #[derive(Default)]
     struct RequestAdapterState {
