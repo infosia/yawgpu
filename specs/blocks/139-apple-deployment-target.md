@@ -1,6 +1,6 @@
 # Block 139 — The Tint shim uses the Rust target's Apple deployment target
 
-Status: **IN PROGRESS (2026-11-04)**.
+Status: **COMPLETE (2026-11-04)**. Phase Review: 0 CRITICAL, 0 MAJOR, 3 MINOR; see below.
 Source: found while re-verifying the iOS cross-build on 2026-11-04; fixed by user request.
 
 ## Problem
@@ -69,7 +69,9 @@ Windows. A deployment target that the user sets is used as given.
 
 ## Out of scope
 
-- tvOS, watchOS, and visionOS. yawgpu does not build for them.
+- tvOS, watchOS, visionOS, and Mac Catalyst (`*-apple-ios-macabi`). yawgpu does not build
+  for them. Mac Catalyst has `CARGO_CFG_TARGET_OS=ios` but a macOS deployment target, so
+  R1's iOS rule would not fit it.
 - A minimum OS above rustc's default, for example to match Dawn's own build. Users can
   set the variable.
 
@@ -77,3 +79,27 @@ Windows. A deployment target that the user sets is used as given.
 
 - **S1 (coding agent):** R1-R4 with the unit tests.
 - **S2 (Claude):** binary checks, cross-builds, e2e, CTS, Phase Review.
+
+## Verification (2026-11-04)
+
+Run on Apple M2, macOS 27.2, Xcode 27.2, SDK 27.2, with neither deployment-target
+variable set unless stated.
+
+| Gate | Result |
+|---|---|
+| Minimum OS, `libyawgpu.dylib` / `libtint_shim.dylib` | `aarch64-apple-darwin` 11.0 / 11.0; `aarch64-apple-ios` 10.0 / 10.0; `aarch64-apple-ios-sim` 14.0 / 14.0 (the shim was 27.2 on all three) |
+| `MACOSX_DEPLOYMENT_TARGET=13.0` | 13.0 / 13.0 |
+| iOS device and simulator, `metal` and `metal,tiled,shader-passthrough` | build with 0 warnings; clippy `-D warnings` clean |
+| `cargo test --workspace` | 1,403 passed, 0 failed (`build_probe` 12 of 12) |
+| fmt; clippy `-D warnings` on default, `metal`, `vulkan`, `gles` (host) | clean |
+| Metal e2e and every other ignored `yawgpu` test, `metal,tiled` | 162 passed, 0 failed |
+| webgpu-native-cts, Metal, `webgpu:shader,execution,*` | pass 853,787, skip 29,466, fail 0, crash 0; identical to the Block 130 baseline |
+
+## Phase Review
+
+| ID | Finding | Disposition |
+|---|---|---|
+| m1 | A comment named the cmake crate's patch version, but `Cargo.toml` allows any `0.1` | Reworded without the version |
+| m2 | An explicit malformed value makes cc or rustc fail | Same before this block; R4 uses the value as given. No change |
+| m3 | Mac Catalyst has `CARGO_CFG_TARGET_OS=ios` but a macOS deployment target | Out of scope, recorded |
+

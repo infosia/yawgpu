@@ -1,5 +1,5 @@
-//! Pure, filesystem-only helpers shared by `yawgpu-tint`'s build script and its
-//! `tests/build_probe.rs` test target.
+//! Pure selection/parsing and filesystem helpers shared by `yawgpu-tint`'s
+//! build script and its `tests/build_probe.rs` test target.
 //!
 //! Cargo compiles `build.rs` without `--test`, so a `#[cfg(test)] mod tests`
 //! living there is never built into a libtest harness and never runs. Block 98's
@@ -19,6 +19,39 @@ pub(crate) fn android_abi_for_arch(arch: &str) -> Option<&'static str> {
         "riscv64" => Some("riscv64"),
         _ => None,
     }
+}
+
+pub(crate) fn apple_deployment_target_var(target_os: &str) -> Option<&'static str> {
+    match target_os {
+        "macos" => Some("MACOSX_DEPLOYMENT_TARGET"),
+        "ios" => Some("IPHONEOS_DEPLOYMENT_TARGET"),
+        _ => None,
+    }
+}
+
+/// Reads a single `VARIABLE=VERSION` line from rustc's deployment-target output.
+pub(crate) fn parse_apple_deployment_target<'a>(
+    variable: &str,
+    output: &'a str,
+) -> Option<&'a str> {
+    let (name, version) = output.trim().split_once('=')?;
+    let mut components = version.split('.');
+    if name != variable
+        || components.clone().count() > 3
+        || !components.all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return None;
+    }
+    Some(version)
+}
+
+/// Uses an explicit environment value verbatim, otherwise parses rustc's default.
+pub(crate) fn select_apple_deployment_target<'a>(
+    variable: &str,
+    env_value: Option<&'a str>,
+    rustc_output: Option<&'a str>,
+) -> Option<&'a str> {
+    env_value.or_else(|| parse_apple_deployment_target(variable, rustc_output?))
 }
 
 /// The files whose existence decides whether a candidate Dawn root is usable:
@@ -45,7 +78,10 @@ pub(crate) fn dawn_checkout_usable(root: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{android_abi_for_arch, dawn_checkout_usable, dawn_probe_paths};
+    use super::{
+        android_abi_for_arch, apple_deployment_target_var, dawn_checkout_usable, dawn_probe_paths,
+        parse_apple_deployment_target, select_apple_deployment_target,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -97,6 +133,140 @@ mod tests {
         assert_eq!(android_abi_for_arch("x86"), Some("x86"));
         assert_eq!(android_abi_for_arch("riscv64"), Some("riscv64"));
         assert_eq!(android_abi_for_arch("wasm32"), None);
+    }
+
+    #[test]
+    fn apple_deployment_target_var_selects_only_supported_operating_systems() {
+        assert_eq!(
+            apple_deployment_target_var("macos"),
+            Some("MACOSX_DEPLOYMENT_TARGET")
+        );
+        // Device and simulator targets both have CARGO_CFG_TARGET_OS=ios.
+        assert_eq!(
+            apple_deployment_target_var("ios"),
+            Some("IPHONEOS_DEPLOYMENT_TARGET")
+        );
+        for os in [
+            "android", "linux", "windows", "tvos", "watchos", "visionos", "",
+        ] {
+            assert_eq!(apple_deployment_target_var(os), None, "{os}");
+        }
+    }
+
+    #[test]
+    fn parse_apple_deployment_target_accepts_rustc_versions() {
+        for (variable, output, expected) in [
+            (
+                "MACOSX_DEPLOYMENT_TARGET",
+                "MACOSX_DEPLOYMENT_TARGET=11.0\n",
+                "11.0",
+            ),
+            (
+                "IPHONEOS_DEPLOYMENT_TARGET",
+                "IPHONEOS_DEPLOYMENT_TARGET=14.0\n",
+                "14.0",
+            ),
+            (
+                "IPHONEOS_DEPLOYMENT_TARGET",
+                "IPHONEOS_DEPLOYMENT_TARGET=10.0\r\n",
+                "10.0",
+            ),
+            (
+                "MACOSX_DEPLOYMENT_TARGET",
+                "MACOSX_DEPLOYMENT_TARGET=13.2.1",
+                "13.2.1",
+            ),
+            (
+                "MACOSX_DEPLOYMENT_TARGET",
+                "MACOSX_DEPLOYMENT_TARGET=13",
+                "13",
+            ),
+        ] {
+            assert_eq!(
+                parse_apple_deployment_target(variable, output),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn parse_apple_deployment_target_rejects_empty_malformed_and_wrong_variable_output() {
+        for output in [
+            "",
+            "\n",
+            "11.0",
+            "MACOSX_DEPLOYMENT_TARGET",
+            "MACOSX_DEPLOYMENT_TARGET=",
+            "MACOSX_DEPLOYMENT_TARGET=latest",
+            "MACOSX_DEPLOYMENT_TARGET=11..0",
+            "MACOSX_DEPLOYMENT_TARGET=.11",
+            "MACOSX_DEPLOYMENT_TARGET=11.",
+            "MACOSX_DEPLOYMENT_TARGET=11.0.0.1",
+            "MACOSX_DEPLOYMENT_TARGET=-11.0",
+            "MACOSX_DEPLOYMENT_TARGET=11.0=12.0",
+            "MACOSX_DEPLOYMENT_TARGET= 11.0",
+            "MACOSX_DEPLOYMENT_TARGET=11.0\nextra",
+            "IPHONEOS_DEPLOYMENT_TARGET=14.0",
+            "MACOSX_DEPLOYMENT_TARGET=11.0\nMACOSX_DEPLOYMENT_TARGET=12.0",
+        ] {
+            assert_eq!(
+                parse_apple_deployment_target("MACOSX_DEPLOYMENT_TARGET", output),
+                None,
+                "{output:?}"
+            );
+        }
+        assert_eq!(
+            parse_apple_deployment_target(
+                "IPHONEOS_DEPLOYMENT_TARGET",
+                "MACOSX_DEPLOYMENT_TARGET=11.0"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn select_apple_deployment_target_preserves_explicit_values() {
+        for variable in ["MACOSX_DEPLOYMENT_TARGET", "IPHONEOS_DEPLOYMENT_TARGET"] {
+            for value in ["13.0", "13.0.0", "", "as given"] {
+                for output in [
+                    Some("malformed"),
+                    Some("MACOSX_DEPLOYMENT_TARGET=11.0"),
+                    Some("IPHONEOS_DEPLOYMENT_TARGET=14.0"),
+                    None,
+                ] {
+                    assert_eq!(
+                        select_apple_deployment_target(variable, Some(value), output),
+                        Some(value)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn select_apple_deployment_target_uses_rustc_only_without_an_override() {
+        for (variable, output, expected) in [
+            (
+                "MACOSX_DEPLOYMENT_TARGET",
+                "MACOSX_DEPLOYMENT_TARGET=11.0",
+                "11.0",
+            ),
+            (
+                "IPHONEOS_DEPLOYMENT_TARGET",
+                "IPHONEOS_DEPLOYMENT_TARGET=14.0",
+                "14.0",
+            ),
+        ] {
+            assert_eq!(
+                select_apple_deployment_target(variable, None, Some(output)),
+                Some(expected)
+            );
+            assert_eq!(
+                select_apple_deployment_target(variable, None, Some("malformed")),
+                None
+            );
+            assert_eq!(select_apple_deployment_target(variable, None, None), None);
+        }
     }
 
     #[test]

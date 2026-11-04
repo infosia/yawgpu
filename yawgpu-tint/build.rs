@@ -11,15 +11,19 @@
 
 use std::env;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-// The pure, filesystem-only part of the stub-vs-real decision lives in its own
-// module file so it can also be included by a real test target
+// The pure build configuration and filesystem probes live in their own
+// module file so they can also be included by a real test target
 // (`tests/build_probe.rs`): cargo compiles `build.rs` without `--test`, so unit
 // tests written here would never run. See Block 98 R7.
 #[path = "build_probe.rs"]
 mod build_probe;
 
-use build_probe::{android_abi_for_arch, dawn_checkout_usable, dawn_probe_paths};
+use build_probe::{
+    android_abi_for_arch, apple_deployment_target_var, dawn_checkout_usable, dawn_probe_paths,
+    select_apple_deployment_target,
+};
 
 fn main() {
     println!("cargo:rerun-if-env-changed=YAWGPU_DAWN_DIR");
@@ -27,6 +31,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=ANDROID_NDK_ROOT");
     println!("cargo:rerun-if-env-changed=NDK_HOME");
     println!("cargo:rerun-if-env-changed=ANDROID_PLATFORM");
+    println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
+    println!("cargo:rerun-if-env-changed=IPHONEOS_DEPLOYMENT_TARGET");
     println!("cargo:rerun-if-changed=shim/tint_shim.cpp");
     println!("cargo:rerun-if-changed=shim/tint_shim.h");
     println!("cargo:rerun-if-changed=shim/CMakeLists.txt");
@@ -74,6 +80,7 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
         configure_android_cmake(&mut cfg);
     }
+    configure_apple_cmake(&mut cfg);
     let dst = cfg.build();
 
     // The cmake crate places the configured build tree under `<OUT_DIR>/build`.
@@ -116,6 +123,67 @@ fn main() {
         copy_runtime_shim(&build_dir);
     }
     println!("cargo:rustc-cfg=have_tint");
+}
+
+fn configure_apple_cmake(cfg: &mut cmake::Config) {
+    let Some(variable) = env::var("CARGO_CFG_TARGET_OS")
+        .ok()
+        .as_deref()
+        .and_then(apple_deployment_target_var)
+    else {
+        return;
+    };
+
+    let env_value = match env::var(variable) {
+        Ok(value) => Some(value),
+        Err(env::VarError::NotPresent) => None,
+        Err(error) => {
+            println!("cargo:warning=Cannot read {variable}: {error}; keeping Tint's default deployment target");
+            return;
+        }
+    };
+    let rustc_output = if env_value.is_none() {
+        match read_rustc_deployment_target() {
+            Ok(output) => Some(output),
+            Err(error) => {
+                println!("cargo:warning=Cannot query rustc's deployment target: {error}; keeping Tint's default deployment target");
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let Some(version) =
+        select_apple_deployment_target(variable, env_value.as_deref(), rustc_output.as_deref())
+    else {
+        println!("cargo:warning=Cannot parse rustc's deployment target for {variable}; keeping Tint's default deployment target");
+        return;
+    };
+
+    cfg.define("CMAKE_OSX_DEPLOYMENT_TARGET", version);
+    // This build script is single-threaded here. The cmake crate builds cc's
+    // C/C++ flags in this process before spawning CMake, so cfg.env alone does
+    // not reach cc's deployment-target flag; the spawned CMake and compilers
+    // inherit this value too.
+    env::set_var(variable, version);
+}
+
+fn read_rustc_deployment_target() -> Result<String, String> {
+    let rustc = env::var_os("RUSTC").ok_or("RUSTC is unset")?;
+    let target = env::var_os("TARGET").ok_or("TARGET is unset")?;
+    let output = Command::new(rustc)
+        .args(["--print", "deployment-target", "--target"])
+        .arg(target)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "{}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    String::from_utf8(output.stdout).map_err(|error| error.to_string())
 }
 
 fn configure_android_cmake(cfg: &mut cmake::Config) {
