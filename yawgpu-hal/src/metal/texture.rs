@@ -43,22 +43,17 @@ impl MetalTexture {
         origin: crate::HalOrigin3d,
         extent: HalExtent3d,
     ) -> Result<(), HalError> {
-        let x_end = origin
-            .x
-            .checked_add(extent.width)
-            .ok_or_else(|| texture_error("texture x range overflows"))?;
-        let y_end = origin
-            .y
-            .checked_add(extent.height)
-            .ok_or_else(|| texture_error("texture y range overflows"))?;
-        let z_end = origin
-            .z
-            .checked_add(extent.depth_or_array_layers)
-            .ok_or_else(|| texture_error("texture z range overflows"))?;
-        if x_end > self.width || y_end > self.height || z_end > self.depth_or_array_layers {
-            return Err(texture_error("texture range exceeds texture size"));
-        }
-        Ok(())
+        crate::format::validate_texture_origin_extent(
+            BACKEND,
+            self.format,
+            HalExtent3d {
+                width: self.width,
+                height: self.height,
+                depth_or_array_layers: self.depth_or_array_layers,
+            },
+            origin,
+            extent,
+        )
     }
 }
 

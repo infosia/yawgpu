@@ -271,6 +271,7 @@ pub struct VulkanAdapter {
     astc_sliced_3d_support: Arc<OnceLock<bool>>,
     subgroup_query: Arc<OnceLock<SubgroupQuery>>,
     float16_query: Arc<OnceLock<Float16Query>>,
+    int64_atomics_query: Arc<OnceLock<Int64AtomicsQuery>>,
 }
 
 fn is_fallback_device_type(device_type: vk::PhysicalDeviceType) -> bool {
@@ -343,6 +344,7 @@ impl VulkanAdapter {
             astc_sliced_3d_support: Arc::new(OnceLock::new()),
             subgroup_query: Arc::new(OnceLock::new()),
             float16_query: Arc::new(OnceLock::new()),
+            int64_atomics_query: Arc::new(OnceLock::new()),
         })
     }
 
@@ -636,6 +638,35 @@ impl VulkanAdapter {
         self.float16_query.get_or_init(|| self.query_float16())
     }
 
+    fn int64_atomics_query(&self) -> &Int64AtomicsQuery {
+        self.int64_atomics_query.get_or_init(|| {
+            let properties = unsafe {
+                self.instance
+                    .instance
+                    .get_physical_device_properties(self.physical_device)
+            };
+            let api_version = YAWGPU_VULKAN_API_VERSION.min(properties.api_version);
+            let extension_present = self.has_device_extension(vk::KHR_SHADER_ATOMIC_INT64_NAME);
+            let mut atomics = vk::PhysicalDeviceShaderAtomicInt64Features::default();
+            let mut features = vk::PhysicalDeviceFeatures2::default();
+            if api_version >= vk::API_VERSION_1_2 || extension_present {
+                features = features.push_next(&mut atomics);
+            }
+            unsafe {
+                self.instance
+                    .instance
+                    .get_physical_device_features2(self.physical_device, &mut features);
+            }
+            let shader_int64 = features.features.shader_int64;
+            Int64AtomicsQuery {
+                api_version,
+                extension_present,
+                shader_buffer_int64_atomics: atomics.shader_buffer_int64_atomics,
+                shader_int64,
+            }
+        })
+    }
+
     fn query_float16(&self) -> Float16Query {
         let extension_present = self.has_device_extension(vk::KHR_SHADER_FLOAT16_INT8_NAME);
         let mut float16 = vk::PhysicalDeviceShaderFloat16Int8Features::default();
@@ -673,6 +704,18 @@ impl VulkanAdapter {
             ),
             storage: enabled_16bit_storage_features(storage_available, storage),
         }
+    }
+
+    /// Returns true when compressed texture dimensions may be unaligned.
+    #[must_use]
+    pub(super) fn supports_texture_compression_unaligned(&self) -> bool {
+        true
+    }
+
+    /// Returns true when WGSL `atomic_vec2u_min_max` is supported.
+    #[must_use]
+    pub(super) fn supports_atomic_vec2u_min_max(&self) -> bool {
+        self.int64_atomics_query().supported()
     }
 
     /// Returns true when WGSL `subgroups` is supported by this physical device.
@@ -840,6 +883,14 @@ impl VulkanAdapter {
 
     /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<VulkanDevice, HalError> {
+        self.create_device_with_features(crate::HalDeviceFeatures::default())
+    }
+
+    /// Creates a device with the requested optional backend features enabled.
+    pub(super) fn create_device_with_features(
+        &self,
+        requested: crate::HalDeviceFeatures,
+    ) -> Result<VulkanDevice, HalError> {
         let queue_family_index = self
             .queue_family_index()
             .ok_or(HalError::DeviceCreationFailed { backend: BACKEND })?;
@@ -1137,6 +1188,11 @@ impl VulkanAdapter {
         let fragment_stores_and_atomics =
             supported_features.fragment_stores_and_atomics == vk::TRUE;
         let mut enabled_features = enabled_texture_compression_features(&supported_features);
+        let mut int64_atomics = self.int64_atomics_query().enable(
+            requested.atomic_vec2u_min_max,
+            &mut enabled_features,
+            &mut extension_names,
+        );
         if shader_float16 {
             enabled_features.shader_int16 = vk::TRUE;
         }
@@ -1248,6 +1304,7 @@ impl VulkanAdapter {
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&extension_names)
             .enabled_features(&enabled_features);
+        create_info = chain_int64_atomics(create_info, &mut int64_atomics);
         if robustness2_enabled {
             create_info = create_info.push_next(&mut robustness2_features);
         }
@@ -1390,6 +1447,50 @@ impl VulkanAdapter {
         has_device_extension_for_physical_device(&self.instance, self.physical_device, name)
     }
 }
+fn chain_int64_atomics<'a>(
+    info: vk::DeviceCreateInfo<'a>,
+    atomics: &'a mut vk::PhysicalDeviceShaderAtomicInt64Features<'static>,
+) -> vk::DeviceCreateInfo<'a> {
+    if atomics.shader_buffer_int64_atomics == vk::TRUE {
+        info.push_next(atomics)
+    } else {
+        info
+    }
+}
+
+/// Pointer-free int64 atomic snapshot shared by advertisement and device creation.
+#[derive(Debug, Clone, Copy)]
+struct Int64AtomicsQuery {
+    api_version: u32,
+    extension_present: bool,
+    shader_buffer_int64_atomics: vk::Bool32,
+    shader_int64: vk::Bool32,
+}
+
+impl Int64AtomicsQuery {
+    fn supported(self) -> bool {
+        (self.api_version >= vk::API_VERSION_1_2 || self.extension_present)
+            && self.shader_buffer_int64_atomics == vk::TRUE
+            && self.shader_int64 == vk::TRUE
+    }
+
+    fn enable(
+        self,
+        requested: bool,
+        base: &mut vk::PhysicalDeviceFeatures,
+        extensions: &mut Vec<*const std::ffi::c_char>,
+    ) -> vk::PhysicalDeviceShaderAtomicInt64Features<'static> {
+        let enabled = requested && self.supported();
+        if enabled {
+            base.shader_int64 = vk::TRUE;
+            if self.api_version < vk::API_VERSION_1_2 {
+                extensions.push(vk::KHR_SHADER_ATOMIC_INT64_NAME.as_ptr());
+            }
+        }
+        vk::PhysicalDeviceShaderAtomicInt64Features::default().shader_buffer_int64_atomics(enabled)
+    }
+}
+
 /// Pointer-free feature snapshot reused by adapter clones and device creation.
 #[derive(Debug, Clone, Copy)]
 struct Float16Query {
@@ -3042,7 +3143,7 @@ mod tests {
         options.disable_storage_runtime_sized_array_index_clamping =
             flags.disable_storage_runtime_sized_array_index_clamping;
         options.use_zero_initialize_workgroup_memory = flags.use_zero_initialize_workgroup_memory;
-        yawgpu_tint::Program::parse(source, false, false, false, false, false, false, &[])
+        yawgpu_tint::Program::parse(source, false, false, false, false, false, false, false, &[])
             .expect("parse writer test WGSL")
             .generate_spirv(
                 entry,
@@ -3257,6 +3358,82 @@ diagnostic(off, derivative_uniformity);
     }
 
     use super::*;
+
+    #[test]
+    fn int64_atomics_support_and_device_enablement_require_all_prerequisites() {
+        for (
+            api_version,
+            extension_present,
+            shader_buffer_int64_atomics,
+            shader_int64,
+            supported,
+        ) in [
+            (vk::API_VERSION_1_1, false, vk::FALSE, vk::FALSE, false),
+            (vk::API_VERSION_1_1, false, vk::FALSE, vk::TRUE, false),
+            (vk::API_VERSION_1_1, false, vk::TRUE, vk::FALSE, false),
+            (vk::API_VERSION_1_1, false, vk::TRUE, vk::TRUE, false),
+            (vk::API_VERSION_1_1, true, vk::FALSE, vk::FALSE, false),
+            (vk::API_VERSION_1_1, true, vk::FALSE, vk::TRUE, false),
+            (vk::API_VERSION_1_1, true, vk::TRUE, vk::FALSE, false),
+            (vk::API_VERSION_1_1, true, vk::TRUE, vk::TRUE, true),
+            (vk::API_VERSION_1_2, false, vk::FALSE, vk::FALSE, false),
+            (vk::API_VERSION_1_2, false, vk::FALSE, vk::TRUE, false),
+            (vk::API_VERSION_1_2, false, vk::TRUE, vk::FALSE, false),
+            (vk::API_VERSION_1_2, false, vk::TRUE, vk::TRUE, true),
+            (vk::API_VERSION_1_2, true, vk::FALSE, vk::FALSE, false),
+            (vk::API_VERSION_1_2, true, vk::FALSE, vk::TRUE, false),
+            (vk::API_VERSION_1_2, true, vk::TRUE, vk::FALSE, false),
+            (vk::API_VERSION_1_2, true, vk::TRUE, vk::TRUE, true),
+            (vk::API_VERSION_1_3, false, vk::FALSE, vk::FALSE, false),
+            (vk::API_VERSION_1_3, false, vk::FALSE, vk::TRUE, false),
+            (vk::API_VERSION_1_3, false, vk::TRUE, vk::FALSE, false),
+            (vk::API_VERSION_1_3, false, vk::TRUE, vk::TRUE, true),
+            (vk::API_VERSION_1_3, true, vk::FALSE, vk::FALSE, false),
+            (vk::API_VERSION_1_3, true, vk::FALSE, vk::TRUE, false),
+            (vk::API_VERSION_1_3, true, vk::TRUE, vk::FALSE, false),
+            (vk::API_VERSION_1_3, true, vk::TRUE, vk::TRUE, true),
+        ] {
+            let query = Int64AtomicsQuery {
+                api_version,
+                extension_present,
+                shader_buffer_int64_atomics,
+                shader_int64,
+            };
+            assert_eq!(query.supported(), supported);
+            for requested in [false, true] {
+                let enabled = requested && supported;
+                let mut base = vk::PhysicalDeviceFeatures::default();
+                let mut extensions = Vec::new();
+                let mut atomics = query.enable(requested, &mut base, &mut extensions);
+                assert_eq!(base.shader_int64 == vk::TRUE, enabled);
+                assert_eq!(atomics.shader_buffer_int64_atomics == vk::TRUE, enabled);
+                assert_eq!(atomics.shader_shared_int64_atomics, vk::FALSE);
+                assert_eq!(
+                    extensions.contains(&vk::KHR_SHADER_ATOMIC_INT64_NAME.as_ptr()),
+                    enabled && api_version < vk::API_VERSION_1_2
+                );
+                let info = chain_int64_atomics(
+                    vk::DeviceCreateInfo::default().enabled_features(&base),
+                    &mut atomics,
+                );
+                assert_eq!(!info.p_next.is_null(), enabled);
+                if enabled {
+                    // SAFETY: the sole chain entry borrows `atomics` until `info` is dropped.
+                    let chained = unsafe {
+                        &*info
+                            .p_next
+                            .cast::<vk::PhysicalDeviceShaderAtomicInt64Features<'_>>()
+                    };
+                    assert_eq!(
+                        chained.s_type,
+                        vk::StructureType::PHYSICAL_DEVICE_SHADER_ATOMIC_INT64_FEATURES
+                    );
+                    assert_eq!(chained.shader_buffer_int64_atomics, vk::TRUE);
+                    assert!(chained.p_next.is_null());
+                }
+            }
+        }
+    }
 
     #[test]
     fn hal_limits_from_vk_caps_nvidia_storage_bindings() {

@@ -664,6 +664,18 @@ impl HalAdapter {
         hal_dispatch!(self, adapter => adapter.supports_shader_float16())
     }
 
+    /// Returns true when compressed texture dimensions may be unaligned.
+    #[must_use]
+    pub fn supports_texture_compression_unaligned(&self) -> bool {
+        hal_dispatch!(self, adapter => adapter.supports_texture_compression_unaligned())
+    }
+
+    /// Returns true when WGSL `atomic_vec2u_min_max` is supported.
+    #[must_use]
+    pub fn supports_atomic_vec2u_min_max(&self) -> bool {
+        hal_dispatch!(self, adapter => adapter.supports_atomic_vec2u_min_max())
+    }
+
     /// Returns true when WGSL `subgroups` is supported.
     #[must_use]
     pub fn supports_subgroups(&self) -> bool {
@@ -706,7 +718,9 @@ impl HalAdapter {
         hal_dispatch!(self, adapter => adapter.supports_indirect_first_instance())
     }
 
-    /// Returns the supported subgroup size range, or `None` when unsupported.
+    /// Returns the reported subgroup size range, or `None` when unavailable.
+    ///
+    /// Metal reports a range independently of [`Self::supports_subgroups`].
     #[must_use]
     pub fn subgroup_size_range(&self) -> Option<(u32, u32)> {
         hal_dispatch!(self, adapter => adapter.subgroup_size_range())
@@ -722,8 +736,37 @@ impl HalAdapter {
 
     /// Creates a device (and its default queue) on this adapter.
     pub fn create_device(&self) -> Result<HalDevice, HalError> {
-        hal_dispatch!(self, adapter => adapter.create_device(), map HalDevice)
+        self.create_device_with_features(HalDeviceFeatures::default())
     }
+
+    /// Creates a device with the requested optional backend features enabled.
+    pub fn create_device_with_features(
+        &self,
+        features: HalDeviceFeatures,
+    ) -> Result<HalDevice, HalError> {
+        // Backends other than Vulkan need no device-level atomic feature knobs.
+        let _ = features;
+        match self {
+            #[cfg(feature = "noop")]
+            Self::Noop(adapter) => adapter.create_device().map(HalDevice::Noop),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(adapter) => adapter
+                .create_device_with_features(features)
+                .map(HalDevice::Vulkan),
+            #[cfg(feature = "metal")]
+            Self::Metal(adapter) => adapter.create_device().map(HalDevice::Metal),
+            #[cfg(feature = "gles")]
+            Self::Gles(adapter) => adapter.create_device().map(HalDevice::Gles),
+        }
+    }
+}
+
+/// Optional features requiring explicit backend device enablement.
+#[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
+pub struct HalDeviceFeatures {
+    /// Enable 64-bit buffer atomics for WGSL `atomic_vec2u_min_max`.
+    pub atomic_vec2u_min_max: bool,
 }
 
 /// Enumerates HAL backend values.
@@ -1542,6 +1585,19 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn hal_adapter_exposes_unaligned_compression_and_atomic_vec2u_features() {
+        let adapter = HalInstance::new_noop().enumerate_adapters().remove(0);
+        assert!(adapter.supports_texture_compression_unaligned());
+        assert!(adapter.supports_atomic_vec2u_min_max());
+        for requested in [false, true] {
+            let features = HalDeviceFeatures {
+                atomic_vec2u_min_max: requested,
+            };
+            assert!(adapter.create_device_with_features(features).is_ok());
+        }
+    }
 
     #[test]
     fn submission_index_none_is_pre_submission_value() {

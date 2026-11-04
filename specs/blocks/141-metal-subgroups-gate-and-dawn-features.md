@@ -1,6 +1,7 @@
 # Block 141 — Metal subgroups gate; `texture-compression-unaligned` and `atomic-vec2u-min-max`
 
-Status: **IN PROGRESS**.
+Status: **COMPLETE (2026-11-05)**. Phase Review: 0 CRITICAL, 0 MAJOR, 5 MINOR; all resolved,
+see below.
 Source: backlog A26 and B8, started by user request on 2026-11-05.
 Oracle: Dawn at the pinned `third_party/dawn` (paths relative to `src/dawn/native/`):
 `metal/PhysicalDeviceMTL.mm` (subgroup sizes at lines 322-330, feature list at lines
@@ -126,3 +127,36 @@ R6. **Unchanged.** Every other feature and limit; GLES; the Vulkan subgroup rang
 
 - **S1 (coding agent):** R1-R6 with the unit tests.
 - **S2 (Claude):** ignored tests, e2e, probe, CTS, Phase Review.
+
+## Verification (2026-11-05)
+
+Run on Apple M2, macOS 27.2. Vulkan here is MoltenVK under the Khronos layer, which is
+reference-only.
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace` | 1,413 passed, 0 failed |
+| fmt; clippy `-D warnings` on default, `metal`, `vulkan`, `gles`, `metal,tiled`, `vulkan,tiled`, `shader-passthrough` | clean |
+| `e2e_metal_dawn_features` (new) | 4 of 4: both features advertised; 64-bit `atomicStoreMax`/`atomicStoreMin` read back; 5×7 BC1 round trip over 3 levels; lazy zero-init around one written block |
+| Metal e2e and every other ignored `yawgpu` test, `metal,tiled` | 169 passed, 0 failed |
+| HAL `apple_gpu_advertises_fixed_subgroup_size_control`, M2 | passes; the range is reported outside the `subgroups` check |
+| All `e2e_vulkan_*`, MoltenVK, Khronos layer | 152 passed, 1 failed (the known `imageView2DOn3DImage` portability case, with its 12 VUID lines); `e2e_vulkan_dawn_features` 4 of 4. MoltenVK does not expose 64-bit buffer atomics, so the atomic scenario skips there |
+| Feature-list probe against Dawn `v20261030`, Metal | standard features `0x1`-`0x19` identical; the remaining differences are Dawn-only `0x5xxxx` features |
+| webgpu-native-cts, Metal, targeted | `texture_compression_unaligned` 416 / fail 0; `createTexture` 50,541 / 0; `image_copy` 143,409 / 0; `copyTextureToTexture` 79,890 / 0; `requestDevice` 292 / 0; subgroup execution 44,359 / 0 |
+| webgpu-native-cts, Metal, `atomicStoreMax` and `atomicStoreMin` | 864 pass, 36 fail each. Every failure is a case with `rndMultiplyX=0;rndMultiplyY=0`, where every invocation stores `vec2u(0, 0)`. Dawn fails the identical 36 cases on each query on the same machine, so this is shared with the oracle (Tint MSL output or the Metal driver), not a yawgpu defect |
+| webgpu-native-cts, Metal, `webgpu:api,*` | pass 589,574, skip 101,793, fail 0, crash 0 (Block 140: 586,612 / 104,755) |
+| webgpu-native-cts, Metal, `webgpu:shader,execution,*` | pass 857,322, skip 25,860, fail 71, crash 0. All 71 are the shared zero-value atomic cases above (one Max case passed because the uninitialized result happened to be zero) |
+
+The CTS ran on the library before the Phase Review fixes. Those fixes move tests, replace
+test expectations, add a pure helper for the Metal range, and share one HAL bounds helper
+between Metal and Vulkan; the e2e and workspace gates above ran after them.
+
+## Phase Review
+
+| ID | Finding | Disposition |
+|---|---|---|
+| m1 | New tests were placed above `use super::*` in eleven modules | Moved below the imports |
+| m2 | The Metal and Vulkan `atomic-vec2u-min-max` tests copied the rule they test | Literal truth tables |
+| m3 | No direct test of the always-reported Metal range | Pure helper with a unit test; the ignored M2 test asserts the range outside the `subgroups` check |
+| m4 | The copy-bounds helper was duplicated in the Metal and Vulkan HALs | One helper in `yawgpu-hal/src/format.rs` |
+| m5 | The e2e never reached lazy zero-init on an unaligned level 0 | New `unaligned_bc_texture_lazy_zero_init` scenario, Metal and Vulkan |

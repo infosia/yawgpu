@@ -2343,6 +2343,52 @@ mod tests {
     }
 
     #[test]
+    fn unaligned_level_zero_copy_and_clear_use_complete_blocks() {
+        let origin = crate::HalOrigin3d { x: 0, y: 0, z: 0 };
+        let extent = HalExtent3d {
+            width: 8,
+            height: 8,
+            depth_or_array_layers: 1,
+        };
+        let clamped = metal_copy_extent(
+            HalTextureFormat::Bc1RgbaUnorm,
+            [5, 7],
+            0,
+            origin,
+            extent,
+            true,
+        );
+        assert_eq!((clamped.width, clamped.height), (5, 7));
+        let parts = compute_buffer_texture_copy_parts(
+            HalTextureDimension::D2,
+            clamped,
+            origin,
+            crate::HalBufferTextureLayout {
+                offset: 0,
+                bytes_per_row: 256,
+                rows_per_image: 2,
+            },
+            (8, 4, 4),
+            272,
+        )
+        .unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!((parts[0].extent.height, parts[1].extent.height), (4, 3));
+        assert_eq!(parts[1].offset, 256);
+        assert_eq!(parts[1].bytes_per_row, 16);
+        assert_eq!(compressed_clear_layout(5, 7, (8, 4, 4)).unwrap(), (16, 32));
+        let texture_extent = metal_copy_extent(
+            HalTextureFormat::Bc1RgbaUnorm,
+            [5, 7],
+            0,
+            origin,
+            extent,
+            false,
+        );
+        assert_eq!((texture_extent.width, texture_extent.height), (8, 8));
+    }
+
+    #[test]
     fn compressed_copy_clamps_only_buffer_copies() {
         let origin = crate::HalOrigin3d { x: 0, y: 0, z: 0 };
         let padded = HalExtent3d {

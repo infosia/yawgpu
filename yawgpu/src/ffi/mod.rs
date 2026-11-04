@@ -5884,6 +5884,50 @@ mod tests {
     const UNKNOWN_DIAGNOSTIC_WARNING: &str = "unrecognized diagnostic rule";
     use crate::YAWGPU_INSTANCE_BACKEND_NOOP;
 
+    #[test]
+    fn unaligned_compression_and_atomic_vec2u_are_advertised_and_requested() {
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+            let required = [
+                native::WGPUFeatureName_TextureCompressionUnaligned,
+                native::WGPUFeatureName_AtomicVec2uMinMax,
+            ];
+            let mut supported: native::WGPUSupportedFeatures = std::mem::zeroed();
+            wgpuAdapterGetFeatures(adapter, &mut supported);
+            let advertised = std::slice::from_raw_parts(supported.features, supported.featureCount);
+            for feature in required {
+                assert!(advertised.contains(&feature));
+                assert_eq!(wgpuAdapterHasFeature(adapter, feature), 1);
+            }
+            wgpuSupportedFeaturesFreeMembers(supported);
+            let mut descriptor: native::WGPUDeviceDescriptor = std::mem::zeroed();
+            descriptor.requiredFeatureCount = required.len();
+            descriptor.requiredFeatures = required.as_ptr();
+            let mut state = RequestDeviceState::default();
+            let callback = native::WGPURequestDeviceCallbackInfo {
+                nextInChain: std::ptr::null_mut(),
+                mode: native::WGPUCallbackMode_AllowProcessEvents,
+                callback: Some(request_device_callback),
+                userdata1: (&mut state as *mut RequestDeviceState).cast(),
+                userdata2: std::ptr::null_mut(),
+            };
+            wgpuAdapterRequestDevice(adapter, &descriptor, callback);
+            wgpuInstanceProcessEvents(instance);
+            assert_eq!(state.status, native::WGPURequestDeviceStatus_Success);
+            assert!(!state.device.is_null());
+            let mut enabled: native::WGPUSupportedFeatures = std::mem::zeroed();
+            wgpuDeviceGetFeatures(state.device, &mut enabled);
+            let values = std::slice::from_raw_parts(enabled.features, enabled.featureCount);
+            for feature in required {
+                assert!(values.contains(&feature));
+                assert_eq!(wgpuDeviceHasFeature(state.device, feature), 1);
+            }
+            wgpuSupportedFeaturesFreeMembers(enabled);
+            release_handles(instance, adapter, state.device);
+        }
+    }
+
     #[derive(Default)]
     struct RequestAdapterState {
         fired: u32,
@@ -8566,7 +8610,7 @@ mod tests {
             };
 
             wgpuAdapterGetFeatures(adapter, &mut features);
-            assert_eq!(features.featureCount, 23);
+            assert_eq!(features.featureCount, 25);
             let values = std::slice::from_raw_parts(features.features, features.featureCount);
             assert!(values.contains(&native::WGPUFeatureName_CoreFeaturesAndLimits));
             assert!(values.contains(&native::WGPUFeatureName_TextureCompressionBC));

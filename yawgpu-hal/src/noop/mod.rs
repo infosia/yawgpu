@@ -122,6 +122,18 @@ impl NoopAdapter {
         true
     }
 
+    /// Returns true when compressed texture dimensions may be unaligned.
+    #[must_use]
+    pub(super) fn supports_texture_compression_unaligned(&self) -> bool {
+        true
+    }
+
+    /// Returns true when WGSL `atomic_vec2u_min_max` is supported.
+    #[must_use]
+    pub(super) fn supports_atomic_vec2u_min_max(&self) -> bool {
+        true
+    }
+
     /// Returns true when WGSL `subgroups` is supported.
     #[must_use]
     pub(super) fn supports_subgroups(&self) -> bool {
@@ -569,6 +581,13 @@ mod tests {
         HalRenderLoadOp, HalRenderPassCommand, HalRenderPipeline, HalScissorRect, HalTexture,
         HalTextureFormat, HalTextureUsage, HalViewport,
     };
+
+    #[test]
+    fn noop_advertises_unaligned_compression_and_atomic_vec2u() {
+        let adapter = NoopAdapter::synthetic();
+        assert!(adapter.supports_texture_compression_unaligned());
+        assert!(adapter.supports_atomic_vec2u_min_max());
+    }
 
     fn texture_descriptor() -> HalTextureDescriptor {
         HalTextureDescriptor {

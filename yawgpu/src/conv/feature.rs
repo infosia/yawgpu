@@ -28,6 +28,10 @@ pub fn map_feature(value: native::WGPUFeatureName) -> core::Feature {
         native::WGPUFeatureName_DualSourceBlending => core::Feature::DualSourceBlending,
         native::WGPUFeatureName_ClipDistances => core::Feature::ClipDistances,
         native::WGPUFeatureName_PrimitiveIndex => core::Feature::PrimitiveIndex,
+        native::WGPUFeatureName_TextureCompressionUnaligned => {
+            core::Feature::TextureCompressionUnaligned
+        }
+        native::WGPUFeatureName_AtomicVec2uMinMax => core::Feature::AtomicVec2uMinMax,
         native::WGPUFeatureName_IndirectFirstInstance => core::Feature::IndirectFirstInstance,
         native::WGPUFeatureName_TextureComponentSwizzle => core::Feature::TextureComponentSwizzle,
         native::WGPUFeatureName_TextureFormatsTier1 => core::Feature::TextureFormatsTier1,
@@ -66,6 +70,10 @@ pub fn map_feature_to_native(value: core::Feature) -> native::WGPUFeatureName {
         core::Feature::DualSourceBlending => native::WGPUFeatureName_DualSourceBlending,
         core::Feature::ClipDistances => native::WGPUFeatureName_ClipDistances,
         core::Feature::PrimitiveIndex => native::WGPUFeatureName_PrimitiveIndex,
+        core::Feature::TextureCompressionUnaligned => {
+            native::WGPUFeatureName_TextureCompressionUnaligned
+        }
+        core::Feature::AtomicVec2uMinMax => native::WGPUFeatureName_AtomicVec2uMinMax,
         core::Feature::IndirectFirstInstance => native::WGPUFeatureName_IndirectFirstInstance,
         core::Feature::TextureComponentSwizzle => native::WGPUFeatureName_TextureComponentSwizzle,
         core::Feature::TextureFormatsTier1 => native::WGPUFeatureName_TextureFormatsTier1,
@@ -81,6 +89,26 @@ pub fn map_feature_to_native(value: core::Feature) -> native::WGPUFeatureName {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unaligned_compression_and_atomic_vec2u_features_round_trip() {
+        for (raw, feature, value) in [
+            (
+                native::WGPUFeatureName_TextureCompressionUnaligned,
+                core::Feature::TextureCompressionUnaligned,
+                0x18,
+            ),
+            (
+                native::WGPUFeatureName_AtomicVec2uMinMax,
+                core::Feature::AtomicVec2uMinMax,
+                0x19,
+            ),
+        ] {
+            assert_eq!(raw, value);
+            assert_eq!(map_feature(raw), feature);
+            assert_eq!(map_feature_to_native(feature), raw);
+        }
+    }
 
     #[test]
     fn maps_subgroups_feature_round_trip() {

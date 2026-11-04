@@ -459,6 +459,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             &[],
         )
         .expect("parse compute shader without @subgroup_size");

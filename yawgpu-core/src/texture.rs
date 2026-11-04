@@ -407,7 +407,7 @@ impl Texture {
         aspect: TextureAspect,
     ) -> Vec<TextureCopySubresource> {
         let aspects = self.init_aspects(aspect);
-        let subresource = self.subresource_size(mip_level);
+        let subresource = self.physical_subresource_size(mip_level);
         let covers_xy = origin.x == 0
             && origin.y == 0
             && copy_size.width == subresource.width
@@ -769,8 +769,9 @@ pub(crate) fn validate_texture_descriptor(
         return Some("texture format must not be Undefined");
     };
     if format_caps.is_compressed {
-        if !size.width.is_multiple_of(format_caps.block_w)
-            || !size.height.is_multiple_of(format_caps.block_h)
+        if !features.contains(&crate::adapter::Feature::TextureCompressionUnaligned)
+            && (!size.width.is_multiple_of(format_caps.block_w)
+                || !size.height.is_multiple_of(format_caps.block_h))
         {
             return Some("compressed texture size must be block-aligned");
         }
@@ -916,6 +917,16 @@ pub(crate) fn validate_queue_write_texture(
 }
 
 impl Texture {
+    /// Returns the mip extent rounded up to whole texel blocks.
+    pub(crate) fn physical_subresource_size(&self, mip_level: u32) -> Extent3d {
+        let mut size = self.subresource_size(mip_level);
+        if let Some(caps) = self.format_caps() {
+            size.width = div_ceil_u32(size.width, caps.block_w).saturating_mul(caps.block_w);
+            size.height = div_ceil_u32(size.height, caps.block_h).saturating_mul(caps.block_h);
+        }
+        size
+    }
+
     /// Returns subresource size.
     pub(crate) fn subresource_size(&self, mip_level: u32) -> Extent3d {
         let size = self.size();
@@ -1167,6 +1178,126 @@ mod tests {
     use super::*;
     use crate::test_helpers::*;
     use crate::*;
+
+    #[test]
+    fn unaligned_compressed_texture_requires_feature_and_copies_physical_level_zero() {
+        let descriptor = TextureDescriptor {
+            usage: TextureUsage::COPY_SRC | TextureUsage::COPY_DST | TextureUsage::TEXTURE_BINDING,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 5,
+                height: 7,
+                depth_or_array_layers: 1,
+            },
+            format: TextureFormat::from_raw(TextureFormat::BC1_RGBA_UNORM),
+            mip_level_count: 3,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        };
+        let without = noop_adapter()
+            .create_device(None, &[Feature::TextureCompressionBc], "", "")
+            .unwrap();
+        without.push_error_scope(ErrorFilter::Validation);
+        assert!(without.create_texture(descriptor.clone()).is_error());
+        assert_eq!(
+            without.pop_error_scope().unwrap().unwrap().message,
+            "compressed texture size must be block-aligned"
+        );
+        let device = noop_adapter()
+            .create_device(
+                None,
+                &[
+                    Feature::TextureCompressionBc,
+                    Feature::TextureCompressionUnaligned,
+                ],
+                "",
+                "",
+            )
+            .unwrap();
+        let texture = Arc::new(device.create_texture(descriptor));
+        assert!(!texture.is_error());
+        let physical = texture.physical_subresource_size(0);
+        assert_eq!(
+            physical,
+            Extent3d {
+                width: 8,
+                height: 8,
+                depth_or_array_layers: 1
+            }
+        );
+        assert_eq!(
+            texture.physical_subresource_size(1),
+            Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1
+            }
+        );
+        let origin = Origin3d { x: 0, y: 0, z: 0 };
+        let layout = TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(256),
+            rows_per_image: Some(2),
+        };
+        assert!(
+            texture.copy_subresources(0, origin, physical, TextureAspect::All)[0]
+                .covers_full_subresource
+        );
+        let (_, view_error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: None,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+            aspect: None,
+            usage: None,
+            swizzle: None,
+        });
+        assert_eq!(view_error, None);
+        let queue = device.queue();
+        assert_eq!(
+            queue.write_texture(QueueTextureWrite {
+                device: device.hal(),
+                texture: &texture,
+                mip_level: 0,
+                origin,
+                write_size: physical,
+                aspect: TextureAspect::All,
+                layout,
+                data: &[0; 272],
+            }),
+            None
+        );
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 272,
+            mapped_at_creation: false,
+        }));
+        let encoder = device.create_command_encoder();
+        assert_eq!(
+            encoder.copy_texture_to_buffer(
+                TexelCopyTextureInfo {
+                    texture: Arc::clone(&texture),
+                    mip_level: 0,
+                    origin,
+                    aspect: TextureAspect::All
+                },
+                TexelCopyBufferInfo {
+                    buffer,
+                    device: Some(device.clone()),
+                    layout
+                },
+                physical,
+            ),
+            None
+        );
+        let (commands, error) = encoder.finish();
+        assert_eq!(error, None);
+        assert_eq!(queue.submit(&[Arc::new(commands)]), None);
+        assert!(texture.is_initialized(0, 0, InitAspect::Color));
+        assert!(!texture.is_initialized(1, 0, InitAspect::Color));
+    }
 
     #[test]
     fn texture_usage_from_bits_retain_round_trips_known_and_unknown_bits() {

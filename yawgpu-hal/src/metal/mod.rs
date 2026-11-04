@@ -487,11 +487,29 @@ impl MetalAdapter {
         true
     }
 
+    /// Returns true when compressed texture dimensions may be unaligned.
+    #[must_use]
+    pub(super) fn supports_texture_compression_unaligned(&self) -> bool {
+        true
+    }
+
+    /// Returns true when WGSL `atomic_vec2u_min_max` is supported.
+    #[must_use]
+    pub(super) fn supports_atomic_vec2u_min_max(&self) -> bool {
+        atomic_vec2u_min_max_supported(
+            self.device.supportsFamily(MTLGPUFamily::Apple9),
+            self.device.supportsFamily(MTLGPUFamily::Mac2),
+            self.device.supportsFamily(MTLGPUFamily::Apple8),
+        )
+    }
+
     /// Returns true when WGSL `subgroups` is supported.
     #[must_use]
     pub(super) fn supports_subgroups(&self) -> bool {
-        self.device.supportsFamily(MTLGPUFamily::Apple6)
-            || self.device.supportsFamily(MTLGPUFamily::Metal3)
+        subgroups_supported(
+            self.device.supportsFamily(MTLGPUFamily::Apple6),
+            self.device.supportsFamily(MTLGPUFamily::Mac2),
+        )
     }
 
     /// Returns true when depth clip control is supported. Dawn enables this unconditionally on Metal, so the literal mirrors its rule.
@@ -530,11 +548,10 @@ impl MetalAdapter {
         true
     }
 
-    /// Returns the supported subgroup size range.
+    /// Returns the subgroup size range regardless of subgroup feature support.
     #[must_use]
     pub(super) fn subgroup_size_range(&self) -> Option<(u32, u32)> {
-        self.supports_subgroups()
-            .then(|| subgroup_size_range_for_vendor(self.vendor_id()))
+        reported_subgroup_size_range_for_vendor(self.vendor_id())
     }
 
     /// Returns the explicit compute subgroup size capabilities.
@@ -544,6 +561,7 @@ impl MetalAdapter {
     pub(super) fn subgroup_size_control_caps(&self) -> Option<crate::HalSubgroupSizeControlCaps> {
         subgroup_size_control_caps_for_range(
             self.subgroup_size_range(),
+            self.supports_subgroups(),
             MetalDeviceLimits::for_family(self.gpu_family()).max_threads_per_threadgroup,
         )
     }
@@ -620,6 +638,14 @@ impl MetalAdapter {
     }
 }
 
+fn subgroups_supported(apple6: bool, mac2: bool) -> bool {
+    apple6 || mac2
+}
+
+fn atomic_vec2u_min_max_supported(apple9: bool, mac2: bool, apple8: bool) -> bool {
+    apple9 || (mac2 && apple8)
+}
+
 /// Apple GPUs have a fixed SIMD width; other vendors expose the derivative-group
 /// minimum and the 64-bit MSL ballot maximum, matching Dawn.
 fn subgroup_size_range_for_vendor(vendor_id: u32) -> (u32, u32) {
@@ -630,11 +656,16 @@ fn subgroup_size_range_for_vendor(vendor_id: u32) -> (u32, u32) {
     }
 }
 
+fn reported_subgroup_size_range_for_vendor(vendor_id: u32) -> Option<(u32, u32)> {
+    Some(subgroup_size_range_for_vendor(vendor_id))
+}
+
 fn subgroup_size_control_caps_for_range(
     range: Option<(u32, u32)>,
+    subgroups: bool,
     max_threads_per_threadgroup: u32,
 ) -> Option<crate::HalSubgroupSizeControlCaps> {
-    let (min, max) = range?;
+    let (min, max) = range.filter(|_| subgroups)?;
     if min == 0 || min != max {
         return None;
     }
@@ -790,7 +821,7 @@ mod tests {
         let range = subgroup_size_range_for_vendor(0);
         assert_eq!(range, (4, 64));
         assert_eq!(
-            subgroup_size_control_caps_for_range(Some(range), 1024),
+            subgroup_size_control_caps_for_range(Some(range), true, 1024),
             None
         );
     }
@@ -817,11 +848,14 @@ mod tests {
     #[test]
     fn subgroup_size_control_requires_a_supported_fixed_range() {
         for range in [None, Some((4, 64)), Some((0, 0))] {
-            assert_eq!(subgroup_size_control_caps_for_range(range, 1024), None);
+            assert_eq!(
+                subgroup_size_control_caps_for_range(range, true, 1024),
+                None
+            );
         }
         for (size, threads, count) in [(32, 1024, 32), (32, 512, 16), (16, 1024, 64)] {
             assert_eq!(
-                subgroup_size_control_caps_for_range(Some((size, size)), threads),
+                subgroup_size_control_caps_for_range(Some((size, size)), true, threads),
                 Some(crate::HalSubgroupSizeControlCaps::new(size, size, count))
             );
         }
@@ -833,7 +867,7 @@ mod tests {
             MetalGpuFamily::Apple9,
         ] {
             let threads = MetalDeviceLimits::for_family(family).max_threads_per_threadgroup;
-            let caps = subgroup_size_control_caps_for_range(Some((32, 32)), threads).unwrap();
+            let caps = subgroup_size_control_caps_for_range(Some((32, 32)), true, threads).unwrap();
             assert_eq!(caps.max_compute_workgroup_subgroups, 32);
             assert_eq!(caps.max_compute_workgroup_subgroups * 32, threads);
         }
@@ -848,6 +882,7 @@ mod tests {
         let adapter = MetalAdapter::new(device.device.clone());
         let apple = adapter.vendor_id() == 0x106b;
         let range = adapter.subgroup_size_range();
+        assert!(range.is_some());
         let caps = adapter.subgroup_size_control_caps();
         eprintln!("{}: range {range:?}, caps {caps:?}", adapter.name());
         if apple && adapter.supports_subgroups() {
@@ -901,6 +936,51 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn subgroup_gate_uses_apple6_or_mac2() {
+        assert!(subgroups_supported(true, false));
+        assert!(subgroups_supported(false, true));
+        assert!(subgroups_supported(true, true));
+        assert!(!subgroups_supported(false, false));
+    }
+
+    #[test]
+    fn subgroup_range_is_reported_without_subgroup_support() {
+        for (vendor, expected) in [
+            (0x106b, Some((32, 32))),
+            (0x8086, Some((4, 64))),
+            (0x1002, Some((4, 64))),
+            (0, Some((4, 64))),
+        ] {
+            let range = reported_subgroup_size_range_for_vendor(vendor);
+            assert_eq!(range, expected);
+            assert_eq!(
+                subgroup_size_control_caps_for_range(range, false, 1024),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn atomic_vec2u_min_max_requires_apple9_or_mac2_and_apple8() {
+        for (apple9, mac2, apple8, expected) in [
+            (false, false, false, false),
+            (false, false, true, false),
+            (false, true, false, false),
+            (false, true, true, true),
+            (true, false, false, true),
+            (true, false, true, true),
+            (true, true, false, true),
+            (true, true, true, true),
+        ] {
+            assert_eq!(
+                atomic_vec2u_min_max_supported(apple9, mac2, apple8),
+                expected,
+                "apple9={apple9}, mac2={mac2}, apple8={apple8}"
+            );
+        }
+    }
 
     #[test]
     fn metal_relaxed_math_min_os_version_matches_dawn() {

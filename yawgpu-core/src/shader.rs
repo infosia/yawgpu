@@ -126,6 +126,7 @@ impl ShaderModule {
     }
 
     /// Constructs this object from wgsl.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_wgsl(
         source: String,
         shader_f16: bool,
@@ -134,6 +135,7 @@ impl ShaderModule {
         dual_source_blending: bool,
         clip_distances: bool,
         primitive_index: bool,
+        atomic_vec2u_min_max: bool,
     ) -> Result<ShaderModuleSourceKind, String> {
         let reflected = frontend::parse_and_validate_wgsl_gated(
             &source,
@@ -143,6 +145,7 @@ impl ShaderModule {
             dual_source_blending,
             clip_distances,
             primitive_index,
+            atomic_vec2u_min_max,
         )?;
         Ok(ShaderModuleSourceKind::Wgsl(Box::new(reflected)))
     }
@@ -281,6 +284,31 @@ mod tests {
     use super::*;
     use crate::test_helpers::*;
     use crate::*;
+
+    #[test]
+    fn shader_module_creation_gates_atomic_vec2u_on_required_feature() {
+        let source = r#"enable atomic_vec2u_min_max;
+@group(0) @binding(0) var<storage, read_write> value: atomic<vec2u>;
+@compute @workgroup_size(1) fn cs() {
+    atomicStoreMax(&value, vec2u(1u, 2u));
+    atomicStoreMin(&value, vec2u(3u, 4u));
+}"#;
+        let without = noop_device();
+        without.push_error_scope(ErrorFilter::Validation);
+        let invalid = without.create_shader_module(ShaderModuleSource::Wgsl(source.to_owned()));
+        assert!(invalid.is_error());
+        let error = without.pop_error_scope().unwrap().unwrap();
+        assert!(
+            error.message.contains("atomic_vec2u_min_max"),
+            "{}",
+            error.message
+        );
+        let device = noop_adapter()
+            .create_device(None, &[Feature::AtomicVec2uMinMax], "", "")
+            .unwrap();
+        let valid = device.create_shader_module(ShaderModuleSource::Wgsl(source.to_owned()));
+        assert!(!valid.is_error(), "{:?}", valid.diagnostic());
+    }
 
     #[test]
     fn shader_module_accessors_pin_is_error_and_diagnostic() {

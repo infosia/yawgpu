@@ -1978,6 +1978,7 @@ YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
                                               bool dual_source_blending,
                                               bool clip_distances,
                                               bool primitive_index,
+                                              bool atomic_vec2u_min_max,
                                               bool allow_framebuffer_fetch,
                                               const uint32_t* lang_features,
                                               size_t n_lang_features,
@@ -2024,6 +2025,9 @@ YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
         }
         if (primitive_index) {
             options.allowed_features.extensions.insert(tint::wgsl::Extension::kPrimitiveIndex);
+        }
+        if (atomic_vec2u_min_max) {
+            options.allowed_features.extensions.insert(tint::wgsl::Extension::kAtomicVec2UMinMax);
         }
         if (allow_framebuffer_fetch) {
             options.allowed_features.extensions.insert(

@@ -373,6 +373,8 @@ on the Tier-2 GLES backend):
 | `clip-distances` | `@builtin(clip_distances)` user-defined clip planes |
 | `primitive-index` | `@builtin(primitive_index)` in fragment shaders |
 | `texture-component-swizzle` | per-view `r/g/b/a` component remapping on sampled texture views |
+| `texture-compression-unaligned` | compressed textures whose size is not a whole number of blocks |
+| `atomic-vec2u-min-max` | `atomicStoreMax` / `atomicStoreMin` on `atomic<vec2u>` (64-bit) |
 
 Each is advertised only when the underlying device supports it, matching Dawn.
 

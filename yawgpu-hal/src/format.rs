@@ -424,6 +424,44 @@ impl HalTextureFormat {
     }
 }
 
+/// Validates copy bounds against whole texel blocks, including partial blocks at level zero.
+#[cfg(any(feature = "metal", feature = "vulkan", test))]
+pub(crate) fn validate_texture_origin_extent(
+    backend: &'static str,
+    format: HalTextureFormat,
+    size: crate::HalExtent3d,
+    origin: crate::HalOrigin3d,
+    extent: crate::HalExtent3d,
+) -> Result<(), HalError> {
+    let (_, block_width, block_height) = format.compressed_block_info().unwrap_or((1, 1, 1));
+    let width = size
+        .width
+        .div_ceil(block_width)
+        .checked_mul(block_width)
+        .ok_or_else(|| buffer_error(backend, "texture physical width overflows"))?;
+    let height = size
+        .height
+        .div_ceil(block_height)
+        .checked_mul(block_height)
+        .ok_or_else(|| buffer_error(backend, "texture physical height overflows"))?;
+    let x_end = origin
+        .x
+        .checked_add(extent.width)
+        .ok_or_else(|| buffer_error(backend, "texture x range overflows"))?;
+    let y_end = origin
+        .y
+        .checked_add(extent.height)
+        .ok_or_else(|| buffer_error(backend, "texture y range overflows"))?;
+    let z_end = origin
+        .z
+        .checked_add(extent.depth_or_array_layers)
+        .ok_or_else(|| buffer_error(backend, "texture z range overflows"))?;
+    if x_end > width || y_end > height || z_end > size.depth_or_array_layers {
+        return Err(buffer_error(backend, "texture range exceeds texture size"));
+    }
+    Ok(())
+}
+
 /// Validates buffer texture range and returns a descriptive error on failure.
 #[cfg(any(feature = "metal", feature = "vulkan", test))]
 pub(crate) fn validate_buffer_texture_range(
@@ -642,6 +680,93 @@ mod tests {
         noop, HalBuffer, HalBufferTextureLayout, HalExtent3d, HalOrigin3d, HalTexture,
         HalTextureDescriptor, HalTextureDimension, HalTextureUsage,
     };
+
+    #[test]
+    fn copy_bounds_include_partial_blocks_at_level_zero() {
+        let size = crate::HalExtent3d {
+            width: 5,
+            height: 7,
+            depth_or_array_layers: 1,
+        };
+        let origin = crate::HalOrigin3d { x: 0, y: 0, z: 0 };
+        let physical = crate::HalExtent3d {
+            width: 8,
+            height: 8,
+            depth_or_array_layers: 1,
+        };
+        assert!(validate_texture_origin_extent(
+            "test",
+            HalTextureFormat::Bc1RgbaUnorm,
+            size,
+            origin,
+            physical
+        )
+        .is_ok());
+        assert!(validate_texture_origin_extent(
+            "test",
+            HalTextureFormat::Bc1RgbaUnorm,
+            size,
+            crate::HalOrigin3d { x: 4, y: 4, z: 0 },
+            crate::HalExtent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1
+            }
+        )
+        .is_ok());
+        assert!(validate_texture_origin_extent(
+            "test",
+            HalTextureFormat::Rgba8Unorm,
+            size,
+            origin,
+            physical
+        )
+        .is_err());
+        assert!(validate_texture_origin_extent(
+            "test",
+            HalTextureFormat::Bc1RgbaUnorm,
+            size,
+            origin,
+            crate::HalExtent3d {
+                width: 12,
+                ..physical
+            }
+        )
+        .is_err());
+        assert!(validate_texture_origin_extent(
+            "test",
+            HalTextureFormat::Bc1RgbaUnorm,
+            size,
+            origin,
+            crate::HalExtent3d {
+                depth_or_array_layers: 2,
+                ..physical
+            }
+        )
+        .is_err());
+        assert!(validate_texture_origin_extent(
+            "test",
+            HalTextureFormat::Bc1RgbaUnorm,
+            size,
+            crate::HalOrigin3d {
+                x: u32::MAX,
+                ..origin
+            },
+            physical
+        )
+        .is_err());
+        assert!(validate_texture_origin_extent(
+            "test",
+            HalTextureFormat::Bc1RgbaUnorm,
+            crate::HalExtent3d {
+                width: u32::MAX,
+                ..size
+            },
+            origin,
+            physical
+        )
+        .is_err());
+    }
 
     const UNCOMPRESSED_COLOR_FORMATS: &[HalTextureFormat] = &[
         HalTextureFormat::R8Unorm,

@@ -5882,6 +5882,30 @@ mod tests {
     };
 
     #[test]
+    fn unaligned_level_zero_copy_and_clear_use_complete_blocks() {
+        let mut texture =
+            dummy_vulkan_texture(HalTextureDimension::D2, HalTextureFormat::Bc1RgbaUnorm);
+        texture.width = 5;
+        texture.height = 7;
+        let (mut copy, _) = make_copy(256, 2, 8, 8, 1);
+        copy.format = texture.format;
+        let region = buffer_image_copy(&copy, &texture, 8, vk::ImageAspectFlags::COLOR).unwrap();
+        assert_eq!(
+            region.image_extent,
+            vk::Extent3D {
+                width: 5,
+                height: 7,
+                depth: 1
+            }
+        );
+        assert_eq!(region.buffer_row_length, 128);
+        assert_eq!(region.buffer_image_height, 8);
+        assert_eq!(compressed_clear_layout(5, 7, (8, 4, 4)).unwrap(), (16, 32));
+        assert_eq!(block_aligned_extent(5, 4).unwrap(), 8);
+        assert_eq!(block_aligned_extent(7, 4).unwrap(), 8);
+    }
+
+    #[test]
     fn compressed_copy_extent_clamps_mip_edges_and_preserves_depth_and_pitches() {
         let mut texture =
             dummy_vulkan_texture(HalTextureDimension::D3, HalTextureFormat::Bc1RgbaUnorm);

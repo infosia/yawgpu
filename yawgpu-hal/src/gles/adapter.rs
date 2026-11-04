@@ -234,6 +234,18 @@ impl GlesAdapter {
         false
     }
 
+    /// Returns true when compressed texture dimensions may be unaligned.
+    #[must_use]
+    pub(crate) fn supports_texture_compression_unaligned(&self) -> bool {
+        false
+    }
+
+    /// Returns true when WGSL `atomic_vec2u_min_max` is supported.
+    #[must_use]
+    pub(crate) fn supports_atomic_vec2u_min_max(&self) -> bool {
+        false
+    }
+
     /// Returns true when WGSL `subgroups` is supported.
     #[must_use]
     pub(crate) fn supports_subgroups(&self) -> bool {

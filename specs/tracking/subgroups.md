@@ -51,7 +51,8 @@ threaded `create_shader_module` → `from_wgsl` → `parse_and_validate_wgsl_gat
 Extension::kSubgroups)`). Shim `to_tint_language_feature` now maps 6/8 (mapping
 completeness only; NOT added to `SUPPORTED_WGSL_LANGUAGE_FEATURES`).
 
-HAL caps: Noop = supported, 4..4 nominal; Metal = Apple6 || Metal3, 32..32;
+HAL caps: Noop = supported, 4..4 nominal; Metal = Apple6 || Mac2 (Block 141), 32..32 on Apple GPUs and 4..64 otherwise, range
+reported even without subgroups;
 Vulkan = `VkPhysicalDeviceSubgroupProperties` requires BASIC|VOTE|ARITHMETIC|
 BALLOT|SHUFFLE ops + COMPUTE stage, size from
 `VkPhysicalDeviceSubgroupSizeControlProperties` (1.3/ext) else `subgroupSize`;

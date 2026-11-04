@@ -283,10 +283,11 @@ pub struct ReflectedModule {
 /// gated form directly so it can pass the device's actual feature set.
 #[cfg(test)]
 pub(crate) fn parse_and_validate_wgsl(src: &str) -> Result<ReflectedModule, String> {
-    parse_and_validate_wgsl_gated(src, true, true, true, true, true, true)
+    parse_and_validate_wgsl_gated(src, true, true, true, true, true, true, true)
 }
 
 /// Returns parse and validate wgsl using the supplied feature gates.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn parse_and_validate_wgsl_gated(
     src: &str,
     shader_f16: bool,
@@ -295,6 +296,7 @@ pub(crate) fn parse_and_validate_wgsl_gated(
     dual_source_blending: bool,
     clip_distances: bool,
     primitive_index: bool,
+    atomic_vec2u_min_max: bool,
 ) -> Result<ReflectedModule, String> {
     let program = yawgpu_tint::Program::parse(
         src,
@@ -304,6 +306,7 @@ pub(crate) fn parse_and_validate_wgsl_gated(
         dual_source_blending,
         clip_distances,
         primitive_index,
+        atomic_vec2u_min_max,
         crate::SUPPORTED_WGSL_LANGUAGE_FEATURES,
     )
     .map_err(|e| e.to_string())?;
@@ -3239,6 +3242,7 @@ fn fs_plain() -> @location(0) vec4f {
             true,
             false,
             false,
+            false,
         )
         .unwrap();
 
@@ -3262,11 +3266,13 @@ fn main() -> Out {
 }
 "#;
 
-        assert!(
-            parse_and_validate_wgsl_gated(source, true, true, false, true, false, false).is_err()
-        );
+        assert!(parse_and_validate_wgsl_gated(
+            source, true, true, false, true, false, false, false
+        )
+        .is_err());
         let module =
-            parse_and_validate_wgsl_gated(source, true, true, false, true, true, false).unwrap();
+            parse_and_validate_wgsl_gated(source, true, true, false, true, true, false, false)
+                .unwrap();
         assert_eq!(module.vertex_clip_distances_size("main"), 1);
     }
 
@@ -3282,9 +3288,13 @@ fn main(@builtin(primitive_index) idx: u32) -> @location(0) vec4f {
 "#;
 
         assert!(
-            parse_and_validate_wgsl_gated(source, true, true, false, true, true, false).is_err()
+            parse_and_validate_wgsl_gated(source, true, true, false, true, true, false, false)
+                .is_err()
         );
-        assert!(parse_and_validate_wgsl_gated(source, true, true, false, true, true, true).is_ok());
+        assert!(
+            parse_and_validate_wgsl_gated(source, true, true, false, true, true, true, false)
+                .is_ok()
+        );
     }
 
     #[test]

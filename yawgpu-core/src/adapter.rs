@@ -94,6 +94,12 @@ impl Adapter {
         add_dual_source_blending_feature(&mut features, &self.inner.hal);
         add_clip_distances_feature(&mut features, &self.inner.hal);
         add_primitive_index_feature(&mut features, &self.inner.hal);
+        if self.inner.hal.supports_texture_compression_unaligned() {
+            features.insert(Feature::TextureCompressionUnaligned);
+        }
+        if self.inner.hal.supports_atomic_vec2u_min_max() {
+            features.insert(Feature::AtomicVec2uMinMax);
+        }
         add_indirect_first_instance_feature(&mut features, &self.inner.hal);
         add_texture_component_swizzle_feature(&mut features, &self.inner.hal);
         #[cfg(feature = "tiled")]
@@ -110,7 +116,7 @@ impl Adapter {
         self.features().contains(&feature)
     }
 
-    /// Returns the minimum subgroup size, or zero when subgroups are unsupported.
+    /// Returns the minimum subgroup size, or zero when no range is reported.
     #[must_use]
     pub fn subgroup_min_size(&self) -> u32 {
         self.inner
@@ -119,7 +125,7 @@ impl Adapter {
             .map_or(0, |(min, _)| min)
     }
 
-    /// Returns the maximum subgroup size, or zero when subgroups are unsupported.
+    /// Returns the maximum subgroup size, or zero when no range is reported.
     #[must_use]
     pub fn subgroup_max_size(&self) -> u32 {
         self.inner
@@ -145,7 +151,9 @@ impl Adapter {
             .validate_required_limits(required_limits)
             .map_err(Error::Validation)?;
         let features = self.resolve_features(required_features)?;
-        let hal = self.inner.hal.create_device()?;
+        let mut hal_features = yawgpu_hal::HalDeviceFeatures::default();
+        hal_features.atomic_vec2u_min_max = features.contains(&Feature::AtomicVec2uMinMax);
+        let hal = self.inner.hal.create_device_with_features(hal_features)?;
         *consumed = true;
         Ok(Device::from_hal_with_adapter_properties(
             hal,
@@ -238,6 +246,10 @@ pub enum Feature {
     ClipDistances,
     /// WGSL primitive index support.
     PrimitiveIndex,
+    /// Compressed textures with dimensions that are not whole texel blocks.
+    TextureCompressionUnaligned,
+    /// WGSL `atomic_vec2u_min_max` support for 64-bit min/max atomics.
+    AtomicVec2uMinMax,
     /// Non-zero first instance support in indirect draws.
     IndirectFirstInstance,
     /// Texture component swizzle support.

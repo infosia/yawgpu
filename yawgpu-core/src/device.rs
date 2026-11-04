@@ -532,6 +532,7 @@ impl Device {
         let dual_source_blending = self.inner.features.contains(&Feature::DualSourceBlending);
         let clip_distances = self.inner.features.contains(&Feature::ClipDistances);
         let primitive_index = self.inner.features.contains(&Feature::PrimitiveIndex);
+        let atomic_vec2u_min_max = self.inner.features.contains(&Feature::AtomicVec2uMinMax);
         let (inner, error) = match source {
             ShaderModuleSource::Wgsl(source) => {
                 match ShaderModule::from_wgsl(
@@ -542,6 +543,7 @@ impl Device {
                     dual_source_blending,
                     clip_distances,
                     primitive_index,
+                    atomic_vec2u_min_max,
                 ) {
                     Ok(inner) => (inner, None),
                     Err(message) => (ShaderModuleSourceKind::Invalid, Some(message)),
@@ -1324,6 +1326,7 @@ mod tests {
         let bindings = Bindings::default();
         let program = Program::parse(
             DISPATCH_INDIRECT_VALIDATION_WGSL,
+            false,
             false,
             false,
             false,
