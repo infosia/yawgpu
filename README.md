@@ -240,8 +240,6 @@ rustup target add aarch64-linux-android
 
 export ANDROID_NDK_HOME=/path/to/ndk           # e.g. ~/Library/Android/sdk/ndk/30.0.14904198
 export NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64/bin"
-# Not `SYSROOT`: clippy-driver reads that variable as the Rust sysroot, and
-# `cargo clippy` then fails with "can't find crate for `std`".
 export NDK_SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64/sysroot"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android24-clang"
 export CC_aarch64_linux_android="$NDK_BIN/aarch64-linux-android24-clang"
