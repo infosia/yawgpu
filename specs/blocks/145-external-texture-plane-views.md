@@ -92,6 +92,20 @@ reference-only.
 Review fixes, which remove duplicated slot fields and reuse one Metal view for a
 one-plane external texture.
 
+### Windows native Vulkan (2026-11-05)
+
+Run on Windows 11, NVIDIA GeForce RTX 5060 Ti, driver 617.14, Vulkan 1.4.351, at yawgpu
+`ebd97f8`. The Khronos validation layer was on for the HAL and e2e runs. External textures
+are Metal-only, so on Vulkan this checks that the shared core lowering and the Vulkan HAL
+changes break nothing.
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace` | 1,434 passed, 0 failed |
+| clippy `-D warnings`, default (workspace) and `vulkan,tiled` (`yawgpu-core`, `yawgpu-hal`, `yawgpu`), all targets | clean |
+| Vulkan HAL ignored tests | 82 passed, 0 failed, 0 VUIDs |
+| Vulkan e2e (every integration test, `vulkan,tiled,shader-passthrough`, `--ignored`) | 171 passed, 0 failed, 0 VUIDs, including `vulkan_external_texture_pipeline_reports_internal_error_without_panic` |
+
 ## Phase Review
 
 | ID | Finding | Disposition |
