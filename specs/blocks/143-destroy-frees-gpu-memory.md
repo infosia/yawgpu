@@ -165,6 +165,17 @@ Those fixes touch the occlusion-query lowering race, comments, the mapped-range 
 the C API, and the Noop queue; `webgpu:api,*` and `webgpu:api,validation,buffer,*`
 (497 / fail 0) ran again after them.
 
+### Windows native Vulkan (2026-11-05)
+
+Run on Windows 11, NVIDIA GeForce RTX 5060 Ti, driver 617.14, Vulkan 1.4.351, at yawgpu
+`c7d9acd` plus the Windows test-build fix (see below). The Khronos validation layer was on.
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace` | 1,426 passed, 0 failed |
+| Vulkan e2e (every integration test, `--ignored`) | 171 passed, 0 failed, 0 VUIDs |
+| `e2e_vulkan_destroy_memory` | `vulkan_destroy_releases_memory` and `vulkan_destroy_while_in_flight` pass with no validation output |
+
 ## Phase Review
 
 | ID | Finding | Disposition |

@@ -151,6 +151,18 @@ The CTS ran on the library before the Phase Review fixes. Those fixes move tests
 test expectations, add a pure helper for the Metal range, and share one HAL bounds helper
 between Metal and Vulkan; the e2e and workspace gates above ran after them.
 
+### Windows native Vulkan (2026-11-05)
+
+Run on Windows 11, NVIDIA GeForce RTX 5060 Ti, driver 617.14, Vulkan 1.4.351, at yawgpu
+`c7d9acd` plus the Windows test-build fix (see below). The Khronos validation layer was on.
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace` | 1,426 passed, 0 failed |
+| Vulkan HAL ignored tests | 82 passed, 0 failed, 0 VUIDs |
+| Vulkan e2e (every integration test, `vulkan,tiled,shader-passthrough`, `--ignored`) | 171 passed, 0 failed, 0 VUIDs |
+| `e2e_vulkan_dawn_features` | 4 of 4. The adapter advertises `texture-compression-unaligned` and `atomic-vec2u-min-max`, so `vulkan_atomic_vec2u_min_max_readback`, which skips on MoltenVK, ran and passed here |
+
 ## Phase Review
 
 | ID | Finding | Disposition |

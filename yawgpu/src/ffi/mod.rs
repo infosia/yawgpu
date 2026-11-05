@@ -3929,12 +3929,15 @@ mod tests {
         }
     }
 
+    // All WGPU*Status aliases share the platform's C enum integer type.
+    type CallbackStatus = native::WGPURequestDeviceStatus;
+
     #[derive(Default)]
     struct ReadyReentryState {
         instance: native::WGPUInstance,
         device: native::WGPUDevice,
         fired: usize,
-        status: u32,
+        status: CallbackStatus,
         locks_free: bool,
         nested: PopErrorScopeState,
         thread: Option<std::thread::ThreadId>,
@@ -4269,7 +4272,7 @@ mod tests {
         buffer: native::WGPUBuffer,
         shader: native::WGPUShaderModule,
         fired: usize,
-        status: u32,
+        status: CallbackStatus,
         locks_free: bool,
         released: bool,
         info_present: bool,
