@@ -97,6 +97,7 @@ file is created.
 | `140-review-minors-and-metal-subgroups.md` | Review MINORs and Metal subgroup parity |
 | `141-metal-subgroups-gate-and-dawn-features.md` | Metal subgroups gate; `texture-compression-unaligned` and `atomic-vec2u-min-max` |
 | `142-metal-private-textures.md` | Metal textures use private storage |
+| `143-destroy-frees-gpu-memory.md` | `destroy()` frees GPU memory |
 
 Vendor-extension blocks (33, 55) are **not** Dawn ports — their rules are
 exercised by direct unit tests (principle 1) + GPU-gated e2e, and they live
