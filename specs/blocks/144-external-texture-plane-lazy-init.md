@@ -25,7 +25,7 @@ Dawn expands an external-texture binding into its plane texture bindings, and cl
 them like any other sampled texture.
 
 External textures are implemented on Metal only; Vulkan rejects a pipeline that uses
-one (Block F-060), and GLES has no lowering.
+one (Block F-060), and GLES has no lowering. (Block 146 later added Vulkan support.)
 
 ## Rules
 

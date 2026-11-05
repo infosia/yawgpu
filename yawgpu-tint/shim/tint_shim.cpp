@@ -616,17 +616,19 @@ static_assert(offsetof(YawgpuTintBindingRemap, dst_group) == 8,
 static_assert(offsetof(YawgpuTintBindingRemap, dst_binding) == 12,
               "YawgpuTintBindingRemap layout changed");
 
-static_assert(sizeof(YawgpuTintExternalTextureRemap) == 20,
+static_assert(sizeof(YawgpuTintExternalTextureRemap) == 24,
               "YawgpuTintExternalTextureRemap layout changed");
 static_assert(offsetof(YawgpuTintExternalTextureRemap, src_group) == 0,
               "YawgpuTintExternalTextureRemap layout changed");
 static_assert(offsetof(YawgpuTintExternalTextureRemap, src_binding) == 4,
               "YawgpuTintExternalTextureRemap layout changed");
-static_assert(offsetof(YawgpuTintExternalTextureRemap, plane0_slot) == 8,
+static_assert(offsetof(YawgpuTintExternalTextureRemap, dst_group) == 8,
               "YawgpuTintExternalTextureRemap layout changed");
-static_assert(offsetof(YawgpuTintExternalTextureRemap, plane1_slot) == 12,
+static_assert(offsetof(YawgpuTintExternalTextureRemap, plane0_slot) == 12,
               "YawgpuTintExternalTextureRemap layout changed");
-static_assert(offsetof(YawgpuTintExternalTextureRemap, params_slot) == 16,
+static_assert(offsetof(YawgpuTintExternalTextureRemap, plane1_slot) == 16,
+              "YawgpuTintExternalTextureRemap layout changed");
+static_assert(offsetof(YawgpuTintExternalTextureRemap, params_slot) == 20,
               "YawgpuTintExternalTextureRemap layout changed");
 
 static_assert(sizeof(YawgpuTintInputAttachmentColorIndex) == 12,
@@ -1123,9 +1125,9 @@ tint::Bindings make_bindings(const YawgpuTintBindings* bindings) {
             const auto& e = bindings->external_texture[i];
             out.external_texture[tint::BindingPoint{e.src_group, e.src_binding}] =
                 tint::ExternalMultiplanarTexture{
-                    /*metadata=*/tint::BindingPoint{0u, e.params_slot},
-                    /*plane0=*/tint::BindingPoint{0u, e.plane0_slot},
-                    /*plane1=*/tint::BindingPoint{0u, e.plane1_slot},
+                    /*metadata=*/tint::BindingPoint{e.dst_group, e.params_slot},
+                    /*plane0=*/tint::BindingPoint{e.dst_group, e.plane0_slot},
+                    /*plane1=*/tint::BindingPoint{e.dst_group, e.plane1_slot},
                 };
         }
     }

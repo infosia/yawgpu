@@ -100,6 +100,7 @@ struct MslCodegenKey {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SpirvCodegenKey {
+    external_texture: Vec<yawgpu_tint::ExternalTextureRemap>,
     emit_vertex_point_size: bool,
     // Includes use_spirv_1_4: the module version participates in cache identity.
     workarounds: yawgpu_tint::SpirvWorkarounds,
@@ -389,9 +390,11 @@ impl ReflectedModule {
         use_storage_input_output_16: bool,
         emit_vertex_point_size: bool,
         workarounds: yawgpu_hal::HalShaderWorkarounds,
+        external_texture: &[yawgpu_tint::ExternalTextureRemap],
     ) -> Result<Vec<u32>, String> {
         let workarounds = tint_spirv_workarounds(workarounds);
         let key = SpirvCodegenKey {
+            external_texture: external_texture.to_vec(),
             emit_vertex_point_size,
             workarounds,
             entry_point: entry_name.to_owned(),
@@ -416,7 +419,10 @@ impl ReflectedModule {
             .program
             .generate_spirv(
                 entry_name,
-                &yawgpu_tint::Bindings::default(),
+                &yawgpu_tint::Bindings {
+                    external_texture: external_texture.to_vec(),
+                    ..Default::default()
+                },
                 &override_values(pipeline_constants),
                 true,
                 vulkan_memory_model,
@@ -1399,6 +1405,7 @@ fn tint_bindings_for_msl(
                             .push(yawgpu_tint::ExternalTextureRemap {
                                 group: binding.group,
                                 binding: binding.binding,
+                                dst_group: 0,
                                 plane0_slot: binding.metal_index,
                                 plane1_slot: binding.metal_index + 1,
                                 params_slot,
@@ -2100,6 +2107,7 @@ mod tests {
                         true,
                         false,
                         flags,
+                        &[],
                     )
                     .unwrap();
                 assert_eq!(module.codegen_miss_count(), 11 + i + 1);
@@ -2172,6 +2180,7 @@ mod tests {
                     enabled,
                     false,
                     Default::default(),
+                    &[],
                 )
                 .unwrap();
             let mut i = 5;
@@ -2478,6 +2487,52 @@ fn fs() -> @builtin(sample_mask) u32 {
     }
 
     #[test]
+    fn generate_spirv_external_texture_map_participates_in_cache_key() {
+        let module = parse_and_validate_wgsl(
+            r#"
+@group(1) @binding(3) var tex: texture_external;
+@group(0) @binding(0) var<storage, read_write> output: vec4f;
+@compute @workgroup_size(1) fn cs() { output = textureLoad(tex, vec2u(0)); }
+"#,
+        )
+        .unwrap();
+        let mut remap = yawgpu_tint::ExternalTextureRemap {
+            group: 1,
+            binding: 3,
+            dst_group: 1,
+            plane0_slot: 3,
+            plane1_slot: 4,
+            params_slot: 5,
+        };
+        let mut outputs = Vec::new();
+        for plane1 in [4, 8, 4] {
+            remap.plane1_slot = plane1;
+            outputs.push(
+                module
+                    .generate_spirv(
+                        "cs",
+                        ShaderStage::Compute,
+                        &PipelineConstants::default(),
+                        false,
+                        0,
+                        false,
+                        None,
+                        false,
+                        0,
+                        true,
+                        false,
+                        Default::default(),
+                        &[remap],
+                    )
+                    .unwrap(),
+            );
+        }
+        assert_eq!(outputs[0], outputs[2]);
+        assert_ne!(outputs[0], outputs[1]);
+        assert_eq!(module.codegen_miss_count(), 2);
+    }
+
+    #[test]
     fn generate_spirv_memoizes_identical_requests() {
         let module = parse_and_validate_wgsl(
             r#"
@@ -2502,6 +2557,7 @@ fn cs() {}
                 true,
                 false,
                 Default::default(),
+                &[],
             )
             .unwrap();
         let second = module
@@ -2518,6 +2574,7 @@ fn cs() {}
                 true,
                 false,
                 Default::default(),
+                &[],
             )
             .unwrap();
         assert_eq!(first, second);
@@ -2537,6 +2594,7 @@ fn cs() {}
                 true,
                 false,
                 Default::default(),
+                &[],
             )
             .unwrap();
         assert_eq!(module.codegen_miss_count(), 2);
@@ -3454,6 +3512,7 @@ fn cs() {}
             true,
             false,
             Default::default(),
+            &[],
         )
         .unwrap();
         assert_eq!(compute.first().copied(), Some(0x0723_0203));
@@ -3493,6 +3552,7 @@ fn fs() -> @location(0) vec4<f32> {
                 true,
                 false,
                 Default::default(),
+                &[],
             )
             .unwrap();
         let fragment = render
@@ -3509,6 +3569,7 @@ fn fs() -> @location(0) vec4<f32> {
                 true,
                 false,
                 Default::default(),
+                &[],
             )
             .unwrap();
         assert_eq!(vertex.first().copied(), Some(0x0723_0203));
@@ -3603,6 +3664,7 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
                             false,
                             false,
                             flags,
+                            &[],
                         )
                         .unwrap();
                     assert_eq!(words[1], if enabled { 0x00010400 } else { 0x00010300 });
@@ -3665,6 +3727,7 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
                         true,
                         point_size,
                         flags,
+                        &[],
                     )
                     .unwrap();
             }
@@ -3757,6 +3820,7 @@ struct Out { @builtin(frag_depth) depth: f32 }
                         true,
                         false,
                         Default::default(),
+                        &[],
                     )
                     .unwrap()
             };
@@ -3803,6 +3867,7 @@ fn cs() {
                     true,
                     false,
                     Default::default(),
+                    &[],
                 )
                 .unwrap();
             assert_eq!(spirv.first().copied(), Some(0x0723_0203));

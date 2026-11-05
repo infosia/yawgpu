@@ -2956,6 +2956,7 @@ mod tests {
         ]
         .into_iter()
         .map(|(binding, ty)| MetalBufferBinding {
+            vulkan_external_bindings: None,
             group: 0,
             binding,
             metal_index: binding,

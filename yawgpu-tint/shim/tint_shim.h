@@ -251,9 +251,10 @@ typedef struct {
 typedef struct {
     uint32_t src_group;     /* WGSL group of the texture_external */
     uint32_t src_binding;   /* WGSL binding of the texture_external */
-    uint32_t plane0_slot;   /* MSL texture slot for plane 0 */
-    uint32_t plane1_slot;   /* MSL texture slot for plane 1 */
-    uint32_t params_slot;   /* MSL buffer slot for the params (metadata) UBO */
+    uint32_t dst_group;     /* Destination group (zero for MSL) */
+    uint32_t plane0_slot;   /* Backend texture binding for plane 0 */
+    uint32_t plane1_slot;   /* Backend texture binding for plane 1 */
+    uint32_t params_slot;   /* Backend buffer binding for the params (metadata) UBO */
 } YawgpuTintExternalTextureRemap;
 
 typedef struct {

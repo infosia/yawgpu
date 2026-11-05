@@ -874,32 +874,35 @@ const _: () = {
     assert!(core::mem::offset_of!(BindingRemap, dst_binding) == 12);
 };
 
-/// A texture_external remap from the WGSL binding point to Metal texture and metadata slots.
+/// A texture_external remap to backend plane and metadata bindings.
 ///
 /// `#[repr(C)]`; see [`BindingRemap`]'s doc comment for the direct-FFI
 /// convention this follows (layout pinned to `YawgpuTintExternalTextureRemap`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub struct ExternalTextureRemap {
     /// WGSL bind group of the texture_external.
     pub group: u32,
     /// WGSL binding of the texture_external.
     pub binding: u32,
-    /// Metal texture slot for plane 0.
+    /// Destination bind group (zero for Metal).
+    pub dst_group: u32,
+    /// Backend texture binding for plane 0.
     pub plane0_slot: u32,
-    /// Metal texture slot for plane 1.
+    /// Backend texture binding for plane 1.
     pub plane1_slot: u32,
-    /// Metal buffer slot for the external-texture metadata UBO.
+    /// Backend buffer binding for the external-texture metadata UBO.
     pub params_slot: u32,
 }
 
 const _: () = {
-    assert!(core::mem::size_of::<ExternalTextureRemap>() == 20);
+    assert!(core::mem::size_of::<ExternalTextureRemap>() == 24);
     assert!(core::mem::offset_of!(ExternalTextureRemap, group) == 0);
     assert!(core::mem::offset_of!(ExternalTextureRemap, binding) == 4);
-    assert!(core::mem::offset_of!(ExternalTextureRemap, plane0_slot) == 8);
-    assert!(core::mem::offset_of!(ExternalTextureRemap, plane1_slot) == 12);
-    assert!(core::mem::offset_of!(ExternalTextureRemap, params_slot) == 16);
+    assert!(core::mem::offset_of!(ExternalTextureRemap, dst_group) == 8);
+    assert!(core::mem::offset_of!(ExternalTextureRemap, plane0_slot) == 12);
+    assert!(core::mem::offset_of!(ExternalTextureRemap, plane1_slot) == 16);
+    assert!(core::mem::offset_of!(ExternalTextureRemap, params_slot) == 20);
 };
 
 /// An input_attachment mapping from the WGSL binding point to a Metal color slot.
@@ -7006,6 +7009,7 @@ fn vs(@location(0) p: vec4f) -> @builtin(position) vec4f {
             external_texture: vec![ExternalTextureRemap {
                 group: 0,
                 binding: 1,
+                dst_group: 0,
                 plane0_slot: 0,
                 plane1_slot: 1,
                 params_slot: 0,
@@ -7375,6 +7379,98 @@ override i: i32 = -3i;
     }
 
     #[test]
+    fn external_texture_remap_generates_spirv_in_its_own_group() {
+        let program = Program::parse(
+            r#"
+@group(2) @binding(7) var tex: texture_external;
+@group(0) @binding(0) var<storage, read_write> output: vec4f;
+@compute @workgroup_size(1) fn cs() { output = textureLoad(tex, vec2u(0)); }
+"#,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let bindings = Bindings {
+            external_texture: vec![ExternalTextureRemap {
+                group: 2,
+                binding: 7,
+                dst_group: 2,
+                plane0_slot: 7,
+                plane1_slot: 8,
+                params_slot: 9,
+            }],
+            ..Default::default()
+        };
+        let words = program
+            .generate_spirv(
+                "cs",
+                &bindings,
+                &[],
+                true,
+                false,
+                0,
+                false,
+                None,
+                false,
+                0,
+                true,
+                false,
+                Default::default(),
+            )
+            .unwrap();
+        let mut sets = std::collections::HashMap::new();
+        let mut slots = std::collections::HashMap::new();
+        let mut storage_classes = std::collections::HashMap::new();
+        let mut blocks = std::collections::HashSet::new();
+        let mut pointers = std::collections::HashMap::new();
+        let mut types = std::collections::HashMap::new();
+        let mut offset = 5;
+        while offset < words.len() {
+            let count = (words[offset] >> 16) as usize;
+            assert!(count > 0 && offset + count <= words.len());
+            let instruction = &words[offset..offset + count];
+            match words[offset] & 0xffff {
+                71 if count == 4 && instruction[2] == 34 => {
+                    sets.insert(instruction[1], instruction[3]);
+                }
+                71 if count == 4 && instruction[2] == 33 => {
+                    slots.insert(instruction[1], instruction[3]);
+                }
+                71 if count == 3 && instruction[2] == 2 => {
+                    blocks.insert(instruction[1]);
+                }
+                32 => {
+                    pointers.insert(instruction[1], instruction[3]);
+                }
+                59 => {
+                    storage_classes.insert(instruction[2], instruction[3]);
+                    types.insert(instruction[2], instruction[1]);
+                }
+                _ => {}
+            }
+            offset += count;
+        }
+        for (binding, storage_class) in [(7, 0), (8, 0), (9, 2)] {
+            let ids = slots
+                .iter()
+                .filter(|(id, slot)| **slot == binding && sets.get(id) == Some(&2))
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>();
+            assert_eq!(ids.len(), 1, "set 2 binding {binding}");
+            assert_eq!(storage_classes[&ids[0]], storage_class);
+            if binding == 9 {
+                assert!(blocks.contains(&pointers[&types[&ids[0]]]));
+            }
+        }
+    }
+
+    #[test]
     fn external_texture_remap_generates_msl() {
         let wgsl = r#"
 @group(0) @binding(0) var s: sampler;
@@ -7397,6 +7493,7 @@ fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
             external_texture: vec![ExternalTextureRemap {
                 group: 0,
                 binding: 1,
+                dst_group: 0,
                 plane0_slot: 0,
                 plane1_slot: 1,
                 params_slot: 0,

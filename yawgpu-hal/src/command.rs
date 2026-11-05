@@ -403,6 +403,10 @@ pub struct HalBoundSampler {
 /// Wraps a bound external texture for the selected backend.
 #[derive(Debug, Clone)]
 pub struct HalBoundExternalTexture {
+    /// Vulkan binding of plane1 in this bind group; required only on Vulkan.
+    pub vulkan_plane1_binding: Option<u32>,
+    /// Vulkan binding of the params uniform buffer; required only on Vulkan.
+    pub vulkan_params_binding: Option<u32>,
     /// Group.
     pub group: u32,
     /// Binding.
@@ -975,6 +979,8 @@ mod external_texture_tests {
             .expect("Noop params buffer");
 
         let binding = HalBoundExternalTexture {
+            vulkan_plane1_binding: Some(3),
+            vulkan_params_binding: Some(4),
             group: 1,
             binding: 2,
             plane0,
@@ -988,6 +994,8 @@ mod external_texture_tests {
         };
         let cloned = binding.clone();
 
+        assert_eq!(cloned.vulkan_plane1_binding, Some(3));
+        assert_eq!(cloned.vulkan_params_binding, Some(4));
         assert_eq!(cloned.group, 1);
         assert_eq!(cloned.binding, 2);
         assert_eq!(cloned.plane0.format, HalTextureFormat::R8Unorm);

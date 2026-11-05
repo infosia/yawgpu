@@ -1899,7 +1899,12 @@ pub(super) fn encode_compute_pass(
             return Err(error);
         }
     };
-    transition_sampled_textures(layouts, device, command_buffer, &pass.bind_textures, &[])?;
+    let mut sampled_textures = pass.bind_textures.clone();
+    for external in &pass.bind_external_textures {
+        let (planes, _) = super::pipeline::external_texture_resources(external)?;
+        sampled_textures.extend(planes);
+    }
+    transition_sampled_textures(layouts, device, command_buffer, &sampled_textures, &[])?;
     transition_storage_textures(layouts, device, command_buffer, &pass.bind_textures, &[])?;
     record_memory_barrier(
         device,
@@ -3513,7 +3518,7 @@ pub(super) fn encode_render_pass_command_stream(
     pass: &HalRenderPassCommandStream,
 ) -> Result<RenderPassTemps, HalError> {
     let mut bind_textures = Vec::new();
-    collect_vulkan_stream_textures(&pass.commands, &mut bind_textures);
+    collect_vulkan_stream_textures(&pass.commands, &mut bind_textures)?;
     encode_render_pass_impl(layouts, device, command_buffer, pass, &bind_textures)
 }
 
@@ -3747,21 +3752,27 @@ fn encode_render_pass_impl(
 fn collect_vulkan_stream_textures(
     commands: &[HalRenderPassCommand],
     textures: &mut Vec<HalBoundTexture>,
-) {
+) -> Result<(), HalError> {
     for command in commands {
         match command {
             HalRenderPassCommand::SetBindGroup {
                 textures: command_textures,
+                external_textures,
                 ..
             } => {
                 textures.extend(command_textures.iter().cloned());
+                for external in external_textures {
+                    let (planes, _) = super::pipeline::external_texture_resources(external)?;
+                    textures.extend(planes);
+                }
             }
             HalRenderPassCommand::ExecuteRenderBundle(bundle) => {
-                collect_vulkan_stream_textures(&bundle.commands, textures);
+                collect_vulkan_stream_textures(&bundle.commands, textures)?;
             }
             _ => {}
         }
     }
+    Ok(())
 }
 
 fn vulkan_stream_query_set(
@@ -3891,7 +3902,7 @@ fn encode_vulkan_render_commands(
                 buffers,
                 textures,
                 samplers,
-                ..
+                external_textures,
             } => {
                 state.bind_buffers.retain(|binding| binding.group != *index);
                 state
@@ -3903,6 +3914,11 @@ fn encode_vulkan_render_commands(
                 state.bind_buffers.extend(buffers.iter().cloned());
                 state.bind_textures.extend(textures.iter().cloned());
                 state.bind_samplers.extend(samplers.iter().cloned());
+                for external in external_textures {
+                    let (planes, params) = super::pipeline::external_texture_resources(external)?;
+                    state.bind_textures.extend(planes);
+                    state.bind_buffers.push(params);
+                }
                 state.descriptors_dirty = true;
             }
             HalRenderPassCommand::SetVertexBuffer { slot, buffer } => {
@@ -6585,6 +6601,79 @@ mod tests {
     }
 
     #[test]
+    fn external_texture_expansion_preserves_descriptor_resources_and_view_ranges() {
+        let device = crate::HalDevice::Noop(noop::NoopDevice::new());
+        let buffer = device
+            .create_buffer(
+                512,
+                crate::HalBufferUsage {
+                    uniform: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let mut external = bound_external_texture(
+            dummy_texture(HalTextureFormat::Rgba8Unorm),
+            dummy_texture(HalTextureFormat::Rgba8Unorm),
+            buffer,
+        );
+        external.group = 2;
+        external.binding = 7;
+        external.vulkan_plane1_binding = Some(11);
+        external.vulkan_params_binding = Some(12);
+        external.params_offset = 16;
+        external.params_size = 296;
+        external.plane0.base_mip_level = 1;
+        external.plane1.base_array_layer = 2;
+        let (planes, params) =
+            super::super::pipeline::external_texture_resources(&external).unwrap();
+        assert_eq!((planes[0].group, planes[0].binding), (2, 7));
+        assert_eq!((planes[1].group, planes[1].binding), (2, 11));
+        assert_eq!(
+            (params.group, params.binding, params.offset, params.size),
+            (2, 12, 16, 296)
+        );
+        assert_eq!(planes[0].base_mip_level, 1);
+        assert_eq!(planes[1].base_array_layer, 2);
+        assert!(planes.iter().all(|plane| plane.storage_access.is_none()));
+        let commands = [HalRenderPassCommand::SetBindGroup {
+            index: 2,
+            buffers: vec![],
+            textures: vec![],
+            samplers: vec![],
+            external_textures: vec![external],
+        }];
+        let mut collected = Vec::new();
+        collect_vulkan_stream_textures(&commands, &mut collected).unwrap();
+        assert_eq!(collected.len(), 2);
+        assert_eq!(collected[0].base_mip_level, 1);
+        assert_eq!(collected[1].base_array_layer, 2);
+    }
+
+    #[test]
+    fn external_texture_expansion_rejects_missing_vulkan_bindings() {
+        let device = crate::HalDevice::Noop(noop::NoopDevice::new());
+        let buffer = device
+            .create_buffer(512, crate::HalBufferUsage::default())
+            .unwrap();
+        for (plane1, params, message) in [
+            (None, Some(4), "plane1 binding"),
+            (Some(3), None, "params binding"),
+            (None, None, "plane1 binding"),
+        ] {
+            let mut external = bound_external_texture(
+                dummy_texture(HalTextureFormat::Rgba8Unorm),
+                dummy_texture(HalTextureFormat::Rgba8Unorm),
+                buffer.clone(),
+            );
+            external.vulkan_plane1_binding = plane1;
+            external.vulkan_params_binding = params;
+            let error = super::super::pipeline::external_texture_resources(&external).unwrap_err();
+            assert!(error.to_string().contains(message));
+        }
+    }
+
+    #[test]
     fn sampled_binding_shares_storage_rejects_storage_query() {
         let mut storage = bound_texture(dummy_texture(HalTextureFormat::Rgba8Unorm));
         storage.storage_access = Some(crate::HalStorageTextureAccess::ReadOnly);
@@ -6679,6 +6768,8 @@ mod tests {
         params: HalBuffer,
     ) -> HalBoundExternalTexture {
         HalBoundExternalTexture {
+            vulkan_plane1_binding: Some(3),
+            vulkan_params_binding: Some(4),
             group: 0,
             binding: 2,
             plane0: bound_texture(plane0),

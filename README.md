@@ -155,12 +155,13 @@ For GLES, an additional chain entry `YaWGPUGlesContextBackend` pins the context
 backend to EGL or WGL (Windows-only) programmatically, taking precedence over
 the `YAWGPU_GLES_BACKEND` environment variable.
 
-### External textures (Metal, experimental)
+### External textures (Metal and Vulkan, experimental)
 
 `yawgpuDeviceCreateExternalTexture` creates a `WGPUExternalTexture` from one
 plane (RGBA) or two planes (NV12, with YUV→RGB conversion). It is experimental
-and implemented on **Metal only**; on Vulkan, a pipeline that uses an external
-texture is rejected deterministically with a device error.
+and implemented on **Metal and Vulkan**. GLES has no lowering, and a tiled
+(multi-subpass) pipeline that uses an external texture is rejected with a device
+error.
 
 ### Tiled rendering (TBDR / multi-subpass) — `tiled`
 
@@ -489,7 +490,8 @@ identically — a CTS port quirk, not a yawgpu defect.
 
 ‡ On both hosts, all 117 fails are documented non-defects, each cross-checked
 against a Dawn-Vulkan oracle on the same GPU (e.g. the spec-in-flux per-sample
-`sample_mask` builtin, and `external_texture` being Metal-only by design). They
+`sample_mask` builtin, and `external_texture` render pipelines, which Vulkan
+rejected at the time of that sweep and now supports). They
 are carried as `xfail`, so the suite exits `fail = 0`.
 
 Shader conformance falls out **by construction**: yawgpu compiles WGSL with the

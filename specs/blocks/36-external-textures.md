@@ -171,7 +171,9 @@ GPU e2e authored by Claude):
   not supported on the Vulkan backend") **before any SPIR-V reaches a driver** — making the rejection
   device-independent and the `e2e_vulkan_external_texture` contract hold on every GPU. (Re-homing
   external textures onto Vulkan would require setting up the multiplanar plane/params bindings on the
-  Vulkan HAL, not just relying on the driver to accept Tint's SPIR-V.)
+  Vulkan HAL, not just relying on the driver to accept Tint's SPIR-V.) **Superseded by Block 146
+  (2026-11-05):** Vulkan now sets up those bindings and supports external textures; the rejection is
+  removed.
 - **R10** ☑ End-to-end on real **Metal** (`yawgpu/tests/e2e_metal_external_texture.rs`): **Rgba**
   passthrough (`doYuvToRgbConversionOnly=1`) round-trips the source colour, and **Nv12** (2-plane
   R8 luma + RG8 chroma) with an identity `yuvToRgbConversionMatrix` recombines (Y,U,V)→(R,G,B). The

@@ -1,8 +1,8 @@
 use super::*;
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
 use crate::{
-    HalComponentSwizzle, HalTextureAspect, HalTextureComponentSwizzle, HalTextureDimension,
-    HalTextureViewDimension,
+    HalBoundExternalTexture, HalComponentSwizzle, HalTextureAspect, HalTextureComponentSwizzle,
+    HalTextureDimension, HalTextureViewDimension,
 };
 
 /// Byte size of the pixel-center polyfill / frag-depth clamp depth-range
@@ -1577,6 +1577,13 @@ pub(super) fn update_compute_descriptor_sets(
     if pipeline.inner.descriptor_bindings.is_empty() {
         return Ok(Vec::new());
     }
+    let mut buffers = pass.bind_buffers.clone();
+    let mut textures = pass.bind_textures.clone();
+    for external in &pass.bind_external_textures {
+        let (planes, params) = external_texture_resources(external)?;
+        textures.extend(planes);
+        buffers.push(params);
+    }
     let mut buffer_infos = Vec::new();
     let mut image_infos = Vec::new();
     let mut image_views = Vec::new();
@@ -1585,7 +1592,7 @@ pub(super) fn update_compute_descriptor_sets(
         {
             let mut scratch = DescriptorUpdateScratch {
                 device,
-                pass_textures: &pass.bind_textures,
+                pass_textures: &textures,
                 buffer_infos: &mut buffer_infos,
                 image_infos: &mut image_infos,
                 image_views: &mut image_views,
@@ -1593,8 +1600,8 @@ pub(super) fn update_compute_descriptor_sets(
             for descriptor in &pipeline.inner.descriptor_bindings {
                 let info = descriptor_info(
                     descriptor,
-                    &pass.bind_buffers,
-                    &pass.bind_textures,
+                    &buffers,
+                    &textures,
                     &pass.bind_samplers,
                     &mut scratch,
                     "compute",
@@ -1634,6 +1641,36 @@ pub(super) fn create_render_descriptor_pool(
         pipeline.inner.descriptor_set_layouts.len(),
         &pipeline.inner.descriptor_bindings,
     )
+}
+
+/// Expands a bound external texture into ordinary sampled images and a uniform buffer.
+/// Reusing the ordinary descriptor path also preserves view ranges and layout policy.
+pub(super) fn external_texture_resources(
+    bound: &HalBoundExternalTexture,
+) -> Result<([HalBoundTexture; 2], HalBoundBuffer), HalError> {
+    let plane1_binding = bound
+        .vulkan_plane1_binding
+        .ok_or_else(|| shader_error("Vulkan external texture is missing the plane1 binding"))?;
+    let params_binding = bound
+        .vulkan_params_binding
+        .ok_or_else(|| shader_error("Vulkan external texture is missing the params binding"))?;
+    let mut plane0 = bound.plane0.clone();
+    plane0.group = bound.group;
+    plane0.binding = bound.binding;
+    let mut plane1 = bound.plane1.clone();
+    plane1.group = bound.group;
+    plane1.binding = plane1_binding;
+    let params = HalBoundBuffer {
+        group: bound.group,
+        binding: params_binding,
+        metal_index: bound.params_metal_index,
+        vertex_metal_index: bound.params_vertex_metal_index,
+        fragment_metal_index: bound.params_fragment_metal_index,
+        buffer: bound.params.clone(),
+        offset: bound.params_offset,
+        size: bound.params_size,
+    };
+    Ok(([plane0, plane1], params))
 }
 
 /// Returns update render descriptor sets.
@@ -2316,6 +2353,65 @@ pub(super) fn descriptor_buffer_info(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn external_texture_descriptor_writes_target_two_images_and_uniform_in_one_set() {
+        use ash::vk::Handle;
+        let set = vk::DescriptorSet::from_raw(77);
+        let plane0 = vk::ImageView::from_raw(101);
+        let plane1 = vk::ImageView::from_raw(102);
+        let params = vk::Buffer::from_raw(103);
+        let images = [
+            vk::DescriptorImageInfo::default()
+                .image_view(plane0)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+            vk::DescriptorImageInfo::default()
+                .image_view(plane1)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+        ];
+        let buffers = [vk::DescriptorBufferInfo::default()
+            .buffer(params)
+            .offset(16)
+            .range(296)];
+        let specs = [
+            (
+                DescriptorInfo::Image(0),
+                1,
+                3,
+                vk::DescriptorType::SAMPLED_IMAGE,
+            ),
+            (
+                DescriptorInfo::Image(1),
+                1,
+                8,
+                vk::DescriptorType::SAMPLED_IMAGE,
+            ),
+            (
+                DescriptorInfo::Buffer(0),
+                1,
+                9,
+                vk::DescriptorType::UNIFORM_BUFFER,
+            ),
+        ];
+        let writes =
+            build_descriptor_writes(&[vk::DescriptorSet::null(), set], &buffers, &images, &specs)
+                .unwrap();
+        for (write, binding) in writes.iter().zip([3, 8, 9]) {
+            assert_eq!(write.dst_set, set);
+            assert_eq!(write.dst_binding, binding);
+            assert_eq!(write.descriptor_count, 1);
+        }
+        assert_eq!(writes[0].descriptor_type, vk::DescriptorType::SAMPLED_IMAGE);
+        assert_eq!(writes[1].descriptor_type, vk::DescriptorType::SAMPLED_IMAGE);
+        assert_eq!(
+            writes[2].descriptor_type,
+            vk::DescriptorType::UNIFORM_BUFFER
+        );
+        assert_eq!(writes[0].p_image_info, &images[0] as *const _);
+        assert_eq!(writes[1].p_image_info, &images[1] as *const _);
+        assert_eq!(writes[2].p_buffer_info, &buffers[0] as *const _);
+        assert!(build_descriptor_writes(&[], &buffers, &images, &specs).is_err());
+    }
+
     #[test]
     fn fragment_subgroup_flags_follow_enabled_size_control() {
         assert_eq!(

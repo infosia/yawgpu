@@ -3079,6 +3079,8 @@ fn hal_bind_resource(
             resources.external_textures.push(HalBoundExternalTexture {
                 group: binding.group,
                 binding: binding.binding,
+                vulkan_plane1_binding: binding.vulkan_external_bindings.map(|bindings| bindings.0),
+                vulkan_params_binding: binding.vulkan_external_bindings.map(|bindings| bindings.1),
                 plane0: hal_bound_texture(binding, plane0, None)?,
                 plane1: hal_bound_texture(
                     &MetalBufferBinding {
@@ -4078,6 +4080,20 @@ fn fs() -> @location(0) vec4<f32> {
         external_texture: Arc<ExternalTexture>,
         stage_slots: (Option<u32>, Option<u32>),
     ) -> HalBoundResources {
+        lower_external_texture_with_vulkan_bindings(
+            device,
+            external_texture,
+            stage_slots,
+            Some((4, 5)),
+        )
+    }
+
+    fn lower_external_texture_with_vulkan_bindings(
+        device: &Device,
+        external_texture: Arc<ExternalTexture>,
+        stage_slots: (Option<u32>, Option<u32>),
+        vulkan_external_bindings: Option<(u32, u32)>,
+    ) -> HalBoundResources {
         let (vertex_metal_index, fragment_metal_index) = stage_slots;
         let visibility = match stage_slots {
             (None, None) => SHADER_STAGE_COMPUTE,
@@ -4117,6 +4133,7 @@ fn fs() -> @location(0) vec4<f32> {
         hal_bind_resources(
             &[layout],
             &[MetalBufferBinding {
+                vulkan_external_bindings,
                 group: 0,
                 binding: 3,
                 metal_index: 4,
@@ -4141,36 +4158,50 @@ fn fs() -> @location(0) vec4<f32> {
             (None, Some(20)),
             (Some(10), Some(20)),
         ] {
-            let resources =
-                lower_external_texture(&device, rgba_external_texture(&device), stage_slots);
+            for vulkan_bindings in [None, Some((4, 5))] {
+                let resources = lower_external_texture_with_vulkan_bindings(
+                    &device,
+                    rgba_external_texture(&device),
+                    stage_slots,
+                    vulkan_bindings,
+                );
 
-            assert!(resources.buffers.is_empty());
-            assert!(resources.textures.is_empty());
-            assert!(resources.samplers.is_empty());
-            assert_eq!(resources.external_textures.len(), 1);
-            let binding = &resources.external_textures[0];
-            assert_eq!(binding.group, 0);
-            assert_eq!(binding.binding, 3);
-            assert_eq!(binding.plane0.metal_index, 4);
-            assert_eq!(binding.plane1.metal_index, 5);
-            assert_eq!(binding.plane0.vertex_metal_index, stage_slots.0);
-            assert_eq!(
-                binding.plane1.vertex_metal_index,
-                stage_slots.0.map(|slot| slot + 1)
-            );
-            assert_eq!(binding.plane0.fragment_metal_index, stage_slots.1);
-            assert_eq!(
-                binding.plane1.fragment_metal_index,
-                stage_slots.1.map(|slot| slot + 1)
-            );
-            assert_eq!(binding.params_metal_index, 7);
-            assert_eq!(binding.params_vertex_metal_index, stage_slots.0.map(|_| 12));
-            assert_eq!(
-                binding.params_fragment_metal_index,
-                stage_slots.1.map(|_| 22)
-            );
-            assert_eq!(binding.params_offset, 0);
-            assert_eq!(binding.params_size, ExternalTextureParams::SIZE as u64);
+                assert!(resources.buffers.is_empty());
+                assert!(resources.textures.is_empty());
+                assert!(resources.samplers.is_empty());
+                assert_eq!(resources.external_textures.len(), 1);
+                assert_eq!(
+                    resources.external_textures[0].vulkan_plane1_binding,
+                    vulkan_bindings.map(|bindings| bindings.0)
+                );
+                assert_eq!(
+                    resources.external_textures[0].vulkan_params_binding,
+                    vulkan_bindings.map(|bindings| bindings.1)
+                );
+                let binding = &resources.external_textures[0];
+                assert_eq!(binding.group, 0);
+                assert_eq!(binding.binding, 3);
+                assert_eq!(binding.plane0.metal_index, 4);
+                assert_eq!(binding.plane1.metal_index, 5);
+                assert_eq!(binding.plane0.vertex_metal_index, stage_slots.0);
+                assert_eq!(
+                    binding.plane1.vertex_metal_index,
+                    stage_slots.0.map(|slot| slot + 1)
+                );
+                assert_eq!(binding.plane0.fragment_metal_index, stage_slots.1);
+                assert_eq!(
+                    binding.plane1.fragment_metal_index,
+                    stage_slots.1.map(|slot| slot + 1)
+                );
+                assert_eq!(binding.params_metal_index, 7);
+                assert_eq!(binding.params_vertex_metal_index, stage_slots.0.map(|_| 12));
+                assert_eq!(
+                    binding.params_fragment_metal_index,
+                    stage_slots.1.map(|_| 22)
+                );
+                assert_eq!(binding.params_offset, 0);
+                assert_eq!(binding.params_size, ExternalTextureParams::SIZE as u64);
+            }
         }
     }
 

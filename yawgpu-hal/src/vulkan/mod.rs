@@ -3409,7 +3409,8 @@ diagnostic(off, derivative_uniformity);
                 assert_eq!(atomics.shader_buffer_int64_atomics == vk::TRUE, enabled);
                 assert_eq!(atomics.shader_shared_int64_atomics, vk::FALSE);
                 assert_eq!(
-                    extensions.contains(&vk::KHR_SHADER_ATOMIC_INT64_NAME.as_ptr()),
+                    extension_names_from_pointers(&extensions)
+                        .contains(&vk::KHR_SHADER_ATOMIC_INT64_NAME),
                     enabled && api_version < vk::API_VERSION_1_2
                 );
                 let info = chain_int64_atomics(

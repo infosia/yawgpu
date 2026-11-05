@@ -170,6 +170,8 @@ pub(crate) struct ResolvedComputeWorkgroup {
 /// Stores binding metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MetalBufferBinding {
+    /// Layout-derived plane1 and params binding numbers for Vulkan.
+    pub(crate) vulkan_external_bindings: Option<(u32, u32)>,
     pub(crate) group: u32,
     pub(crate) binding: u32,
     /// Per-kind Metal slot used for compute pipelines and as fallback for render
@@ -211,25 +213,50 @@ pub(crate) enum MetalBindingKind {
     ExternalTexture,
 }
 
-/// Returns the device-independent rejection message when any binding is an
-/// external texture, which the Vulkan (SPIR-V) backend does not support.
-///
-/// yawgpu matches wgpu's posture: external textures are implemented on Metal
-/// only. Tint *can* emit SPIR-V for a `texture_external` binding, but the
-/// generated module relies on the multiplanar-external-texture transform's
-/// expanded bindings (plane textures + params buffer) which yawgpu does not set
-/// up for the Vulkan backend. Whether the resulting SPIR-V is accepted then
-/// depends on the driver (NVIDIA compiles it, Mesa rejects it), so the rejection
-/// must happen here — before any SPIR-V reaches a driver — to be deterministic
-/// across GPUs. The descriptor itself is valid WebGPU, so this is a backend
-/// (`Internal`) error, never a validation error.
-pub(crate) fn vulkan_external_texture_rejection(
-    metal_bindings: &[MetalBufferBinding],
-) -> Option<String> {
-    metal_bindings
+/// Computes Vulkan expansion bindings from the complete layout, independent of entry order.
+pub(crate) fn vulkan_external_texture_expansion(
+    entries: &[crate::bind_group_layout::BindGroupLayoutEntry],
+) -> Result<BTreeMap<u32, (u32, u32)>, String> {
+    let mut external = entries
         .iter()
-        .any(|binding| matches!(binding.kind, MetalBindingKind::ExternalTexture))
-        .then(|| "external textures are not supported on the Vulkan backend".to_owned())
+        .filter(|entry| matches!(entry.kind, Some(BindingLayoutKind::ExternalTexture)))
+        .map(|entry| entry.binding)
+        .collect::<Vec<_>>();
+    external.sort_unstable();
+    let mut result = BTreeMap::new();
+    let mut next = u64::from(entries.iter().map(|entry| entry.binding).max().unwrap_or(0)) + 1;
+    for binding in external {
+        let plane1 = u32::try_from(next)
+            .map_err(|_| "external texture expansion binding overflow".to_owned())?;
+        let params = u32::try_from(next + 1)
+            .map_err(|_| "external texture expansion binding overflow".to_owned())?;
+        result.insert(binding, (plane1, params));
+        next += 2;
+    }
+    Ok(result)
+}
+
+/// Builds the group-aware Tint request using the layout-derived Vulkan numbers.
+pub(crate) fn vulkan_external_texture_remaps(
+    bindings: &[MetalBufferBinding],
+) -> Result<Vec<yawgpu_tint::ExternalTextureRemap>, String> {
+    bindings
+        .iter()
+        .filter(|binding| matches!(binding.kind, MetalBindingKind::ExternalTexture))
+        .map(|binding| {
+            let (plane1_slot, params_slot) = binding
+                .vulkan_external_bindings
+                .ok_or_else(|| "external texture expansion bindings are missing".to_owned())?;
+            Ok(yawgpu_tint::ExternalTextureRemap {
+                group: binding.group,
+                binding: binding.binding,
+                dst_group: binding.group,
+                plane0_slot: binding.binding,
+                plane1_slot,
+                params_slot,
+            })
+        })
+        .collect()
 }
 
 impl ComputePipeline {
@@ -532,9 +559,7 @@ pub(crate) fn select_compute_shader_source(
             if shader_module.msl_passthrough().is_some() {
                 return Err("MSL passthrough shader requires the Metal backend".to_owned());
             }
-            if let Some(message) = vulkan_external_texture_rejection(metal_bindings) {
-                return Err(message);
-            }
+            let external_texture = vulkan_external_texture_remaps(metal_bindings)?;
             let module = shader_module
                 .reflected()
                 .ok_or_else(|| "compute pipeline requires a reflected shader module".to_owned())?;
@@ -551,11 +576,12 @@ pub(crate) fn select_compute_shader_source(
                 use_storage_input_output_16,
                 false,
                 workarounds,
+                &external_texture,
             )?;
             Ok((
                 HalShaderSource::SpirV(spirv),
                 entry_name.to_owned(),
-                hal_descriptor_bindings(metal_bindings),
+                hal_vulkan_descriptor_bindings(metal_bindings),
             ))
         }
         #[cfg(feature = "gles")]
@@ -632,6 +658,30 @@ pub(crate) fn hal_descriptor_bindings(
             },
         })
         .collect()
+}
+
+/// Returns the Vulkan descriptor list including external-texture expansion.
+pub(crate) fn hal_vulkan_descriptor_bindings(
+    bindings: &[MetalBufferBinding],
+) -> Vec<HalDescriptorBinding> {
+    let mut descriptors = hal_descriptor_bindings(bindings);
+    for binding in bindings {
+        if let Some((plane1, params)) = binding.vulkan_external_bindings {
+            descriptors.extend([
+                HalDescriptorBinding {
+                    group: binding.group,
+                    binding: plane1,
+                    kind: HalDescriptorBindingKind::Texture,
+                },
+                HalDescriptorBinding {
+                    group: binding.group,
+                    binding: params,
+                    kind: HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Uniform),
+                },
+            ]);
+        }
+    }
+    descriptors
 }
 
 /// Converts a storage texture access mode into the corresponding HAL value.
@@ -822,6 +872,7 @@ pub(crate) fn metal_buffer_binding_map(
             let metal_index = vertex_metal_index.or(fragment_metal_index).unwrap_or(0);
 
             bindings.push(MetalBufferBinding {
+                vulkan_external_bindings: None,
                 group,
                 binding,
                 metal_index,
@@ -866,6 +917,7 @@ pub(crate) fn metal_buffer_binding_map(
                 }
             };
             bindings.push(MetalBufferBinding {
+                vulkan_external_bindings: None,
                 group,
                 binding,
                 metal_index,
@@ -879,6 +931,16 @@ pub(crate) fn metal_buffer_binding_map(
         }
     }
 
+    for (group, layout) in layouts.iter().enumerate() {
+        // Validated layouts fit within WebGPU's binding-number limits. If an
+        // invalid layout overflows, Vulkan codegen reports the missing expansion.
+        let expansion = vulkan_external_texture_expansion(layout.entries()).unwrap_or_default();
+        for binding in &mut bindings {
+            if usize::try_from(binding.group).ok() == Some(group) {
+                binding.vulkan_external_bindings = expansion.get(&binding.binding).copied();
+            }
+        }
+    }
     bindings
 }
 
@@ -3106,52 +3168,123 @@ fn cs() {
     }
 
     #[test]
-    fn vulkan_external_texture_rejection_detects_external_binding() {
-        let plain = MetalBufferBinding {
-            group: 0,
-            binding: 0,
-            metal_index: 0,
-            ext_params_buffer_slot: None,
-            ext_params_vertex_buffer_slot: None,
-            ext_params_fragment_buffer_slot: None,
-            vertex_metal_index: None,
-            fragment_metal_index: None,
-            kind: MetalBindingKind::Texture,
-        };
-        assert_eq!(vulkan_external_texture_rejection(&[plain]), None);
-
-        let external = MetalBufferBinding {
-            group: 0,
-            binding: 0,
-            metal_index: 0,
-            ext_params_buffer_slot: Some(1),
-            ext_params_vertex_buffer_slot: None,
-            ext_params_fragment_buffer_slot: Some(1),
-            vertex_metal_index: None,
-            fragment_metal_index: Some(0),
-            kind: MetalBindingKind::ExternalTexture,
-        };
-        assert_eq!(
-            vulkan_external_texture_rejection(&[external]).as_deref(),
-            Some("external textures are not supported on the Vulkan backend")
+    fn vulkan_external_texture_numbering_and_requests_follow_layouts() {
+        let device = noop_device();
+        for (entries, expected) in [
+            (vec![], vec![]),
+            (vec![ext_entry(7, SHADER_STAGE_COMPUTE)], vec![(7, (8, 9))]),
+            (
+                vec![
+                    ext_entry(1, SHADER_STAGE_COMPUTE),
+                    buf_entry(9, SHADER_STAGE_COMPUTE),
+                ],
+                vec![(1, (10, 11))],
+            ),
+            (
+                vec![
+                    ext_entry(6, SHADER_STAGE_COMPUTE),
+                    buf_entry(12, SHADER_STAGE_COMPUTE),
+                    ext_entry(2, SHADER_STAGE_COMPUTE),
+                ],
+                vec![(2, (13, 14)), (6, (15, 16))],
+            ),
+        ] {
+            assert_eq!(
+                vulkan_external_texture_expansion(&entries).unwrap(),
+                expected.into_iter().collect()
+            );
+        }
+        assert!(
+            vulkan_external_texture_expansion(&[ext_entry(u32::MAX, SHADER_STAGE_COMPUTE)])
+                .is_err()
         );
+        let layouts = [
+            make_layout(&device, vec![ext_entry(5, SHADER_STAGE_COMPUTE)]),
+            make_layout(
+                &device,
+                vec![
+                    buf_entry(10, SHADER_STAGE_COMPUTE),
+                    ext_entry(2, SHADER_STAGE_COMPUTE),
+                    ext_entry(7, SHADER_STAGE_COMPUTE),
+                ],
+            ),
+        ];
+        let bindings = metal_buffer_binding_map(&layouts);
+        let remaps = vulkan_external_texture_remaps(&bindings).unwrap();
+        assert_eq!(
+            remaps,
+            vec![
+                yawgpu_tint::ExternalTextureRemap {
+                    group: 0,
+                    binding: 5,
+                    dst_group: 0,
+                    plane0_slot: 5,
+                    plane1_slot: 6,
+                    params_slot: 7
+                },
+                yawgpu_tint::ExternalTextureRemap {
+                    group: 1,
+                    binding: 2,
+                    dst_group: 1,
+                    plane0_slot: 2,
+                    plane1_slot: 11,
+                    params_slot: 12
+                },
+                yawgpu_tint::ExternalTextureRemap {
+                    group: 1,
+                    binding: 7,
+                    dst_group: 1,
+                    plane0_slot: 7,
+                    plane1_slot: 13,
+                    params_slot: 14
+                },
+            ]
+        );
+        let descriptors = hal_vulkan_descriptor_bindings(&bindings);
+        assert_eq!(descriptors.len(), 10);
+        for remap in remaps {
+            for (binding, kind) in [
+                (remap.plane0_slot, HalDescriptorBindingKind::Texture),
+                (remap.plane1_slot, HalDescriptorBindingKind::Texture),
+                (
+                    remap.params_slot,
+                    HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Uniform),
+                ),
+            ] {
+                assert!(descriptors.iter().any(|d| d.group == remap.dst_group
+                    && d.binding == binding
+                    && matches!(
+                        (d.kind, kind),
+                        (
+                            HalDescriptorBindingKind::Texture,
+                            HalDescriptorBindingKind::Texture
+                        ) | (
+                            HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Uniform),
+                            HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Uniform)
+                        )
+                    )));
+            }
+        }
+        let mut missing = bindings.clone();
+        missing[0].vulkan_external_bindings = None;
+        assert!(vulkan_external_texture_remaps(&missing).is_err());
     }
 
     #[test]
-    fn select_compute_shader_source_rejects_external_texture_on_vulkan() {
+    fn select_compute_shader_source_supports_external_texture_on_vulkan() {
         let device = noop_device();
         let wgsl = device.create_shader_module(ShaderModuleSource::Wgsl(
             r#"
-var<workgroup> sink: atomic<u32>;
-@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) {
-    atomicStore(&sink, i / 3u + i % 3u);
-}
+@group(1) @binding(3) var tex: texture_external;
+var<workgroup> sink: vec4f;
+@compute @workgroup_size(1) fn cs() { sink = textureLoad(tex, vec2u(0)); }
 "#
             .to_owned(),
         ));
         let external = [MetalBufferBinding {
-            group: 0,
-            binding: 0,
+            vulkan_external_bindings: Some((4, 5)),
+            group: 1,
+            binding: 3,
             metal_index: 0,
             ext_params_buffer_slot: Some(1),
             ext_params_vertex_buffer_slot: None,
@@ -3160,7 +3293,7 @@ var<workgroup> sink: atomic<u32>;
             fragment_metal_index: None,
             kind: MetalBindingKind::ExternalTexture,
         }];
-        let err = select_compute_shader_source(
+        let selection = select_compute_shader_source(
             HalBackend::Vulkan,
             &wgsl,
             "cs",
@@ -3171,10 +3304,10 @@ var<workgroup> sink: atomic<u32>;
             true,
             Default::default(),
         )
-        .expect_err("Vulkan must reject external textures");
-        assert_eq!(
-            err,
-            "external textures are not supported on the Vulkan backend"
+        .expect("Vulkan expands external textures");
+        assert_eq!(selection.2.len(), 3);
+        assert!(
+            matches!(selection.0, HalShaderSource::SpirV(ref words) if words[0] == 0x0723_0203)
         );
     }
 

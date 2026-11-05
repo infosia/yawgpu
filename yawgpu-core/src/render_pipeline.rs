@@ -1098,6 +1098,17 @@ pub(crate) fn create_hal_subpass_render_pipeline(
             Some("subpass render pipeline requires a fragment stage".to_owned()),
         );
     }
+    if metal_bindings
+        .iter()
+        .any(|binding| matches!(binding.kind, MetalBindingKind::ExternalTexture))
+    {
+        return (
+            None,
+            Some(
+                "external textures are not supported in the tiled subpass pipeline path".to_owned(),
+            ),
+        );
+    }
     let Some(hal_device) = hal_device else {
         return (None, None);
     };
@@ -1624,9 +1635,7 @@ pub(crate) fn select_render_shader_source(
                         .to_owned(),
                 );
             }
-            if let Some(message) = vulkan_external_texture_rejection(metal_bindings) {
-                return Err(message);
-            }
+            let external_texture = vulkan_external_texture_remaps(metal_bindings)?;
             let vertex_module = descriptor.vertex.shader.module.reflected().ok_or_else(|| {
                 "render pipeline requires a reflected vertex shader module".to_owned()
             })?;
@@ -1696,6 +1705,7 @@ pub(crate) fn select_render_shader_source(
                 use_storage_input_output_16,
                 emit_vertex_point_size(descriptor.primitive.topology),
                 workarounds,
+                &external_texture,
             )?;
             let fragment_color_slots = match (fragment, fragment_entry_name) {
                 (Some(fragment), Some(fragment_entry_name)) => fragment
@@ -1728,6 +1738,7 @@ pub(crate) fn select_render_shader_source(
                         use_storage_input_output_16,
                         false,
                         workarounds,
+                        &external_texture,
                     )?)
                 }
                 (None, None) => None,
@@ -1737,7 +1748,7 @@ pub(crate) fn select_render_shader_source(
                     );
                 }
             };
-            let mut descriptor_bindings = hal_descriptor_bindings(metal_bindings);
+            let mut descriptor_bindings = hal_vulkan_descriptor_bindings(metal_bindings);
             descriptor_bindings.extend(fragment_color_slots.into_iter().map(|slot| {
                 HalDescriptorBinding {
                     group: framebuffer_fetch_descriptor_set,
@@ -7119,14 +7130,8 @@ fn fs() -> @builtin(frag_depth) f32 {
         );
     }
 
-    /// The Vulkan render path rejects external textures deterministically — the
-    /// descriptor is valid WebGPU (no validation error) but the backend has no
-    /// SPIR-V lowering, so `select_render_shader_source` returns a backend error
-    /// before any code reaches a driver. This guards against the driver-dependent
-    /// divergence the `e2e_vulkan_external_texture` regression observed (NVIDIA
-    /// compiled the multiplanar-transformed SPIR-V, Mesa rejected it).
     #[test]
-    fn select_render_shader_source_rejects_external_texture_on_vulkan() {
+    fn select_render_shader_source_supports_external_texture_on_vulkan() {
         let device = noop_device();
         let module = Arc::new(
             device.create_shader_module(ShaderModuleSource::Wgsl(
@@ -7144,6 +7149,7 @@ fn fs() -> @builtin(frag_depth) f32 {
         );
         let descriptor = render_pipeline_descriptor(module);
         let external = [MetalBufferBinding {
+            vulkan_external_bindings: Some((4, 5)),
             group: 0,
             binding: 0,
             metal_index: 0,
@@ -7154,7 +7160,7 @@ fn fs() -> @builtin(frag_depth) f32 {
             fragment_metal_index: Some(0),
             kind: MetalBindingKind::ExternalTexture,
         }];
-        let err = select_render_shader_source(
+        let selection = select_render_shader_source(
             HalBackend::Vulkan,
             &descriptor,
             "vs",
@@ -7167,11 +7173,28 @@ fn fs() -> @builtin(frag_depth) f32 {
             true,
             Default::default(),
         )
-        .expect_err("Vulkan must reject external textures");
-        assert_eq!(
-            err,
-            "external textures are not supported on the Vulkan backend"
-        );
+        .expect("Vulkan expands external textures");
+        assert_eq!(selection.3.len(), 3);
+        #[cfg(feature = "tiled")]
+        {
+            let (pipeline, error) = create_hal_subpass_render_pipeline(
+                None,
+                &descriptor,
+                "vs",
+                Some("fs"),
+                &external,
+                &[],
+                &[],
+                &valid_two_subpass_deferred_layout_descriptor(),
+                1,
+                &[],
+            );
+            assert!(pipeline.is_none());
+            assert_eq!(
+                error.as_deref(),
+                Some("external textures are not supported in the tiled subpass pipeline path")
+            );
+        }
     }
 
     /// Regression B / F-081: a fragment-only `texture_external` render pipeline
