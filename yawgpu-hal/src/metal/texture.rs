@@ -120,13 +120,10 @@ pub(super) fn create_texture(
         texture_descriptor.setMipmapLevelCount(to_ns(u64::from(descriptor.mip_level_count))?);
         texture_descriptor.setSampleCount(to_ns(u64::from(descriptor.sample_count))?);
     }
-    texture_descriptor.setStorageMode(if descriptor.usage.transient {
-        MTLStorageMode::Memoryless
-    } else if descriptor.sample_count > 1 {
-        MTLStorageMode::Private
-    } else {
-        MTLStorageMode::Shared
-    });
+    texture_descriptor.setStorageMode(texture_storage_mode(
+        descriptor.usage.transient,
+        device.supportsFamily(MTLGPUFamily::Apple2),
+    ));
     let mut texture_usage = texture_usage_for_clear(descriptor);
     if is_combined_depth_stencil(descriptor.format) {
         // Allow a stencil-only reinterpret view (`X32_Stencil8`) for sampling.
@@ -141,6 +138,15 @@ pub(super) fn create_texture(
                 resource: "texture",
             })?;
     Ok((texture, bytes_per_pixel))
+}
+
+/// Uses private storage except for transient attachments on Apple2-capable devices.
+fn texture_storage_mode(transient: bool, supports_apple2: bool) -> MTLStorageMode {
+    if transient && supports_apple2 {
+        MTLStorageMode::Memoryless
+    } else {
+        MTLStorageMode::Private
+    }
 }
 
 /// Preserves declared usage; lazy clears use blits for non-renderable textures.
@@ -186,6 +192,86 @@ pub(super) fn create_sampler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use objc2_metal::MTLResource;
+
+    #[test]
+    fn texture_storage_mode_uses_memoryless_only_for_transient_apple2() {
+        assert_eq!(texture_storage_mode(true, true), MTLStorageMode::Memoryless);
+        assert_eq!(texture_storage_mode(true, false), MTLStorageMode::Private);
+        assert_eq!(texture_storage_mode(false, true), MTLStorageMode::Private);
+        assert_eq!(texture_storage_mode(false, false), MTLStorageMode::Private);
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    fn metal_created_textures_use_private_or_supported_memoryless_storage() {
+        let device = super::super::test_helpers::metal_device();
+        let mut descriptor = super::super::test_helpers::texture_descriptor();
+        descriptor.usage = HalTextureUsage {
+            copy_src: false,
+            copy_dst: false,
+            texture_binding: true,
+            storage_binding: false,
+            render_attachment: false,
+            transient: false,
+        };
+        for (format, dimension, depth) in [
+            (HalTextureFormat::Rgba8Unorm, HalTextureDimension::D2, 1),
+            (HalTextureFormat::Depth32Float, HalTextureDimension::D2, 1),
+            (HalTextureFormat::Bc1RgbaUnorm, HalTextureDimension::D2, 1),
+            (HalTextureFormat::Rgba8Unorm, HalTextureDimension::D3, 4),
+        ] {
+            descriptor.format = format;
+            descriptor.dimension = dimension;
+            descriptor.depth_or_array_layers = depth;
+            let texture = device.create_texture(&descriptor).expect("create texture");
+            assert_eq!(
+                texture.inner().unwrap().storageMode(),
+                MTLStorageMode::Private,
+                "format={format:?}, dimension={dimension:?}"
+            );
+        }
+
+        descriptor.dimension = HalTextureDimension::D2;
+        descriptor.depth_or_array_layers = 1;
+        descriptor.usage.render_attachment = true;
+        for (format, sample_count, texture_binding) in [
+            (HalTextureFormat::Rgba8Unorm, 4, false),
+            (HalTextureFormat::Depth24PlusStencil8, 1, true),
+        ] {
+            descriptor.format = format;
+            descriptor.sample_count = sample_count;
+            descriptor.usage.texture_binding = texture_binding;
+            let texture = device
+                .create_texture(&descriptor)
+                .expect("create attachment");
+            assert_eq!(
+                texture.inner().unwrap().storageMode(),
+                MTLStorageMode::Private,
+                "format={format:?}, sample_count={sample_count}"
+            );
+        }
+
+        descriptor.format = HalTextureFormat::Rgba8Unorm;
+        descriptor.sample_count = 1;
+        descriptor.usage = HalTextureUsage {
+            copy_src: false,
+            copy_dst: false,
+            texture_binding: false,
+            storage_binding: false,
+            render_attachment: true,
+            transient: true,
+        };
+        let texture = device
+            .create_texture(&descriptor)
+            .expect("create transient attachment");
+        let expected = if device.device.supportsFamily(MTLGPUFamily::Apple2) {
+            MTLStorageMode::Memoryless
+        } else {
+            MTLStorageMode::Private
+        };
+        assert_eq!(texture.inner().unwrap().storageMode(), expected);
+    }
 
     #[test]
     fn texture_usage_for_clear_preserves_declared_render_target_usage() {
