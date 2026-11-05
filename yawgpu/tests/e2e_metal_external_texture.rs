@@ -1199,3 +1199,261 @@ unsafe fn create_identity_external_texture(
     assert!(!external.is_null());
     external
 }
+
+// Block 145: an external texture samples its plane views, not the planes' whole
+// textures, in a fragment shader and in a compute shader. Each case writes a different colour to the subresource the view selects and
+// to mip 0 / layer 0, which the whole texture would sample.
+#[test]
+#[ignore = "manual real-backend test"]
+fn metal_external_texture_samples_plane_view_subresource() {
+    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+        return;
+    }
+    const WHOLE: [u8; 4] = [255, 0, 0, 255];
+    const VIEWED: [u8; 4] = [0, 255, 0, 255];
+    unsafe {
+        let instance = create_metal_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+        let usage = native::WGPUTextureUsage_TextureBinding | native::WGPUTextureUsage_CopyDst;
+
+        // (label, level-0 size, mip levels, array layers, view mip, view layer)
+        for (label, size, mips, layers, view_mip, view_layer) in [
+            ("mip 1 of a two-level texture", 2, 2, 1, 1, 0),
+            ("layer 1 of a two-layer 2D array", 1, 1, 2, 0, 1),
+        ] {
+            let texture = create_texture_with(device, usage, size, mips, layers);
+            for mip in 0..mips {
+                for layer in 0..layers {
+                    let colour = if (mip, layer) == (view_mip, view_layer) {
+                        VIEWED
+                    } else {
+                        WHOLE
+                    };
+                    write_subresource(queue, texture, size >> mip, mip, layer, colour);
+                }
+            }
+            let view = create_single_subresource_view(texture, view_mip, view_layer);
+            let external = create_identity_external_texture(
+                device,
+                view,
+                std::ptr::null_mut(),
+                YAWGPU_EXTERNAL_TEXTURE_FORMAT_RGBA,
+            );
+            let rendered = render_external_texture(instance, device, queue, external, &errors);
+            assert_eq!(rendered, VIEWED, "{label}, render: sampled {rendered:?}");
+            let computed = compute_external_texture(instance, device, queue, external);
+            assert_eq!(computed, VIEWED, "{label}, compute: loaded {computed:?}");
+            yawgpu::wgpuExternalTextureRelease(external);
+            yawgpu::wgpuTextureViewRelease(view);
+            yawgpu::wgpuTextureRelease(texture);
+        }
+
+        assert!(
+            errors.lock().expect("error lock").is_empty(),
+            "unexpected device errors: {:?}",
+            errors.lock().expect("error lock")
+        );
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+unsafe fn create_texture_with(
+    device: native::WGPUDevice,
+    usage: native::WGPUTextureUsage,
+    size: u32,
+    mips: u32,
+    layers: u32,
+) -> native::WGPUTexture {
+    let descriptor = native::WGPUTextureDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        usage,
+        dimension: native::WGPUTextureDimension_2D,
+        size: native::WGPUExtent3D {
+            width: size,
+            height: size,
+            depthOrArrayLayers: layers,
+        },
+        format: native::WGPUTextureFormat_RGBA8Unorm,
+        mipLevelCount: mips,
+        sampleCount: 1,
+        viewFormatCount: 0,
+        viewFormats: std::ptr::null(),
+    };
+    let texture = yawgpu::wgpuDeviceCreateTexture(device, &descriptor);
+    assert!(!texture.is_null());
+    texture
+}
+
+/// Fills one `extent`×`extent` subresource of an RGBA8 texture with `colour`.
+unsafe fn write_subresource(
+    queue: native::WGPUQueue,
+    texture: native::WGPUTexture,
+    extent: u32,
+    mip: u32,
+    layer: u32,
+    colour: [u8; 4],
+) {
+    let data: Vec<u8> = (0..extent * extent).flat_map(|_| colour).collect();
+    yawgpu::wgpuQueueWriteTexture(
+        queue,
+        &native::WGPUTexelCopyTextureInfo {
+            texture,
+            mipLevel: mip,
+            origin: native::WGPUOrigin3D {
+                x: 0,
+                y: 0,
+                z: layer,
+            },
+            aspect: native::WGPUTextureAspect_All,
+        },
+        data.as_ptr().cast(),
+        data.len(),
+        &native::WGPUTexelCopyBufferLayout {
+            offset: 0,
+            bytesPerRow: extent * 4,
+            rowsPerImage: extent,
+        },
+        &native::WGPUExtent3D {
+            width: extent,
+            height: extent,
+            depthOrArrayLayers: 1,
+        },
+    );
+}
+
+unsafe fn create_single_subresource_view(
+    texture: native::WGPUTexture,
+    mip: u32,
+    layer: u32,
+) -> native::WGPUTextureView {
+    let descriptor = native::WGPUTextureViewDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        format: native::WGPUTextureFormat_Undefined,
+        dimension: native::WGPUTextureViewDimension_2D,
+        baseMipLevel: mip,
+        mipLevelCount: 1,
+        baseArrayLayer: layer,
+        arrayLayerCount: 1,
+        aspect: native::WGPUTextureAspect_All,
+        usage: native::WGPUTextureUsage_None,
+    };
+    let view = yawgpu::wgpuTextureCreateView(texture, &descriptor);
+    assert!(!view.is_null());
+    view
+}
+
+const COMPUTE_EXTERNAL_TEXTURE_SHADER: &str = "@group(0) @binding(0) var ext: texture_external;\n\
+@group(0) @binding(1) var<storage, read_write> out: array<u32>;\n\
+\n\
+@compute @workgroup_size(1)\n\
+fn main() {\n\
+  out[0] = pack4x8unorm(textureLoad(ext, vec2u(0u, 0u)));\n\
+}\n";
+
+/// Loads texel (0, 0) of `external` in a compute shader, packs it as RGBA8 unorm into a
+/// storage buffer, and returns the four bytes.
+unsafe fn compute_external_texture(
+    instance: native::WGPUInstance,
+    device: native::WGPUDevice,
+    queue: native::WGPUQueue,
+    external: native::WGPUExternalTexture,
+) -> [u8; 4] {
+    const SIZE: u64 = 16;
+    let module = create_wgsl_module(device, COMPUTE_EXTERNAL_TEXTURE_SHADER);
+    let pipeline = yawgpu::wgpuDeviceCreateComputePipeline(
+        device,
+        &native::WGPUComputePipelineDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            layout: std::ptr::null_mut(),
+            compute: native::WGPUComputeState {
+                nextInChain: std::ptr::null_mut(),
+                module,
+                entryPoint: string_view("main"),
+                constantCount: 0,
+                constants: std::ptr::null(),
+            },
+        },
+    );
+    assert!(!pipeline.is_null());
+    let layout = yawgpu::wgpuComputePipelineGetBindGroupLayout(pipeline, 0);
+    assert!(!layout.is_null());
+    let storage = create_buffer(
+        device,
+        SIZE,
+        native::WGPUBufferUsage_Storage | native::WGPUBufferUsage_CopySrc,
+    );
+    let readback = create_buffer(
+        device,
+        SIZE,
+        native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+    );
+    let mut external_binding = native::WGPUExternalTextureBindingEntry {
+        chain: native::WGPUChainedStruct {
+            next: std::ptr::null_mut(),
+            sType: native::WGPUSType_ExternalTextureBindingEntry,
+        },
+        externalTexture: external,
+    };
+    let entries = [
+        native::WGPUBindGroupEntry {
+            nextInChain: (&mut external_binding.chain) as *mut native::WGPUChainedStruct,
+            binding: 0,
+            buffer: std::ptr::null_mut(),
+            offset: 0,
+            size: 0,
+            sampler: std::ptr::null_mut(),
+            textureView: std::ptr::null_mut(),
+        },
+        native::WGPUBindGroupEntry {
+            nextInChain: std::ptr::null_mut(),
+            binding: 1,
+            buffer: storage,
+            offset: 0,
+            size: SIZE,
+            sampler: std::ptr::null_mut(),
+            textureView: std::ptr::null_mut(),
+        },
+    ];
+    let bind_group = yawgpu::wgpuDeviceCreateBindGroup(
+        device,
+        &native::WGPUBindGroupDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            layout,
+            entryCount: entries.len(),
+            entries: entries.as_ptr(),
+        },
+    );
+    assert!(!bind_group.is_null());
+
+    let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+    let pass = yawgpu::wgpuCommandEncoderBeginComputePass(encoder, std::ptr::null());
+    yawgpu::wgpuComputePassEncoderSetPipeline(pass, pipeline);
+    yawgpu::wgpuComputePassEncoderSetBindGroup(pass, 0, bind_group, 0, std::ptr::null());
+    yawgpu::wgpuComputePassEncoderDispatchWorkgroups(pass, 1, 1, 1);
+    yawgpu::wgpuComputePassEncoderEnd(pass);
+    yawgpu::wgpuComputePassEncoderRelease(pass);
+    yawgpu::wgpuCommandEncoderCopyBufferToBuffer(encoder, storage, 0, readback, 0, SIZE);
+    let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+    yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+    yawgpu::wgpuCommandBufferRelease(command_buffer);
+    yawgpu::wgpuCommandEncoderRelease(encoder);
+
+    let bytes = read_buffer(instance, readback, 0, 4);
+    yawgpu::wgpuBindGroupRelease(bind_group);
+    yawgpu::wgpuBindGroupLayoutRelease(layout);
+    yawgpu::wgpuComputePipelineRelease(pipeline);
+    yawgpu::wgpuShaderModuleRelease(module);
+    yawgpu::wgpuBufferRelease(readback);
+    yawgpu::wgpuBufferRelease(storage);
+    [bytes[0], bytes[1], bytes[2], bytes[3]]
+}

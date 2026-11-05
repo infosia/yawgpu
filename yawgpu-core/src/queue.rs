@@ -3079,20 +3079,21 @@ fn hal_bind_resource(
             resources.external_textures.push(HalBoundExternalTexture {
                 group: binding.group,
                 binding: binding.binding,
-                plane0: plane0.texture().hal()?,
-                plane1: plane1.texture().hal()?,
-                plane0_metal_index: binding.metal_index,
-                plane1_metal_index,
-                plane0_vertex_metal_index: binding.vertex_metal_index,
-                plane1_vertex_metal_index,
-                plane0_fragment_metal_index: binding.fragment_metal_index,
-                plane1_fragment_metal_index,
+                plane0: hal_bound_texture(binding, plane0, None)?,
+                plane1: hal_bound_texture(
+                    &MetalBufferBinding {
+                        metal_index: plane1_metal_index,
+                        vertex_metal_index: plane1_vertex_metal_index,
+                        fragment_metal_index: plane1_fragment_metal_index,
+                        ..*binding
+                    },
+                    plane1,
+                    None,
+                )?,
                 params: inner.params.hal()?,
                 params_metal_index: params_slot,
                 params_vertex_metal_index,
                 params_fragment_metal_index,
-                format: hal_texture_format(plane0.format()),
-                dimension: hal_texture_view_dimension(plane0.dimension()),
                 params_offset: 0,
                 params_size: inner.params.size(),
             });
@@ -3398,7 +3399,7 @@ mod tests {
     use crate::shader::{SHADER_STAGE_COMPUTE, SHADER_STAGE_FRAGMENT, SHADER_STAGE_VERTEX};
     use crate::test_helpers::*;
     use crate::*;
-    use yawgpu_hal::HalStorageTextureAccess;
+    use yawgpu_hal::{HalStorageTextureAccess, HalTextureFormat};
 
     fn depth32_float() -> TextureFormat {
         TextureFormat::from_raw(0x30)
@@ -4072,19 +4073,27 @@ fn fs() -> @location(0) vec4<f32> {
         );
     }
 
-    #[test]
-    fn hal_bind_resources_lowers_external_texture_planes_and_params() {
-        let device = noop_device();
+    fn lower_external_texture(
+        device: &Device,
+        external_texture: Arc<ExternalTexture>,
+        stage_slots: (Option<u32>, Option<u32>),
+    ) -> HalBoundResources {
+        let (vertex_metal_index, fragment_metal_index) = stage_slots;
+        let visibility = match stage_slots {
+            (None, None) => SHADER_STAGE_COMPUTE,
+            (Some(_), None) => SHADER_STAGE_VERTEX,
+            (None, Some(_)) => SHADER_STAGE_FRAGMENT,
+            (Some(_), Some(_)) => SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT,
+        };
         let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
             entries: vec![BindGroupLayoutEntry {
                 binding: 3,
-                visibility: SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT,
+                visibility,
                 binding_array_size: 0,
                 kind: Some(BindingLayoutKind::ExternalTexture),
             }],
             error: None,
         }));
-        let external_texture = rgba_external_texture(&device);
         let bind_group = Arc::new(device.create_bind_group(
             Arc::clone(&layout),
             vec![BindGroupEntry {
@@ -4105,7 +4114,7 @@ fn fs() -> @location(0) vec4<f32> {
                 dynamic_offsets: Vec::new(),
             },
         );
-        let resources = hal_bind_resources(
+        hal_bind_resources(
             &[layout],
             &[MetalBufferBinding {
                 group: 0,
@@ -4114,32 +4123,134 @@ fn fs() -> @location(0) vec4<f32> {
                 ext_params_buffer_slot: Some(7),
                 ext_params_vertex_buffer_slot: Some(12),
                 ext_params_fragment_buffer_slot: Some(22),
-                vertex_metal_index: Some(10),
-                fragment_metal_index: Some(20),
+                vertex_metal_index,
+                fragment_metal_index,
                 kind: MetalBindingKind::ExternalTexture,
             }],
             &bind_groups,
         )
-        .expect("HAL resources");
+        .expect("HAL resources")
+    }
 
-        assert!(resources.buffers.is_empty());
-        assert!(resources.textures.is_empty());
-        assert!(resources.samplers.is_empty());
-        assert_eq!(resources.external_textures.len(), 1);
+    #[test]
+    fn hal_bind_resources_lowers_external_texture_planes_and_params() {
+        let device = noop_device();
+        for stage_slots in [
+            (None, None),
+            (Some(10), None),
+            (None, Some(20)),
+            (Some(10), Some(20)),
+        ] {
+            let resources =
+                lower_external_texture(&device, rgba_external_texture(&device), stage_slots);
+
+            assert!(resources.buffers.is_empty());
+            assert!(resources.textures.is_empty());
+            assert!(resources.samplers.is_empty());
+            assert_eq!(resources.external_textures.len(), 1);
+            let binding = &resources.external_textures[0];
+            assert_eq!(binding.group, 0);
+            assert_eq!(binding.binding, 3);
+            assert_eq!(binding.plane0.metal_index, 4);
+            assert_eq!(binding.plane1.metal_index, 5);
+            assert_eq!(binding.plane0.vertex_metal_index, stage_slots.0);
+            assert_eq!(
+                binding.plane1.vertex_metal_index,
+                stage_slots.0.map(|slot| slot + 1)
+            );
+            assert_eq!(binding.plane0.fragment_metal_index, stage_slots.1);
+            assert_eq!(
+                binding.plane1.fragment_metal_index,
+                stage_slots.1.map(|slot| slot + 1)
+            );
+            assert_eq!(binding.params_metal_index, 7);
+            assert_eq!(binding.params_vertex_metal_index, stage_slots.0.map(|_| 12));
+            assert_eq!(
+                binding.params_fragment_metal_index,
+                stage_slots.1.map(|_| 22)
+            );
+            assert_eq!(binding.params_offset, 0);
+            assert_eq!(binding.params_size, ExternalTextureParams::SIZE as u64);
+        }
+    }
+
+    fn assert_external_texture_subresource_lowering(base_mip_level: u32, base_array_layer: u32) {
+        let device = noop_adapter()
+            .create_device(None, &[Feature::TextureComponentSwizzle], "", "")
+            .expect("device with texture swizzle");
+        let texture = device.create_texture(TextureDescriptor {
+            usage: TextureUsage::TEXTURE_BINDING,
+            dimension: TextureDimension::D2,
+            size: Extent3d {
+                width: 8,
+                height: 8,
+                depth_or_array_layers: 2,
+            },
+            format: rgba8_unorm(),
+            mip_level_count: 2,
+            sample_count: 1,
+            view_formats: Vec::new(),
+        });
+        assert!(!texture.is_error());
+        let (view, error) = texture.create_view(TextureViewDescriptor {
+            format: None,
+            dimension: Some(TextureViewDimension::D2),
+            base_mip_level,
+            mip_level_count: Some(1),
+            base_array_layer,
+            array_layer_count: Some(1),
+            aspect: None,
+            usage: None,
+            swizzle: Some(TextureComponentSwizzle {
+                r: ComponentSwizzle::B,
+                g: ComponentSwizzle::G,
+                b: ComponentSwizzle::R,
+                a: ComponentSwizzle::One,
+            }),
+        });
+        assert_eq!(error, None);
+        let view = Arc::new(view);
+        let external =
+            external_texture_from_planes(&device, ExternalTextureFormat::Rgba, view.clone(), None);
+        let resources = lower_external_texture(&device, external, (Some(10), Some(20)));
         let binding = &resources.external_textures[0];
-        assert_eq!(binding.group, 0);
-        assert_eq!(binding.binding, 3);
-        assert_eq!(binding.plane0_metal_index, 4);
-        assert_eq!(binding.plane1_metal_index, 5);
-        assert_eq!(binding.plane0_vertex_metal_index, Some(10));
-        assert_eq!(binding.plane1_vertex_metal_index, Some(11));
-        assert_eq!(binding.plane0_fragment_metal_index, Some(20));
-        assert_eq!(binding.plane1_fragment_metal_index, Some(21));
-        assert_eq!(binding.params_metal_index, 7);
-        assert_eq!(binding.params_vertex_metal_index, Some(12));
-        assert_eq!(binding.params_fragment_metal_index, Some(22));
-        assert_eq!(binding.params_offset, 0);
-        assert_eq!(binding.params_size, ExternalTextureParams::SIZE as u64);
+        for plane in [&binding.plane0, &binding.plane1] {
+            assert!(matches!(plane.texture, yawgpu_hal::HalTexture::Noop(_)));
+            assert_eq!(plane.format, HalTextureFormat::Rgba8Unorm);
+            assert_eq!(plane.dimension, HalTextureViewDimension::D2);
+            assert_eq!(plane.base_mip_level, base_mip_level);
+            assert_eq!(plane.mip_level_count, 1);
+            assert_eq!(plane.base_array_layer, base_array_layer);
+            assert_eq!(plane.array_layer_count, 1);
+            assert_eq!(plane.aspect, HalTextureAspect::All);
+            assert_eq!(
+                plane.swizzle,
+                texture_view_hal_component_swizzle(&view).unwrap()
+            );
+            assert_eq!(plane.storage_access, None);
+        }
+    }
+
+    #[test]
+    fn hal_bind_resources_lowers_external_texture_mip_view() {
+        assert_external_texture_subresource_lowering(1, 0);
+    }
+
+    #[test]
+    fn hal_bind_resources_lowers_external_texture_array_layer_view() {
+        assert_external_texture_subresource_lowering(0, 1);
+    }
+
+    #[test]
+    fn hal_bind_resources_lowers_nv12_plane_formats() {
+        let device = noop_device();
+        let external = submit_external_texture(&device, ExternalTextureFormat::Nv12);
+        let resources = lower_external_texture(&device, external, (Some(10), Some(20)));
+        let binding = &resources.external_textures[0];
+        assert_eq!(binding.plane0.format, HalTextureFormat::R8Unorm);
+        assert_eq!(binding.plane1.format, HalTextureFormat::Rg8Unorm);
+        assert_eq!(binding.plane0.dimension, HalTextureViewDimension::D2);
+        assert_eq!(binding.plane1.dimension, HalTextureViewDimension::D2);
     }
 
     #[test]

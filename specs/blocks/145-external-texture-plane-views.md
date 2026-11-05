@@ -1,6 +1,7 @@
 # Block 145 — External texture planes are bound as their views
 
-Status: **IN PROGRESS**.
+Status: **COMPLETE (2026-11-05)**. Phase Review: 0 CRITICAL, 0 MAJOR, 3 MINOR; all resolved,
+see below.
 Source: backlog A28 (Block 144 Phase Review m3), started by user request on 2026-11-05.
 Oracle: Dawn at the pinned `third_party/dawn` (paths relative to `src/dawn/native/`):
 `BindGroup.cpp` (an external-texture entry expands into `plane0`/`plane1` bindings of the
@@ -70,3 +71,31 @@ compiling and retaining what they retain today.
 
 - **S1 (coding agent):** R1-R3 with the unit tests.
 - **S2 (Claude):** e2e, CTS, Phase Review.
+
+## Verification (2026-11-05)
+
+Run on Apple M2, macOS 27.2. Vulkan here is MoltenVK under the Khronos layer, which is
+reference-only.
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace` | 1,434 passed, 0 failed |
+| fmt; clippy `-D warnings` on default, `metal`, `vulkan`, `gles`, `metal,tiled`, `vulkan,tiled`, `shader-passthrough` | clean |
+| HAL Metal lib and ignored tests | 200 passed; 66 passed |
+| `metal_external_texture_samples_plane_view_subresource` (new) | passes for a view of mip 1 of a two-level texture and a view of layer 1 of a two-layer 2D array, through a fragment shader and a compute shader. Against `4fd45fb` (before this block) both paths sample mip 0's colour and fail |
+| Metal e2e and every other ignored `yawgpu` test, `metal,tiled` | 173 passed, 0 failed |
+| All `e2e_vulkan_*`, MoltenVK, Khronos layer | 154 passed, 1 failed (the known `imageView2DOn3DImage` portability case); `vulkan_external_texture_pipeline_reports_internal_error_without_panic` passes, re-run after the Phase Review fixes with no validation output |
+| webgpu-native-cts, Metal, `webgpu:api,*` | pass 589,574, skip 101,793, fail 0, crash 0, before and after the Phase Review fixes; identical to Block 144 |
+| webgpu-native-cts, Metal, `webgpu:shader,execution,*` | pass 857,321, skip 25,860, fail 0, crash 0, xfail 72 (F-160); pass + xfail identical to Block 144 |
+
+`webgpu:shader,execution,*` and the full MoltenVK run used the library before the Phase
+Review fixes, which remove duplicated slot fields and reuse one Metal view for a
+one-plane external texture.
+
+## Phase Review
+
+| ID | Finding | Disposition |
+|---|---|---|
+| m1 | Each plane's binding slots were stored twice, in `HalBoundExternalTexture` and in the plane's `HalBoundTexture`, and the Metal HAL read only the outer copy | The outer slot fields are removed; the Metal HAL reads the plane's own slots, and the lowering tests assert them |
+| m2 | A one-plane external texture made two identical Metal views per bind | Plane 1 reuses plane 0's view when the texture and view description match (`texture_views_match`, unit-tested) |
+| m3 | The e2e exercised only the fragment path | The e2e also loads the plane view in a compute shader |

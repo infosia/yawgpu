@@ -407,22 +407,10 @@ pub struct HalBoundExternalTexture {
     pub group: u32,
     /// Binding.
     pub binding: u32,
-    /// Plane0 texture.
-    pub plane0: HalTexture,
-    /// Plane1 texture, or plane0 again for single-plane external textures.
-    pub plane1: HalTexture,
-    /// Plane0 Metal texture-space slot.
-    pub plane0_metal_index: u32,
-    /// Plane1 Metal texture-space slot.
-    pub plane1_metal_index: u32,
-    /// Plane0 Metal texture-space slot for the vertex stage.
-    pub plane0_vertex_metal_index: Option<u32>,
-    /// Plane1 Metal texture-space slot for the vertex stage.
-    pub plane1_vertex_metal_index: Option<u32>,
-    /// Plane0 Metal texture-space slot for the fragment stage.
-    pub plane0_fragment_metal_index: Option<u32>,
-    /// Plane1 Metal texture-space slot for the fragment stage.
-    pub plane1_fragment_metal_index: Option<u32>,
+    /// Plane0 texture view and binding slots.
+    pub plane0: HalBoundTexture,
+    /// Plane1 texture view and binding slots, repeating plane0's view for single-plane external textures.
+    pub plane1: HalBoundTexture,
     /// Params buffer.
     pub params: HalBuffer,
     /// Params Metal buffer-space slot.
@@ -431,10 +419,6 @@ pub struct HalBoundExternalTexture {
     pub params_vertex_metal_index: Option<u32>,
     /// Params Metal buffer-space slot for the fragment stage.
     pub params_fragment_metal_index: Option<u32>,
-    /// Plane view format.
-    pub format: HalTextureFormat,
-    /// Plane view dimension.
-    pub dimension: HalTextureViewDimension,
     /// Params buffer byte offset.
     pub params_offset: u64,
     /// Params buffer byte size.
@@ -953,8 +937,33 @@ mod external_texture_tests {
     #[test]
     fn external_texture_binding_struct_carries_planes_params_and_stage_slots() {
         let device = noop_device();
-        let plane0 = noop_texture(&device);
-        let plane1 = noop_texture(&device);
+        let plane0 = HalBoundTexture {
+            group: 1,
+            binding: 2,
+            metal_index: 4,
+            vertex_metal_index: Some(10),
+            fragment_metal_index: Some(20),
+            texture: noop_texture(&device),
+            format: HalTextureFormat::R8Unorm,
+            dimension: HalTextureViewDimension::D2,
+            base_mip_level: 1,
+            mip_level_count: 1,
+            base_array_layer: 2,
+            array_layer_count: 1,
+            aspect: HalTextureAspect::All,
+            swizzle: HalTextureComponentSwizzle::default(),
+            storage_access: None,
+        };
+        let plane1 = HalBoundTexture {
+            metal_index: 5,
+            vertex_metal_index: Some(11),
+            fragment_metal_index: Some(21),
+            texture: noop_texture(&device),
+            format: HalTextureFormat::Rg8Unorm,
+            base_mip_level: 3,
+            base_array_layer: 4,
+            ..plane0.clone()
+        };
         let params = device
             .create_buffer(
                 296,
@@ -970,18 +979,10 @@ mod external_texture_tests {
             binding: 2,
             plane0,
             plane1,
-            plane0_metal_index: 4,
-            plane1_metal_index: 5,
-            plane0_vertex_metal_index: Some(10),
-            plane1_vertex_metal_index: Some(11),
-            plane0_fragment_metal_index: Some(20),
-            plane1_fragment_metal_index: Some(21),
             params,
             params_metal_index: 7,
             params_vertex_metal_index: Some(12),
             params_fragment_metal_index: Some(22),
-            format: HalTextureFormat::Rgba8Unorm,
-            dimension: HalTextureViewDimension::D2,
             params_offset: 0,
             params_size: 296,
         };
@@ -989,12 +990,18 @@ mod external_texture_tests {
 
         assert_eq!(cloned.group, 1);
         assert_eq!(cloned.binding, 2);
-        assert_eq!(cloned.plane0_metal_index, 4);
-        assert_eq!(cloned.plane1_metal_index, 5);
-        assert_eq!(cloned.plane0_vertex_metal_index, Some(10));
-        assert_eq!(cloned.plane1_vertex_metal_index, Some(11));
-        assert_eq!(cloned.plane0_fragment_metal_index, Some(20));
-        assert_eq!(cloned.plane1_fragment_metal_index, Some(21));
+        assert_eq!(cloned.plane0.format, HalTextureFormat::R8Unorm);
+        assert_eq!(cloned.plane1.format, HalTextureFormat::Rg8Unorm);
+        assert_eq!(cloned.plane0.base_mip_level, 1);
+        assert_eq!(cloned.plane1.base_mip_level, 3);
+        assert_eq!(cloned.plane0.base_array_layer, 2);
+        assert_eq!(cloned.plane1.base_array_layer, 4);
+        assert_eq!(cloned.plane0.metal_index, 4);
+        assert_eq!(cloned.plane1.metal_index, 5);
+        assert_eq!(cloned.plane0.vertex_metal_index, Some(10));
+        assert_eq!(cloned.plane1.vertex_metal_index, Some(11));
+        assert_eq!(cloned.plane0.fragment_metal_index, Some(20));
+        assert_eq!(cloned.plane1.fragment_metal_index, Some(21));
         assert_eq!(cloned.params_metal_index, 7);
         assert_eq!(cloned.params_vertex_metal_index, Some(12));
         assert_eq!(cloned.params_fragment_metal_index, Some(22));

@@ -776,8 +776,8 @@ fn retain_hal_external_texture(
     texture: &crate::HalBoundExternalTexture,
     retained: &mut RetainedResources,
 ) {
-    retain_hal_texture(&texture.plane0, retained);
-    retain_hal_texture(&texture.plane1, retained);
+    retain_hal_texture(&texture.plane0.texture, retained);
+    retain_hal_texture(&texture.plane1.texture, retained);
     retain_hal_buffer(&texture.params, retained);
 }
 
@@ -6681,20 +6681,15 @@ mod tests {
         HalBoundExternalTexture {
             group: 0,
             binding: 2,
-            plane0,
-            plane1,
-            plane0_metal_index: 0,
-            plane1_metal_index: 1,
-            plane0_vertex_metal_index: None,
-            plane1_vertex_metal_index: None,
-            plane0_fragment_metal_index: None,
-            plane1_fragment_metal_index: None,
+            plane0: bound_texture(plane0),
+            plane1: HalBoundTexture {
+                metal_index: 1,
+                ..bound_texture(plane1)
+            },
             params,
             params_metal_index: 0,
             params_vertex_metal_index: None,
             params_fragment_metal_index: None,
-            format: HalTextureFormat::Rgba8Unorm,
-            dimension: HalTextureViewDimension::D2,
             params_offset: 0,
             params_size: 16,
         }

@@ -960,15 +960,27 @@ fn encode_compute_external_texture(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     binding: &HalBoundExternalTexture,
 ) -> Result<(), HalError> {
-    let HalTexture::Metal(plane0) = &binding.plane0 else {
+    let HalTexture::Metal(plane0) = &binding.plane0.texture else {
         return Err(texture_error(
             "compute external texture plane0 is not Metal-backed",
         ));
     };
-    let HalTexture::Metal(plane1) = &binding.plane1 else {
+    let HalTexture::Metal(plane1) = &binding.plane1.texture else {
         return Err(texture_error(
             "compute external texture plane1 is not Metal-backed",
         ));
+    };
+    let same_view = texture_views_match(
+        std::ptr::from_ref(plane0.inner()?).cast(),
+        &binding.plane0,
+        std::ptr::from_ref(plane1.inner()?).cast(),
+        &binding.plane1,
+    );
+    let plane0 = metal_texture_view(plane0, &binding.plane0)?;
+    let plane1 = if same_view {
+        plane0.clone()
+    } else {
+        metal_texture_view(plane1, &binding.plane1)?
     };
     let HalBuffer::Metal(params) = &binding.params else {
         return Err(buffer_error(
@@ -981,14 +993,8 @@ fn encode_compute_external_texture(
         ));
     }
     unsafe {
-        encoder.setTexture_atIndex(
-            Some(plane0.inner()?),
-            to_ns(u64::from(binding.plane0_metal_index))?,
-        );
-        encoder.setTexture_atIndex(
-            Some(plane1.inner()?),
-            to_ns(u64::from(binding.plane1_metal_index))?,
-        );
+        encoder.setTexture_atIndex(Some(&plane0), to_ns(u64::from(binding.plane0.metal_index))?);
+        encoder.setTexture_atIndex(Some(&plane1), to_ns(u64::from(binding.plane1.metal_index))?);
         encoder.setBuffer_offset_atIndex(
             Some(params.inner()?),
             to_ns(binding.params_offset)?,
@@ -1934,15 +1940,27 @@ fn encode_render_bind_external_texture(
     encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
     binding: &HalBoundExternalTexture,
 ) -> Result<(), HalError> {
-    let HalTexture::Metal(plane0) = &binding.plane0 else {
+    let HalTexture::Metal(plane0) = &binding.plane0.texture else {
         return Err(texture_error(
             "render external texture plane0 is not Metal-backed",
         ));
     };
-    let HalTexture::Metal(plane1) = &binding.plane1 else {
+    let HalTexture::Metal(plane1) = &binding.plane1.texture else {
         return Err(texture_error(
             "render external texture plane1 is not Metal-backed",
         ));
+    };
+    let same_view = texture_views_match(
+        std::ptr::from_ref(plane0.inner()?).cast(),
+        &binding.plane0,
+        std::ptr::from_ref(plane1.inner()?).cast(),
+        &binding.plane1,
+    );
+    let plane0 = metal_texture_view(plane0, &binding.plane0)?;
+    let plane1 = if same_view {
+        plane0.clone()
+    } else {
+        metal_texture_view(plane1, &binding.plane1)?
     };
     let HalBuffer::Metal(params) = &binding.params else {
         return Err(buffer_error(
@@ -1956,47 +1974,47 @@ fn encode_render_bind_external_texture(
     }
     let offset = to_ns(binding.params_offset)?;
 
-    if let Some(vtx) = binding.plane0_vertex_metal_index {
+    if let Some(vtx) = binding.plane0.vertex_metal_index {
         unsafe {
-            encoder.setVertexTexture_atIndex(Some(plane0.inner()?), to_ns(u64::from(vtx))?);
+            encoder.setVertexTexture_atIndex(Some(&plane0), to_ns(u64::from(vtx))?);
             encoder.setVertexTexture_atIndex(
-                Some(plane1.inner()?),
-                to_ns(u64::from(binding.plane1_vertex_metal_index.ok_or_else(
+                Some(&plane1),
+                to_ns(u64::from(binding.plane1.vertex_metal_index.ok_or_else(
                     || texture_error("render external texture plane1 vertex slot is missing"),
                 )?))?,
             );
         }
-    } else if binding.plane0_fragment_metal_index.is_none() {
+    } else if binding.plane0.fragment_metal_index.is_none() {
         unsafe {
             encoder.setVertexTexture_atIndex(
-                Some(plane0.inner()?),
-                to_ns(u64::from(binding.plane0_metal_index))?,
+                Some(&plane0),
+                to_ns(u64::from(binding.plane0.metal_index))?,
             );
             encoder.setVertexTexture_atIndex(
-                Some(plane1.inner()?),
-                to_ns(u64::from(binding.plane1_metal_index))?,
+                Some(&plane1),
+                to_ns(u64::from(binding.plane1.metal_index))?,
             );
         }
     }
-    if let Some(frag) = binding.plane0_fragment_metal_index {
+    if let Some(frag) = binding.plane0.fragment_metal_index {
         unsafe {
-            encoder.setFragmentTexture_atIndex(Some(plane0.inner()?), to_ns(u64::from(frag))?);
+            encoder.setFragmentTexture_atIndex(Some(&plane0), to_ns(u64::from(frag))?);
             encoder.setFragmentTexture_atIndex(
-                Some(plane1.inner()?),
-                to_ns(u64::from(binding.plane1_fragment_metal_index.ok_or_else(
+                Some(&plane1),
+                to_ns(u64::from(binding.plane1.fragment_metal_index.ok_or_else(
                     || texture_error("render external texture plane1 fragment slot is missing"),
                 )?))?,
             );
         }
-    } else if binding.plane0_vertex_metal_index.is_none() {
+    } else if binding.plane0.vertex_metal_index.is_none() {
         unsafe {
             encoder.setFragmentTexture_atIndex(
-                Some(plane0.inner()?),
-                to_ns(u64::from(binding.plane0_metal_index))?,
+                Some(&plane0),
+                to_ns(u64::from(binding.plane0.metal_index))?,
             );
             encoder.setFragmentTexture_atIndex(
-                Some(plane1.inner()?),
-                to_ns(u64::from(binding.plane1_metal_index))?,
+                Some(&plane1),
+                to_ns(u64::from(binding.plane1.metal_index))?,
             );
         }
     }
@@ -2036,6 +2054,24 @@ fn encode_render_bind_external_texture(
         }
     }
     Ok(())
+}
+
+/// Compares the backing MTLTexture identity and view description, ignoring binding slots.
+fn texture_views_match(
+    texture0: *const (),
+    plane0: &HalBoundTexture,
+    texture1: *const (),
+    plane1: &HalBoundTexture,
+) -> bool {
+    texture0 == texture1
+        && plane0.format == plane1.format
+        && plane0.dimension == plane1.dimension
+        && plane0.base_mip_level == plane1.base_mip_level
+        && plane0.mip_level_count == plane1.mip_level_count
+        && plane0.base_array_layer == plane1.base_array_layer
+        && plane0.array_layer_count == plane1.array_layer_count
+        && plane0.aspect == plane1.aspect
+        && plane0.swizzle == plane1.swizzle
 }
 
 fn metal_texture_view(
@@ -3308,6 +3344,57 @@ mod tests {
                 message: "MSL buffer size exceeds u32"
             }
         ));
+    }
+
+    #[test]
+    fn texture_views_match_requires_same_texture_and_complete_view_description() {
+        let device = crate::noop::NoopDevice::new();
+        let plane0 = HalBoundTexture {
+            group: 0,
+            binding: 0,
+            metal_index: 4,
+            vertex_metal_index: Some(10),
+            fragment_metal_index: Some(20),
+            texture: HalTexture::Noop(
+                device
+                    .create_texture(&texture_descriptor())
+                    .expect("Noop texture"),
+            ),
+            format: HalTextureFormat::Rgba8Unorm,
+            dimension: HalTextureViewDimension::D2,
+            base_mip_level: 0,
+            mip_level_count: 1,
+            base_array_layer: 0,
+            array_layer_count: 1,
+            aspect: HalTextureAspect::All,
+            swizzle: HalTextureComponentSwizzle::default(),
+            storage_access: None,
+        };
+        let plane1 = HalBoundTexture {
+            metal_index: 5,
+            vertex_metal_index: Some(11),
+            fragment_metal_index: Some(21),
+            ..plane0.clone()
+        };
+        // Stand-in identities keep this comparison test independent of a Metal device.
+        let identities = [0u8, 1u8];
+        let texture0 = std::ptr::from_ref(&identities[0]).cast();
+        let texture1 = std::ptr::from_ref(&identities[1]).cast();
+        assert!(texture_views_match(texture0, &plane0, texture0, &plane1));
+        assert!(!texture_views_match(texture0, &plane0, texture1, &plane1));
+
+        let mut different_views = vec![plane1; 8];
+        different_views[0].format = HalTextureFormat::R8Unorm;
+        different_views[1].dimension = HalTextureViewDimension::D2Array;
+        different_views[2].base_mip_level = 1;
+        different_views[3].mip_level_count = 2;
+        different_views[4].base_array_layer = 1;
+        different_views[5].array_layer_count = 2;
+        different_views[6].aspect = HalTextureAspect::DepthOnly;
+        different_views[7].swizzle.r = HalComponentSwizzle::B;
+        for view in different_views {
+            assert!(!texture_views_match(texture0, &plane0, texture0, &view));
+        }
     }
 
     #[test]
