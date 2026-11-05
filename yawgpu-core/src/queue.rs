@@ -27,7 +27,6 @@ use crate::copy::*;
 use crate::error::*;
 use crate::extent::*;
 use crate::pass::*;
-use crate::query_set::QuerySet;
 use crate::render_pipeline::*;
 #[cfg(feature = "tiled")]
 use crate::subpass::*;
@@ -75,6 +74,7 @@ pub(crate) struct QueueInner {
 struct SubmitTestHook {
     reached: std::sync::mpsc::Sender<&'static str>,
     resume: std::sync::mpsc::Receiver<()>,
+    pause_after_validation: bool,
 }
 
 #[cfg(test)]
@@ -508,9 +508,7 @@ impl Queue {
             return None;
         }
 
-        // Retrieve the HAL handle for the destination buffer.  A None here
-        // means the buffer is an error buffer, which validate_queue_write
-        // would have caught above; treat it as internal if somehow reached.
+        // No HAL handle means an error buffer or destruction after validation.
         let Some(destination) = buffer.hal() else {
             return Some(DeviceError::internal(
                 "queue write buffer destination has no HAL buffer",
@@ -677,6 +675,7 @@ impl Queue {
                 }
             };
             let format = hal_texture_format(texture.format());
+            // No HAL handle means an error texture or destruction after validation.
             let Some(texture) = texture.hal() else {
                 return Some(DeviceError::internal(
                     "queue write texture has no HAL texture",
@@ -733,6 +732,7 @@ impl Queue {
             ));
         };
         let format = hal_texture_format(texture.format());
+        // No HAL handle means an error texture or destruction after validation.
         let Some(texture) = texture.hal() else {
             return Some(DeviceError::internal(
                 "queue write texture has no HAL texture",
@@ -882,6 +882,12 @@ impl Queue {
             // error, matching the existing error surface.
             let _ = self.flush_pending_writes_locked();
             return Some(DeviceError::validation(message));
+        }
+        #[cfg(test)]
+        if let Some(hook) = &test_hook {
+            if hook.pause_after_validation {
+                hook.pause("validated");
+            }
         }
         if command_buffers.is_empty() {
             let PendingWriteSubmission { copies, chunks } = self.take_pending_writes();
@@ -2445,7 +2451,10 @@ pub(crate) fn hal_render_pass_execution(
     stream.framebuffer_fetch_color_slots = render_stream_framebuffer_fetch_slots(&pass.commands);
     stream.depth_stencil_attachment =
         hal_render_depth_stencil_attachment(pass.depth_stencil_attachment.as_ref(), plan)?;
-    stream.occlusion_query_set = pass.occlusion_query_set.as_ref().and_then(QuerySet::hal);
+    stream.occlusion_query_set = match &pass.occlusion_query_set {
+        Some(query_set) => Some(query_set.hal()?),
+        None => None,
+    };
     stream.commands = commands;
     Some(HalCopy::RenderPassCommandStream(stream))
 }
@@ -3161,7 +3170,11 @@ mod tests {
         });
         let (reached, reached_rx) = std::sync::mpsc::channel();
         let (resume_tx, resume) = std::sync::mpsc::channel();
-        *queue.inner.wait_idle_test_hook.lock() = Some(SubmitTestHook { reached, resume });
+        *queue.inner.wait_idle_test_hook.lock() = Some(SubmitTestHook {
+            reached,
+            resume,
+            pause_after_validation: false,
+        });
         let waiting_queue = queue.clone();
         let waiter = std::thread::spawn(move || waiting_queue.wait_idle());
         assert_eq!(reached_rx.recv().unwrap(), "waited");
@@ -3411,15 +3424,23 @@ mod tests {
     }
 
     fn sampled_external_texture_view(device: &Device) -> Arc<TextureView> {
+        external_texture_plane_view(device, rgba8_unorm(), 4)
+    }
+
+    fn external_texture_plane_view(
+        device: &Device,
+        format: TextureFormat,
+        size: u32,
+    ) -> Arc<TextureView> {
         let texture = device.create_texture(TextureDescriptor {
             usage: TextureUsage::TEXTURE_BINDING,
             dimension: TextureDimension::D2,
             size: Extent3d {
-                width: 4,
-                height: 4,
+                width: size,
+                height: size,
                 depth_or_array_layers: 1,
             },
-            format: rgba8_unorm(),
+            format,
             mip_level_count: 1,
             sample_count: 1,
             view_formats: Vec::new(),
@@ -3440,12 +3461,34 @@ mod tests {
     }
 
     fn rgba_external_texture(device: &Device) -> Arc<ExternalTexture> {
+        submit_external_texture(device, ExternalTextureFormat::Rgba)
+    }
+
+    fn submit_external_texture(
+        device: &Device,
+        format: ExternalTextureFormat,
+    ) -> Arc<ExternalTexture> {
+        let (plane0, plane1) = match format {
+            ExternalTextureFormat::Rgba => (sampled_external_texture_view(device), None),
+            ExternalTextureFormat::Nv12 => (
+                external_texture_plane_view(
+                    device,
+                    TextureFormat::from_raw(TextureFormat::R8_UNORM),
+                    4,
+                ),
+                Some(external_texture_plane_view(
+                    device,
+                    TextureFormat::from_raw(TextureFormat::RG8_UNORM),
+                    2,
+                )),
+            ),
+        };
         Arc::new(
             device
                 .create_external_texture(ExternalTextureDescriptor {
-                    plane0: sampled_external_texture_view(device),
-                    plane1: None,
-                    format: ExternalTextureFormat::Rgba,
+                    plane0,
+                    plane1,
+                    format,
                     crop_origin: Origin2d { x: 0, y: 0 },
                     crop_size: Extent3d {
                         width: 4,
@@ -4131,6 +4174,173 @@ fn fs() -> @location(0) vec4<f32> {
                     && pass.bind_samplers[0].binding == 1
                     && pass.bind_samplers[0].metal_index == 0
         ));
+    }
+
+    fn external_texture_bind_group(
+        device: &Device,
+        external_texture: Arc<ExternalTexture>,
+    ) -> Arc<BindGroup> {
+        let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![BindGroupLayoutEntry {
+                binding: 0,
+                visibility: SHADER_STAGE_COMPUTE | SHADER_STAGE_FRAGMENT,
+                binding_array_size: 0,
+                kind: Some(BindingLayoutKind::ExternalTexture),
+            }],
+            error: None,
+        }));
+        let group = Arc::new(device.create_bind_group(
+            layout,
+            vec![BindGroupEntry {
+                binding: 0,
+                resource: BindGroupResource::ExternalTexture {
+                    external_texture,
+                    device: Arc::new(device.clone()),
+                },
+            }],
+        ));
+        assert!(!group.is_error());
+        group
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum ExternalTexturePass {
+        Compute,
+        Render,
+        Bundle,
+    }
+
+    fn external_texture_plane_submit_cases(kind: ExternalTexturePass) {
+        for format in [ExternalTextureFormat::Rgba, ExternalTextureFormat::Nv12] {
+            let plane_count = match format {
+                ExternalTextureFormat::Rgba => 1,
+                ExternalTextureFormat::Nv12 => 2,
+            };
+            // Include an intact submission and destruction of each plane separately.
+            for destroyed_plane in std::iter::once(None).chain((0..plane_count).map(Some)) {
+                let device = noop_device();
+                let external = submit_external_texture(&device, format);
+                let group = external_texture_bind_group(&device, external.clone());
+                let layout = explicit_pipeline_layout(&device, group.layout().clone());
+                let encoder = device.create_command_encoder();
+                match kind {
+                    ExternalTexturePass::Compute => {
+                        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+                            "@group(0) @binding(0) var ext: texture_external;
+                             @compute @workgroup_size(1) fn cs() { _ = textureLoad(ext, vec2u(0)); }"
+                                .to_owned(),
+                        )));
+                        let mut descriptor = compute_pipeline_descriptor(module);
+                        descriptor.layout = ComputePipelineLayout::Explicit(layout);
+                        let pipeline = Arc::new(device.create_compute_pipeline(descriptor));
+                        assert!(!pipeline.is_error());
+                        let (pass, error) = encoder.begin_compute_pass(None);
+                        assert_eq!(error, None);
+                        assert_eq!(pass.set_pipeline(pipeline), None);
+                        assert_eq!(
+                            pass.set_bind_group(0, Some(group), Vec::new(), device.limits()),
+                            None
+                        );
+                        assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
+                        assert_eq!(pass.end(), None);
+                    }
+                    ExternalTexturePass::Render | ExternalTexturePass::Bundle => {
+                        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+                            "@group(0) @binding(0) var ext: texture_external;
+                             @vertex fn vs() -> @builtin(position) vec4f { return vec4f(0, 0, 0, 1); }
+                             @fragment fn fs() -> @location(0) vec4f { return textureLoad(ext, vec2u(0)); }"
+                                .to_owned(),
+                        )));
+                        let mut descriptor = render_pipeline_descriptor(module);
+                        descriptor.layout = RenderPipelineLayout::Explicit(layout);
+                        let pipeline = Arc::new(device.create_render_pipeline(descriptor));
+                        assert!(!pipeline.is_error());
+                        let (pass, error) = encoder.begin_render_pass(
+                            &noop_render_pass_descriptor(noop_render_attachment(&device), None),
+                        );
+                        assert_eq!(error, None);
+                        if matches!(kind, ExternalTexturePass::Bundle) {
+                            let (bundle, error) = RenderBundleEncoder::new(
+                                render_bundle_encoder_descriptor(),
+                                device.limits(),
+                                device.features(),
+                            );
+                            assert_eq!(error, None);
+                            assert_eq!(bundle.set_pipeline(pipeline), None);
+                            assert_eq!(
+                                bundle.set_bind_group(0, Some(group), Vec::new(), device.limits()),
+                                None
+                            );
+                            assert_eq!(bundle.draw(3, 1, 0, 0, device.limits()), None);
+                            let (bundle, error) = bundle.finish();
+                            assert_eq!(error, None);
+                            assert_eq!(pass.execute_bundles(&[Arc::new(bundle)]), None);
+                        } else {
+                            assert_eq!(pass.set_pipeline(pipeline), None);
+                            assert_eq!(
+                                pass.set_bind_group(0, Some(group), Vec::new(), device.limits()),
+                                None
+                            );
+                            assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+                        }
+                        assert_eq!(pass.end(), None);
+                    }
+                }
+                let (commands, error) = encoder.finish();
+                assert_eq!(error, None);
+                if let Some(plane) = destroyed_plane {
+                    external.inner().planes[plane].texture().destroy();
+                }
+                let error = device.queue().submit(&[Arc::new(commands)]);
+                let expected = destroyed_plane.map(|_| {
+                    DeviceError::validation("queue submit cannot use a destroyed texture")
+                });
+                assert_eq!(
+                    error, expected,
+                    "{kind:?}, {format:?}, plane {destroyed_plane:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compute_submit_validates_external_texture_planes() {
+        external_texture_plane_submit_cases(ExternalTexturePass::Compute);
+    }
+
+    #[test]
+    fn render_submit_validates_external_texture_planes() {
+        external_texture_plane_submit_cases(ExternalTexturePass::Render);
+    }
+
+    #[test]
+    fn render_bundle_submit_validates_external_texture_planes() {
+        external_texture_plane_submit_cases(ExternalTexturePass::Bundle);
+    }
+
+    #[test]
+    fn external_texture_planes_are_reads_in_usage_scopes() {
+        let device = noop_device();
+        for format in [ExternalTextureFormat::Rgba, ExternalTextureFormat::Nv12] {
+            let external = submit_external_texture(&device, format);
+            let group = external_texture_bind_group(&device, external.clone());
+            let uses = &group.precomputed_usage().texture_uses;
+            assert_eq!(uses.len(), external.inner().planes.len());
+            for (scope_use, plane) in uses.iter().zip(&external.inner().planes) {
+                assert!(scope_use.texture.same(&plane.texture()));
+                assert_eq!(scope_use.access, TextureAccess::Read);
+                let mut with_write = uses.clone();
+                with_write.push(texture_scope_use(plane, TextureAccess::WriteOnlyStorage));
+                let conflict = Err(
+                    "usage scope cannot read and write or write the same texture subresource twice"
+                        .to_owned(),
+                );
+                assert_eq!(validate_texture_usage_scope(&with_write), conflict);
+                assert_eq!(validate_texture_usage_scope_lenient(&with_write), conflict);
+            }
+            assert_eq!(validate_texture_usage_scope(uses), Ok(()));
+            assert_eq!(validate_texture_usage_scope_lenient(uses), Ok(()));
+        }
     }
 
     #[test]
@@ -6497,6 +6707,49 @@ fn fs() -> @location(0) vec4<f32> {
     }
 
     #[test]
+    fn submitted_buffer_survives_destroy_until_completion_is_harvested() {
+        for completion in 0..3 {
+            let device = noop_device();
+            let queue = device.queue();
+            let buffer = Arc::new(noop_buffer(16, BufferUsage::COPY_DST));
+            let weak = match buffer.hal().unwrap() {
+                HalBuffer::Noop(buffer) => buffer.downgrade_storage(),
+                _ => panic!("expected Noop buffer"),
+            };
+            let encoder = device.create_command_encoder();
+            assert_eq!(encoder.clear_buffer(Arc::clone(&buffer), 0, 16), None);
+            let (commands, error) = encoder.finish();
+            assert_eq!(error, None);
+            assert_eq!(queue.submit(&[Arc::new(commands)]), None);
+            buffer.destroy();
+            assert!(buffer.hal().is_none());
+            assert!(weak.upgrade().is_some(), "submission must own its buffer");
+            match completion {
+                0 => assert_eq!(queue.wait_idle(), None),
+                1 => assert!(queue
+                    .submission_complete(queue.latest_submission_index())
+                    .unwrap()),
+                _ => assert!(queue
+                    .wait_for_submission(queue.latest_submission_index())
+                    .is_ok()),
+            }
+            assert!(
+                weak.upgrade().is_none(),
+                "completion must release HAL storage while core handles live"
+            );
+            let HalQueue::Noop(hal_queue) = queue.hal() else {
+                panic!("expected Noop queue");
+            };
+            // Inspection retains command metadata without retaining its allocation.
+            let recorded = hal_queue.submitted_copies();
+            assert!(
+                matches!(recorded.as_slice(), [HalCopy::BufferClear(clear)] if clear.buffer.size() == 16)
+            );
+            assert!(weak.upgrade().is_none());
+        }
+    }
+
+    #[test]
     fn queue_pending_write_keeps_destroyed_destination_alive_until_flush() {
         let device = noop_device();
         let queue = device.queue();
@@ -6517,7 +6770,7 @@ fn fs() -> @location(0) vec4<f32> {
             None
         );
         buffer.destroy();
-        drop(buffer);
+        assert!(buffer.hal().is_none());
 
         assert_eq!(queue.submit(&[]), None);
         assert_eq!(
@@ -6566,7 +6819,7 @@ fn fs() -> @location(0) vec4<f32> {
             None
         );
         texture.destroy();
-        drop(texture);
+        assert!(texture.hal().is_none());
 
         assert_eq!(queue.submit(&[]), None);
         assert!(matches!(
@@ -8086,6 +8339,74 @@ fn fs() -> @location(0) vec4<f32> {
     }
 
     #[test]
+    fn destroy_after_submit_validation_fails_render_pass_lowering() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        for resource in ["buffer", "texture", "occlusion query set"] {
+            let device = noop_device();
+            let queue = device.queue();
+            let view = noop_render_attachment(&device);
+            let texture = view.texture();
+            let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+                usage: BufferUsage::INDEX,
+                size: 16,
+                mapped_at_creation: false,
+            }));
+            let (query_set, error) = device.create_query_set(QuerySetDescriptor {
+                label: String::new(),
+                kind: QueryType::Occlusion,
+                count: 1,
+            });
+            assert_eq!(error, None);
+            let encoder = device.create_command_encoder();
+            let (pass, error) = encoder
+                .begin_render_pass(&noop_render_pass_descriptor(view, Some(query_set.clone())));
+            assert_eq!(error, None);
+            assert_eq!(
+                pass.set_index_buffer(Arc::clone(&buffer), Some(IndexFormat::Uint16), 0, 16),
+                None
+            );
+            assert_eq!(pass.begin_occlusion_query(0), None);
+            assert_eq!(pass.end_occlusion_query(), None);
+            assert_eq!(pass.end(), None);
+            let (commands, error) = encoder.finish();
+            assert_eq!(error, None);
+            let (reached_tx, reached_rx) = mpsc::channel();
+            let (resume_tx, resume_rx) = mpsc::channel();
+            *queue.inner.submit_test_hook.lock() = Some(SubmitTestHook {
+                reached: reached_tx,
+                resume: resume_rx,
+                pause_after_validation: true,
+            });
+            let submit_queue = queue.clone();
+            let submit = std::thread::spawn(move || submit_queue.submit(&[Arc::new(commands)]));
+            let timeout = Duration::from_secs(5);
+            assert_eq!(reached_rx.recv_timeout(timeout).unwrap(), "validating");
+            resume_tx.send(()).unwrap();
+            assert_eq!(reached_rx.recv_timeout(timeout).unwrap(), "validated");
+            match resource {
+                "buffer" => buffer.destroy(),
+                "texture" => texture.destroy(),
+                _ => query_set.destroy(),
+            }
+            resume_tx.send(()).unwrap();
+            // Drain later pauses even if lowering incorrectly succeeds, so the
+            // regression reports an assertion failure instead of blocking.
+            while let Ok(stage) = reached_rx.recv_timeout(timeout) {
+                assert!(matches!(stage, "lowered" | "submitted" | "committed"));
+                resume_tx.send(()).unwrap();
+            }
+            assert_eq!(
+                submit.join().unwrap(),
+                Some(DeviceError::internal("render pass lowering failed")),
+                "destroyed {resource} must fail lowering"
+            );
+            assert!(submitted_copies(&queue).is_empty());
+        }
+    }
+
+    #[test]
     fn concurrent_submits_serialize_lowering_hal_commit_and_retirement() {
         use std::sync::mpsc;
         use std::time::Duration;
@@ -8098,6 +8419,7 @@ fn fs() -> @location(0) vec4<f32> {
         *queue.inner.submit_test_hook.lock() = Some(SubmitTestHook {
             reached: reached_tx,
             resume: resume_rx,
+            pause_after_validation: false,
         });
         let first_queue = queue.clone();
         let first = std::thread::spawn(move || first_queue.submit(&[write]));
@@ -8185,6 +8507,7 @@ fn fs() -> @location(0) vec4<f32> {
             *queue.inner.submit_test_hook.lock() = Some(SubmitTestHook {
                 reached: reached_tx,
                 resume: resume_rx,
+                pause_after_validation: false,
             });
             let submit_queue = queue.clone();
             let submit_commands = Arc::clone(&commands);

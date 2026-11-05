@@ -108,7 +108,7 @@ pub struct Texture {
 /// Holds shared state for the texture handle.
 #[derive(Debug)]
 pub(crate) struct TextureInner {
-    pub(crate) hal: Option<HalTexture>,
+    pub(crate) hal: Mutex<Option<HalTexture>>,
     pub(crate) usage: TextureUsage,
     pub(crate) dimension: TextureDimension,
     pub(crate) size: Extent3d,
@@ -263,7 +263,7 @@ impl Texture {
         let init_aspects = InitAspects::from_caps(format_caps);
         Self {
             inner: Arc::new(TextureInner {
-                hal,
+                hal: Mutex::new(hal),
                 usage: descriptor.usage,
                 dimension: descriptor.dimension,
                 size: descriptor.size,
@@ -474,12 +474,14 @@ impl Texture {
 
     /// Returns the HAL.
     pub(crate) fn hal(&self) -> Option<HalTexture> {
-        self.inner.hal.clone()
+        self.inner.hal.lock().clone()
     }
 
     /// Destroys this object and releases backend resources.
     pub fn destroy(&self) {
-        self.inner.state.lock().is_destroyed = true;
+        let mut state = self.inner.state.lock();
+        state.is_destroyed = true;
+        self.inner.hal.lock().take();
     }
 
     /// Creates a view of this texture, resolving defaulted fields against the texture.
@@ -2334,7 +2336,9 @@ mod tests {
         );
 
         texture.destroy();
+        assert!(texture.hal().is_none());
         texture.destroy();
+        assert!(texture.hal().is_none());
         assert_eq!(
             texture.validate_queue_write(
                 0,

@@ -1,5 +1,7 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+
+mod recording;
 
 use crate::{
     HalBufferUsage, HalCopy, HalError, HalLimits, HalQueryKind, HalRenderPassCommandStream,
@@ -281,6 +283,8 @@ impl Default for NoopDevice {
 pub struct NoopQueue {
     submitted_copies: Arc<Mutex<Vec<HalCopy>>>,
     submitted_render_pass_command_streams: Arc<Mutex<Vec<HalRenderPassCommandStream>>>,
+    retired_copy_count: Arc<AtomicUsize>,
+    retired_render_pass_count: Arc<AtomicUsize>,
     last_submission_index: Arc<AtomicU64>,
 }
 
@@ -291,6 +295,8 @@ impl NoopQueue {
         Self {
             submitted_copies: Arc::new(Mutex::new(Vec::new())),
             submitted_render_pass_command_streams: Arc::new(Mutex::new(Vec::new())),
+            retired_copy_count: Arc::new(AtomicUsize::new(0)),
+            retired_render_pass_count: Arc::new(AtomicUsize::new(0)),
             last_submission_index: Arc::new(AtomicU64::new(SubmissionIndex::NONE.0)),
         }
     }
@@ -367,6 +373,7 @@ impl NoopQueue {
 
     /// Returns the highest submission index proven complete without blocking.
     pub fn completed_submission_index(&self) -> Result<SubmissionIndex, HalError> {
+        self.retire_recorded_resources()?;
         Ok(SubmissionIndex(
             self.last_submission_index.load(Ordering::Acquire),
         ))
@@ -387,10 +394,40 @@ impl NoopQueue {
 
     /// Waits until all submitted queue work has completed.
     pub fn wait_idle(&self) -> Result<(), HalError> {
+        self.retire_recorded_resources()
+    }
+
+    fn retire_recorded_resources(&self) -> Result<(), HalError> {
+        let mut copies =
+            self.submitted_copies
+                .lock()
+                .map_err(|_| HalError::QueueSubmissionFailed {
+                    backend: "noop",
+                    message: "submitted copies lock poisoned".to_owned(),
+                })?;
+        // Each cursor is read and advanced while holding its recorder's lock.
+        copies[self.retired_copy_count.load(Ordering::Relaxed)..]
+            .iter_mut()
+            .for_each(recording::release_copy_storage);
+        self.retired_copy_count
+            .store(copies.len(), Ordering::Relaxed);
+        drop(copies);
+        let mut passes = self
+            .submitted_render_pass_command_streams
+            .lock()
+            .map_err(|_| HalError::QueueSubmissionFailed {
+                backend: "noop",
+                message: "submitted render pass command streams lock poisoned".to_owned(),
+            })?;
+        passes[self.retired_render_pass_count.load(Ordering::Relaxed)..]
+            .iter_mut()
+            .for_each(|pass| recording::release_render_storage(&mut pass.commands));
+        self.retired_render_pass_count
+            .store(passes.len(), Ordering::Relaxed);
         Ok(())
     }
 
-    /// Returns submitted copy commands recorded by this queue.
+    /// Returns submitted copy commands; completed records hold only weak buffer storage.
     #[must_use]
     pub fn submitted_copies(&self) -> Vec<HalCopy> {
         self.submitted_copies
@@ -399,7 +436,7 @@ impl NoopQueue {
             .unwrap_or_default()
     }
 
-    /// Returns render-pass command streams recorded by this queue.
+    /// Returns render-pass commands; completed records hold only weak buffer storage.
     #[must_use]
     pub fn submitted_render_pass_command_streams(&self) -> Vec<HalRenderPassCommandStream> {
         self.submitted_render_pass_command_streams
@@ -419,7 +456,14 @@ impl Default for NoopQueue {
 #[derive(Debug, Clone)]
 pub struct NoopBuffer {
     size: u64,
-    data: Arc<Mutex<Vec<u8>>>,
+    data: NoopBufferStorage,
+}
+
+// Completed command records preserve metadata without owning the allocation.
+#[derive(Debug, Clone)]
+enum NoopBufferStorage {
+    Owned(Arc<Mutex<Vec<u8>>>),
+    Recorded(std::sync::Weak<Mutex<Vec<u8>>>),
 }
 
 impl NoopBuffer {
@@ -429,7 +473,7 @@ impl NoopBuffer {
         let len = usize::try_from(size).unwrap_or(0);
         Self {
             size,
-            data: Arc::new(Mutex::new(vec![0; len])),
+            data: NoopBufferStorage::Owned(Arc::new(Mutex::new(vec![0; len]))),
         }
     }
 
@@ -439,6 +483,26 @@ impl NoopBuffer {
         self.size
     }
 
+    /// Returns a weak reference to the backing storage for lifetime inspection.
+    #[must_use]
+    pub fn downgrade_storage(&self) -> std::sync::Weak<Mutex<Vec<u8>>> {
+        match &self.data {
+            NoopBufferStorage::Owned(data) => Arc::downgrade(data),
+            NoopBufferStorage::Recorded(data) => data.clone(),
+        }
+    }
+
+    fn storage(&self) -> Result<Arc<Mutex<Vec<u8>>>, HalError> {
+        match &self.data {
+            NoopBufferStorage::Owned(data) => Some(Arc::clone(data)),
+            NoopBufferStorage::Recorded(data) => data.upgrade(),
+        }
+        .ok_or(HalError::BufferOperationFailed {
+            backend: "noop",
+            message: "recorded buffer storage has been released",
+        })
+    }
+
     /// Writes bytes into the buffer.
     pub fn write(&self, offset: u64, data: &[u8]) -> Result<(), HalError> {
         let end = validate_noop_buffer_range(self.size, offset, data.len() as u64)?;
@@ -446,8 +510,8 @@ impl NoopBuffer {
             backend: "noop",
             message: "buffer offset is too large",
         })?;
-        let mut storage = self
-            .data
+        let backing = self.storage()?;
+        let mut storage = backing
             .lock()
             .map_err(|_| HalError::BufferOperationFailed {
                 backend: "noop",
@@ -470,8 +534,8 @@ impl NoopBuffer {
             backend: "noop",
             message: "buffer offset is too large",
         })?;
-        let storage = self
-            .data
+        let backing = self.storage()?;
+        let storage = backing
             .lock()
             .map_err(|_| HalError::BufferOperationFailed {
                 backend: "noop",
@@ -1091,6 +1155,58 @@ mod tests {
     }
 
     #[test]
+    fn noop_queue_completion_releases_both_render_recorders() -> Result<(), HalError> {
+        use crate::{HalBoundIndirectBuffer, HalBuffer, HalRenderPassCommand};
+
+        for submit_copy in [false, true] {
+            let queue = NoopQueue::new();
+            for record_count in 1..=2 {
+                let buffer = NoopBuffer::new(16);
+                let weak = buffer.downgrade_storage();
+                let pass = HalRenderPassCommandStream {
+                    commands: vec![HalRenderPassCommand::DrawIndirect {
+                        indirect_buffer: HalBoundIndirectBuffer {
+                            buffer: HalBuffer::Noop(buffer),
+                            offset: 0,
+                        },
+                    }],
+                    ..Default::default()
+                };
+                let submitted = if submit_copy {
+                    queue.submit_copies(&[HalCopy::RenderPassCommandStream(pass)])?
+                } else {
+                    queue.submit_render_pass_command_streams(&[pass])?
+                };
+                assert!(weak.upgrade().is_some());
+                if record_count == 2 {
+                    queue.wait_idle()?;
+                    assert!(weak.upgrade().is_none());
+                }
+                assert_eq!(queue.completed_submission_index()?, submitted);
+                assert!(weak.upgrade().is_none());
+                queue.wait_idle()?;
+                assert_eq!(
+                    queue.submitted_render_pass_command_streams().len(),
+                    record_count
+                );
+                assert_eq!(
+                    queue.submitted_copies().len(),
+                    record_count * usize::from(submit_copy)
+                );
+                assert_eq!(
+                    queue.retired_copy_count.load(Ordering::Relaxed),
+                    record_count * usize::from(submit_copy)
+                );
+                assert_eq!(
+                    queue.retired_render_pass_count.load(Ordering::Relaxed),
+                    record_count
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn noop_queue_wait_for_already_completed_submission_returns_promptly() -> Result<(), HalError> {
         let queue = NoopQueue::new();
         let submitted = queue.submit_empty()?;
@@ -1110,6 +1226,17 @@ mod tests {
 
         assert!(queue.wait_for_submission(unissued).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn noop_buffer_downgrade_storage_does_not_keep_allocation_alive() {
+        let buffer = NoopBuffer::new(4);
+        let weak = buffer.downgrade_storage();
+        let clone = buffer.clone();
+        drop(buffer);
+        assert!(weak.upgrade().is_some());
+        drop(clone);
+        assert!(weak.upgrade().is_none());
     }
 
     #[test]

@@ -184,7 +184,8 @@ type WritebackTestHook = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver
 /// Holds shared state for the buffer handle.
 #[derive(Debug)]
 pub(crate) struct BufferInner {
-    pub(crate) hal: Option<HalBuffer>,
+    // Lock order: state -> hal. Mapped access and destruction hold state.
+    pub(crate) hal: Mutex<Option<HalBuffer>>,
     pub(crate) usage: BufferUsage,
     pub(crate) size: u64,
     pub(crate) host: HostBuffer,
@@ -363,7 +364,7 @@ impl Buffer {
 
         Self {
             inner: Arc::new(BufferInner {
-                hal,
+                hal: Mutex::new(hal),
                 usage: descriptor.usage,
                 size: descriptor.size,
                 host,
@@ -419,7 +420,7 @@ impl Buffer {
 
         Ok(Self {
             inner: Arc::new(BufferInner {
-                hal,
+                hal: Mutex::new(hal),
                 usage: descriptor.usage,
                 size: descriptor.size,
                 host,
@@ -474,7 +475,7 @@ impl Buffer {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 
-    /// Cancels any pending map and clears the mapped state.
+    /// Cancels any map and releases host storage and the backend buffer.
     pub fn destroy(&self) {
         let mut state = self.inner.state.lock();
         state.is_destroyed = true;
@@ -483,6 +484,7 @@ impl Buffer {
         state.active_map = None;
         state.mapped_ranges.clear();
         *self.inner.host.bytes.lock() = Box::new([]);
+        self.inner.hal.lock().take();
     }
 
     /// Cancels any pending map and clears the mapped state.
@@ -509,9 +511,7 @@ impl Buffer {
         if active_map.mode != MapMode::Write {
             return None;
         }
-        let Some(hal) = &self.inner.hal else {
-            return None;
-        };
+        let hal = self.hal()?;
         if hal.mapped_ptr().is_some() {
             return None;
         }
@@ -608,8 +608,8 @@ impl Buffer {
         };
         // GPU completion may take the submission lock or reenter buffer APIs.
         // Never call it while holding buffer state.
-        let complete =
-            pending.mode != MapMode::Read || self.inner.hal.is_none() || ensure_gpu_complete();
+        let has_hal = self.inner.hal.lock().is_some();
+        let complete = pending.mode != MapMode::Read || !has_hal || ensure_gpu_complete();
         let mut state = self.inner.state.lock();
         if state
             .pending_map
@@ -625,13 +625,9 @@ impl Buffer {
             MapAsyncStatus::Error
         };
         if let Some(pending) = pending.as_ref() {
-            if should_wait_for_read_map(outcome, pending, self.inner.hal.is_some()) {
-                if let Some(hal) = self
-                    .inner
-                    .hal
-                    .as_ref()
-                    .filter(|hal| hal.mapped_ptr().is_none())
-                {
+            let hal = self.hal();
+            if should_wait_for_read_map(outcome, pending, hal.is_some()) {
+                if let Some(hal) = hal.filter(|hal| hal.mapped_ptr().is_none()) {
                     outcome = match hal.read(pending.offset, pending.size) {
                         Ok(bytes) if self.inner.host.write(pending.offset, &bytes).is_ok() => {
                             MapAsyncStatus::Success
@@ -715,6 +711,46 @@ impl Buffer {
         self.mapped_ptr_at(&state, range.offset)
     }
 
+    /// Copies a mapped range into `data`, holding the map state lock until complete.
+    #[must_use]
+    pub fn copy_from_mapped_range(&self, offset: u64, data: &mut [u8]) -> bool {
+        let Ok(size) = u64::try_from(data.len()) else {
+            return false;
+        };
+        let state = self.inner.state.lock();
+        let Some(range) = self.validate_mapped_range(&state, true, offset, Some(size)) else {
+            return false;
+        };
+        let Some(source) = self.mapped_ptr_at(&state, range.offset) else {
+            return false;
+        };
+        if !data.is_empty() {
+            // The state lock prevents unmap or destroy from releasing the allocation.
+            unsafe { std::ptr::copy_nonoverlapping(source, data.as_mut_ptr(), data.len()) };
+        }
+        true
+    }
+
+    /// Copies `data` into a mapped range, holding the map state lock until complete.
+    #[must_use]
+    pub fn copy_to_mapped_range(&self, offset: u64, data: &[u8]) -> bool {
+        let Ok(size) = u64::try_from(data.len()) else {
+            return false;
+        };
+        let state = self.inner.state.lock();
+        let Some(range) = self.validate_mapped_range(&state, false, offset, Some(size)) else {
+            return false;
+        };
+        let Some(destination) = self.mapped_ptr_at(&state, range.offset) else {
+            return false;
+        };
+        if !data.is_empty() {
+            // The state lock prevents unmap or destroy from releasing the allocation.
+            unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), destination, data.len()) };
+        }
+        true
+    }
+
     fn validate_mapped_range(
         &self,
         state: &BufferState,
@@ -754,7 +790,13 @@ impl Buffer {
         if state.is_destroyed || state.map_state != BufferMapState::Mapped {
             return None;
         }
-        if let Some(mapped_ptr) = self.inner.hal.as_ref().and_then(HalBuffer::mapped_ptr) {
+        if let Some(mapped_ptr) = self
+            .inner
+            .hal
+            .lock()
+            .as_ref()
+            .and_then(HalBuffer::mapped_ptr)
+        {
             let offset = usize::try_from(offset).ok()?;
             return Some(unsafe { mapped_ptr.as_ptr().add(offset) });
         }
@@ -763,7 +805,7 @@ impl Buffer {
 
     /// Returns the HAL.
     pub fn hal(&self) -> Option<HalBuffer> {
-        self.inner.hal.clone()
+        self.inner.hal.lock().clone()
     }
 
     /// Validates queue write and returns a descriptive error on failure.
@@ -1054,7 +1096,9 @@ mod tests {
         );
 
         buffer.destroy();
+        assert!(buffer.hal().is_none());
         buffer.destroy();
+        assert!(buffer.hal().is_none());
         assert_eq!(
             buffer.validate_queue_write(0, 4),
             Err("cannot write to a destroyed buffer")
@@ -1236,6 +1280,83 @@ mod tests {
             assert_eq!(buffer.mapped_range(false, 0, Some(0)), None);
             assert_eq!(buffer.mapped_range_for_copy(false, 0, 0), None);
         }
+    }
+
+    #[test]
+    fn destroy_releases_hal_and_discards_mappings_without_writeback() {
+        for case in 0..6 {
+            let buffer = noop_device().create_buffer(BufferDescriptor {
+                usage: if case >= 4 {
+                    BufferUsage::MAP_READ | BufferUsage::COPY_DST
+                } else if case == 3 {
+                    BufferUsage::COPY_SRC
+                } else {
+                    BufferUsage::MAP_WRITE | BufferUsage::COPY_SRC
+                },
+                size: 16,
+                mapped_at_creation: case == 3,
+            });
+            let hal = buffer.hal().expect("HAL buffer");
+            let yawgpu_hal::HalBuffer::Noop(noop) = &hal else {
+                panic!("expected Noop buffer");
+            };
+            let weak = noop.downgrade_storage();
+            let mode = if case >= 4 {
+                MapMode::Read
+            } else {
+                MapMode::Write
+            };
+            let serial = if matches!(case, 1 | 2 | 4 | 5) {
+                Some(buffer.begin_map(mode, 0, 16).unwrap())
+            } else {
+                None
+            };
+            if case == 2 || case == 5 {
+                assert_eq!(
+                    buffer.resolve_pending_map(serial.unwrap()),
+                    MapAsyncStatus::Success
+                );
+            }
+            if case == 2 || case == 3 {
+                let ptr = buffer.mapped_range(false, 0, Some(16)).unwrap();
+                // SAFETY: The mapping is writable and remains active until destroy.
+                unsafe {
+                    *ptr = 42;
+                }
+            }
+            buffer.destroy();
+            buffer.destroy();
+            assert!(buffer.hal().is_none());
+            assert_eq!(buffer.map_state(), BufferMapState::Unmapped);
+            assert_eq!(buffer.unmap(), None);
+            assert_eq!(buffer.mapped_range(false, 0, Some(16)), None);
+            assert_eq!(buffer.mapped_range_for_copy(false, 0, 16), None);
+            if let Some(serial) = serial {
+                assert_eq!(buffer.resolve_pending_map(serial), MapAsyncStatus::Aborted);
+            }
+            assert_eq!(hal.read(0, 1).unwrap(), vec![0]);
+            drop(hal);
+            assert!(
+                weak.upgrade().is_none(),
+                "core handles must not own destroyed HAL storage"
+            );
+        }
+    }
+
+    #[test]
+    fn destroy_during_read_map_completion_aborts_without_holding_hal_lock() {
+        let buffer = noop_buffer(16, BufferUsage::MAP_READ | BufferUsage::COPY_DST);
+        let serial = buffer.begin_map(MapMode::Read, 0, 16).unwrap();
+        assert_eq!(
+            buffer.resolve_pending_map_with_gpu_completion(serial, || {
+                buffer.destroy();
+                true
+            }),
+            MapAsyncStatus::Aborted
+        );
+        assert!(buffer.hal().is_none());
+        assert_eq!(buffer.unmap(), None);
+        assert_eq!(buffer.mapped_range(true, 0, Some(16)), None);
     }
 
     #[test]
@@ -1456,6 +1577,47 @@ mod tests {
             .expect("map should begin after unmap");
         assert_eq!(buffer.resolve_pending_map(2), MapAsyncStatus::Success);
         assert!(buffer.mapped_range(false, 24, Some(0)).is_some());
+    }
+
+    #[test]
+    fn mapped_range_copies_validate_mapping_access_and_bounds() {
+        let buffer = noop_buffer(32, BufferUsage::MAP_WRITE);
+        let mut output = [0; 4];
+        assert!(!buffer.copy_from_mapped_range(0, &mut output));
+        assert!(!buffer.copy_to_mapped_range(0, &[1; 4]));
+        assert_eq!(buffer.begin_map(MapMode::Write, 8, 16), Ok(1));
+        assert_eq!(buffer.resolve_pending_map(1), MapAsyncStatus::Success);
+
+        // Copy operations do not register ranges or conflict with registered ranges.
+        assert!(buffer.mapped_range(false, 8, Some(4)).is_some());
+        assert!(buffer.copy_to_mapped_range(8, &[1, 2, 3, 4]));
+        assert!(buffer.copy_from_mapped_range(8, &mut output));
+        assert_eq!(output, [1, 2, 3, 4]);
+        assert!(buffer.copy_to_mapped_range(24, &[]));
+        assert!(buffer.copy_from_mapped_range(24, &mut []));
+        for (offset, size) in [(0, 4), (12, 4), (16, 2), (24, 4), (u64::MAX - 7, 8)] {
+            let mut bytes = vec![0; size];
+            assert!(!buffer.copy_from_mapped_range(offset, &mut bytes));
+            assert!(!buffer.copy_to_mapped_range(offset, &bytes));
+        }
+
+        assert_eq!(buffer.unmap(), None);
+        assert!(!buffer.copy_from_mapped_range(8, &mut output));
+        assert!(!buffer.copy_to_mapped_range(8, &[1; 4]));
+        assert_eq!(buffer.begin_map(MapMode::Write, 0, 32), Ok(2));
+        assert_eq!(buffer.resolve_pending_map(2), MapAsyncStatus::Success);
+        buffer.destroy();
+        assert!(!buffer.copy_from_mapped_range(0, &mut output));
+        assert!(!buffer.copy_to_mapped_range(0, &[1; 4]));
+
+        let read_buffer = noop_buffer(16, BufferUsage::MAP_READ);
+        assert_eq!(read_buffer.begin_map(MapMode::Read, 0, 16), Ok(1));
+        assert_eq!(read_buffer.resolve_pending_map(1), MapAsyncStatus::Success);
+        assert!(read_buffer.copy_from_mapped_range(0, &mut output));
+        assert_eq!(output, [0; 4]);
+        assert!(!read_buffer.copy_to_mapped_range(0, &[1; 4]));
+        read_buffer.destroy();
+        assert!(!read_buffer.copy_from_mapped_range(0, &mut output));
     }
 
     #[test]

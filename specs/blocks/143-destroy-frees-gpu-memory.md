@@ -1,6 +1,7 @@
 # Block 143 — `destroy()` frees GPU memory
 
-Status: **IN PROGRESS**.
+Status: **COMPLETE (2026-11-05)**. Phase Review: 0 CRITICAL, 0 MAJOR, 7 MINOR; six
+resolved, one declined with a reason, see below.
 Source: backlog A24, started by user request on 2026-11-05.
 Oracle: Dawn at the pinned `third_party/dawn` (paths relative to `src/dawn/native/`):
 `metal/BufferMTL.mm` (`Buffer::DestroyImpl`), `vulkan/BufferVk.cpp`
@@ -81,13 +82,21 @@ R6. **Unchanged.**
 - Device destruction and loss.
 - Surface textures: `destroy()` on the texture from `getCurrentTexture` does not free
   the swapchain image. It may drop core's reference only if the surface keeps its own.
-- External textures.
+- External texture objects. Their plane textures follow R8.
 - Every backend's behaviour except when memory is freed.
 - C API.
 
 R7. **Performance.** `hal()` is on the encode and submit hot paths. Making `inner.hal`
 releasable must not add measurable cost there. Use an uncontended lock or an atomic
 swap; do not add an allocation per access. Claude checks it with the bench.
+
+R8. **External texture planes.** A bound external texture's plane textures take part in
+the pass usage scope as sampled reads, and in the submit-time destroyed check, as Dawn
+does: Dawn expands an external-texture binding into plane texture bindings
+(`BindGroup.cpp`, `PassResourceUsageTracker.cpp` `AddBindGroup`) and rejects a destroyed
+plane at submit (`ExternalTexture.cpp`, `ValidateCanUseInSubmitNow`). A destroyed plane
+texture fails submit with "queue submit cannot use a destroyed texture". Without the
+check, a destroyed plane would reach lowering with no HAL texture.
 
 ## Tests
 
@@ -113,9 +122,10 @@ swap; do not add an allocation per access. Claude checks it with the bench.
 - Claude, Vulkan e2e (MoltenVK under the Khronos layer): the in-flight scenario runs
   with no validation errors.
 - Claude: the full Metal e2e and every other ignored test. CTS on Metal:
-  - targeted `webgpu:api,validation,state,device_lost,destroy:*`,
-    `webgpu:api,validation,buffer,destroy:*`, `webgpu:api,validation,texture,destroy:*`,
-    `webgpu:api,validation,query_set,destroy:*`, `webgpu:api,operation,buffers,map:*`;
+  - targeted `webgpu:api,validation,buffer,destroy:*`,
+    `webgpu:api,validation,buffer,mapping:*`, `webgpu:api,validation,queue,destroyed,*`,
+    `webgpu:api,validation,query_set,destroy:*`, `webgpu:api,operation,buffers,*`,
+    `webgpu:api,operation,device,lost:*`;
   - then `webgpu:api,*` and `webgpu:shader,execution,*` must not regress.
 - Claude: a bench comparison against `b81d1b4` (R7).
 
@@ -130,3 +140,39 @@ swap; do not add an allocation per access. Claude checks it with the bench.
 
 - **S1 (coding agent):** R1-R7 with the unit tests and the R2 audit.
 - **S2 (Claude):** e2e, CTS, bench, Phase Review.
+
+## Verification (2026-11-05)
+
+Run on Apple M2, macOS 27.2. Vulkan here is MoltenVK under the Khronos layer, which is
+reference-only.
+
+| Gate | Result |
+|---|---|
+| R2 audit (coding agent; confirmed by the Phase Review) | Core holds HAL objects only in `BufferInner`, `TextureInner`, `QuerySetInner`, and the queue's pending writes. The Metal and Vulkan HALs retain every resource a submission references until it completes, and keep no cache keyed on a resource. The one structure that kept storage past completion was the Noop queue's command history; it now holds weak references once a submission completes |
+| `cargo test --workspace` | 1,426 passed, 0 failed |
+| fmt; clippy `-D warnings` on default, `metal`, `vulkan`, `gles`, `metal,tiled`, `vulkan,tiled`, `shader-passthrough` | clean |
+| HAL Metal ignored tests | 66 passed |
+| `e2e_metal_destroy_memory` (new) | 2 of 2. `currentAllocatedSize` grows by 80 MiB for the first iteration and by 0 MiB after 16 destroyed iterations. The same test against `8122944` (before this block) keeps 1,280 MiB and fails |
+| Metal e2e and every other ignored `yawgpu` test, `metal,tiled` | 171 passed, 0 failed |
+| All `e2e_vulkan_*`, MoltenVK, Khronos layer | 154 passed, 1 failed (the known `imageView2DOn3DImage` portability case). `e2e_vulkan_destroy_memory` 2 of 2 with no validation output |
+| webgpu-native-cts, Metal, targeted | `buffer,destroy` 31 / fail 0; `buffer,mapping` 289 / 0; `queue,destroyed,*` 60 / 0; `query_set,destroy` 2 / 0; `operation,buffers,*` 940 / 0; `device,lost` 1 / 0 |
+| webgpu-native-cts, Metal, `webgpu:api,*` | pass 589,574, skip 101,793, fail 0, crash 0, on the library before and after the Phase Review fixes; identical to Block 142 |
+| webgpu-native-cts, Metal, `webgpu:shader,execution,*` | pass 857,326, skip 25,860, fail 0, crash 0, xfail 67, xpass 5 (F-160 cases that happened to read zero); pass + xfail identical to Block 142 |
+| Bench against `b81d1b4`, three interleaved runs each, then five interleaved runs of the `encode/` cases | every case within run-to-run noise (R7) |
+
+`webgpu:shader,execution,*` and the targeted queries ran before the Phase Review fixes.
+Those fixes touch the occlusion-query lowering race, comments, the mapped-range copy in
+the C API, and the Noop queue; `webgpu:api,*` and `webgpu:api,validation,buffer,*`
+(497 / fail 0) ran again after them.
+
+## Phase Review
+
+| ID | Finding | Disposition |
+|---|---|---|
+| m1 | A destroy racing submit could lower a render pass with `BeginOcclusionQuery` and no query set | Lowering fails the pass with "render pass lowering failed" |
+| m2 | A queue-write comment said a missing HAL buffer means an error buffer only | Comments state both cases |
+| m3 | `wgpuBufferReadMappedRange` and `wgpuBufferWriteMappedRange` copied after dropping the buffer state lock, so a concurrent destroy could free the allocation mid-copy | The copy runs in core under the state lock (`Buffer::copy_from_mapped_range`, `copy_to_mapped_range`) |
+| m4 | The spec said external textures and validation were unchanged, but plane textures now join the usage scope and the destroyed check | R8 added |
+| m5 | Test gaps: no test of destroy between validation and lowering; the in-flight e2e cannot prove the submission was still running; the Vulkan loop has no memory bound | Race test added through the submit test hook (it fails without m1). The in-flight e2e is documented as a safety regression test. The Vulkan memory bound is declined: there is no portable allocated-size query, and MoltenVK is reference-only |
+| m6 | The Noop queue walked its whole command history on every completion check | A retired-up-to cursor per history list |
+| m7 | External texture planes are not lazily zero-initialized (not caused by this block) | Backlog A27 |

@@ -3042,20 +3042,6 @@ unsafe fn mapped_range_ptr(
     buffer.core.mapped_range(const_access, offset, size)
 }
 
-unsafe fn mapped_range_for_copy_ptr(
-    buffer: native::WGPUBuffer,
-    const_access: bool,
-    offset: usize,
-    size: usize,
-) -> Option<*mut u8> {
-    let buffer = borrow_handle(buffer, "WGPUBuffer");
-    let offset = u64::try_from(offset).ok()?;
-    let size = u64::try_from(size).ok()?;
-    buffer
-        .core
-        .mapped_range_for_copy(const_access, offset, size)
-}
-
 /// Installs a Rust-side uncaptured-error callback for test harnesses.
 ///
 /// # Safety

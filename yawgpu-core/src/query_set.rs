@@ -73,7 +73,7 @@ pub(crate) struct QuerySetInner {
     pub(crate) label: Mutex<String>,
     pub(crate) kind: QueryType,
     pub(crate) count: u32,
-    pub(crate) hal: Option<HalQuerySet>,
+    pub(crate) hal: Mutex<Option<HalQuerySet>>,
     pub(crate) state: Mutex<QuerySetState>,
 }
 
@@ -96,7 +96,7 @@ impl QuerySet {
                 label: Mutex::new(descriptor.label),
                 kind: descriptor.kind,
                 count: descriptor.count,
-                hal,
+                hal: Mutex::new(hal),
                 state: Mutex::new(QuerySetState {
                     is_error,
                     is_destroyed: false,
@@ -119,7 +119,7 @@ impl QuerySet {
 
     /// Returns the HAL query set.
     pub(crate) fn hal(&self) -> Option<HalQuerySet> {
-        self.inner.hal.clone()
+        self.inner.hal.lock().clone()
     }
 
     /// Sets label on this object or encoder.
@@ -147,7 +147,9 @@ impl QuerySet {
 
     /// Destroys this object and releases backend resources.
     pub fn destroy(&self) {
-        self.inner.state.lock().is_destroyed = true;
+        let mut state = self.inner.state.lock();
+        state.is_destroyed = true;
+        self.inner.hal.lock().take();
     }
 }
 
@@ -208,7 +210,9 @@ mod tests {
         assert_eq!(query_set.inner.label.lock().as_str(), "renamed queries");
         assert!(!query_set.is_destroyed());
         query_set.destroy();
+        assert!(query_set.hal().is_none());
         query_set.destroy();
+        assert!(query_set.hal().is_none());
         assert!(query_set.is_destroyed());
 
         let (error_query_set, error) = device.create_query_set(QuerySetDescriptor {

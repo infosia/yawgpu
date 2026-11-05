@@ -189,11 +189,17 @@ pub unsafe extern "C" fn wgpuBufferReadMappedRange(
     if data.is_null() && size > 0 {
         return native::WGPUStatus_Error;
     }
-    let Some(range) = mapped_range_for_copy_ptr(buffer, true, offset, size) else {
+    let buffer = borrow_handle(buffer, "WGPUBuffer");
+    let Ok(offset) = u64::try_from(offset) else {
         return native::WGPUStatus_Error;
     };
-    if size > 0 {
-        std::ptr::copy_nonoverlapping(range.cast_const(), data.cast(), size);
+    let data = if size == 0 {
+        &mut []
+    } else {
+        std::slice::from_raw_parts_mut(data.cast::<u8>(), size)
+    };
+    if !buffer.core.copy_from_mapped_range(offset, data) {
+        return native::WGPUStatus_Error;
     }
     native::WGPUStatus_Success
 }
@@ -219,11 +225,17 @@ pub unsafe extern "C" fn wgpuBufferWriteMappedRange(
     if data.is_null() && size > 0 {
         return native::WGPUStatus_Error;
     }
-    let Some(range) = mapped_range_for_copy_ptr(buffer, false, offset, size) else {
+    let buffer = borrow_handle(buffer, "WGPUBuffer");
+    let Ok(offset) = u64::try_from(offset) else {
         return native::WGPUStatus_Error;
     };
-    if size > 0 {
-        std::ptr::copy_nonoverlapping(data.cast(), range, size);
+    let data = if size == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(data.cast::<u8>(), size)
+    };
+    if !buffer.core.copy_to_mapped_range(offset, data) {
+        return native::WGPUStatus_Error;
     }
     native::WGPUStatus_Success
 }

@@ -1502,6 +1502,20 @@ pub(crate) fn precompute_bind_group_usage(
                     .texture_uses
                     .push(texture_scope_use(texture_view, access));
             }
+            (
+                BindGroupResource::ExternalTexture {
+                    external_texture, ..
+                },
+                BindingLayoutKind::ExternalTexture,
+            ) => {
+                usage.texture_uses.extend(
+                    external_texture
+                        .inner()
+                        .planes
+                        .iter()
+                        .map(|plane| texture_scope_use(plane, TextureAccess::Read)),
+                );
+            }
             _ => {}
         }
     }
@@ -1708,17 +1722,23 @@ pub(crate) fn bind_group_buffer_resources(
         })
 }
 
-/// Returns bind group texture resources.
+/// Returns bind group texture resources, including external texture planes.
 pub(crate) fn bind_group_texture_resources(
     group: &BindGroup,
 ) -> impl Iterator<Item = Texture> + '_ {
     group
         .entries()
         .iter()
-        .filter_map(|entry| match &entry.resource {
-            BindGroupResource::TextureView { texture_view, .. } => Some(texture_view.texture()),
-            _ => None,
+        .flat_map(|entry| match &entry.resource {
+            BindGroupResource::TextureView { texture_view, .. } => {
+                std::slice::from_ref(texture_view)
+            }
+            BindGroupResource::ExternalTexture {
+                external_texture, ..
+            } => external_texture.inner().planes.as_slice(),
+            _ => &[],
         })
+        .map(|view| view.texture())
 }
 
 /// Validates pipeline bind groups and returns a descriptive error on failure.
