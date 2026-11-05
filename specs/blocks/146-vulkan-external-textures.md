@@ -1,7 +1,7 @@
 # Block 146 — External textures on Vulkan
 
 Status: **COMPLETE (2026-11-05)**. Phase Review: 0 CRITICAL, 0 MAJOR, 5 MINOR; all resolved, see
-below. The shared e2e on Metal is owed to a Mac host.
+below. Verified on Windows native Vulkan and on Metal (Mac host).
 Source: user request (2026-11-05). Lifts the Vulkan rejection of Block 36 R9.
 Oracle: Dawn at the pinned `third_party/dawn` (paths relative to `src/dawn/`):
 - `native/BindGroupLayoutInternal.cpp` (the external-texture binding expansion: two
@@ -139,6 +139,22 @@ the HAL lib tests and the full Vulkan e2e ran after them.
 Block 141's int64-atomics HAL unit test failed on Windows: it compared extension names by
 pointer, and a Rust constant does not have one guaranteed address. It now compares the
 string contents. It passed on macOS by chance.
+
+### Metal and MoltenVK (Mac host, 2026-11-05)
+
+Run on Apple M2, macOS 27.2, at yawgpu `fa447be`. MoltenVK ran under the Khronos layer and
+is reference-only.
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace` | 1,436 passed, 0 failed |
+| fmt; clippy `-D warnings` on default, `metal`, `vulkan`, `metal,tiled`, `shader-passthrough` | clean |
+| HAL Metal lib and ignored tests | 200 passed; 66 passed |
+| `e2e_metal_external_texture` (shared scenarios) | 6 of 6 |
+| Metal e2e and every other ignored `yawgpu` test, `metal,tiled` | 174 passed, 0 failed |
+| All `e2e_vulkan_*`, MoltenVK | 159 passed, 1 failed (the known `imageView2DOn3DImage` portability case); `e2e_vulkan_external_texture` 6 of 6 with no validation output |
+| webgpu-native-cts, Metal, `webgpu:api,*` | pass 589,574, skip 101,793, fail 0, crash 0; identical to Block 145 |
+| webgpu-native-cts, Metal, `webgpu:shader,execution,*` | pass 857,322, skip 25,860, fail 0, crash 0, xfail 71, xpass 1 (F-160); pass + xfail identical to Block 145 |
 
 ## Phase Review
 
