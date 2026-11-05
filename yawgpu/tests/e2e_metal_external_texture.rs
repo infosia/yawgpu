@@ -1042,3 +1042,160 @@ unsafe fn write_solid_bytes(
         &extent,
     );
 }
+
+// Block 144: a plane texture that is uninitialized for WebGPU must read as zero through
+// an external texture. Each plane is cleared to a non-zero colour and stored, then a
+// second pass loads it and ends with `storeOp: discard`. The memory keeps the colour, but
+// the texture is uninitialized again, so the submission that samples it must clear it
+// first.
+#[test]
+#[ignore = "manual real-backend test"]
+fn metal_external_texture_discarded_planes_read_zero() {
+    if real_backend_skip_reason(RealBackend::Metal).is_some() {
+        return;
+    }
+    unsafe {
+        let instance = create_metal_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+        let usage = native::WGPUTextureUsage_TextureBinding
+            | native::WGPUTextureUsage_RenderAttachment
+            | native::WGPUTextureUsage_CopySrc;
+
+        // One plane: RGBA passthrough reproduces the raw plane texel, alpha included.
+        let rgba = create_texture(device, usage, native::WGPUTextureFormat_RGBA8Unorm);
+        let rgba_view = create_default_view(rgba);
+        store_then_discard(device, queue, rgba_view);
+        let external = create_identity_external_texture(
+            device,
+            rgba_view,
+            std::ptr::null_mut(),
+            YAWGPU_EXTERNAL_TEXTURE_FORMAT_RGBA,
+        );
+        let result = render_external_texture(instance, device, queue, external, &errors);
+        assert_eq!(
+            result,
+            [0, 0, 0, 0],
+            "discarded RGBA plane sampled through an external texture"
+        );
+        yawgpu::wgpuExternalTextureRelease(external);
+
+        // Two planes: the identity YUV matrix maps (Y, U, V) to (R, G, B); alpha is 1.
+        let luma = create_texture(device, usage, native::WGPUTextureFormat_R8Unorm);
+        let luma_view = create_default_view(luma);
+        let chroma = create_texture(device, usage, native::WGPUTextureFormat_RG8Unorm);
+        let chroma_view = create_default_view(chroma);
+        store_then_discard(device, queue, luma_view);
+        store_then_discard(device, queue, chroma_view);
+        let external = create_identity_external_texture(
+            device,
+            luma_view,
+            chroma_view,
+            YAWGPU_EXTERNAL_TEXTURE_FORMAT_NV12,
+        );
+        let result = render_external_texture(instance, device, queue, external, &errors);
+        assert_eq!(
+            result,
+            [0, 0, 0, 255],
+            "discarded NV12 planes sampled through an external texture"
+        );
+
+        assert!(
+            errors.lock().expect("error lock").is_empty(),
+            "unexpected device errors: {:?}",
+            errors.lock().expect("error lock")
+        );
+        yawgpu::wgpuExternalTextureRelease(external);
+        yawgpu::wgpuTextureViewRelease(chroma_view);
+        yawgpu::wgpuTextureViewRelease(luma_view);
+        yawgpu::wgpuTextureViewRelease(rgba_view);
+        yawgpu::wgpuTextureRelease(chroma);
+        yawgpu::wgpuTextureRelease(luma);
+        yawgpu::wgpuTextureRelease(rgba);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+/// Clears `view` to a non-zero colour and stores it, then loads it in a second pass that
+/// ends with `storeOp: discard`.
+unsafe fn store_then_discard(
+    device: native::WGPUDevice,
+    queue: native::WGPUQueue,
+    view: native::WGPUTextureView,
+) {
+    let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+    for (load_op, store_op) in [
+        (native::WGPULoadOp_Clear, native::WGPUStoreOp_Store),
+        (native::WGPULoadOp_Load, native::WGPUStoreOp_Discard),
+    ] {
+        let attachment = native::WGPURenderPassColorAttachment {
+            nextInChain: std::ptr::null_mut(),
+            view,
+            depthSlice: native::WGPU_DEPTH_SLICE_UNDEFINED,
+            resolveTarget: std::ptr::null_mut(),
+            loadOp: load_op,
+            storeOp: store_op,
+            clearValue: native::WGPUColor {
+                r: 0.25,
+                g: 0.5,
+                b: 0.75,
+                a: 1.0,
+            },
+        };
+        let descriptor = native::WGPURenderPassDescriptor {
+            nextInChain: std::ptr::null_mut(),
+            label: empty_string_view(),
+            colorAttachmentCount: 1,
+            colorAttachments: &attachment,
+            depthStencilAttachment: std::ptr::null(),
+            occlusionQuerySet: std::ptr::null_mut(),
+            timestampWrites: std::ptr::null(),
+        };
+        let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
+        yawgpu::wgpuRenderPassEncoderEnd(pass);
+        yawgpu::wgpuRenderPassEncoderRelease(pass);
+    }
+    let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+    yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+    yawgpu::wgpuCommandBufferRelease(command_buffer);
+    yawgpu::wgpuCommandEncoderRelease(encoder);
+}
+
+/// Creates an external texture over the given planes with an identity YUV matrix and no
+/// gamut or transfer conversion, so it samples the raw plane values.
+unsafe fn create_identity_external_texture(
+    device: native::WGPUDevice,
+    plane0: native::WGPUTextureView,
+    plane1: native::WGPUTextureView,
+    format: u32,
+) -> native::WGPUExternalTexture {
+    let descriptor = YaWGPUExternalTextureDescriptor {
+        plane0,
+        plane1,
+        format,
+        cropOrigin: YaWGPUOrigin2D { x: 0, y: 0 },
+        cropSize: YaWGPUExtent2D {
+            width: WIDTH,
+            height: HEIGHT,
+        },
+        apparentSize: YaWGPUExtent2D {
+            width: WIDTH,
+            height: HEIGHT,
+        },
+        doYuvToRgbConversionOnly: 1,
+        yuvToRgbConversionMatrix: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        srcTransferFunctionParameters: [0.0; 7],
+        dstTransferFunctionParameters: [0.0; 7],
+        gamutConversionMatrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        mirrored: 0,
+        rotation: YAWGPU_EXTERNAL_TEXTURE_ROTATION_ROTATE_0_DEGREES,
+    };
+    let external = yawgpu::yawgpuDeviceCreateExternalTexture(device, &descriptor);
+    assert!(!external.is_null());
+    external
+}

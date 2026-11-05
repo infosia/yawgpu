@@ -1984,8 +1984,8 @@ fn hal_init_aspect(aspect: InitAspect) -> HalTextureAspect {
 ///
 /// Every texture binding kind counts, not just a writable storage texture:
 /// a sampled `texture_2d`, a read-only storage texture and (tiled) an input
-/// attachment all observe the contents. External textures are excluded — their
-/// planes are user-provided (vendor path, outside WebGPU).
+/// attachment all observe the contents. External texture planes are sampled
+/// views too and get the same lazy clears and initialization marks.
 ///
 /// The input-attachment arm is defensive: such a slot must be left empty in
 /// the bind group (`validate_bind_group_entry` rejects a supplied resource)
@@ -2002,7 +2002,8 @@ fn append_bound_texture_init_clears(
         for layout_entry in layout_entries {
             let tracks_initialization = match layout_entry.kind {
                 Some(BindingLayoutKind::Texture { .. })
-                | Some(BindingLayoutKind::StorageTexture { .. }) => true,
+                | Some(BindingLayoutKind::StorageTexture { .. })
+                | Some(BindingLayoutKind::ExternalTexture) => true,
                 #[cfg(feature = "tiled")]
                 Some(BindingLayoutKind::InputAttachment { .. }) => true,
                 _ => false,
@@ -2018,10 +2019,19 @@ fn append_bound_texture_init_clears(
             else {
                 continue;
             };
-            let BindGroupResource::TextureView { texture_view, .. } = &entry.resource else {
-                continue;
-            };
-            append_texture_view_init_clears(copies, texture_view, overlay);
+            match &entry.resource {
+                BindGroupResource::TextureView { texture_view, .. } => {
+                    append_texture_view_init_clears(copies, texture_view, overlay);
+                }
+                BindGroupResource::ExternalTexture {
+                    external_texture, ..
+                } => {
+                    for plane in &external_texture.inner().planes {
+                        append_texture_view_init_clears(copies, plane, overlay);
+                    }
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -3433,7 +3443,7 @@ mod tests {
         size: u32,
     ) -> Arc<TextureView> {
         let texture = device.create_texture(TextureDescriptor {
-            usage: TextureUsage::TEXTURE_BINDING,
+            usage: TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST,
             dimension: TextureDimension::D2,
             size: Extent3d {
                 width: size,
@@ -3483,6 +3493,15 @@ mod tests {
                 )),
             ),
         };
+        external_texture_from_planes(device, format, plane0, plane1)
+    }
+
+    fn external_texture_from_planes(
+        device: &Device,
+        format: ExternalTextureFormat,
+        plane0: Arc<TextureView>,
+        plane1: Option<Arc<TextureView>>,
+    ) -> Arc<ExternalTexture> {
         Arc::new(
             device
                 .create_external_texture(ExternalTextureDescriptor {
@@ -4210,6 +4229,94 @@ fn fs() -> @location(0) vec4<f32> {
         Bundle,
     }
 
+    fn external_texture_commands(
+        device: &Device,
+        external: &Arc<ExternalTexture>,
+        kind: ExternalTexturePass,
+    ) -> Arc<CommandBuffer> {
+        let encoder = device.create_command_encoder();
+        record_external_texture_pass(device, &encoder, external, kind);
+        let (commands, error) = encoder.finish();
+        assert_eq!(error, None);
+        Arc::new(commands)
+    }
+
+    fn record_external_texture_pass(
+        device: &Device,
+        encoder: &CommandEncoder,
+        external: &Arc<ExternalTexture>,
+        kind: ExternalTexturePass,
+    ) {
+        let group = external_texture_bind_group(device, external.clone());
+        let layout = explicit_pipeline_layout(device, group.layout().clone());
+        match kind {
+            ExternalTexturePass::Compute => {
+                let module = Arc::new(
+                    device.create_shader_module(ShaderModuleSource::Wgsl(
+                        "@group(0) @binding(0) var ext: texture_external;
+                     @compute @workgroup_size(1) fn cs() { _ = textureLoad(ext, vec2u(0)); }"
+                            .to_owned(),
+                    )),
+                );
+                let mut descriptor = compute_pipeline_descriptor(module);
+                descriptor.layout = ComputePipelineLayout::Explicit(layout);
+                let pipeline = Arc::new(device.create_compute_pipeline(descriptor));
+                assert!(!pipeline.is_error());
+                let (pass, error) = encoder.begin_compute_pass(None);
+                assert_eq!(error, None);
+                assert_eq!(pass.set_pipeline(pipeline), None);
+                assert_eq!(
+                    pass.set_bind_group(0, Some(group), Vec::new(), device.limits()),
+                    None
+                );
+                assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
+                assert_eq!(pass.end(), None);
+            }
+            ExternalTexturePass::Render | ExternalTexturePass::Bundle => {
+                let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+                    "@group(0) @binding(0) var ext: texture_external;
+                     @vertex fn vs() -> @builtin(position) vec4f { return vec4f(0, 0, 0, 1); }
+                     @fragment fn fs() -> @location(0) vec4f { return textureLoad(ext, vec2u(0)); }"
+                        .to_owned(),
+                )));
+                let mut descriptor = render_pipeline_descriptor(module);
+                descriptor.layout = RenderPipelineLayout::Explicit(layout);
+                let pipeline = Arc::new(device.create_render_pipeline(descriptor));
+                assert!(!pipeline.is_error());
+                let (pass, error) = encoder.begin_render_pass(&noop_render_pass_descriptor(
+                    noop_render_attachment(device),
+                    None,
+                ));
+                assert_eq!(error, None);
+                if matches!(kind, ExternalTexturePass::Bundle) {
+                    let (bundle, error) = RenderBundleEncoder::new(
+                        render_bundle_encoder_descriptor(),
+                        device.limits(),
+                        device.features(),
+                    );
+                    assert_eq!(error, None);
+                    assert_eq!(bundle.set_pipeline(pipeline), None);
+                    assert_eq!(
+                        bundle.set_bind_group(0, Some(group), Vec::new(), device.limits()),
+                        None
+                    );
+                    assert_eq!(bundle.draw(3, 1, 0, 0, device.limits()), None);
+                    let (bundle, error) = bundle.finish();
+                    assert_eq!(error, None);
+                    assert_eq!(pass.execute_bundles(&[Arc::new(bundle)]), None);
+                } else {
+                    assert_eq!(pass.set_pipeline(pipeline), None);
+                    assert_eq!(
+                        pass.set_bind_group(0, Some(group), Vec::new(), device.limits()),
+                        None
+                    );
+                    assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+                }
+                assert_eq!(pass.end(), None);
+            }
+        }
+    }
+
     fn external_texture_plane_submit_cases(kind: ExternalTexturePass) {
         for format in [ExternalTextureFormat::Rgba, ExternalTextureFormat::Nv12] {
             let plane_count = match format {
@@ -4220,78 +4327,11 @@ fn fs() -> @location(0) vec4<f32> {
             for destroyed_plane in std::iter::once(None).chain((0..plane_count).map(Some)) {
                 let device = noop_device();
                 let external = submit_external_texture(&device, format);
-                let group = external_texture_bind_group(&device, external.clone());
-                let layout = explicit_pipeline_layout(&device, group.layout().clone());
-                let encoder = device.create_command_encoder();
-                match kind {
-                    ExternalTexturePass::Compute => {
-                        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
-                            "@group(0) @binding(0) var ext: texture_external;
-                             @compute @workgroup_size(1) fn cs() { _ = textureLoad(ext, vec2u(0)); }"
-                                .to_owned(),
-                        )));
-                        let mut descriptor = compute_pipeline_descriptor(module);
-                        descriptor.layout = ComputePipelineLayout::Explicit(layout);
-                        let pipeline = Arc::new(device.create_compute_pipeline(descriptor));
-                        assert!(!pipeline.is_error());
-                        let (pass, error) = encoder.begin_compute_pass(None);
-                        assert_eq!(error, None);
-                        assert_eq!(pass.set_pipeline(pipeline), None);
-                        assert_eq!(
-                            pass.set_bind_group(0, Some(group), Vec::new(), device.limits()),
-                            None
-                        );
-                        assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
-                        assert_eq!(pass.end(), None);
-                    }
-                    ExternalTexturePass::Render | ExternalTexturePass::Bundle => {
-                        let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
-                            "@group(0) @binding(0) var ext: texture_external;
-                             @vertex fn vs() -> @builtin(position) vec4f { return vec4f(0, 0, 0, 1); }
-                             @fragment fn fs() -> @location(0) vec4f { return textureLoad(ext, vec2u(0)); }"
-                                .to_owned(),
-                        )));
-                        let mut descriptor = render_pipeline_descriptor(module);
-                        descriptor.layout = RenderPipelineLayout::Explicit(layout);
-                        let pipeline = Arc::new(device.create_render_pipeline(descriptor));
-                        assert!(!pipeline.is_error());
-                        let (pass, error) = encoder.begin_render_pass(
-                            &noop_render_pass_descriptor(noop_render_attachment(&device), None),
-                        );
-                        assert_eq!(error, None);
-                        if matches!(kind, ExternalTexturePass::Bundle) {
-                            let (bundle, error) = RenderBundleEncoder::new(
-                                render_bundle_encoder_descriptor(),
-                                device.limits(),
-                                device.features(),
-                            );
-                            assert_eq!(error, None);
-                            assert_eq!(bundle.set_pipeline(pipeline), None);
-                            assert_eq!(
-                                bundle.set_bind_group(0, Some(group), Vec::new(), device.limits()),
-                                None
-                            );
-                            assert_eq!(bundle.draw(3, 1, 0, 0, device.limits()), None);
-                            let (bundle, error) = bundle.finish();
-                            assert_eq!(error, None);
-                            assert_eq!(pass.execute_bundles(&[Arc::new(bundle)]), None);
-                        } else {
-                            assert_eq!(pass.set_pipeline(pipeline), None);
-                            assert_eq!(
-                                pass.set_bind_group(0, Some(group), Vec::new(), device.limits()),
-                                None
-                            );
-                            assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
-                        }
-                        assert_eq!(pass.end(), None);
-                    }
-                }
-                let (commands, error) = encoder.finish();
-                assert_eq!(error, None);
+                let commands = external_texture_commands(&device, &external, kind);
                 if let Some(plane) = destroyed_plane {
                     external.inner().planes[plane].texture().destroy();
                 }
-                let error = device.queue().submit(&[Arc::new(commands)]);
+                let error = device.queue().submit(&[commands]);
                 let expected = destroyed_plane.map(|_| {
                     DeviceError::validation("queue submit cannot use a destroyed texture")
                 });
@@ -4316,6 +4356,250 @@ fn fs() -> @location(0) vec4<f32> {
     #[test]
     fn render_bundle_submit_validates_external_texture_planes() {
         external_texture_plane_submit_cases(ExternalTexturePass::Bundle);
+    }
+
+    fn external_texture_lazy_init_cases(kind: ExternalTexturePass) {
+        for format in [ExternalTextureFormat::Rgba, ExternalTextureFormat::Nv12] {
+            let plane_count = match format {
+                ExternalTextureFormat::Rgba => 1,
+                ExternalTextureFormat::Nv12 => 2,
+            };
+            for initialized_plane in std::iter::once(None).chain((0..plane_count).map(Some)) {
+                let device = noop_device();
+                let queue = device.queue();
+                let external = submit_external_texture(&device, format);
+                let planes = &external.inner().planes;
+                if let Some(plane) = initialized_plane {
+                    let texture = planes[plane].texture();
+                    let bytes_per_texel = match (format, plane) {
+                        (ExternalTextureFormat::Rgba, _) => 4,
+                        (ExternalTextureFormat::Nv12, 0) => 1,
+                        (ExternalTextureFormat::Nv12, _) => 2,
+                    };
+                    let data = vec![
+                        7;
+                        (texture.size().width * texture.size().height * bytes_per_texel)
+                            as usize
+                    ];
+                    assert_eq!(
+                        queue.write_texture(QueueTextureWrite {
+                            device: device.hal(),
+                            texture: &texture,
+                            mip_level: 0,
+                            origin: Origin3d { x: 0, y: 0, z: 0 },
+                            write_size: texture.size(),
+                            aspect: TextureAspect::All,
+                            layout: TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(texture.size().width * bytes_per_texel),
+                                rows_per_image: Some(texture.size().height),
+                            },
+                            data: &data,
+                        }),
+                        None
+                    );
+                    assert!(texture.is_initialized(0, 0, InitAspect::Color));
+                }
+                // Flush the params buffer and optional plane write before inspecting passes.
+                assert_eq!(queue.submit(&[]), None);
+                for submission in 0..2 {
+                    let before = submitted_copies(&queue).len();
+                    let commands = external_texture_commands(&device, &external, kind);
+                    assert_eq!(queue.submit(&[commands]), None);
+                    let copies = submitted_copies(&queue);
+                    let copies = &copies[before..];
+                    let pending_planes: Vec<_> = planes
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| submission == 0 && Some(*index) != initialized_plane)
+                        .map(|(_, plane)| plane)
+                        .collect();
+                    assert_eq!(
+                        copies.len(),
+                        pending_planes.len() + 1,
+                        "{kind:?}, {format:?}, initialized plane: {initialized_plane:?}, submission: {submission}"
+                    );
+                    for (copy, plane) in copies.iter().zip(pending_planes) {
+                        let HalCopy::ClearTexture(clear) = copy else {
+                            panic!("expected a plane clear before the pass");
+                        };
+                        assert_eq!(clear.format, hal_texture_format(plane.texture().format()));
+                        assert_eq!(clear.aspect, HalTextureAspect::All);
+                        assert_eq!(clear.mip_level, plane.base_mip_level());
+                        assert_eq!(clear.base_array_layer, plane.base_array_layer());
+                        assert_eq!(clear.array_layer_count, 1);
+                        let yawgpu_hal::HalTexture::Noop(texture) = &clear.texture else {
+                            panic!("expected a Noop plane texture");
+                        };
+                        assert_eq!(texture.width(), plane.texture().size().width);
+                        assert_eq!(texture.height(), plane.texture().size().height);
+                    }
+                    match kind {
+                        ExternalTexturePass::Compute => {
+                            assert!(matches!(copies.last(), Some(HalCopy::ComputePass(_))))
+                        }
+                        ExternalTexturePass::Render | ExternalTexturePass::Bundle => assert!(
+                            matches!(copies.last(), Some(HalCopy::RenderPassCommandStream(_)))
+                        ),
+                    }
+                    for plane in planes {
+                        assert!(
+                            plane.texture().is_initialized(0, 0, InitAspect::Color),
+                            "a plane must be initialized after its lazy clear or earlier write"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compute_external_texture_lazy_init() {
+        external_texture_lazy_init_cases(ExternalTexturePass::Compute);
+    }
+
+    #[test]
+    fn render_external_texture_lazy_init() {
+        external_texture_lazy_init_cases(ExternalTexturePass::Render);
+    }
+
+    #[test]
+    fn render_bundle_external_texture_lazy_init() {
+        external_texture_lazy_init_cases(ExternalTexturePass::Bundle);
+    }
+
+    #[test]
+    fn external_texture_read_after_discard_in_one_command_buffer_clears_between_passes() {
+        for kind in [
+            ExternalTexturePass::Compute,
+            ExternalTexturePass::Render,
+            ExternalTexturePass::Bundle,
+        ] {
+            let device = noop_device();
+            let queue = device.queue();
+            let texture = lazy_init_texture(
+                &device,
+                TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
+                rgba8_unorm(),
+                Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                1,
+                1,
+            );
+            let view = whole_texture_view(&texture);
+            let external = external_texture_from_planes(
+                &device,
+                ExternalTextureFormat::Rgba,
+                view.clone(),
+                None,
+            );
+            // Start initialized so consulting committed state instead of the
+            // submission's discard mark would incorrectly skip the clear.
+            submit_empty_render_pass(
+                &device,
+                &color_attachment(view.clone(), LoadOp::Clear, StoreOp::Store),
+            );
+            let before = submitted_copies(&queue).len();
+            let encoder = device.create_command_encoder();
+            let (pass, error) =
+                encoder.begin_render_pass(&color_attachment(view, LoadOp::Load, StoreOp::Discard));
+            assert_eq!(error, None);
+            assert_eq!(pass.end(), None);
+            record_external_texture_pass(&device, &encoder, &external, kind);
+            let (commands, error) = encoder.finish();
+            assert_eq!(error, None);
+            assert!(texture.is_initialized(0, 0, InitAspect::Color));
+
+            assert_eq!(queue.submit(&[Arc::new(commands)]), None);
+
+            let copies = submitted_copies(&queue);
+            let [HalCopy::RenderPassCommandStream(_), HalCopy::ClearTexture(clear), sampling_pass] =
+                &copies[before..]
+            else {
+                panic!("{kind:?}: expected exactly one plane clear between discard and sampling");
+            };
+            assert_eq!(clear.format, hal_texture_format(texture.format()));
+            assert_eq!(clear.aspect, HalTextureAspect::All);
+            assert_eq!(clear.mip_level, 0);
+            assert_eq!(clear.base_array_layer, 0);
+            assert_eq!(clear.array_layer_count, 1);
+            match kind {
+                ExternalTexturePass::Compute => {
+                    assert!(matches!(sampling_pass, HalCopy::ComputePass(_)))
+                }
+                ExternalTexturePass::Render | ExternalTexturePass::Bundle => {
+                    assert!(matches!(sampling_pass, HalCopy::RenderPassCommandStream(_)))
+                }
+            }
+            assert!(texture.is_initialized(0, 0, InitAspect::Color));
+        }
+    }
+
+    #[test]
+    fn external_texture_read_after_full_copy_in_one_command_buffer_needs_no_clear() {
+        for kind in [
+            ExternalTexturePass::Compute,
+            ExternalTexturePass::Render,
+            ExternalTexturePass::Bundle,
+        ] {
+            let device = noop_device();
+            let queue = device.queue();
+            let external = rgba_external_texture(&device);
+            let texture = Arc::new(external.inner().planes[0].texture());
+            // Exclude the external texture's parameter-buffer upload.
+            assert_eq!(queue.submit(&[]), None);
+            let before = submitted_copies(&queue).len();
+            let source = Arc::new(device.create_buffer(BufferDescriptor {
+                usage: BufferUsage::COPY_SRC,
+                size: 1024,
+                mapped_at_creation: false,
+            }));
+            let encoder = device.create_command_encoder();
+            assert_eq!(
+                encoder.copy_buffer_to_texture(
+                    TexelCopyBufferInfo {
+                        buffer: source,
+                        device: None,
+                        layout: TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(256),
+                            rows_per_image: Some(texture.size().height),
+                        },
+                    },
+                    TexelCopyTextureInfo {
+                        texture: texture.clone(),
+                        mip_level: 0,
+                        origin: Origin3d { x: 0, y: 0, z: 0 },
+                        aspect: TextureAspect::All,
+                    },
+                    texture.size(),
+                ),
+                None
+            );
+            record_external_texture_pass(&device, &encoder, &external, kind);
+            let (commands, error) = encoder.finish();
+            assert_eq!(error, None);
+            assert!(!texture.is_initialized(0, 0, InitAspect::Color));
+
+            assert_eq!(queue.submit(&[Arc::new(commands)]), None);
+
+            let copies = submitted_copies(&queue);
+            let [HalCopy::BufferToTexture(_), sampling_pass] = &copies[before..] else {
+                panic!("{kind:?}: expected a full plane copy followed by sampling without a clear");
+            };
+            match kind {
+                ExternalTexturePass::Compute => {
+                    assert!(matches!(sampling_pass, HalCopy::ComputePass(_)))
+                }
+                ExternalTexturePass::Render | ExternalTexturePass::Bundle => {
+                    assert!(matches!(sampling_pass, HalCopy::RenderPassCommandStream(_)))
+                }
+            }
+            assert!(texture.is_initialized(0, 0, InitAspect::Color));
+        }
     }
 
     #[test]

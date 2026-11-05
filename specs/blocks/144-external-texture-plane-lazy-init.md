@@ -1,11 +1,14 @@
 # Block 144 — External texture planes are lazily zero-initialized
 
-Status: **IN PROGRESS**.
+Status: **COMPLETE (2026-11-05)**. Phase Review: 0 CRITICAL, 0 MAJOR, 3 MINOR; two resolved,
+one moved to the backlog (A28), see below.
 Source: backlog A27 (Block 143 Phase Review m7), started by user request on 2026-11-05.
 Oracle: Dawn at the pinned `third_party/dawn` (paths relative to `src/dawn/native/`):
-`BindGroup.cpp` (an external-texture binding expands into plane texture bindings),
-`CommandBufferStateTracker`/`PassResourceUsageTracker.cpp` (`AddBindGroup`), and the
-backends' lazy clears of sampled textures before a pass.
+`BindGroup.cpp` (an external-texture entry expands into `plane0`/`plane1` sampled
+texture bindings), `PassResourceUsageTracker.cpp` (`SyncScopeUsageTracker::AddBindGroup`
+tracks them as sampled textures), and `metal/CommandBufferMTL.mm`
+(`LazyClearSyncScope` clears every non-attachment texture usage before the pass and marks
+it initialized).
 
 ## Problem
 
@@ -32,8 +35,9 @@ view: uninitialized subresources the view covers are cleared before the pass, in
 same place and order as for a `Texture` binding. Compute passes, render passes, and
 render bundles. One-plane and two-plane formats.
 
-R2. **Reads do not mark.** Sampling a plane does not mark it initialized, as for any
-sampled texture.
+R2. **The clear initializes.** The lazy clear writes zeros, so it marks the cleared
+subresources initialized, exactly as it does for a sampled texture view. A later
+submission that samples the same plane needs no clear.
 
 R3. **Unchanged.** External texture validation, the parameter buffer, every other
 binding kind, and every backend.
@@ -43,7 +47,8 @@ binding kind, and every backend.
 - Unit (core, Noop): a submission that binds an external texture whose plane 0 (and, for
   NV12, plane 1) was never written lowers a `ClearTexture` for that plane before the
   pass, in a compute pass, a render pass, and a render bundle. An initialized plane gets
-  no clear. Both planes of a two-plane format are handled.
+  no clear, and neither does a plane a previous submission already cleared. Both planes
+  of a two-plane format are handled.
 - Claude, Metal e2e (`e2e_metal_external_texture.rs`): a plane texture is cleared to a
   non-zero colour with `storeOp: store`, then a second pass loads it and ends with
   `storeOp: discard`, which leaves the memory non-zero but the texture uninitialized.
@@ -61,3 +66,26 @@ binding kind, and every backend.
 
 - **S1 (coding agent):** R1-R3 with the unit tests.
 - **S2 (Claude):** e2e, CTS, Phase Review.
+
+## Verification (2026-11-05)
+
+Run on Apple M2, macOS 27.2.
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace` | 1,431 passed, 0 failed (after the Phase Review test additions) |
+| fmt; clippy `-D warnings` on default, `metal`, `vulkan`, `gles`, `metal,tiled`, `vulkan,tiled`, `shader-passthrough` | clean |
+| `metal_external_texture_discarded_planes_read_zero` (new) | passes. Against `4bd397d` (before this block) it fails: the discarded RGBA plane samples as `[64, 128, 191, 255]` instead of zero |
+| Metal e2e and every other ignored `yawgpu` test, `metal,tiled` | 172 passed, 0 failed |
+| webgpu-native-cts, Metal, `webgpu:api,*` | pass 589,574, skip 101,793, fail 0, crash 0; identical to Block 143 |
+| webgpu-native-cts, Metal, `webgpu:shader,execution,*` | pass 857,323, skip 25,860, fail 0, crash 0, xfail 70, xpass 2 (F-160); pass + xfail identical to Block 143 |
+
+The CTS and e2e ran before the Phase Review fixes, which add unit tests only.
+
+## Phase Review
+
+| ID | Finding | Disposition |
+|---|---|---|
+| m1 | The "already initialized" unit case only initialized plane 0, so a bug that handles planes by position could pass | The cases cover no plane, plane 0, and (NV12) plane 1 initialized |
+| m2 | No unit test of a plane discarded or written earlier in the same command buffer | Added: a discarding attachment pass before the sampling pass gets exactly one clear between them; a full copy before it gets none |
+| m3 | The Metal HAL binds the plane's whole texture, not its view, so a plane view with a non-zero base mip or layer samples the wrong subresource (predates this block) | Backlog A28 |
