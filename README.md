@@ -504,15 +504,19 @@ macOS is a non-authoritative Vulkan path and is not part of these results.)
 > **Not a conformance table.** GLES is opt-in and experimental; these are raw
 > bring-up snapshots, and numbers may change without SemVer guarantees.
 
-Linux / NVIDIA RTX 5060 Ti, OpenGL ES 3.2:
+Linux / NVIDIA RTX 5060 Ti, OpenGL ES 3.2 (yawgpu `9977e34`, 2026-11-01):
 
 | area | pass | skip | fail | crash |
 |---|---:|---:|---:|---:|
-| `api/validation` | 203,412 | 151,323 | 257 | 0 |
-| `api/operation` | 141,076 | 76,704 | 11,813 | 0 |
-| `shader/execution` | 309,535 | 517,406 | 17,645 | 0 |
-| `shader/validation` | 369,753 | 297,389 | 0 | 0 |
-| **total** | **1,023,776** | **1,042,822** | **29,715** | **0** |
+| `api/validation` | 204,742 | 152,703 | 326 | 0 |
+| `api/operation` | 91,746 | 233,174 | 8,678 | 0 |
+| `shader/execution` | 330,771 | 532,678 | 19,804 | 0 |
+| `shader/validation` | 377,272 | 305,562 | 2 | 0 |
+| **total** | **1,004,531** | **1,224,117** | **28,810** | **0** |
+
+The suite was re-baselined before this sweep, so the counts are not comparable per area
+with older snapshots. The 2 `shader/validation` failures are the same two
+language-feature cases as on Vulkan.
 
 Linux / Mesa `crocus` on Intel Haswell:
 

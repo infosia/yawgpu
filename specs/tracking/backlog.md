@@ -82,6 +82,7 @@ below are stable IDs, not the rank.
 | A24 | `destroy()` kept GPU memory until the last handle dropped | Block 143, 2026-11-05 (buffers, textures, and query sets release the backend object at `destroy()`; the HAL frees it when the last submission using it completes) |
 | A27 | External texture planes were not lazily zero-initialized | Block 144, 2026-11-05 (planes get the same lazy clears and initialization marks as sampled texture views) |
 | A28 | External texture planes were bound as whole textures | Block 145, 2026-11-05 (each plane is a `HalBoundTexture` view; Metal binds the view) |
+| D14 | README Linux NVIDIA GLES table was older than the suite's | README updated to the suite's 2026-11-01 sweep at `9977e34` (fail 28,810), 2026-11-05 |
 
 ---
 
@@ -100,7 +101,7 @@ below are stable IDs, not the rank.
 | # | Item | Difficulty | Evidence |
 |---|---|---|---|
 | B2 | **Binding arrays**: `bindingArraySize > 1` rejected outright in core. Dawn also rejects it unless `AllowUnsafeAPIs` is on, supports it then only for sampled textures, and Tint's `sized_binding_array` is experimental, so today's rejection matches default Dawn (`BindGroupLayoutInternal.cpp:362-367`). | M–L | `yawgpu-core/src/bind_group_layout.rs` |
-| B3 | **External textures are Metal-only.** Vulkan is deterministically rejected in core (the HAL would need the multiplanar plane/params bindings, not just driver acceptance of Tint's SPIR-V); GLES is a `HalError`. | L / L | `yawgpu-core/src/compute_pipeline.rs`; `specs/blocks/36-external-textures.md:165-174` |
+| B3 | **External textures on GLES.** Metal and Vulkan support them (Blocks 36, 146); GLES returns a `HalError`, because it has no lowering for the multiplanar plane and params bindings. | L | `specs/blocks/36-external-textures.md`; `specs/blocks/146-vulkan-external-textures.md` |
 | B6 | Tier-2 read-write storage format breadth ambiguous against the current spec (yawgpu grants `R32Float`, `RGBA16Float`, `RGBA32Float`). Needs a spec check more than code. | S | `specs/tracking/format-completeness-audit.md:23-27` |
 | B7 | Multi-threading correctness beyond what the ported tests exercise. | L | `specs/SPEC.md:53` |
 
@@ -132,7 +133,6 @@ independent investigation.
 | D8 | Latent self-deadlock: `Drop` impls of GLES buffer / pipeline / sampler / texture inners acquire `with_current_context`; dropping the last `Arc` inside a context closure re-deadlocks. A guard is cheap. | S | `specs/tracking/cts-gles-sweep-0705.md:136-145` |
 | D9 | `unorm8x4-bgra` renders R/B swapped on hosts without `EXT/ARB_vertex_array_bgra` (execution-only divergence; shader swizzle emulation deferred). | M | `specs/blocks/67-gles-backend.md:786-790` |
 | D10 | **Manual verification owed**: ANGLE re-confirmation after the Tint migration. Windows WGL passed 38 of 39 e2e at the Block 118 pin; `e2e_gles_process_exit` crashes on every run because F-153's exit guard is armed only on the EGL path. | Manual | `specs/tracking/tint-integration-refactor.md:219-221`; `specs/blocks/118-dawn-v20261030-bump.md` |
-| D14 | README Linux NVIDIA GLES table is older than the suite's: it shows `fail=29,715`, the suite README shows 28,810. | S | `README.md:511` |
 
 Permanent / catalogued Tier-2 rejections (not backlog, listed for
 completeness): vertex-stage storage images, `rg32*` storage formats,
@@ -337,6 +337,7 @@ Re-verification after the fixes: `cargo test --workspace` 1093/0, clippy default
 - Windows native Vulkan at `c7d9acd` (2026-11-05): `cargo test --workspace` did not compile on Windows. Two test state structs from Blocks 137 and 138 declared `status: u32`, but bindgen's C enum type is `i32` under MSVC. Fixed in the tests with a status type alias. Then workspace 1,426/0, Vulkan HAL ignored 82/82, Vulkan e2e 171/171 with 0 VUIDs. Block 141's `atomic-vec2u-min-max` readback, which skips on MoltenVK, ran and passed on NVIDIA; Block 143's destroy e2e passed.
 - A27 done by Block 144 (2026-11-05): external texture planes are lazily zero-initialized like any sampled texture view, in compute, render, bundle, and tiled passes. A Metal e2e that discards a plane and samples it reads zero (it read the stored colour before). CTS Metal `api,*` and `shader,execution,*` fail=0. A28 opened (plane views with a non-zero base mip or layer).
 - A28 done by Block 145 (2026-11-05): external texture planes are lowered as full texture-view descriptions and Metal binds a view of each, so a plane view of mip 1 or of one layer of a 2D array samples that subresource (it sampled mip 0 / layer 0 before). CTS Metal `api,*` and `shader,execution,*` fail=0.
-- Blocks 144 and 145 on Windows native Vulkan at `ebd97f8` (2026-11-05): workspace 1,434/0, clippy default and `vulkan,tiled` clean, Vulkan HAL ignored 82/82, Vulkan e2e 171/171 with 0 VUIDs. External textures are Metal-only; the Vulkan rejection e2e passes.
+- Blocks 144 and 145 on Windows native Vulkan at `ebd97f8` (2026-11-05): workspace 1,434/0, clippy default and `vulkan,tiled` clean, Vulkan HAL ignored 82/82, Vulkan e2e 171/171 with 0 VUIDs. External textures were still Metal-only at that commit; the Vulkan rejection e2e passed.
 - Block 146 done (user request): external textures on Vulkan. Each `texture_external` expands to plane0 at its binding and plane1 and a params uniform above the layout's largest binding; Tint's multiplanar transform gets a group-aware map for SPIR-V. Windows NVIDIA: shared external-texture e2e 6/6, Vulkan e2e 176/176 with 0 VUIDs, CTS `webgpu:*` `fail=2 crash=2` (known) with about 3,000 subcases moving from skip to pass. The suite's F-111 `xfail` entries can be dropped. Metal run of the shared e2e owed to a Mac host. Also fixed: Block 141's int64-atomics HAL test compared extension names by pointer and failed on Windows.
 - Block 146 on Metal and MoltenVK at `fa447be` (2026-11-05): workspace 1,436/0, the shared external-texture e2e 6/6 on Metal and on MoltenVK (no validation output), Metal e2e 174/174, CTS Metal `api,*` and `shader,execution,*` fail=0, identical to Block 145.
+- Doc drift fixed (2026-11-05): B3 narrowed to GLES now that Vulkan has external textures (Block 146); README Linux NVIDIA GLES table updated to the suite's 2026-11-01 sweep (D14).
