@@ -777,6 +777,8 @@ pub(super) fn color_subresource_range(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn audit_f2_view_formats_require_mutable_images_and_include_base() {
         let formats = texture_view_formats(
@@ -810,8 +812,6 @@ mod tests {
         )
         .is_empty());
     }
-
-    use super::*;
 
     /// Exercises both recording entry points and range rejection on a real device.
     #[test]

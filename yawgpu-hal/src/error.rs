@@ -1,5 +1,5 @@
 /// Enumerates HAL error values.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum HalError {
     /// The surface configuration must be recreated.
@@ -121,5 +121,16 @@ mod tests {
             "HAL texture creation failed: vulkan: \
              sample count 4 not supported for R8Sint on this device"
         );
+    }
+
+    #[test]
+    fn cloning_string_message_preserves_display() {
+        let error = HalError::QueueSubmissionFailed {
+            backend: "gles",
+            message: "queue submission failed".to_owned(),
+        };
+        let cloned = error.clone();
+
+        assert_eq!(cloned.to_string(), error.to_string());
     }
 }

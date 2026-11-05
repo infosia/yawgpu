@@ -1131,6 +1131,12 @@ impl Device {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::test_helpers::*;
+    use crate::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
     #[test]
     fn phase_review_m6_pipeline_requires_override_used_only_by_initializer() {
         let device = noop_device();
@@ -1465,12 +1471,6 @@ mod tests {
         assert_eq!(device.pop_error_scope(), Ok(None));
         assert!(!pipeline.is_error());
     }
-
-    use super::*;
-    use crate::test_helpers::*;
-    use crate::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
 
     #[test]
     fn device_from_hal_wraps_noop_hal_device() {

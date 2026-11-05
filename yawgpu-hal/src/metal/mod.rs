@@ -816,6 +816,8 @@ pub use texture::{MetalSampler, MetalTexture};
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn subgroup_vendor_zero_has_variable_range_without_size_control() {
         let range = subgroup_size_range_for_vendor(0);
@@ -934,8 +936,6 @@ mod tests {
         let device = crate::HalDevice::Metal(device);
         assert!(device.shader_workarounds().fix_u32_div_mod);
     }
-
-    use super::*;
 
     #[test]
     fn subgroup_gate_uses_apple6_or_mac2() {

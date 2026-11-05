@@ -1936,6 +1936,8 @@ fn reflected_override(override_: yawgpu_tint::Override) -> ReflectedOverride {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn hal_workarounds_map_only_to_same_named_tint_flags() {
         macro_rules! one_hot_hal_flags {
@@ -2198,8 +2200,6 @@ mod tests {
         }
         assert_eq!(program.codegen_miss_count(), 2);
     }
-
-    use super::*;
 
     fn empty_msl_binding_map() -> MslBindingMap {
         MslBindingMap {

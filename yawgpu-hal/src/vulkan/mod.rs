@@ -2366,6 +2366,8 @@ pub use texture::{VulkanSampler, VulkanTexture};
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn adapter_type_maps_vulkan_hardware_classes() {
         for (input, expected) in [
@@ -3356,8 +3358,6 @@ diagnostic(off, derivative_uniformity);
             assert!(!is_fallback_device_type(kind));
         }
     }
-
-    use super::*;
 
     #[test]
     fn int64_atomics_support_and_device_enablement_require_all_prerequisites() {

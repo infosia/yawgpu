@@ -24,20 +24,9 @@ pub struct RenderPassDescriptor {
     /// Occlusion query set.
     pub occlusion_query_set: Option<QuerySet>,
     /// Timestamp writes.
-    pub timestamp_writes: Option<RenderPassTimestampWrites>,
+    pub timestamp_writes: Option<PassTimestampWrites>,
     /// Maximum draw calls allowed in this pass.
     pub max_draw_count: u64,
-}
-
-/// Stores render pass timestamp writes data used by validation and backend submission.
-#[derive(Debug, Clone)]
-pub struct RenderPassTimestampWrites {
-    /// Query set.
-    pub query_set: QuerySet,
-    /// Beginning index.
-    pub beginning_index: Option<u32>,
-    /// End index.
-    pub end_index: Option<u32>,
 }
 
 /// Stores color metadata.
@@ -636,6 +625,7 @@ mod tests {
         TextureSampleType, TextureUsage, TextureView, TextureViewDimension, VertexAttribute,
         VertexBufferLayout, VertexFormat, VertexStepMode,
     };
+    use std::sync::Arc;
 
     fn only_render_pass(command_buffer: &CommandBuffer) -> &RenderPassCommand {
         let [CommandExecution::RenderPass(pass)] = command_buffer.command_ops() else {
@@ -679,8 +669,6 @@ mod tests {
             })
             .sum()
     }
-
-    use std::sync::Arc;
 
     fn immediate_render_wgsl() -> &'static str {
         r#"

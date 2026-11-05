@@ -207,17 +207,6 @@ fn bind_group_layout_entry_is_input_attachment(entry: &BindGroupLayoutEntry) -> 
     }
 }
 
-/// Validates bind group entry and returns a descriptive error on failure.
-#[cfg(test)]
-pub(crate) fn validate_bind_group_entry(
-    device: &Device,
-    entry: &BindGroupEntry,
-    kind: BindingLayoutKind,
-    limits: Limits,
-) -> Option<String> {
-    validate_bind_group_entry_with_usage(device, entry, kind, limits, false)
-}
-
 fn validate_bind_group_entry_with_usage(
     device: &Device,
     entry: &BindGroupEntry,
@@ -624,6 +613,23 @@ impl Device {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    #[cfg(feature = "tiled")]
+    use crate::shader::SHADER_STAGE_FRAGMENT;
+    use crate::test_helpers::*;
+    use crate::*;
+    use std::sync::Arc;
+
+    /// Validates bind group entry and returns a descriptive error on failure.
+    fn validate_bind_group_entry(
+        device: &Device,
+        entry: &BindGroupEntry,
+        kind: BindingLayoutKind,
+        limits: Limits,
+    ) -> Option<String> {
+        validate_bind_group_entry_with_usage(device, entry, kind, limits, false)
+    }
+
     #[test]
     fn internal_bind_group_skips_only_storage_usage_validation() {
         let device = Arc::new(noop_device());
@@ -675,14 +681,6 @@ mod tests {
             .create_internal_bind_group(layout, vec![entry(0, 8, Arc::new(noop_device()))])
             .is_err());
     }
-
-    use super::*;
-    #[cfg(feature = "tiled")]
-    use crate::shader::SHADER_STAGE_FRAGMENT;
-    use crate::test_helpers::*;
-    use crate::*;
-
-    use std::sync::Arc;
 
     fn external_texture_view(device: &Device) -> Arc<TextureView> {
         let texture = device.create_texture(TextureDescriptor {

@@ -2219,6 +2219,11 @@ pub(crate) fn buffer_binding_types_compatible(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::test_helpers::*;
+    use crate::*;
+    use std::sync::Arc;
+
     #[test]
     fn audit_override_requirements_are_entry_scoped() {
         let module = frontend::parse_and_validate_wgsl(
@@ -2317,12 +2322,6 @@ override required: u32;
             [2, 1, 1]
         );
     }
-
-    use super::*;
-    use crate::test_helpers::*;
-    use crate::*;
-
-    use std::sync::Arc;
 
     #[test]
     fn compute_pipeline_workgroup_storage_limit_is_entry_scoped() {

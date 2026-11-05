@@ -2353,9 +2353,12 @@ pub(super) fn descriptor_buffer_info(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::{noop, HalTextureDescriptor, HalTextureDimension, HalTextureUsage};
+    use ash::vk::Handle;
+
     #[test]
     fn external_texture_descriptor_writes_target_two_images_and_uniform_in_one_set() {
-        use ash::vk::Handle;
         let set = vk::DescriptorSet::from_raw(77);
         let plane0 = vk::ImageView::from_raw(101);
         let plane1 = vk::ImageView::from_raw(102);
@@ -2423,8 +2426,6 @@ mod tests {
             ash::vk::PipelineShaderStageCreateFlags::ALLOW_VARYING_SUBGROUP_SIZE
         );
     }
-
-    use super::*;
 
     // Minimal instruction streams exercise the metadata reader without a GPU.
     fn storage_spirv(read_only: bool, variable_decoration: bool) -> Vec<u32> {
@@ -2558,9 +2559,6 @@ mod tests {
             pipeline_color_attachment_description(HalTextureFormat::Rgba8Unorm, 3, false).is_err()
         );
     }
-
-    use crate::{noop, HalTextureDescriptor, HalTextureDimension, HalTextureUsage};
-    use ash::vk::Handle;
 
     #[test]
     fn compute_stage_subgroup_config_prefers_explicit_then_default_then_varying() {

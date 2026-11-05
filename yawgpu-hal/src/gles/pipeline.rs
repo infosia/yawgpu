@@ -5,7 +5,7 @@ use glow::HasContext;
 use super::device::GlesDeviceInner;
 use super::format::{is_color_renderable_with, map_vertex_format, GlesColorRenderCaps};
 use super::texture::validate_sample_count;
-use super::{rebuild_hal_error, BACKEND};
+use super::BACKEND;
 use crate::{
     HalColorTargetState, HalCombinedSampler, HalCullMode, HalDepthStencilState,
     HalDescriptorBinding, HalError, HalFrontFace, HalGlesBindingRemap, HalPrimitiveTopology,
@@ -123,11 +123,7 @@ impl GlesComputePipeline {
     }
 
     pub(super) fn raw_or_err(&self) -> Result<glow::Program, HalError> {
-        self.inner
-            .program
-            .as_ref()
-            .copied()
-            .map_err(rebuild_hal_error)
+        self.inner.program.as_ref().copied().map_err(Clone::clone)
     }
 
     #[must_use]
@@ -266,11 +262,7 @@ impl GlesRenderPipeline {
     }
 
     pub(super) fn raw_or_err(&self) -> Result<glow::Program, HalError> {
-        self.inner
-            .program
-            .as_ref()
-            .copied()
-            .map_err(rebuild_hal_error)
+        self.inner.program.as_ref().copied().map_err(Clone::clone)
     }
 
     #[must_use]

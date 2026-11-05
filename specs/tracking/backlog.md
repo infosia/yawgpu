@@ -83,6 +83,8 @@ below are stable IDs, not the rank.
 | A27 | External texture planes were not lazily zero-initialized | Block 144, 2026-11-05 (planes get the same lazy clears and initialization marks as sampled texture views) |
 | A28 | External texture planes were bound as whole textures | Block 145, 2026-11-05 (each plane is a `HalBoundTexture` view; Metal binds the view) |
 | D14 | README Linux NVIDIA GLES table was older than the suite's | README updated to the suite's 2026-11-01 sweep at `9977e34` (fail 28,810), 2026-11-05 |
+| E9 | Block 102 m12 cosmetic deferrals | Block 147, 2026-11-05 (test-module imports first, test-only helpers moved into test modules, `PassTimestampWrites` serves both pass kinds) |
+| E10 | GLES copied `HalError` by hand | Block 147, 2026-11-05 (`HalError` derives `Clone`) |
 
 ---
 
@@ -153,8 +155,6 @@ reference `> i32::MAX`, `first_instance` indirect, external textures,
 | E4 | refactor-dedup deferrals: double `Arc<core::X>` in FFI Impl structs, Metal derived-view cache + per-draw scratch reuse, unified `HalRenderStreamState` interpreter, GLES draw-time dirty tracking + binding index maps, subpass attachment validation dedupe; **+ Block 107 F5**: a `RenderBindings<'_>` struct for the Vulkan render descriptor call chain (`update_render_descriptor_sets` `too_many_arguments`, `bind_textures` / `pass_textures` side by side). | M each | `specs/tracking/refactor-dedup.md:38-56, 98-101, 191-196`; `specs/blocks/107-vulkan-discard-epilogue-shared-layout.md` F5 |
 | E5 | `tiled`: depth-format transient attachments, MSAA subpass input (Dawn-deferred; 2-arg `inputAttachmentLoad` parked on a Dawn resolver issue), queries inside subpass passes, GLES mapping, `SubpassAttachmentResource::Transient` arm TODOs (the two remaining `TODO(tiled 2.4)` markers).; a forced-flag e2e on the subpass path (Block 120). | M / L / M / L | `specs/blocks/55-tiled-rendering.md:45-53, 501-507, 639-648`; `yawgpu-core/src/subpass.rs:244`, `yawgpu-hal/src/command.rs:779` |
 | E8 | `shader-passthrough`: B5 Phase Review outstanding; gating SPIR-V passthrough behind `WGPUInstanceFeatureName_ShaderSourceSPIRV` deferred. | S / S | `specs/blocks/33-shader-passthrough.md:257-270` |
-| E9 | Block 102 m12 cosmetic deferrals: tests inserted above `use super::*`; `#[cfg(test)] pub(crate)` shim; `RenderPassTimestampWrites` reused for compute passes (renaming is a cross-crate API change). | S | `specs/tracking/backlog.md` Phase Review Blocks 99–102, m12 |
-| E10 | GLES `HalError` is not `Clone`; the GLES module keeps a `TODO` to derive it upstream once every variant allows it. | S | `yawgpu-hal/src/gles/mod.rs:43` |
 
 ## Priority F — doc drift
 
@@ -341,3 +341,4 @@ Re-verification after the fixes: `cargo test --workspace` 1093/0, clippy default
 - Block 146 done (user request): external textures on Vulkan. Each `texture_external` expands to plane0 at its binding and plane1 and a params uniform above the layout's largest binding; Tint's multiplanar transform gets a group-aware map for SPIR-V. Windows NVIDIA: shared external-texture e2e 6/6, Vulkan e2e 176/176 with 0 VUIDs, CTS `webgpu:*` `fail=2 crash=2` (known) with about 3,000 subcases moving from skip to pass. The suite's F-111 `xfail` entries can be dropped. Metal run of the shared e2e owed to a Mac host. Also fixed: Block 141's int64-atomics HAL test compared extension names by pointer and failed on Windows.
 - Block 146 on Metal and MoltenVK at `fa447be` (2026-11-05): workspace 1,436/0, the shared external-texture e2e 6/6 on Metal and on MoltenVK (no validation output), Metal e2e 174/174, CTS Metal `api,*` and `shader,execution,*` fail=0, identical to Block 145.
 - Doc drift fixed (2026-11-05): B3 narrowed to GLES now that Vulkan has external textures (Block 146); README Linux NVIDIA GLES table updated to the suite's 2026-11-01 sweep (D14).
+- Block 147 done (user request, E9 and E10): `use` items first in 26 test modules, test-only `#[cfg(test)]` helpers moved into their test modules, `RenderPassTimestampWrites` renamed `PassTimestampWrites`, `HalError` derives `Clone`. No behaviour change; workspace 1,437/0. The GLES `HalError: Clone` `TODO` is gone, so two `TODO`s remain (the `tiled 2.4` arms).

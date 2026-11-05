@@ -4,7 +4,7 @@ use glow::HasContext;
 
 use super::device::GlesDeviceInner;
 use super::format::{fallback_format, map_texture_format, GlesFormat};
-use super::{rebuild_hal_error, BACKEND};
+use super::BACKEND;
 use crate::{HalError, HalTextureDescriptor, HalTextureDimension, HalTextureFormat};
 
 pub(super) struct GlesTextureMeta {
@@ -79,11 +79,7 @@ impl GlesTexture {
     }
 
     pub(super) fn raw_or_err(&self) -> Result<glow::Texture, HalError> {
-        self.inner
-            .texture
-            .as_ref()
-            .copied()
-            .map_err(rebuild_hal_error)
+        self.inner.texture.as_ref().copied().map_err(Clone::clone)
     }
 
     pub(super) fn meta(&self) -> &GlesTextureMeta {

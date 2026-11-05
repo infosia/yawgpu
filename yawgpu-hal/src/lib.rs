@@ -1537,6 +1537,8 @@ pub enum HalRenderPipeline {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn hal_adapter_info_noop_is_cpu_with_empty_identity() {
         let adapter = super::HalInstance::new_noop()
@@ -1583,8 +1585,6 @@ mod tests {
         );
         Ok(())
     }
-
-    use super::*;
 
     #[test]
     fn hal_adapter_exposes_unaligned_compression_and_atomic_vec2u_features() {

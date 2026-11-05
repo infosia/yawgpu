@@ -496,6 +496,8 @@ fn blit_back_buffer_to_window(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn gles_surface_capabilities_matches_constant_set() {
         let caps = super::GlesSurface::capabilities();
@@ -517,8 +519,6 @@ mod tests {
                 && !caps.usages.transient
         );
     }
-
-    use super::*;
 
     #[test]
     fn swap_interval_maps_present_modes() {

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use glow::HasContext;
 
 use super::device::GlesDeviceInner;
-use super::{rebuild_hal_error, BACKEND};
+use super::BACKEND;
 use crate::{
     HalAddressMode, HalCompareFunction, HalError, HalFilterMode, HalMipmapFilterMode,
     HalSamplerDescriptor,
@@ -54,11 +54,7 @@ impl GlesSampler {
 
     #[allow(dead_code)]
     pub(super) fn raw_or_err(&self) -> Result<glow::Sampler, HalError> {
-        self.inner
-            .sampler
-            .as_ref()
-            .copied()
-            .map_err(rebuild_hal_error)
+        self.inner.sampler.as_ref().copied().map_err(Clone::clone)
     }
 }
 

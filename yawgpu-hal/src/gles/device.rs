@@ -14,7 +14,7 @@ use super::pipeline::{GlesComputePipeline, GlesPipelineResourceBindings, GlesRen
 use super::queue::GlesQueue;
 use super::sampler::{create_nearest_placeholder_sampler, GlesSampler};
 use super::texture::GlesTexture;
-use super::{rebuild_hal_error, BACKEND};
+use super::BACKEND;
 use crate::{
     HalBufferUsage, HalDescriptorBinding, HalError, HalRenderPipelineDescriptor,
     HalSamplerDescriptor, HalShaderSource, HalShaderStage, HalTextureDescriptor,
@@ -342,13 +342,13 @@ impl GlesDeviceInner {
                 .placeholder_sampler
                 .as_ref()
                 .copied()
-                .map_err(rebuild_hal_error),
+                .map_err(Clone::clone),
             #[cfg(windows)]
             Self::Wgl(state) => state
                 .placeholder_sampler
                 .as_ref()
                 .copied()
-                .map_err(rebuild_hal_error),
+                .map_err(Clone::clone),
         }
     }
 

@@ -71,13 +71,14 @@ pub use format::{FormatAspects, FormatCaps, FormatOutputClass, TextureFormat};
 pub use future::{FutureCallbackMode, FutureId, FutureRegistry, WaitAnyResult, WaitAnyStatus};
 pub use instance::Instance;
 pub use limits::Limits;
+pub use pass::PassTimestampWrites;
 pub use pipeline_layout::{PipelineLayout, PipelineLayoutDescriptor};
 pub use query_set::{QuerySet, QuerySetDescriptor, QueryType};
 pub use queue::{Queue, QueueBufferWrite, QueueTextureWrite};
 pub use render_bundle::{RenderBundle, RenderBundleEncoder, RenderBundleEncoderDescriptor};
 pub use render_pass::{
     RenderPassColorAttachment, RenderPassDepthStencilAttachment, RenderPassDescriptor,
-    RenderPassEncoder, RenderPassTimestampWrites,
+    RenderPassEncoder,
 };
 #[cfg(feature = "tiled")]
 pub use render_pipeline::SubpassRenderPipelineDescriptor;

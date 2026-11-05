@@ -126,11 +126,6 @@ impl FutureRegistry {
         }
     }
 
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.inner.lock().futures.len()
-    }
-
     /// Returns process events.
     #[must_use]
     pub fn process_events(&self) -> Vec<FutureId> {
@@ -211,6 +206,12 @@ impl FutureRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl FutureRegistry {
+        fn len(&self) -> usize {
+            self.inner.lock().futures.len()
+        }
+    }
 
     #[test]
     fn future_id_get_and_from_raw_round_trip() {

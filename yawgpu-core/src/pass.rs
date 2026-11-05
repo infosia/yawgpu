@@ -16,6 +16,17 @@ use crate::render_pipeline::*;
 use crate::texture::*;
 use crate::texture_view::{TextureAspect, TextureView};
 
+/// Timestamp writes for a render or compute pass, used by validation and backend submission.
+#[derive(Debug, Clone)]
+pub struct PassTimestampWrites {
+    /// Query set.
+    pub query_set: QuerySet,
+    /// Beginning index.
+    pub beginning_index: Option<u32>,
+    /// End index.
+    pub end_index: Option<u32>,
+}
+
 /// Holds shared state for the pass encoder handle.
 #[derive(Debug)]
 pub(crate) struct PassEncoderInner {
@@ -1701,14 +1712,6 @@ fn ranges_overlap(a_start: u32, a_count: u32, b_start: u32, b_count: u32) -> boo
     a_start < b_end && b_start < a_end
 }
 
-/// Returns buffer ranges overlap.
-#[cfg(test)]
-pub(crate) fn buffer_ranges_overlap(a: &BufferScopeUse, b: &BufferScopeUse) -> bool {
-    let a_end = a.offset.saturating_add(a.size);
-    let b_end = b.offset.saturating_add(b.size);
-    a.offset < b_end && b.offset < a_end
-}
-
 /// Returns bind group buffer resources.
 pub(crate) fn bind_group_buffer_resources(
     group: &BindGroup,
@@ -2346,6 +2349,13 @@ mod tests {
     use crate::Device;
 
     use std::sync::Arc;
+
+    /// Returns buffer ranges overlap.
+    fn buffer_ranges_overlap(a: &BufferScopeUse, b: &BufferScopeUse) -> bool {
+        let a_end = a.offset.saturating_add(a.size);
+        let b_end = b.offset.saturating_add(b.size);
+        a.offset < b_end && b.offset < a_end
+    }
 
     #[test]
     fn validate_required_immediate_data_requires_subset_of_written_words() {

@@ -413,6 +413,10 @@ impl BindGroupLayout {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::test_helpers::*;
+    use crate::*;
+
     #[test]
     fn audit_unknown_visibility_bits_are_rejected() {
         let entry = BindGroupLayoutEntry {
@@ -454,10 +458,6 @@ mod tests {
             );
         }
     }
-
-    use super::*;
-    use crate::test_helpers::*;
-    use crate::*;
 
     #[test]
     fn constructors_sort_entries_by_binding_number() {

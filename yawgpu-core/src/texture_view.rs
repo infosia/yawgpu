@@ -422,6 +422,9 @@ pub(crate) fn validate_texture_view_descriptor(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::test_helpers::*;
+
     fn view_descriptor() -> TextureViewDescriptor {
         TextureViewDescriptor {
             format: None,
@@ -504,9 +507,6 @@ mod tests {
             }
         }
     }
-
-    use super::*;
-    use crate::test_helpers::*;
 
     #[test]
     fn texture_component_swizzle_identity_detection() {

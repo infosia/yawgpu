@@ -501,6 +501,12 @@ fn fill_surface_capabilities(
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::{
+        create_noop_surface, noop_chain, noop_surface_caps, release_handles, valid_surface_config,
+    };
+    use super::*;
+    use yawgpu_hal::{HalCompositeAlphaMode as A, HalSurfaceCapabilities};
+
     #[test]
     fn audit_t2_surface_configure_forwards_view_formats_to_hal() {
         unsafe {
@@ -646,12 +652,6 @@ mod tests {
             release_handles(instance, adapter, device);
         }
     }
-
-    use super::super::tests::{
-        create_noop_surface, noop_chain, noop_surface_caps, release_handles, valid_surface_config,
-    };
-    use super::*;
-    use yawgpu_hal::{HalCompositeAlphaMode as A, HalSurfaceCapabilities};
 
     #[test]
     fn current_texture_is_reused_until_present_configure_or_unconfigure() {

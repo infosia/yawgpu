@@ -527,7 +527,7 @@ impl CommandEncoder {
     #[must_use]
     pub fn begin_compute_pass(
         &self,
-        timestamp_writes: Option<RenderPassTimestampWrites>,
+        timestamp_writes: Option<PassTimestampWrites>,
     ) -> (ComputePassEncoder, Option<String>) {
         let (token, immediate_error) = self.begin_pass(PassKind::Compute);
         let end_timestamp = if immediate_error.is_none() {
@@ -568,7 +568,7 @@ impl CommandEncoder {
 
     fn record_pass_timestamp_begin(
         &self,
-        writes: Option<&RenderPassTimestampWrites>,
+        writes: Option<&PassTimestampWrites>,
     ) -> Option<WriteTimestampCommand> {
         let writes = writes?;
         self.record_referenced_query_set(writes.query_set.clone());
@@ -1394,7 +1394,7 @@ pub(crate) fn validate_render_pass_descriptor(
 
 /// Validates render pass timestamp writes and returns a descriptive error on failure.
 pub(crate) fn validate_render_pass_timestamp_writes(
-    timestamp_writes: &RenderPassTimestampWrites,
+    timestamp_writes: &PassTimestampWrites,
 ) -> Result<(), String> {
     validate_timestamp_query_set(
         &timestamp_writes.query_set,
@@ -1425,7 +1425,7 @@ pub(crate) fn validate_render_pass_timestamp_writes(
 
 /// Validates compute pass timestamp writes and returns a descriptive error on failure.
 pub fn validate_compute_pass_timestamp_writes(
-    timestamp_writes: &RenderPassTimestampWrites,
+    timestamp_writes: &PassTimestampWrites,
 ) -> Result<(), String> {
     validate_timestamp_query_set(
         &timestamp_writes.query_set,
@@ -2515,6 +2515,10 @@ impl CommandBuffer {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::test_helpers::*;
+    use std::sync::Arc;
+
     fn view_descriptor() -> TextureViewDescriptor {
         TextureViewDescriptor {
             format: None,
@@ -2731,7 +2735,7 @@ mod tests {
     fn begin_compute_pass_records_beginning_timestamp_before_and_end_after_the_pass() {
         let (device, set) = timestamp_device_and_set();
         let encoder = device.create_command_encoder();
-        let (pass, error) = encoder.begin_compute_pass(Some(RenderPassTimestampWrites {
+        let (pass, error) = encoder.begin_compute_pass(Some(PassTimestampWrites {
             query_set: (*set).clone(),
             beginning_index: Some(1),
             end_index: Some(2),
@@ -2752,7 +2756,7 @@ mod tests {
         let (device, set) = timestamp_device_and_set();
         let encoder = device.create_command_encoder();
         let mut descriptor = noop_render_pass_descriptor(noop_render_attachment(&device), None);
-        descriptor.timestamp_writes = Some(RenderPassTimestampWrites {
+        descriptor.timestamp_writes = Some(PassTimestampWrites {
             query_set: (*set).clone(),
             beginning_index: Some(1),
             end_index: Some(2),
@@ -2772,7 +2776,7 @@ mod tests {
         let (device, set) = timestamp_device_and_set();
         for render in [false, true] {
             let encoder = device.create_command_encoder();
-            let writes = Some(RenderPassTimestampWrites {
+            let writes = Some(PassTimestampWrites {
                 query_set: (*set).clone(),
                 beginning_index: None,
                 end_index: Some(3),
@@ -2929,11 +2933,6 @@ mod tests {
         assert!(buffer.command_ops().is_empty());
         assert!(device.inner.timestamp_pipeline.get().is_none());
     }
-
-    use super::*;
-    use crate::test_helpers::*;
-
-    use std::sync::Arc;
 
     #[test]
     fn command_encoder_create_finish_idempotent_and_command_buffer_is_error_false() {
@@ -5101,7 +5100,7 @@ mod tests {
             count: 2,
         });
         assert_eq!(error, None);
-        let writes = |beginning_index, end_index| RenderPassTimestampWrites {
+        let writes = |beginning_index, end_index| PassTimestampWrites {
             query_set: query_set.clone(),
             beginning_index,
             end_index,

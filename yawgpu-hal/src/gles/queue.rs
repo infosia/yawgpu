@@ -4486,6 +4486,8 @@ fn u32_from_u64(value: u64, message: &'static str) -> Result<u32, HalError> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     #[cfg(feature = "noop")]
     fn volume_views_use_one_array_layer_and_bind_all_depth_slices() {
@@ -4610,8 +4612,6 @@ mod tests {
         invalidate_gles_render_bundle_state(&mut state);
         assert_eq!(state.frag_depth_range, Some([0.25, 0.75]));
     }
-
-    use super::*;
 
     #[test]
     fn attachment_mip_dimensions_cover_viewport_and_resolve_extents() {

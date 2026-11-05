@@ -1238,23 +1238,6 @@ pub(crate) trait CacheKey: Eq + std::hash::Hash {
     type Handle;
 }
 
-/// Returns the number of entries currently stored in a device object cache.
-///
-/// Test-only helper used to assert that dead `Weak` entries (and their keys) are
-/// pruned rather than accumulating for the device's lifetime.
-#[cfg(test)]
-fn cache_len<T>(cache: &ObjectCache<T>) -> usize
-where
-    T: CacheKey,
-{
-    cache
-        .inner
-        .lock()
-        .expect("device object cache lock must not poison")
-        .map
-        .len()
-}
-
 impl CacheKey for ShaderModuleCacheKey {
     type Handle = WGPUShaderModuleImpl;
 }
@@ -3112,6 +3095,25 @@ pub unsafe fn testing_get_queue_label(queue: native::WGPUQueue) -> String {
 #[cfg(test)]
 mod tests {
     #![allow(non_snake_case)]
+    use super::*;
+    use crate::YAWGPU_INSTANCE_BACKEND_NOOP;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Returns the number of entries currently stored in a device object cache.
+    ///
+    /// Test-only helper used to assert that dead `Weak` entries (and their keys) are
+    /// pruned rather than accumulating for the device's lifetime.
+    fn cache_len<T>(cache: &ObjectCache<T>) -> usize
+    where
+        T: CacheKey,
+    {
+        cache
+            .inner
+            .lock()
+            .expect("device object cache lock must not poison")
+            .map
+            .len()
+    }
 
     #[test]
     fn adapter_info_mapping_copies_all_hal_fields_and_owns_strings() {
@@ -5865,13 +5867,8 @@ mod tests {
         }
     }
 
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use super::*;
-
     const NOT_WGSL_PARSE_ERROR: &str = "unexpected token";
     const UNKNOWN_DIAGNOSTIC_WARNING: &str = "unrecognized diagnostic rule";
-    use crate::YAWGPU_INSTANCE_BACKEND_NOOP;
 
     #[test]
     fn unaligned_compression_and_atomic_vec2u_are_advertised_and_requested() {

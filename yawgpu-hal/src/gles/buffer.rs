@@ -4,7 +4,7 @@ use std::sync::Arc;
 use glow::HasContext;
 
 use super::device::GlesDeviceInner;
-use super::{rebuild_hal_error, BACKEND};
+use super::BACKEND;
 use crate::{HalBufferUsage, HalError};
 
 pub(super) struct GlesBufferInner {
@@ -144,11 +144,7 @@ impl GlesBuffer {
     }
 
     pub(super) fn raw_or_err(&self) -> Result<glow::Buffer, HalError> {
-        self.inner
-            .buffer
-            .as_ref()
-            .copied()
-            .map_err(rebuild_hal_error)
+        self.inner.buffer.as_ref().copied().map_err(Clone::clone)
     }
 }
 

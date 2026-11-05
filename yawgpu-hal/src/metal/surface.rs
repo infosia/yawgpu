@@ -178,6 +178,9 @@ fn acquire_in_pool<T>(acquire: impl FnOnce(objc2::rc::AutoreleasePool<'_>) -> T)
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_helpers::*;
+    use super::*;
+
     #[test]
     fn drawable_acquisition_pool_drains_temporary_objects() {
         use objc2::rc::Weak;
@@ -198,9 +201,6 @@ mod tests {
         drop(retained);
         assert!(weak.load().is_none());
     }
-
-    use super::super::test_helpers::*;
-    use super::*;
 
     #[test]
     fn metal_surface_capability_list_matches_dawn() {

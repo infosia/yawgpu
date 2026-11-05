@@ -1117,6 +1117,10 @@ pub(crate) fn max_texture_mips(size: Extent3d, dimension: TextureDimension) -> u
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::test_helpers::*;
+    use crate::*;
+
     #[test]
     fn audit_empty_depth_stencil_write_still_requires_full_subresource() {
         let device = noop_device();
@@ -1176,10 +1180,6 @@ mod tests {
             )
             .is_ok());
     }
-
-    use super::*;
-    use crate::test_helpers::*;
-    use crate::*;
 
     #[test]
     fn unaligned_compressed_texture_requires_feature_and_copies_physical_level_zero() {

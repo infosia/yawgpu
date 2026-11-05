@@ -2299,6 +2299,14 @@ fn metal_index_type(format: HalIndexFormat) -> MTLIndexType {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_helpers::*;
+    use super::*;
+    #[cfg(feature = "tiled")]
+    use crate::{
+        HalSubpassAttachmentLayout, HalSubpassColorAttachment, HalSubpassInputAttachment,
+        HalSubpassLayout, HalSubpassPassLayout, HalSubpassRenderPassCommand,
+    };
+
     #[test]
     fn mismatched_compressed_mip_edges_stage_both_copy_directions() {
         let format = HalTextureFormat::Bc1RgbaUnorm;
@@ -2600,14 +2608,6 @@ mod tests {
         )
         .is_err());
     }
-
-    use super::super::test_helpers::*;
-    use super::*;
-    #[cfg(feature = "tiled")]
-    use crate::{
-        HalSubpassAttachmentLayout, HalSubpassColorAttachment, HalSubpassInputAttachment,
-        HalSubpassLayout, HalSubpassPassLayout, HalSubpassRenderPassCommand,
-    };
 
     #[test]
     fn attachment_view_format_uses_raw_texture_only_when_formats_match() {

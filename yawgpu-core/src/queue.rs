@@ -285,19 +285,6 @@ impl PendingWriteBatch {
             }
         }
     }
-
-    #[cfg(test)]
-    fn pool_sizes(&self) -> (usize, usize) {
-        (self.in_flight.len(), self.free_chunks.len())
-    }
-
-    #[cfg(test)]
-    fn in_flight_submission_indices(&self) -> Vec<SubmissionIndex> {
-        self.in_flight
-            .iter()
-            .map(|chunk| chunk.submission_index)
-            .collect()
-    }
 }
 
 /// Staging sink for encoder-side buffer writes met during submit lowering
@@ -1311,28 +1298,6 @@ impl InitOverlay {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn hal_command_execution(op: &CommandExecution) -> Option<HalCopy> {
-    hal_command_execution_with_ops(op, &[op])
-}
-
-#[cfg(test)]
-fn hal_command_execution_with_ops(
-    op: &CommandExecution,
-    command_ops: &[&CommandExecution],
-) -> Option<HalCopy> {
-    let mut copies = Vec::new();
-    let mut batch = PendingWriteBatch::default();
-    let mut staging = BufferWriteStaging {
-        batch: &mut batch,
-        error: None,
-    };
-    let mut overlay = InitOverlay::default();
-    append_hal_command_execution(&mut copies, op, command_ops, &mut staging, &mut overlay);
-    overlay.commit();
-    copies.into_iter().next()
-}
-
 fn append_hal_command_execution(
     copies: &mut Vec<HalCopy>,
     op: &CommandExecution,
@@ -1988,7 +1953,7 @@ fn hal_init_aspect(aspect: InitAspect) -> HalTextureAspect {
 /// views too and get the same lazy clears and initialization marks.
 ///
 /// The input-attachment arm is defensive: such a slot must be left empty in
-/// the bind group (`validate_bind_group_entry` rejects a supplied resource)
+/// the bind group (`validate_bind_group_entry_with_usage` rejects a supplied resource)
 /// because the subpass pass auto-wires it from its own attachments, which
 /// `append_subpass_attachment_init_clears` already clears. It is matched
 /// here so the kind cannot be silently skipped if that ever changes.
@@ -3138,6 +3103,45 @@ pub(crate) fn dynamic_offset_for_binding(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::shader::{SHADER_STAGE_COMPUTE, SHADER_STAGE_FRAGMENT, SHADER_STAGE_VERTEX};
+    use crate::test_helpers::*;
+    use crate::*;
+    use yawgpu_hal::{HalStorageTextureAccess, HalTextureFormat};
+
+    impl PendingWriteBatch {
+        fn pool_sizes(&self) -> (usize, usize) {
+            (self.in_flight.len(), self.free_chunks.len())
+        }
+
+        fn in_flight_submission_indices(&self) -> Vec<SubmissionIndex> {
+            self.in_flight
+                .iter()
+                .map(|chunk| chunk.submission_index)
+                .collect()
+        }
+    }
+
+    fn hal_command_execution(op: &CommandExecution) -> Option<HalCopy> {
+        hal_command_execution_with_ops(op, &[op])
+    }
+
+    fn hal_command_execution_with_ops(
+        op: &CommandExecution,
+        command_ops: &[&CommandExecution],
+    ) -> Option<HalCopy> {
+        let mut copies = Vec::new();
+        let mut batch = PendingWriteBatch::default();
+        let mut staging = BufferWriteStaging {
+            batch: &mut batch,
+            error: None,
+        };
+        let mut overlay = InitOverlay::default();
+        append_hal_command_execution(&mut copies, op, command_ops, &mut staging, &mut overlay);
+        overlay.commit();
+        copies.into_iter().next()
+    }
+
     #[test]
     fn audit_c1_write_buffer_waits_for_submission_lock() {
         let device = noop_device();
@@ -3396,12 +3400,6 @@ mod tests {
             matches!(copies.as_slice(), [HalCopy::ResolveQuerySet(r), HalCopy::ComputePass(_), HalCopy::WriteTimestamp(_)] if r.written_queries.is_empty())
         );
     }
-
-    use super::*;
-    use crate::shader::{SHADER_STAGE_COMPUTE, SHADER_STAGE_FRAGMENT, SHADER_STAGE_VERTEX};
-    use crate::test_helpers::*;
-    use crate::*;
-    use yawgpu_hal::{HalStorageTextureAccess, HalTextureFormat};
 
     fn depth32_float() -> TextureFormat {
         TextureFormat::from_raw(0x30)
@@ -9706,7 +9704,7 @@ fn fs() -> @location(0) vec4<f32> {
             })],
             depth_stencil_attachment: None,
             occlusion_query_set: None,
-            timestamp_writes: Some(RenderPassTimestampWrites {
+            timestamp_writes: Some(PassTimestampWrites {
                 query_set: query_set.clone(),
                 beginning_index: Some(0),
                 end_index: Some(1),

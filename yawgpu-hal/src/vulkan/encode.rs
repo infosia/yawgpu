@@ -5256,6 +5256,27 @@ pub(super) fn to_image_extent(extent: HalExtent3d) -> vk::Extent3D {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "vulkan")]
+    use super::super::test_helpers::{
+        compute_spirv, sampler_descriptor, texture_descriptor, vulkan_device,
+    };
+    use super::*;
+    use crate::{noop, HalBufferTextureLayout, HalOrigin3d, HalTextureDescriptor, HalTextureUsage};
+    #[cfg(feature = "vulkan")]
+    use crate::{
+        HalBoundExternalTexture, HalBoundIndexBuffer, HalBoundIndirectBuffer, HalBoundSampler,
+        HalBoundTexture, HalBuffer, HalBufferUsage, HalComputeDispatch, HalComputePass,
+        HalComputePipeline, HalIndexFormat, HalRenderPassCommand, HalRenderPassCommandStream,
+        HalSampler, HalShaderSource, HalTexture, HalTextureComponentSwizzle,
+        HalTextureViewDimension,
+    };
+    #[cfg(feature = "tiled")]
+    use crate::{
+        HalSubpassAttachmentLayout, HalSubpassAttachmentResource, HalSubpassColorAttachment,
+        HalSubpassDependency, HalSubpassDepthStencilAttachment, HalSubpassInputAttachment,
+        HalSubpassLayout, HalSubpassPassLayout,
+    };
+
     #[test]
     fn vulkan_frag_depth_clamp_draw_bytes_follow_viewport_changes() {
         let mut descriptor = crate::vulkan::test_helpers::render_descriptor();
@@ -5875,27 +5896,6 @@ mod tests {
             assert!(scopes.dst_access.contains(access));
         }
     }
-
-    #[cfg(feature = "vulkan")]
-    use super::super::test_helpers::{
-        compute_spirv, sampler_descriptor, texture_descriptor, vulkan_device,
-    };
-    use super::*;
-    use crate::{noop, HalBufferTextureLayout, HalOrigin3d, HalTextureDescriptor, HalTextureUsage};
-    #[cfg(feature = "vulkan")]
-    use crate::{
-        HalBoundExternalTexture, HalBoundIndexBuffer, HalBoundIndirectBuffer, HalBoundSampler,
-        HalBoundTexture, HalBuffer, HalBufferUsage, HalComputeDispatch, HalComputePass,
-        HalComputePipeline, HalIndexFormat, HalRenderPassCommand, HalRenderPassCommandStream,
-        HalSampler, HalShaderSource, HalTexture, HalTextureComponentSwizzle,
-        HalTextureViewDimension,
-    };
-    #[cfg(feature = "tiled")]
-    use crate::{
-        HalSubpassAttachmentLayout, HalSubpassAttachmentResource, HalSubpassColorAttachment,
-        HalSubpassDependency, HalSubpassDepthStencilAttachment, HalSubpassInputAttachment,
-        HalSubpassLayout, HalSubpassPassLayout,
-    };
 
     #[test]
     fn unaligned_level_zero_copy_and_clear_use_complete_blocks() {

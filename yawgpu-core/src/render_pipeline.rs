@@ -3630,6 +3630,19 @@ fn emit_vertex_point_size(topology: PrimitiveTopology) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::pass::bind_group_layouts_compatible;
+    #[cfg(feature = "tiled")]
+    use crate::subpass::{
+        AttachmentLayout, SubpassDependency, SubpassDependencyType, SubpassInputAttachment,
+        SubpassLayoutDesc, SubpassPassLayoutDescriptor,
+    };
+    use crate::test_helpers::*;
+    #[cfg(feature = "shader-passthrough")]
+    use crate::ShaderStage;
+    use crate::{Device, ErrorFilter, TextureViewDimension};
+    use std::sync::Arc;
+
     #[test]
     fn point_size_is_emitted_only_for_point_lists() {
         for topology in [
@@ -3782,20 +3795,6 @@ override fragment_only: f32;
             Ok(())
         );
     }
-
-    use super::*;
-    use crate::pass::bind_group_layouts_compatible;
-    #[cfg(feature = "tiled")]
-    use crate::subpass::{
-        AttachmentLayout, SubpassDependency, SubpassDependencyType, SubpassInputAttachment,
-        SubpassLayoutDesc, SubpassPassLayoutDescriptor,
-    };
-    use crate::test_helpers::*;
-    #[cfg(feature = "shader-passthrough")]
-    use crate::ShaderStage;
-    use crate::{Device, ErrorFilter, TextureViewDimension};
-
-    use std::sync::Arc;
 
     fn primitive_state(unclipped_depth: bool) -> PrimitiveState {
         PrimitiveState {

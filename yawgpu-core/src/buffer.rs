@@ -963,6 +963,11 @@ pub(crate) fn validate_buffer_descriptor(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::test_helpers::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
     #[test]
     fn audit_map_completion_wait_runs_without_buffer_state_lock() {
         let device = noop_device();
@@ -1005,11 +1010,6 @@ mod tests {
         );
         assert_eq!(buffer.map_state(), BufferMapState::Unmapped);
     }
-
-    use super::*;
-    use crate::test_helpers::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
 
     #[test]
     fn buffer_usage_from_bits_retain_round_trips_known_and_unknown_bits() {

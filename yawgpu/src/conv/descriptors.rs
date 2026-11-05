@@ -524,9 +524,9 @@ unsafe fn map_render_pass_depth_stencil_attachment(
 
 pub(crate) unsafe fn map_render_pass_timestamp_writes(
     value: &native::WGPUPassTimestampWrites,
-) -> core::RenderPassTimestampWrites {
+) -> core::PassTimestampWrites {
     let query_set = borrow_handle::<WGPUQuerySetImpl>(value.querySet, "WGPUQuerySet");
-    core::RenderPassTimestampWrites {
+    core::PassTimestampWrites {
         query_set: (*query_set.core).clone(),
         beginning_index: map_query_index(value.beginningOfPassWriteIndex),
         end_index: map_query_index(value.endOfPassWriteIndex),

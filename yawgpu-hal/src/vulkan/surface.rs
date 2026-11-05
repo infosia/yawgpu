@@ -1385,6 +1385,9 @@ fn hal_usage_to_vk_image_usage(usage: HalTextureUsage) -> vk::ImageUsageFlags {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_helpers::*;
+    use super::*;
+
     #[test]
     fn phase_review_configured_extent_wins_inside_wide_fixed_surface_range() {
         let mut config = surface_config();
@@ -1837,9 +1840,6 @@ mod tests {
         // The helper has a null VkSurfaceKHR, so a driver query is not valid.
         assert!(dummy_surface(&instance).capabilities(&adapter).is_err());
     }
-
-    use super::super::test_helpers::*;
-    use super::*;
 
     #[test]
     fn select_present_mode_honors_fifo_relaxed_when_supported() {

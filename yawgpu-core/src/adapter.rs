@@ -445,15 +445,15 @@ pub(crate) const MAX_QUERY_COUNT: u32 = 4096;
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::test_helpers::*;
+
     #[test]
     fn adapter_info_passes_through_hal_identity() {
         let adapter = noop_adapter();
         assert_eq!(adapter.info(), adapter.hal().info());
         assert_eq!(adapter.info().adapter_type, yawgpu_hal::HalAdapterType::Cpu);
     }
-
-    use super::*;
-    use crate::test_helpers::*;
 
     #[test]
     fn adapter_hal_returns_wrapped_adapter() {

@@ -39,55 +39,6 @@ pub use texture::GlesTexture;
 
 const BACKEND: &str = "gles";
 
-pub(super) fn rebuild_hal_error(error: &crate::HalError) -> crate::HalError {
-    // TODO: Consider deriving Clone for HalError upstream once all variants are
-    // confirmed cheap or intentionally cloneable.
-    match error {
-        crate::HalError::SurfaceOutdated => crate::HalError::SurfaceOutdated,
-        crate::HalError::SurfaceLost => crate::HalError::SurfaceLost,
-        crate::HalError::SurfaceTimeout => crate::HalError::SurfaceTimeout,
-        crate::HalError::BackendUnavailable { backend } => {
-            crate::HalError::BackendUnavailable { backend }
-        }
-        crate::HalError::DeviceCreationFailed { backend } => {
-            crate::HalError::DeviceCreationFailed { backend }
-        }
-        crate::HalError::QueueSubmissionFailed { backend, message } => {
-            crate::HalError::QueueSubmissionFailed {
-                backend,
-                message: message.clone(),
-            }
-        }
-        crate::HalError::BufferOperationFailed { backend, message } => {
-            crate::HalError::BufferOperationFailed { backend, message }
-        }
-        crate::HalError::ShaderCompilationFailed { backend, message } => {
-            crate::HalError::ShaderCompilationFailed {
-                backend,
-                message: message.clone(),
-            }
-        }
-        crate::HalError::SwapchainCreationFailed { backend, message } => {
-            crate::HalError::SwapchainCreationFailed { backend, message }
-        }
-        crate::HalError::AcquireFailed { backend, message } => {
-            crate::HalError::AcquireFailed { backend, message }
-        }
-        crate::HalError::PresentFailed { backend, message } => {
-            crate::HalError::PresentFailed { backend, message }
-        }
-        crate::HalError::OutOfMemory { backend, resource } => {
-            crate::HalError::OutOfMemory { backend, resource }
-        }
-        crate::HalError::TextureCreationFailed { backend, message } => {
-            crate::HalError::TextureCreationFailed {
-                backend,
-                message: message.clone(),
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

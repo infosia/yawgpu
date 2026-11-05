@@ -1,6 +1,7 @@
 # Block 147 — Test-module layout, a test-only shim, the pass timestamp type, and `HalError: Clone`
 
-Status: **IN PROGRESS**.
+Status: **COMPLETE (2026-11-05)**. Phase Review: 0 CRITICAL, 0 MAJOR, 4 MINOR; all resolved, see
+below.
 Source: backlog E9 (Block 102 Phase Review m12 (b), (c), (d)) and E10, started by user
 request on 2026-11-05.
 
@@ -82,3 +83,30 @@ R5. **Unchanged.** Behaviour, error messages, the C API, test names, and test co
 
 - **S1 (coding agent):** R1-R5 with the R4 unit test.
 - **S2 (Claude):** verification, Phase Review.
+
+## Verification (2026-11-05)
+
+Run on Apple M2, macOS 27.2.
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace` | 1,437 passed, 0 failed (1,436 at `44b867b` plus the R4 test) |
+| `#[test]` count per crate against `44b867b` (Phase Review) | `yawgpu` 319 / 319, `yawgpu-core` 813 / 813, `yawgpu-hal` 746 / 747; test names unchanged |
+| fmt; clippy `-D warnings` on default, `metal`, `vulkan`, `gles`, `metal,tiled`, `vulkan,tiled`, `shader-passthrough` | clean |
+| HAL lib tests, `metal` and `vulkan` | 201 passed; 373 passed |
+| R1 scan (scope-aware, nested modules, every backend) | 26 modules fixed: the 25 listed above and `yawgpu-core/src/render_pass.rs`; none left |
+
+R2 also moved the test-only `buffer_ranges_overlap`, `PendingWriteBatch::pool_sizes` and
+`in_flight_submission_indices`, `hal_command_execution` and
+`hal_command_execution_with_ops`, `FutureRegistry::len`, and the C API `cache_len` into
+their test modules, unchanged. The `#[cfg(test)]` items left outside test modules are
+called from other modules' tests or are test hooks threaded through library code.
+
+## Phase Review
+
+| ID | Finding | Disposition |
+|---|---|---|
+| m1 | Backlog rows E9 and E10 and this block's status still open | Closed in the backlog; status updated |
+| m2 | The problem list names 25 files; `render_pass.rs` was the 26th | Recorded in Verification |
+| m3 | A test in `vulkan/pipeline.rs` repeats the module-level `use ash::vk::Handle;` in its body | Removed |
+| m4 | The `PassTimestampWrites` doc comment read as if the passes were used by validation | Reworded |
