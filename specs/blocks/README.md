@@ -99,6 +99,7 @@ file is created.
 | `142-metal-private-textures.md` | Metal textures use private storage |
 | `143-destroy-frees-gpu-memory.md` | `destroy()` frees GPU memory |
 | `144-external-texture-plane-lazy-init.md` | External texture planes are lazily zero-initialized |
+| `145-external-texture-plane-views.md` | External texture planes are bound as their views |
 
 Vendor-extension blocks (33, 55) are **not** Dawn ports — their rules are
 exercised by direct unit tests (principle 1) + GPU-gated e2e, and they live
