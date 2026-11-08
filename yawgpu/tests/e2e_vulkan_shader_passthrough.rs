@@ -560,10 +560,12 @@ unsafe fn create_vulkan_instance() -> native::WGPUInstance {
         },
         backend: YAWGPU_INSTANCE_BACKEND_VULKAN,
     };
+    // SPIR-V shader modules need the instance feature.
+    let features = [native::WGPUInstanceFeatureName_ShaderSourceSPIRV];
     let descriptor = native::WGPUInstanceDescriptor {
         nextInChain: (&mut backend.chain) as *mut native::WGPUChainedStruct,
-        requiredFeatureCount: 0,
-        requiredFeatures: std::ptr::null(),
+        requiredFeatureCount: features.len(),
+        requiredFeatures: features.as_ptr(),
         requiredLimits: std::ptr::null(),
     };
     let instance = yawgpu::wgpuCreateInstance(&descriptor);

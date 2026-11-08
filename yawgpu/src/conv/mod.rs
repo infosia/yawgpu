@@ -169,6 +169,8 @@ mod tests {
         Arc::new(WGPUInstanceImpl {
             core: Arc::new(core::Instance::new_noop()),
             timed_wait_any_enabled: false,
+            #[cfg(feature = "shader-passthrough")]
+            shader_source_spirv_enabled: false,
             pending_callbacks: Mutex::new(BTreeMap::new()),
             external_refs: std::sync::atomic::AtomicUsize::new(1),
             in_use_refs: std::sync::atomic::AtomicUsize::new(1),

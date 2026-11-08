@@ -150,6 +150,24 @@ impl ShaderModule {
         Ok(ShaderModuleSourceKind::Wgsl(Box::new(reflected)))
     }
 
+    /// Validates that the selected backend can consume this native shader source.
+    #[cfg(feature = "shader-passthrough")]
+    pub fn validate_passthrough_backend(
+        &self,
+        backend: yawgpu_hal::HalBackend,
+    ) -> Result<(), String> {
+        use yawgpu_hal::HalBackend;
+        if backend != HalBackend::Noop {
+            if self.msl_passthrough().is_some() && backend != HalBackend::Metal {
+                return Err("MSL passthrough shader requires the Metal backend".to_owned());
+            }
+            if self.spirv_passthrough().is_some() && backend != HalBackend::Vulkan {
+                return Err("SPIR-V passthrough shader requires the Vulkan backend".to_owned());
+            }
+        }
+        Ok(())
+    }
+
     /// Constructs this object from raw SPIR-V passthrough words.
     #[cfg(feature = "shader-passthrough")]
     pub(crate) fn from_spirv(words: Vec<u32>) -> Result<ShaderModuleSourceKind, String> {
@@ -281,6 +299,51 @@ pub(crate) fn visible_stages(visibility: u64) -> impl Iterator<Item = usize> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn validate_passthrough_backend_accepts_noop_and_matching_backend() {
+        use yawgpu_hal::HalBackend;
+        let device = crate::test_helpers::noop_device();
+        let spirv = device.create_shader_module(crate::ShaderModuleSource::SpirvPassthrough(vec![
+            0x0723_0203,
+        ]));
+        let msl = device.create_shader_module(crate::ShaderModuleSource::MslPassthrough {
+            source: "vertex void vs() {}".to_owned(),
+            entries: Vec::new(),
+        });
+        for (module, matching, message) in [
+            (
+                &spirv,
+                HalBackend::Vulkan,
+                "SPIR-V passthrough shader requires the Vulkan backend",
+            ),
+            (
+                &msl,
+                HalBackend::Metal,
+                "MSL passthrough shader requires the Metal backend",
+            ),
+        ] {
+            for backend in [
+                HalBackend::Noop,
+                HalBackend::Metal,
+                HalBackend::Vulkan,
+                #[cfg(feature = "gles")]
+                HalBackend::Gles,
+            ] {
+                let result = module.validate_passthrough_backend(backend);
+                if backend == matching || backend == HalBackend::Noop {
+                    assert!(result.is_ok());
+                } else {
+                    assert_eq!(result.unwrap_err(), message);
+                }
+            }
+        }
+        let wgsl = device.create_shader_module(crate::ShaderModuleSource::Wgsl(
+            "@compute @workgroup_size(1) fn cs() {}".to_owned(),
+        ));
+        assert!(wgsl.validate_passthrough_backend(HalBackend::Metal).is_ok());
+    }
+
     use super::*;
     use crate::test_helpers::*;
     use crate::*;

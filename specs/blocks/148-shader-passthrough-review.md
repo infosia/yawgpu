@@ -1,6 +1,7 @@
 # Block 148 — Shader passthrough: Phase Review fixes and the `ShaderSourceSPIRV` instance feature
 
-Status: **IN PROGRESS**.
+Status: **COMPLETE (2026-11-08)**. Phase Review: 0 CRITICAL, 2 MAJOR (both fixed), 8 MINOR;
+six fixed, two moved to the backlog, see below.
 Source: backlog E8, started by user request on 2026-11-08. Block 33 (shader passthrough)
 never had its Phase Review (slice B5). This block runs it on the code at `531bd45`, fixes
 what it found, and gates SPIR-V input behind the standard instance feature, the Block 33
@@ -95,7 +96,16 @@ disallowed." With the cargo feature off, the existing "shader passthrough not en
 error is unchanged. Requiring an unsupported instance feature still does not fail
 instance creation (as Dawn). MSL input is not affected.
 
-R10. **Unchanged.** WGSL pipelines apart from R2, the C API types, and Tint.
+R10. **Unchanged.** WGSL pipelines apart from R2 and R11, the C API types, and Tint.
+
+R11. **Render passes do not bind compute-only entries.** In a render pipeline's Metal
+binding map, an entry visible to neither the vertex nor the fragment stage has no slot,
+and the Metal render encoding (pass and bundle) binds nothing for it. Today it gets
+`metal_index` 0, and `per_stage_slots(None, None, 0)` binds it at slot 0 of both
+stages, over the resource a shader reads there (found by the Phase Review; a Metal e2e
+where a compute-only uniform overwrites the fragment's `[[buffer(0)]]` renders red
+instead of green). Every other user of the flat `metal_index` fallback is checked to be
+compute-only or to handle a missing slot.
 
 ## Tests
 
@@ -124,4 +134,39 @@ R10. **Unchanged.** WGSL pipelines apart from R2, the C API types, and Tint.
 ## Slices
 
 - **S1 (coding agent):** R1-R10 with the unit tests.
+- **S1b (coding agent):** R11 and the Phase Review MINORs.
 - **S2 (Claude):** e2e, CTS, Phase Review.
+
+## Verification (2026-11-08)
+
+Run on Apple M2, macOS 27.2. Vulkan here is MoltenVK under the Khronos layer, which is
+reference-only.
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace` | 1,441 passed, 0 failed; with `yawgpu/shader-passthrough` 1,490 passed, 0 failed |
+| fmt; clippy `-D warnings` on default, `metal`, `vulkan`, `gles`, `metal,tiled`, `vulkan,tiled`, `shader-passthrough`, `metal,shader-passthrough`, `vulkan,shader-passthrough` | clean |
+| HAL Metal lib and ignored tests | 201 passed; 66 passed |
+| `e2e_metal_compute_binding_slots` (new) | 2 of 2. Against `92a6f21` (before this block) both fail: the compute pipeline reads back `[[0, 0], [0, 0], [0, 0]]` instead of `[[11, 5], [22, 7], [33, 12]]` (R2), and the render pipeline draws red, the compute-only uniform, instead of green (R11) |
+| Metal e2e and every other ignored `yawgpu` test, `metal,tiled,shader-passthrough` | 178 passed, 0 failed |
+| All `e2e_vulkan_*`, `vulkan,shader-passthrough`, MoltenVK, Khronos layer | 163 passed, 1 failed (the known `imageView2DOn3DImage` portability case, whose VUIDs are the only validation output); `e2e_vulkan_shader_passthrough` (now requires the instance feature) 2 of 2 and `e2e_vulkan_compute_binding_slots` 2 of 2 |
+| `examples/triangle_passthrough` | Metal `--verify` passes. On MoltenVK the SPIR-V modules and pipeline are created without error; the run then stops at surface acquisition with `SuccessSuboptimal`, as the plain `triangle` example does on this host |
+| webgpu-native-cts, Metal, `webgpu:api,*` | pass 589,574, skip 101,793, fail 0, crash 0, on the library after R11; identical to Block 145 |
+| webgpu-native-cts, Metal, `webgpu:shader,execution,*` | pass 857,330, skip 25,860, fail 0, crash 0, xfail 63, xpass 9 (F-160), on the library after R11; pass + xfail identical to Block 146 |
+
+## Phase Review
+
+Two fresh reviews: one after S1 (R1-R10) and one after S1b (R11 and the MINOR fixes).
+
+| ID | Finding | Disposition |
+|---|---|---|
+| M1 | A Metal render pipeline bound a layout entry visible only to compute at slot 0 of both stages, over the resource the shader reads there (predates this block) | R11 added and fixed; Metal e2e |
+| M2 | The examples framework created its instance without `ShaderSourceSPIRV`, so `triangle_passthrough` failed on Vulkan under R9 | The framework requests the feature |
+| m1 | The async callback computed the backend-mismatch message separately from the error core recorded | The callback reports the recorded error |
+| m2 | The async mismatch test injected its message instead of using the real path | Replaced by core and FFI tests of the real path |
+| m3 | With both a WGSL and a SPIR-V chain and no instance feature, the error was "SPIR-V is disallowed." instead of the one-source error | The feature check runs on the mapped SPIR-V source only |
+| m4 | WGSL accepts a depth-format color target with `writeMask 0` and no shader output; passthrough now rejects it (outside R10) | Backlog |
+| m5 | Stale `#[allow(unused_mut)]`; an inaccurate `metal_buffer_binding_map` doc comment | Fixed |
+| m6 | `yawgpu.h` did not say that a passthrough stage may only use entries visible to it | Documented |
+| m7 | The render e2e had the compute-only entry only after the fragment entry and no bundle | Compute-only entries before and after; the right half is drawn through a render bundle |
+| m8 | Tiled subpass draws do not bind external textures (reported, not verified; not caused by this block) | Backlog |

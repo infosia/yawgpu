@@ -110,7 +110,22 @@ unsafe fn map_msl_shader_source(msl: &YaWGPUShaderSourceMSL) -> core::ShaderModu
     }
     #[cfg(feature = "shader-passthrough")]
     {
-        let code = string_view_to_str(msl.code).map_or_else(String::new, ToOwned::to_owned);
+        let code = match string_view_to_str(msl.code) {
+            Some(code) => code.to_owned(),
+            None if msl.code.data.is_null() => String::new(),
+            None => {
+                return core::ShaderModuleSource::Invalid(
+                    "MSL shader source must be valid UTF-8".to_owned(),
+                )
+            }
+        };
+        if msl.entryPointCount
+            > isize::MAX as usize / std::mem::size_of::<crate::YaWGPUMslEntryPoint>()
+        {
+            return core::ShaderModuleSource::Invalid(
+                "MSL shader source entryPoints length overflows".to_owned(),
+            );
+        }
         let entries = if msl.entryPointCount == 0 {
             &[][..]
         } else if msl.entryPoints.is_null() {
@@ -127,8 +142,17 @@ unsafe fn map_msl_shader_source(msl: &YaWGPUShaderSourceMSL) -> core::ShaderModu
                     "MSL entry point stage must be exactly one shader stage".to_owned(),
                 );
             };
+            let name = match string_view_to_str(entry.name) {
+                Some(name) => name.to_owned(),
+                None if entry.name.data.is_null() => String::new(),
+                None => {
+                    return core::ShaderModuleSource::Invalid(
+                        "MSL entry point name must be valid UTF-8".to_owned(),
+                    )
+                }
+            };
             mapped_entries.push(core::MslEntryPoint {
-                name: string_view_to_str(entry.name).map_or_else(String::new, ToOwned::to_owned),
+                name,
                 stage,
                 workgroup_size: entry.workgroupSize,
             });

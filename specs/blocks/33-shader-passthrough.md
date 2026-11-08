@@ -108,7 +108,7 @@ block 30). No new functions: both flow through `wgpuDeviceCreateShaderModule`.
   reflection; a non-empty `constants` array against a passthrough module ⇒
   error. (Re-home later if needed.)
 - **Error-object model** identical to block 30: an invalid create (empty SPIR-V
-  / not a multiple-of-4 / bad magic word `0x07230203`; empty MSL; a compute
+  / bad magic word `0x07230203`; empty MSL; a compute
   entry with no/zero workgroup size; an entry whose `stage` is not exactly one
   bit) emits a device validation error and returns a `Release`-safe error
   `WGPUShaderModule` with `is_error() == true`.
@@ -254,13 +254,16 @@ buffers ABI shape; per-stage bindings and vertex attributes are later work.
 - **B4** ✅ **DONE** **Docs**: the Metal binding-slot ABI algorithm + worked MSL
   example in `yawgpu.h`; README "Shaders" → "Native shader passthrough" note
   (vendor, off-by-default, unsafe); spec rules ☑.
-- **B5** **Phase Review** (fresh no-context subagent over the cumulative diff;
-  fix CRITICAL/MAJOR before COMPLETE).
+- **B5** ✅ **DONE** **Phase Review**, run on the code at `531bd45` and fixed by
+  Block 148 (`specs/blocks/148-shader-passthrough-review.md`): render passthrough
+  validates the descriptor, compute pipelines use compute Metal slots, backend
+  mismatch is a validation error, MSL workgroup size is checked against limits,
+  SPIR-V needs `WGPUInstanceFeatureName_ShaderSourceSPIRV`.
 
 ## Open questions
 
 - Multi-entry-point SPIR-V: select by name at pipeline creation (as WGSL) —
   default yes, no descriptor override in v1.
-- Whether to later gate SPIR-V passthrough behind the standard
-  `WGPUInstanceFeatureName_ShaderSourceSPIRV` instance feature (spec-sanctioned
-  opt-in) in addition to the cargo feature — deferred; not in v1.
+- SPIR-V passthrough is gated behind the standard
+  `WGPUInstanceFeatureName_ShaderSourceSPIRV` instance feature in addition to the
+  cargo feature (Block 148 R9).

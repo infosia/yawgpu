@@ -85,6 +85,7 @@ below are stable IDs, not the rank.
 | D14 | README Linux NVIDIA GLES table was older than the suite's | README updated to the suite's 2026-11-01 sweep at `9977e34` (fail 28,810), 2026-11-05 |
 | E9 | Block 102 m12 cosmetic deferrals | Block 147, 2026-11-05 (test-module imports first, test-only helpers moved into test modules, `PassTimestampWrites` serves both pass kinds) |
 | E10 | GLES copied `HalError` by hand | Block 147, 2026-11-05 (`HalError` derives `Clone`) |
+| E8 | Shader passthrough had no Phase Review; SPIR-V input was not gated by the instance feature | Block 148, 2026-11-08 (review fixes, incl. Metal compute and render binding slots for WGSL too; `ShaderSourceSPIRV` required) |
 
 ---
 
@@ -97,6 +98,8 @@ below are stable IDs, not the rank.
 | A3 | **Lazy zero-init GLES clear paths (Block 104 S4)** — core marks and un-marks on every backend, but the GLES HAL has no `ClearTexture` lowering for the Stage-2 eligibility set (sampled reads of uninitialized depth/stencil, compressed and MSAA textures). Tier-2 catalogue item; passes today only where the driver hands back zeroed memory. | M | `specs/blocks/104-lazy-zero-init-stage2.md` S4; `specs/blocks/67-gles-backend.md` mapping matrix |
 | A7 | GLES `SetImmediates` is recorded and bounds-checked but never read by the draw path — a silent gap. Unreachable today because `max_immediate_size` is 0 and core rejects first; must become an explicit `HalError` if the limit is ever raised. | S | `specs/blocks/67-gles-backend.md:282`, `yawgpu-hal/src/gles/adapter.rs` |
 | A11 | Block 107 F2 (documented, not a bug): `wgpuSurfacePresent` is the one consumer core does not lazily clear for, so a surface texture Discarded then presented shows `DONT_CARE` contents on Vulkan. Matches Metal and Dawn; listed so nobody re-adds the eager clear. | — | `specs/blocks/107-vulkan-discard-epilogue-shared-layout.md` R1 |
+| A29 | Tiled subpass draws drop `bindings.external_textures` (`hal_subpass_draw_execution`, `yawgpu-core/src/queue.rs`), so a subpass pipeline cannot sample an external texture. Reported by the Block 148 Phase Review; not yet confirmed. | S | `specs/blocks/148-shader-passthrough-review.md` Phase Review m8 |
+| A30 | WGSL render pipelines accept a depth-format color target when `writeMask` is 0 and the shader has no output at that location; the not-color-renderable check runs only through the output-compat path. Compare with Dawn's `ValidateColorTargetState`. | S | `specs/blocks/148-shader-passthrough-review.md` Phase Review m4; `yawgpu-core/src/render_pipeline.rs` |
 
 ## Priority B — missing standard WebGPU surface
 
@@ -154,7 +157,6 @@ reference `> i32::MAX`, `first_instance` indirect, external textures,
 | E11 | Vulkan `VkRenderPass` / `VkFramebuffer` / `VkDescriptorPool` caches, left out of Block 117. Run 7 cannot decide it: no bench case isolates per-pass creation, so add one that submits many passes without waiting. | M | `specs/blocks/117-vulkan-submit-recycling.md` |
 | E4 | refactor-dedup deferrals: double `Arc<core::X>` in FFI Impl structs, Metal derived-view cache + per-draw scratch reuse, unified `HalRenderStreamState` interpreter, GLES draw-time dirty tracking + binding index maps, subpass attachment validation dedupe; **+ Block 107 F5**: a `RenderBindings<'_>` struct for the Vulkan render descriptor call chain (`update_render_descriptor_sets` `too_many_arguments`, `bind_textures` / `pass_textures` side by side). | M each | `specs/tracking/refactor-dedup.md:38-56, 98-101, 191-196`; `specs/blocks/107-vulkan-discard-epilogue-shared-layout.md` F5 |
 | E5 | `tiled`: depth-format transient attachments, MSAA subpass input (Dawn-deferred; 2-arg `inputAttachmentLoad` parked on a Dawn resolver issue), queries inside subpass passes, GLES mapping, `SubpassAttachmentResource::Transient` arm TODOs (the two remaining `TODO(tiled 2.4)` markers).; a forced-flag e2e on the subpass path (Block 120). | M / L / M / L | `specs/blocks/55-tiled-rendering.md:45-53, 501-507, 639-648`; `yawgpu-core/src/subpass.rs:244`, `yawgpu-hal/src/command.rs:779` |
-| E8 | `shader-passthrough`: B5 Phase Review outstanding; gating SPIR-V passthrough behind `WGPUInstanceFeatureName_ShaderSourceSPIRV` deferred. | S / S | `specs/blocks/33-shader-passthrough.md:257-270` |
 
 ## Priority F — doc drift
 
@@ -342,3 +344,4 @@ Re-verification after the fixes: `cargo test --workspace` 1093/0, clippy default
 - Block 146 on Metal and MoltenVK at `fa447be` (2026-11-05): workspace 1,436/0, the shared external-texture e2e 6/6 on Metal and on MoltenVK (no validation output), Metal e2e 174/174, CTS Metal `api,*` and `shader,execution,*` fail=0, identical to Block 145.
 - Doc drift fixed (2026-11-05): B3 narrowed to GLES now that Vulkan has external textures (Block 146); README Linux NVIDIA GLES table updated to the suite's 2026-11-01 sweep (D14).
 - Block 147 done (user request, E9 and E10): `use` items first in 26 test modules, test-only `#[cfg(test)]` helpers moved into their test modules, `RenderPassTimestampWrites` renamed `PassTimestampWrites`, `HalError` derives `Clone`. No behaviour change; workspace 1,437/0. The GLES `HalError: Clone` `TODO` is gone, so two `TODO`s remain (the `tiled 2.4` arms).
+- Block 148 done (user request, E8): the Block 33 Phase Review ran on today's code. Fixed: render passthrough validates the descriptor; Metal compute pipelines use compute slots even when layout entries are also visible to render stages, and Metal render passes no longer bind compute-only entries at slot 0 (both silent-wrong for WGSL too, shown by a new Metal e2e that fails before); backend mismatch is a validation error; MSL workgroup limits; `ShaderSourceSPIRV` is advertised and required for SPIR-V. A29 and A30 opened.

@@ -1,7 +1,10 @@
 use super::*;
 
-const SUPPORTED_INSTANCE_FEATURES: &[native::WGPUInstanceFeatureName] =
-    &[native::WGPUInstanceFeatureName_TimedWaitAny];
+const SUPPORTED_INSTANCE_FEATURES: &[native::WGPUInstanceFeatureName] = &[
+    native::WGPUInstanceFeatureName_TimedWaitAny,
+    #[cfg(feature = "shader-passthrough")]
+    native::WGPUInstanceFeatureName_ShaderSourceSPIRV,
+];
 
 // Advertised for native parity; FutureRegistry::wait_any does not enforce it today.
 pub(crate) const TIMED_WAIT_ANY_MAX_COUNT: usize = 64;
@@ -12,6 +15,7 @@ fn finish_real_instance(
     prefix: &str,
     backend: &str,
     timed_wait_any_enabled: bool,
+    shader_source_spirv_enabled: bool,
 ) -> Option<Arc<WGPUInstanceImpl>> {
     if hal_instance.enumerate_adapters().is_empty() {
         eprintln!(
@@ -22,6 +26,7 @@ fn finish_real_instance(
     Some(WGPUInstanceImpl::from_core(
         core::Instance::from_hal(hal_instance),
         timed_wait_any_enabled,
+        shader_source_spirv_enabled,
     ))
 }
 
@@ -57,11 +62,12 @@ pub unsafe extern "C" fn wgpuCreateInstance(
         }
     }
     let timed_wait_any_enabled = instance_has_timed_wait_any(descriptor);
+    let shader_source_spirv_enabled = instance_has_shader_source_spirv(descriptor);
     let selection = instance_backend_selection(descriptor);
     let instance = match selection {
         // IB1 (no chain) and IB2 (chain == NOOP) / IB4 (chain == unknown).
         None | Some(InstanceBackendSelection::Noop) => {
-            WGPUInstanceImpl::new_noop(timed_wait_any_enabled)
+            WGPUInstanceImpl::new_noop(timed_wait_any_enabled, shader_source_spirv_enabled)
         }
         Some(InstanceBackendSelection::Metal) => {
             #[cfg(feature = "metal")]
@@ -73,6 +79,7 @@ pub unsafe extern "C" fn wgpuCreateInstance(
                             "yawgpu-metal",
                             "YAWGPU_INSTANCE_BACKEND_METAL",
                             timed_wait_any_enabled,
+                            shader_source_spirv_enabled,
                         ) else {
                             return std::ptr::null();
                         };
@@ -105,6 +112,7 @@ pub unsafe extern "C" fn wgpuCreateInstance(
                             "yawgpu-vulkan",
                             "YAWGPU_INSTANCE_BACKEND_VULKAN",
                             timed_wait_any_enabled,
+                            shader_source_spirv_enabled,
                         ) else {
                             return std::ptr::null();
                         };
@@ -138,6 +146,7 @@ pub unsafe extern "C" fn wgpuCreateInstance(
                             "yawgpu-gles",
                             "YAWGPU_INSTANCE_BACKEND_GLES",
                             timed_wait_any_enabled,
+                            shader_source_spirv_enabled,
                         ) else {
                             return std::ptr::null();
                         };
@@ -667,7 +676,7 @@ mod tests {
     #[test]
     fn wait_any_pending_future_times_out_with_bounded_delay() {
         use std::time::{Duration, Instant};
-        let instance = WGPUInstanceImpl::new_noop(true);
+        let instance = WGPUInstanceImpl::new_noop(true, false);
         let future = instance
             .core
             .future_registry()

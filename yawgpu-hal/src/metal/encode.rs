@@ -1050,17 +1050,11 @@ fn encode_compute_buffer(
     Ok(())
 }
 
-fn per_stage_slots(
-    vertex: Option<u32>,
-    fragment: Option<u32>,
-    flat: u32,
-) -> (Option<usize>, Option<usize>) {
-    match (vertex, fragment) {
-        (Some(vertex), Some(fragment)) => (Some(vertex as usize), Some(fragment as usize)),
-        (Some(vertex), None) => (Some(vertex as usize), None),
-        (None, Some(fragment)) => (None, Some(fragment as usize)),
-        (None, None) => (Some(flat as usize), Some(flat as usize)),
-    }
+fn per_stage_slots(vertex: Option<u32>, fragment: Option<u32>) -> (Option<usize>, Option<usize>) {
+    (
+        vertex.map(|slot| slot as usize),
+        fragment.map(|slot| slot as usize),
+    )
 }
 
 /// Collects storage-buffer sizes in binding order. Each entry is one `u32` of
@@ -1892,11 +1886,8 @@ fn encode_render_bind_buffer(
         "render bind buffer is not Metal-backed",
         "render bind buffer offset exceeds buffer size",
     )?;
-    let (vertex_slot, fragment_slot) = per_stage_slots(
-        binding.vertex_metal_index,
-        binding.fragment_metal_index,
-        binding.metal_index,
-    );
+    let (vertex_slot, fragment_slot) =
+        per_stage_slots(binding.vertex_metal_index, binding.fragment_metal_index);
     if let Some(slot) = vertex_slot {
         unsafe {
             encoder.setVertexBuffer_offset_atIndex(Some(buffer), offset, slot);
@@ -1918,11 +1909,8 @@ fn encode_render_bind_texture(
         return Err(texture_error("render bind texture is not Metal-backed"));
     };
     let view = metal_texture_view(texture, binding)?;
-    let (vertex_slot, fragment_slot) = per_stage_slots(
-        binding.vertex_metal_index,
-        binding.fragment_metal_index,
-        binding.metal_index,
-    );
+    let (vertex_slot, fragment_slot) =
+        per_stage_slots(binding.vertex_metal_index, binding.fragment_metal_index);
     if let Some(slot) = vertex_slot {
         unsafe {
             encoder.setVertexTexture_atIndex(Some(view.as_ref()), slot);
@@ -1984,17 +1972,6 @@ fn encode_render_bind_external_texture(
                 )?))?,
             );
         }
-    } else if binding.plane0.fragment_metal_index.is_none() {
-        unsafe {
-            encoder.setVertexTexture_atIndex(
-                Some(&plane0),
-                to_ns(u64::from(binding.plane0.metal_index))?,
-            );
-            encoder.setVertexTexture_atIndex(
-                Some(&plane1),
-                to_ns(u64::from(binding.plane1.metal_index))?,
-            );
-        }
     }
     if let Some(frag) = binding.plane0.fragment_metal_index {
         unsafe {
@@ -2004,17 +1981,6 @@ fn encode_render_bind_external_texture(
                 to_ns(u64::from(binding.plane1.fragment_metal_index.ok_or_else(
                     || texture_error("render external texture plane1 fragment slot is missing"),
                 )?))?,
-            );
-        }
-    } else if binding.plane0.vertex_metal_index.is_none() {
-        unsafe {
-            encoder.setFragmentTexture_atIndex(
-                Some(&plane0),
-                to_ns(u64::from(binding.plane0.metal_index))?,
-            );
-            encoder.setFragmentTexture_atIndex(
-                Some(&plane1),
-                to_ns(u64::from(binding.plane1.metal_index))?,
             );
         }
     }
@@ -2027,14 +1993,6 @@ fn encode_render_bind_external_texture(
                 to_ns(u64::from(vtx))?,
             );
         }
-    } else if binding.params_fragment_metal_index.is_none() {
-        unsafe {
-            encoder.setVertexBuffer_offset_atIndex(
-                Some(params.inner()?),
-                offset,
-                to_ns(u64::from(binding.params_metal_index))?,
-            );
-        }
     }
     if let Some(frag) = binding.params_fragment_metal_index {
         unsafe {
@@ -2042,14 +2000,6 @@ fn encode_render_bind_external_texture(
                 Some(params.inner()?),
                 offset,
                 to_ns(u64::from(frag))?,
-            );
-        }
-    } else if binding.params_vertex_metal_index.is_none() {
-        unsafe {
-            encoder.setFragmentBuffer_offset_atIndex(
-                Some(params.inner()?),
-                offset,
-                to_ns(u64::from(binding.params_metal_index))?,
             );
         }
     }
@@ -2146,11 +2096,8 @@ fn encode_render_bind_sampler(
     binding: &HalBoundSampler,
 ) -> Result<(), HalError> {
     let sampler = metal_bound_sampler(binding, "render bind sampler is not Metal-backed")?;
-    let (vertex_slot, fragment_slot) = per_stage_slots(
-        binding.vertex_metal_index,
-        binding.fragment_metal_index,
-        binding.metal_index,
-    );
+    let (vertex_slot, fragment_slot) =
+        per_stage_slots(binding.vertex_metal_index, binding.fragment_metal_index);
     if let Some(slot) = vertex_slot {
         unsafe {
             encoder.setVertexSamplerState_atIndex(Some(sampler), slot);
@@ -3222,11 +3169,11 @@ mod tests {
     }
 
     #[test]
-    fn per_stage_slots_resolves_stage_specific_and_flat_fallbacks() {
-        assert_eq!(per_stage_slots(Some(1), Some(2), 9), (Some(1), Some(2)));
-        assert_eq!(per_stage_slots(Some(1), None, 9), (Some(1), None));
-        assert_eq!(per_stage_slots(None, Some(2), 9), (None, Some(2)));
-        assert_eq!(per_stage_slots(None, None, 9), (Some(9), Some(9)));
+    fn per_stage_slots_only_binds_visible_render_stages() {
+        assert_eq!(per_stage_slots(Some(1), Some(2)), (Some(1), Some(2)));
+        assert_eq!(per_stage_slots(Some(1), None), (Some(1), None));
+        assert_eq!(per_stage_slots(None, Some(2)), (None, Some(2)));
+        assert_eq!(per_stage_slots(None, None), (None, None));
     }
 
     /// Constructs a minimal `MetalBuffer` stub usable in unit tests.

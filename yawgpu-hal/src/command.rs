@@ -298,9 +298,8 @@ pub struct HalBoundBuffer {
     pub group: u32,
     /// Binding.
     pub binding: u32,
-    /// Metal per-kind buffer-space slot (used by the compute encoder and as the
-    /// fallback when `vertex_metal_index` / `fragment_metal_index` are both
-    /// `None`).
+    /// Metal buffer-space slot for compute resources or vertex buffers.
+    /// Render bind-group resources use the per-stage slots instead.
     pub metal_index: u32,
     /// Metal per-kind buffer-space slot for the vertex stage of a render
     /// pipeline.  `None` for compute bindings and for bindings that are not
@@ -343,9 +342,8 @@ pub struct HalBoundTexture {
     pub group: u32,
     /// Binding.
     pub binding: u32,
-    /// Metal per-kind texture-space slot (used by the compute encoder and as
-    /// the fallback when `vertex_metal_index` / `fragment_metal_index` are both
-    /// `None`).
+    /// Metal texture-space slot for compute resources.
+    /// Render resources use the per-stage slots instead.
     pub metal_index: u32,
     /// Metal per-kind texture-space slot for the vertex stage of a render
     /// pipeline.  `None` for compute bindings and for bindings not visible to
@@ -384,9 +382,8 @@ pub struct HalBoundSampler {
     pub group: u32,
     /// Binding.
     pub binding: u32,
-    /// Metal per-kind sampler-space slot (used by the compute encoder and as
-    /// the fallback when `vertex_metal_index` / `fragment_metal_index` are both
-    /// `None`).
+    /// Metal sampler-space slot for compute resources.
+    /// Render resources use the per-stage slots instead.
     pub metal_index: u32,
     /// Metal per-kind sampler-space slot for the vertex stage of a render
     /// pipeline.  `None` for compute bindings and for bindings not visible to
@@ -417,7 +414,7 @@ pub struct HalBoundExternalTexture {
     pub plane1: HalBoundTexture,
     /// Params buffer.
     pub params: HalBuffer,
-    /// Params Metal buffer-space slot.
+    /// Params Metal buffer-space slot for compute resources.
     pub params_metal_index: u32,
     /// Params Metal buffer-space slot for the vertex stage.
     pub params_vertex_metal_index: Option<u32>,

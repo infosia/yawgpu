@@ -399,6 +399,23 @@ bypassing WGSL and Tint entirely:
   [`yawgpu.h`](yawgpu/ffi/webgpu-headers/yawgpu.h)). Compute and render
   (vertex + fragment) pipelines are supported on both Tier-1 backends.
 
+- `YAWGPU_HAS_SHADER_PASSTHROUGH` means the header declarations exist. With the
+  Cargo feature off, creation returns an error module: "shader passthrough not enabled".
+  SPIR-V also requires `WGPUInstanceFeatureName_ShaderSourceSPIRV` in the
+  instance descriptor's `requiredFeatures` (otherwise "SPIR-V is disallowed.").
+- Every pipeline stage needs an explicit, non-empty entry point name; pipeline
+  constants are rejected. MSL compute metadata must specify a workgroup size
+  within device limits.
+- Vulkan maps `group` to descriptor `set` and `binding` to `binding`, uses a
+  negative-height viewport for WebGPU clip space, and provides push constants
+  at offset 0 with the layout's `immediateSize`, visible to every stage.
+  SPIR-V passthrough rejects external-texture bindings.
+- Metal vertex buffers occupy consecutive slots after the last vertex-stage
+  bind-group buffer slot, including external-texture parameter buffers. Only
+  used vertex-buffer layouts consume slots, in array order, as with WGSL.
+  MSL external textures consume two texture slots and one parameter buffer slot;
+  MSL passthrough rejects layouts with non-zero `immediateSize`.
+
 ## Quality
 
 - **Validation-tested**: the WebGPU validation rules are exercised by an

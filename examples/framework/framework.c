@@ -171,8 +171,16 @@ WGPUInstance yawgpu_instance_create(void) {
         },
         .backend = backend_from_environment(),
     };
+    // SPIR-V shader modules need this instance feature. Requesting it is
+    // harmless when the library does not support it: instance creation does
+    // not fail.
+    static const WGPUInstanceFeatureName features[] = {
+        WGPUInstanceFeatureName_ShaderSourceSPIRV,
+    };
     WGPUInstanceDescriptor descriptor = {
         .nextInChain = &backend.chain,
+        .requiredFeatureCount = sizeof(features) / sizeof(features[0]),
+        .requiredFeatures = features,
     };
     return wgpuCreateInstance(&descriptor);
 }

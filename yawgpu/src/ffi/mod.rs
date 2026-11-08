@@ -238,6 +238,9 @@ pub struct WGPUInstanceImpl {
     pub(crate) in_use_refs: std::sync::atomic::AtomicUsize,
     pub(crate) core: Arc<core::Instance>,
     pub(crate) timed_wait_any_enabled: bool,
+    /// Whether the instance required the SPIR-V shader source feature.
+    #[cfg(feature = "shader-passthrough")]
+    pub(crate) shader_source_spirv_enabled: bool,
     pub(crate) pending_callbacks: Mutex<BTreeMap<u64, PendingCallback>>,
 }
 
@@ -605,14 +608,26 @@ impl_test_label_accessor!(
 );
 
 impl WGPUInstanceImpl {
-    fn new_noop(timed_wait_any_enabled: bool) -> Arc<Self> {
-        Self::from_core(core::Instance::new_noop(), timed_wait_any_enabled)
+    fn new_noop(timed_wait_any_enabled: bool, shader_source_spirv_enabled: bool) -> Arc<Self> {
+        Self::from_core(
+            core::Instance::new_noop(),
+            timed_wait_any_enabled,
+            shader_source_spirv_enabled,
+        )
     }
 
-    fn from_core(core: core::Instance, timed_wait_any_enabled: bool) -> Arc<Self> {
+    fn from_core(
+        core: core::Instance,
+        timed_wait_any_enabled: bool,
+        shader_source_spirv_enabled: bool,
+    ) -> Arc<Self> {
+        #[cfg(not(feature = "shader-passthrough"))]
+        let _ = shader_source_spirv_enabled;
         Arc::new(Self {
             core: Arc::new(core),
             timed_wait_any_enabled,
+            #[cfg(feature = "shader-passthrough")]
+            shader_source_spirv_enabled,
             pending_callbacks: Mutex::new(BTreeMap::new()),
             external_refs: std::sync::atomic::AtomicUsize::new(1),
             in_use_refs: std::sync::atomic::AtomicUsize::new(1),
@@ -2521,8 +2536,15 @@ impl PendingCallback {
             } => {
                 let is_lost = pipeline._device.is_lost();
                 let is_error = pipeline._core.is_error();
+                let message = pipeline._core.diagnostic().map(str::to_owned);
                 fire_create_pipeline_async(
-                    callback, pipeline, is_lost, is_error, userdata1, userdata2,
+                    callback,
+                    pipeline,
+                    is_lost,
+                    is_error,
+                    userdata1,
+                    userdata2,
+                    message.as_deref(),
                 );
             }
             Self::CreateRenderPipelineAsync {
@@ -2534,8 +2556,15 @@ impl PendingCallback {
             } => {
                 let is_lost = pipeline._device.is_lost();
                 let is_error = pipeline._core.is_error();
+                let message = pipeline._core.diagnostic().map(str::to_owned);
                 fire_create_pipeline_async(
-                    callback, pipeline, is_lost, is_error, userdata1, userdata2,
+                    callback,
+                    pipeline,
+                    is_lost,
+                    is_error,
+                    userdata1,
+                    userdata2,
+                    message.as_deref(),
                 );
             }
             Self::PopErrorScope {
@@ -2588,6 +2617,7 @@ unsafe fn fire_create_pipeline_async<T>(
     is_error: bool,
     userdata1: usize,
     userdata2: usize,
+    validation_message: Option<&str>,
 ) {
     let Some(callback) = callback else {
         return;
@@ -2600,7 +2630,11 @@ unsafe fn fire_create_pipeline_async<T>(
     let (pipeline, message) = if status == native::WGPUCreatePipelineAsyncStatus_ValidationError {
         (
             std::ptr::null(),
-            string_view(b"Pipeline creation failed validation"),
+            string_view(
+                validation_message
+                    .unwrap_or("Pipeline creation failed validation")
+                    .as_bytes(),
+            ),
         )
     } else {
         (arc_to_handle(pipeline), string_view(b""))
@@ -2916,6 +2950,19 @@ unsafe fn instance_has_timed_wait_any(descriptor: *const native::WGPUInstanceDes
     let features =
         std::slice::from_raw_parts(descriptor.requiredFeatures, descriptor.requiredFeatureCount);
     features.contains(&native::WGPUInstanceFeatureName_TimedWaitAny)
+}
+
+unsafe fn instance_has_shader_source_spirv(
+    descriptor: *const native::WGPUInstanceDescriptor,
+) -> bool {
+    let Some(descriptor) = descriptor.as_ref() else {
+        return false;
+    };
+    if descriptor.requiredFeatureCount == 0 || descriptor.requiredFeatures.is_null() {
+        return false;
+    }
+    std::slice::from_raw_parts(descriptor.requiredFeatures, descriptor.requiredFeatureCount)
+        .contains(&native::WGPUInstanceFeatureName_ShaderSourceSPIRV)
 }
 
 /// Resolves the requested HAL backend from the descriptor's chain.
@@ -6353,6 +6400,24 @@ mod tests {
         (instance, adapter, device)
     }
 
+    #[cfg(feature = "shader-passthrough")]
+    unsafe fn spirv_noop_chain() -> (
+        native::WGPUInstance,
+        native::WGPUAdapter,
+        native::WGPUDevice,
+    ) {
+        let feature = native::WGPUInstanceFeatureName_ShaderSourceSPIRV;
+        let descriptor = native::WGPUInstanceDescriptor {
+            requiredFeatureCount: 1,
+            requiredFeatures: &feature,
+            ..std::mem::zeroed()
+        };
+        let instance = wgpuCreateInstance(&descriptor);
+        let adapter = request_noop_adapter(instance);
+        let device = request_noop_device(instance, adapter);
+        (instance, adapter, device)
+    }
+
     fn msl_shader_descriptor(
         source: &mut YaWGPUShaderSourceMSL,
     ) -> native::WGPUShaderModuleDescriptor {
@@ -6377,9 +6442,275 @@ mod tests {
 
     #[cfg(feature = "shader-passthrough")]
     #[test]
-    fn wgpuDeviceCreateShaderModule_spirv_passthrough_noop_returns_non_error_module() {
+    fn native_async_callbacks_report_recorded_pipeline_errors() {
+        unsafe {
+            let (instance, adapter, device) = spirv_noop_chain();
+            let device_impl = borrow_handle(device, "WGPUDevice");
+            for spirv in [false, true] {
+                let words = valid_spirv_words();
+                let mut spirv_source = native::WGPUShaderSourceSPIRV {
+                    chain: native::WGPUChainedStruct {
+                        next: std::ptr::null_mut(),
+                        sType: native::WGPUSType_ShaderSourceSPIRV,
+                    },
+                    codeSize: words.len() as u32,
+                    code: words.as_ptr(),
+                };
+                let mut msl_source = YaWGPUShaderSourceMSL {
+                    chain: native::WGPUChainedStruct {
+                        next: std::ptr::null_mut(),
+                        sType: YAWGPU_STYPE_SHADER_SOURCE_MSL,
+                    },
+                    code: label_view("native source"),
+                    entryPointCount: 0,
+                    entryPoints: std::ptr::null(),
+                };
+                let descriptor = if spirv {
+                    spirv_shader_descriptor(&mut spirv_source)
+                } else {
+                    msl_shader_descriptor(&mut msl_source)
+                };
+                let module = wgpuDeviceCreateShaderModule(device, &descriptor);
+                assert!(!borrow_handle(module, "WGPUShaderModule")._core.is_error());
+                for conversion_error in [false, true] {
+                    let entry = if conversion_error {
+                        string_view(&[0xff])
+                    } else {
+                        empty_string_view()
+                    };
+                    let mut descriptor = compute_pipeline_descriptor(module, std::ptr::null());
+                    descriptor.compute.entryPoint = entry;
+                    let recorded = create_compute_pipeline_handle(device_impl, &descriptor, false);
+                    let message = recorded._core.diagnostic().unwrap();
+                    assert!(message.contains(if conversion_error {
+                        "UTF-8"
+                    } else {
+                        "explicit pipeline layout"
+                    }));
+                    let mut state = ComputePipelineAsyncState::default();
+                    wgpuDeviceCreateComputePipelineAsync(
+                        device,
+                        &descriptor,
+                        native::WGPUCreateComputePipelineAsyncCallbackInfo {
+                            mode: native::WGPUCallbackMode_AllowSpontaneous,
+                            callback: Some(compute_pipeline_async_callback),
+                            userdata1: (&mut state as *mut ComputePipelineAsyncState).cast(),
+                            ..std::mem::zeroed()
+                        },
+                    );
+                    assert_eq!(state.fired, 1);
+                    assert_eq!(
+                        state.status,
+                        native::WGPUCreatePipelineAsyncStatus_ValidationError
+                    );
+                    assert_eq!(state.message, message);
+                    assert!(state.pipeline.is_null());
+
+                    let mut descriptor =
+                        render_pipeline_descriptor(module, module, std::ptr::null());
+                    descriptor.vertex.entryPoint = entry;
+                    let recorded = create_render_pipeline_handle(device_impl, &descriptor, false);
+                    let message = recorded._core.diagnostic().unwrap();
+                    assert!(message.contains(if conversion_error {
+                        "UTF-8"
+                    } else {
+                        "explicit pipeline layout"
+                    }));
+                    let mut state = RenderPipelineAsyncState::default();
+                    wgpuDeviceCreateRenderPipelineAsync(
+                        device,
+                        &descriptor,
+                        native::WGPUCreateRenderPipelineAsyncCallbackInfo {
+                            mode: native::WGPUCallbackMode_AllowSpontaneous,
+                            callback: Some(render_pipeline_async_callback),
+                            userdata1: (&mut state as *mut RenderPipelineAsyncState).cast(),
+                            ..std::mem::zeroed()
+                        },
+                    );
+                    assert_eq!(state.fired, 1);
+                    assert_eq!(
+                        state.status,
+                        native::WGPUCreatePipelineAsyncStatus_ValidationError
+                    );
+                    assert_eq!(state.message, message);
+                    assert!(state.pipeline.is_null());
+                }
+                wgpuShaderModuleRelease(module);
+            }
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn msl_input_decoding_errors_return_uncached_error_modules() {
         unsafe {
             let (instance, adapter, device) = noop_chain();
+            for case in 0..3 {
+                let entry = YaWGPUMslEntryPoint {
+                    name: string_view(if case == 1 { &[0xFF] } else { b"cs" }),
+                    stage: native::WGPUShaderStage_Compute,
+                    workgroupSize: [1; 3],
+                };
+                let mut source = YaWGPUShaderSourceMSL {
+                    chain: native::WGPUChainedStruct {
+                        next: std::ptr::null_mut(),
+                        sType: YAWGPU_STYPE_SHADER_SOURCE_MSL,
+                    },
+                    code: string_view(if case == 0 {
+                        &[0xFF]
+                    } else {
+                        b"kernel void cs() {}"
+                    }),
+                    entryPointCount: if case == 2 {
+                        isize::MAX as usize / std::mem::size_of::<YaWGPUMslEntryPoint>() + 1
+                    } else {
+                        1
+                    },
+                    entryPoints: &entry,
+                };
+                let descriptor = msl_shader_descriptor(&mut source);
+                let module = wgpuDeviceCreateShaderModule(device, &descriptor);
+                let module_impl = borrow_handle(module, "WGPUShaderModule");
+                assert!(module_impl._core.is_error());
+                assert_eq!(
+                    module_impl._core.diagnostic(),
+                    Some(match case {
+                        0 => "MSL shader source must be valid UTF-8",
+                        1 => "MSL entry point name must be valid UTF-8",
+                        _ => "MSL shader source entryPoints length overflows",
+                    })
+                );
+                wgpuShaderModuleRelease(module);
+            }
+            assert_eq!(
+                cache_len(&borrow_handle(device, "WGPUDevice").shader_module_cache),
+                0
+            );
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn spirv_modules_require_instance_feature_and_are_not_cached() {
+        unsafe {
+            for enabled in [false, true] {
+                let (instance, adapter, device) = if enabled {
+                    spirv_noop_chain()
+                } else {
+                    noop_chain()
+                };
+                let words = valid_spirv_words();
+                let mut source = native::WGPUShaderSourceSPIRV {
+                    chain: native::WGPUChainedStruct {
+                        next: std::ptr::null_mut(),
+                        sType: native::WGPUSType_ShaderSourceSPIRV,
+                    },
+                    codeSize: words.len() as u32,
+                    code: words.as_ptr(),
+                };
+                let descriptor = spirv_shader_descriptor(&mut source);
+                let first = wgpuDeviceCreateShaderModule(device, &descriptor);
+                let second = wgpuDeviceCreateShaderModule(device, &descriptor);
+                for module in [first, second] {
+                    let module = borrow_handle(module, "WGPUShaderModule");
+                    assert_eq!(module._core.is_error(), !enabled);
+                    assert_eq!(
+                        module._core.diagnostic(),
+                        if enabled {
+                            None
+                        } else {
+                            Some("SPIR-V is disallowed.")
+                        }
+                    );
+                }
+                assert_eq!(
+                    cache_len(&borrow_handle(device, "WGPUDevice").shader_module_cache),
+                    0
+                );
+                assert_ne!(first, second);
+                wgpuShaderModuleRelease(first);
+                wgpuShaderModuleRelease(second);
+                release_handles(instance, adapter, device);
+            }
+        }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn mixed_wgsl_and_spirv_sources_report_exactly_one_source_before_feature_check() {
+        unsafe {
+            for enabled in [false, true] {
+                let (instance, adapter, device) = if enabled {
+                    spirv_noop_chain()
+                } else {
+                    noop_chain()
+                };
+                for spirv_first in [false, true] {
+                    let words = valid_spirv_words();
+                    let mut spirv = native::WGPUShaderSourceSPIRV {
+                        chain: native::WGPUChainedStruct {
+                            next: std::ptr::null_mut(),
+                            sType: native::WGPUSType_ShaderSourceSPIRV,
+                        },
+                        codeSize: words.len() as u32,
+                        code: words.as_ptr(),
+                    };
+                    let mut wgsl = native::WGPUShaderSourceWGSL {
+                        chain: native::WGPUChainedStruct {
+                            next: std::ptr::null_mut(),
+                            sType: native::WGPUSType_ShaderSourceWGSL,
+                        },
+                        code: label_view("@compute @workgroup_size(1) fn cs() {}"),
+                    };
+                    let chain = if spirv_first {
+                        spirv.chain.next = &mut wgsl.chain;
+                        &mut spirv.chain
+                    } else {
+                        wgsl.chain.next = &mut spirv.chain;
+                        &mut wgsl.chain
+                    };
+                    let descriptor = native::WGPUShaderModuleDescriptor {
+                        nextInChain: chain,
+                        label: empty_string_view(),
+                    };
+                    let module = wgpuDeviceCreateShaderModule(device, &descriptor);
+                    let module_impl = borrow_handle(module, "WGPUShaderModule");
+                    assert!(module_impl._core.is_error());
+                    assert_eq!(
+                        module_impl._core.diagnostic(),
+                        Some("shader module descriptor must contain exactly one shader source")
+                    );
+                    wgpuShaderModuleRelease(module);
+                }
+                release_handles(instance, adapter, device);
+            }
+        }
+    }
+
+    #[test]
+    fn requiring_spirv_instance_feature_does_not_reject_instance_creation() {
+        unsafe {
+            let feature = native::WGPUInstanceFeatureName_ShaderSourceSPIRV;
+            let descriptor = native::WGPUInstanceDescriptor {
+                requiredFeatureCount: 1,
+                requiredFeatures: &feature,
+                ..std::mem::zeroed()
+            };
+            let instance = wgpuCreateInstance(&descriptor);
+            assert!(!instance.is_null());
+            assert!(instance_has_shader_source_spirv(&descriptor));
+            assert!(!instance_has_shader_source_spirv(std::ptr::null()));
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn wgpuDeviceCreateShaderModule_spirv_passthrough_noop_returns_non_error_module() {
+        unsafe {
+            let (instance, adapter, device) = spirv_noop_chain();
             let words = valid_spirv_words();
             let mut source = native::WGPUShaderSourceSPIRV {
                 chain: native::WGPUChainedStruct {
@@ -6405,7 +6736,7 @@ mod tests {
     #[test]
     fn wgpuDeviceCreateShaderModule_spirv_passthrough_bad_magic_returns_error_module() {
         unsafe {
-            let (instance, adapter, device) = noop_chain();
+            let (instance, adapter, device) = spirv_noop_chain();
             let words = [1_u32, 2, 3];
             let mut source = native::WGPUShaderSourceSPIRV {
                 chain: native::WGPUChainedStruct {
@@ -6435,7 +6766,7 @@ mod tests {
     #[test]
     fn wgpuDeviceCreateShaderModule_spirv_passthrough_null_code_returns_error_module() {
         unsafe {
-            let (instance, adapter, device) = noop_chain();
+            let (instance, adapter, device) = spirv_noop_chain();
             let mut source = native::WGPUShaderSourceSPIRV {
                 chain: native::WGPUChainedStruct {
                     next: std::ptr::null_mut(),
@@ -7788,10 +8119,21 @@ mod tests {
 
             wgpuGetInstanceFeatures(&mut features);
 
-            assert_eq!(features.featureCount, 1);
+            assert_eq!(
+                features.featureCount,
+                if cfg!(feature = "shader-passthrough") {
+                    2
+                } else {
+                    1
+                }
+            );
             assert!(!features.features.is_null());
             let reported = std::slice::from_raw_parts(features.features, features.featureCount);
             assert_eq!(reported[0], native::WGPUInstanceFeatureName_TimedWaitAny);
+            assert_eq!(
+                reported.contains(&native::WGPUInstanceFeatureName_ShaderSourceSPIRV),
+                cfg!(feature = "shader-passthrough")
+            );
             for feature in reported {
                 assert_eq!(wgpuHasInstanceFeature(*feature), 1);
             }
@@ -7819,7 +8161,7 @@ mod tests {
             );
             assert_eq!(
                 wgpuHasInstanceFeature(native::WGPUInstanceFeatureName_ShaderSourceSPIRV),
-                0
+                u32::from(cfg!(feature = "shader-passthrough"))
             );
             assert_eq!(
                 wgpuHasInstanceFeature(native::WGPUInstanceFeatureName_Force32),

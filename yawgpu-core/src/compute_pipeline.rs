@@ -76,6 +76,8 @@ pub(crate) struct ComputePipelineInner {
     /// the entry point uses no linear-index builtin.
     pub(crate) linear_index_invocations: Option<u64>,
     pub(crate) is_error: bool,
+    /// Recorded descriptor validation or backend creation failure.
+    pub(crate) diagnostic: Option<String>,
 }
 
 /// Stores a shader-required size that is checked when the pipeline dispatches or
@@ -174,9 +176,8 @@ pub(crate) struct MetalBufferBinding {
     pub(crate) vulkan_external_bindings: Option<(u32, u32)>,
     pub(crate) group: u32,
     pub(crate) binding: u32,
-    /// Per-kind Metal slot used for compute pipelines and as fallback for render
-    /// pipelines when both `vertex_metal_index` and `fragment_metal_index` are
-    /// `None` (i.e. the binding is visible to a single well-known stage).
+    /// Per-kind Metal slot used for compute pipelines. For render pipelines,
+    /// this mirrors the first visible stage; encoding uses per-stage slots.
     /// Buffer-space for `Buffer`; texture-space base for
     /// `Texture`/`StorageTexture`/`ExternalTexture`; sampler-space for `Sampler`.
     pub(crate) metal_index: u32,
@@ -277,7 +278,7 @@ impl ComputePipeline {
                     0,
                 )
             });
-        let metal_bindings = metal_buffer_binding_map(&bind_group_layouts);
+        let metal_bindings = metal_buffer_binding_map(&bind_group_layouts, false);
         let required_buffer_sizes = required_buffer_sizes(&bindings, &bind_group_layouts);
         let linear_index_invocations = descriptor
             .shader_module
@@ -329,6 +330,7 @@ impl ComputePipeline {
                     immediate_required_mask,
                     required_buffer_sizes,
                     linear_index_invocations,
+                    diagnostic: descriptor.error.or_else(|| backend_error.clone()),
                     is_error,
                 }),
             },
@@ -340,6 +342,12 @@ impl ComputePipeline {
     #[must_use]
     pub fn is_error(&self) -> bool {
         self.inner.is_error
+    }
+
+    /// Returns the recorded pipeline creation error, if any.
+    #[must_use]
+    pub fn diagnostic(&self) -> Option<&str> {
+        self.inner.diagnostic.as_deref()
     }
 
     /// Returns the entry name.
@@ -402,7 +410,7 @@ pub(crate) fn resolve_compute_pipeline_descriptor_for_source(
     }
     #[cfg(feature = "shader-passthrough")]
     if let Some((_source, entries)) = descriptor.shader_module.msl_passthrough() {
-        return resolve_msl_passthrough_compute_pipeline_descriptor(descriptor, entries);
+        return resolve_msl_passthrough_compute_pipeline_descriptor(descriptor, entries, limits);
     }
     resolve_compute_pipeline_descriptor(
         descriptor,
@@ -491,6 +499,8 @@ pub(crate) fn select_compute_shader_source(
     use_storage_input_output_16: bool,
     workarounds: yawgpu_hal::HalShaderWorkarounds,
 ) -> Result<(HalShaderSource, String, Vec<HalDescriptorBinding>), String> {
+    #[cfg(feature = "shader-passthrough")]
+    shader_module.validate_passthrough_backend(backend)?;
     let pipeline_constants = pipeline_constant_map(constants);
     match backend {
         HalBackend::Metal => {
@@ -722,13 +732,17 @@ pub(crate) fn msl_resource_bindings(
 ///
 /// For compute pipelines all entries are included in one map with per-kind
 /// counters (buffer-space / texture-space / sampler-space are independent).
-/// For render pipelines the `visibility` of each layout entry is used to build
-/// per-stage per-kind counters; the flat `metal_index` field holds the
-/// vertex-stage index (matching the legacy behaviour for single-stage entries)
-/// and `vertex_metal_index`/`fragment_metal_index` carry the independent
-/// per-stage slot when both stages are present.
+/// The flat `metal_index` field holds the compute slot.
+///
+/// For render pipelines entries visible to neither vertex nor fragment are
+/// omitted. The `visibility` of each layout entry is used to build per-stage
+/// per-kind counters. Each of `vertex_metal_index` and `fragment_metal_index`
+/// holds that stage's slot if the entry is visible to it, including single-stage
+/// entries, and is `None` otherwise. The flat `metal_index` field holds the first
+/// visible render-stage slot (vertex, then fragment).
 pub(crate) fn metal_buffer_binding_map(
     layouts: &[Arc<BindGroupLayout>],
+    is_render: bool,
 ) -> Vec<MetalBufferBinding> {
     // Collect raw entries sorted by (group, binding).
     let mut raw: Vec<(u32, u32, u64, MetalBindingKind)> = Vec::new();
@@ -752,12 +766,6 @@ pub(crate) fn metal_buffer_binding_map(
     }
     raw.sort_by_key(|&(group, binding, _, _)| (group, binding));
 
-    // Determine whether this is a render layout (any entry has vertex or
-    // fragment visibility) or a compute layout.
-    let is_render = raw
-        .iter()
-        .any(|&(_, _, vis, _)| vis & (SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT) != 0);
-
     let mut bindings = Vec::with_capacity(raw.len());
 
     if is_render {
@@ -772,6 +780,10 @@ pub(crate) fn metal_buffer_binding_map(
         for (group, binding, visibility, kind) in raw {
             let in_vtx = visibility & SHADER_STAGE_VERTEX != 0;
             let in_frag = visibility & SHADER_STAGE_FRAGMENT != 0;
+
+            if !in_vtx && !in_frag {
+                continue;
+            }
 
             // Assign per-stage slots and advance counters.
             let (
@@ -862,14 +874,15 @@ pub(crate) fn metal_buffer_binding_map(
                     } else {
                         None
                     };
-                    // The flat slots keep compute/fallback callers working;
-                    // render codegen and binding use the per-stage slots.
+                    // The flat slots mirror the first visible stage.
                     (vi_tex, fi_tex, vi_buf.or(fi_buf), vi_buf, fi_buf)
                 }
             };
 
             // Flat `metal_index`: use vertex index when available, then fragment.
-            let metal_index = vertex_metal_index.or(fragment_metal_index).unwrap_or(0);
+            let Some(metal_index) = vertex_metal_index.or(fragment_metal_index) else {
+                continue;
+            };
 
             bindings.push(MetalBufferBinding {
                 vulkan_external_bindings: None,
@@ -885,7 +898,7 @@ pub(crate) fn metal_buffer_binding_map(
             });
         }
     } else {
-        // Compute (or no-visibility) layout: one flat map with per-kind counters.
+        // Compute pipelines use one flat map with per-kind counters.
         let mut buf_idx = 0u32;
         let mut tex_idx = 0u32;
         let mut smp_idx = 0u32;
@@ -1122,6 +1135,7 @@ pub(crate) fn resolve_compute_pipeline_descriptor(
 pub(crate) fn resolve_msl_passthrough_compute_pipeline_descriptor(
     descriptor: &ComputePipelineDescriptor,
     entries: &[MslEntryPoint],
+    limits: Limits,
 ) -> Result<ResolvedPipelineParts, String> {
     let (layout, entry_name) = passthrough_compute_common(
         descriptor,
@@ -1140,6 +1154,8 @@ pub(crate) fn resolve_msl_passthrough_compute_pipeline_descriptor(
             "MSL passthrough compute entry point not found or missing workgroup size".to_owned(),
         );
     }
+    validate_passthrough_layout(layout, false)?;
+    validate_compute_workgroup_size(entry.workgroup_size, limits)?;
     Ok((
         entry_name.to_owned(),
         Vec::new(),
@@ -1162,6 +1178,7 @@ pub(crate) fn resolve_spirv_passthrough_compute_pipeline_descriptor(
         descriptor,
         "SPIR-V passthrough compute entry point is required",
     )?;
+    validate_passthrough_layout(layout, true)?;
     Ok((
         entry_name.to_owned(),
         Vec::new(),
@@ -1173,6 +1190,27 @@ pub(crate) fn resolve_spirv_passthrough_compute_pipeline_descriptor(
         layout.bind_group_layouts().to_vec(),
         0,
     ))
+}
+
+/// Validates layout restrictions for native shader sources.
+#[cfg(feature = "shader-passthrough")]
+pub(crate) fn validate_passthrough_layout(
+    layout: &PipelineLayout,
+    spirv: bool,
+) -> Result<(), String> {
+    if spirv {
+        if layout.bind_group_layouts().iter().any(|group| {
+            group
+                .entries()
+                .iter()
+                .any(|entry| matches!(entry.kind, Some(BindingLayoutKind::ExternalTexture)))
+        }) {
+            return Err("SPIR-V passthrough does not support external texture bindings".to_owned());
+        }
+    } else if layout.immediate_size() != 0 {
+        return Err("MSL passthrough does not support immediates".to_owned());
+    }
+    Ok(())
 }
 
 #[cfg(feature = "shader-passthrough")]
@@ -1358,6 +1396,21 @@ pub(crate) fn resolve_compute_workgroup(
     let workgroup = module.resolved_compute_workgroup_size(entry_name, &pipeline_constants)?;
     let size = workgroup.literal_size;
 
+    validate_compute_workgroup_size(size, limits)?;
+    if workgroup.workgroup_storage_size > u64::from(limits.max_compute_workgroup_storage_size) {
+        return Err("compute workgroup storage size exceeds the device limit".to_owned());
+    }
+    let subgroup_size =
+        validate_explicit_subgroup_size(size, workgroup.subgroup_size, subgroup_size_control)?;
+
+    Ok(ResolvedComputeWorkgroup {
+        size,
+        storage_size: workgroup.workgroup_storage_size,
+        subgroup_size,
+    })
+}
+
+fn validate_compute_workgroup_size(size: [u32; 3], limits: Limits) -> Result<(), String> {
     if size.contains(&0) {
         return Err("compute workgroup size must be at least one".to_owned());
     }
@@ -1377,17 +1430,7 @@ pub(crate) fn resolve_compute_workgroup(
     if invocations > limits.max_compute_invocations_per_workgroup {
         return Err("compute workgroup invocation count exceeds the device limit".to_owned());
     }
-    if workgroup.workgroup_storage_size > u64::from(limits.max_compute_workgroup_storage_size) {
-        return Err("compute workgroup storage size exceeds the device limit".to_owned());
-    }
-    let subgroup_size =
-        validate_explicit_subgroup_size(size, workgroup.subgroup_size, subgroup_size_control)?;
-
-    Ok(ResolvedComputeWorkgroup {
-        size,
-        storage_size: workgroup.workgroup_storage_size,
-        subgroup_size,
-    })
+    Ok(())
 }
 
 /// Validates an override-resolved WGSL `@subgroup_size` against the resolved
@@ -3208,7 +3251,7 @@ fn cs() {
                 ],
             ),
         ];
-        let bindings = metal_buffer_binding_map(&layouts);
+        let bindings = metal_buffer_binding_map(&layouts, false);
         let remaps = vulkan_external_texture_remaps(&bindings).unwrap();
         assert_eq!(
             remaps,
@@ -3477,7 +3520,7 @@ var<workgroup> sink: vec4f;
                 smp_entry(4, SHADER_STAGE_COMPUTE),
             ],
         );
-        let bindings = metal_buffer_binding_map(&[layout]);
+        let bindings = metal_buffer_binding_map(&[layout], false);
 
         // Find each binding by kind and slot.
         let buf = bindings.iter().find(|b| b.binding == 0).unwrap();
@@ -3506,7 +3549,7 @@ var<workgroup> sink: vec4f;
                 tex_entry(2, SHADER_STAGE_COMPUTE),
             ],
         );
-        let bindings = metal_buffer_binding_map(&[layout]);
+        let bindings = metal_buffer_binding_map(&[layout], false);
 
         let ext = bindings.iter().find(|b| b.binding == 0).unwrap();
         let buf = bindings.iter().find(|b| b.binding == 1).unwrap();
@@ -3536,7 +3579,7 @@ var<workgroup> sink: vec4f;
                 ext_entry(2, SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT),
             ],
         );
-        let bindings = metal_buffer_binding_map(&[layout]);
+        let bindings = metal_buffer_binding_map(&[layout], true);
 
         let ext = bindings.iter().find(|b| b.binding == 2).unwrap();
 
@@ -3578,7 +3621,7 @@ var<workgroup> sink: vec4f;
                 smp_entry(2, SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT),
             ],
         );
-        let bindings = metal_buffer_binding_map(&[layout]);
+        let bindings = metal_buffer_binding_map(&[layout], true);
 
         let buf = bindings.iter().find(|b| b.binding == 0).unwrap();
         let tex = bindings.iter().find(|b| b.binding == 1).unwrap();
@@ -3609,7 +3652,7 @@ var<workgroup> sink: vec4f;
                 buf_entry(1, SHADER_STAGE_VERTEX),
             ],
         );
-        let bindings = metal_buffer_binding_map(&[layout]);
+        let bindings = metal_buffer_binding_map(&[layout], true);
         let vb_bindings = metal_vertex_buffer_binding_map(
             &[crate::VertexBufferLayout {
                 used: true,
@@ -3632,7 +3675,7 @@ var<workgroup> sink: vec4f;
             .map(|i| smp_entry(i, SHADER_STAGE_COMPUTE))
             .collect();
         let layout = make_layout(&device, entries);
-        let bindings = metal_buffer_binding_map(&[layout]);
+        let bindings = metal_buffer_binding_map(&[layout], false);
 
         let result = validate_metal_slot_ranges(&bindings);
         assert!(
@@ -3657,8 +3700,189 @@ var<workgroup> sink: vec4f;
                 smp_entry(2, SHADER_STAGE_COMPUTE),
             ],
         );
-        let bindings = metal_buffer_binding_map(&[layout]);
+        let bindings = metal_buffer_binding_map(&[layout], false);
         assert_eq!(validate_metal_slot_ranges(&bindings), Ok(()));
+    }
+
+    #[test]
+    fn metal_compute_slots_ignore_render_visibility() {
+        let device = noop_device();
+        let layout = make_layout(
+            &device,
+            vec![
+                buf_entry(1, SHADER_STAGE_COMPUTE | SHADER_STAGE_FRAGMENT),
+                buf_entry(0, SHADER_STAGE_COMPUTE),
+            ],
+        );
+        let compute = metal_buffer_binding_map(&[Arc::clone(&layout)], false);
+        assert_eq!(
+            compute
+                .iter()
+                .map(|b| (b.binding, b.metal_index))
+                .collect::<Vec<_>>(),
+            vec![(0, 0), (1, 1)]
+        );
+        let render = metal_buffer_binding_map(&[layout], true);
+        assert_eq!(render.len(), 1);
+        assert_eq!(render[0].binding, 1);
+        assert_eq!(render[0].fragment_metal_index, Some(0));
+        assert_eq!(render[0].vertex_metal_index, None);
+        let tint = msl_resource_bindings(&compute);
+        assert_eq!(
+            tint.iter()
+                .map(|binding| binding.metal_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn metal_render_map_omits_invisible_entries_without_consuming_slots() {
+        let device = noop_device();
+        let visible = SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT;
+        let layout = make_layout(
+            &device,
+            vec![
+                buf_entry(0, SHADER_STAGE_COMPUTE),
+                tex_entry(1, SHADER_STAGE_COMPUTE),
+                smp_entry(2, SHADER_STAGE_COMPUTE),
+                ext_entry(3, SHADER_STAGE_COMPUTE),
+                buf_entry(4, visible),
+                tex_entry(5, visible),
+                smp_entry(6, visible),
+                ext_entry(7, visible),
+                buf_entry(8, 0),
+                tex_entry(9, 0),
+                smp_entry(10, 0),
+                ext_entry(11, 0),
+                buf_entry(12, visible),
+                tex_entry(13, visible),
+                smp_entry(14, visible),
+            ],
+        );
+        let bindings = metal_buffer_binding_map(&[layout], true);
+        assert_eq!(
+            bindings.iter().map(|b| b.binding).collect::<Vec<_>>(),
+            vec![4, 5, 6, 7, 12, 13, 14]
+        );
+        for (binding, slot) in bindings.iter().zip([0, 0, 0, 1, 2, 3, 1]) {
+            assert_eq!(binding.vertex_metal_index, Some(slot));
+            assert_eq!(binding.fragment_metal_index, Some(slot));
+        }
+        assert_eq!(bindings[3].ext_params_vertex_buffer_slot, Some(1));
+        assert_eq!(bindings[3].ext_params_fragment_buffer_slot, Some(1));
+        for vertex in [false, true] {
+            let projected = crate::render_pipeline::msl_stage_resource_bindings(&bindings, vertex);
+            assert_eq!(projected.len(), bindings.len());
+            assert_eq!(
+                projected.iter().map(|b| b.metal_index).collect::<Vec<_>>(),
+                vec![0, 0, 0, 1, 2, 3, 1]
+            );
+        }
+    }
+
+    #[test]
+    fn msl_render_projection_does_not_fall_back_to_compute_slots() {
+        let device = noop_device();
+        let layout = make_layout(&device, vec![buf_entry(0, SHADER_STAGE_COMPUTE)]);
+        let bindings = metal_buffer_binding_map(&[layout], false);
+        assert_eq!(bindings[0].metal_index, 0);
+        for vertex in [false, true] {
+            assert!(
+                crate::render_pipeline::msl_stage_resource_bindings(&bindings, vertex).is_empty()
+            );
+        }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn msl_workgroup_limits_apply_at_pipeline_creation() {
+        let device = noop_device();
+        let limits = device.limits();
+        for (size, expected) in [
+            (
+                [limits.max_compute_workgroup_size_x + 1, 1, 1],
+                "compute workgroup x size exceeds the device limit",
+            ),
+            (
+                [1, limits.max_compute_workgroup_size_y + 1, 1],
+                "compute workgroup y size exceeds the device limit",
+            ),
+            (
+                [1, 1, limits.max_compute_workgroup_size_z + 1],
+                "compute workgroup z size exceeds the device limit",
+            ),
+            (
+                [limits.max_compute_workgroup_size_x, 2, 1],
+                "compute workgroup invocation count exceeds the device limit",
+            ),
+        ] {
+            let module = msl_passthrough_module(&device, vec![msl_compute_entry("cs", size)]);
+            let descriptor = msl_passthrough_descriptor(
+                module,
+                ComputePipelineLayout::Explicit(empty_pipeline_layout(&device)),
+            );
+            device.push_error_scope(ErrorFilter::Validation);
+            assert!(device.create_compute_pipeline(descriptor).is_error());
+            assert_eq!(device.pop_error_scope().unwrap().unwrap().message, expected);
+        }
+        let limits = Limits {
+            max_compute_workgroup_size_x: u32::MAX,
+            max_compute_workgroup_size_y: u32::MAX,
+            max_compute_workgroup_size_z: u32::MAX,
+            ..limits
+        };
+        assert_eq!(
+            validate_compute_workgroup_size([u32::MAX; 3], limits).unwrap_err(),
+            "compute workgroup invocation count overflows"
+        );
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn native_compute_layout_restrictions_are_validation_errors() {
+        let device = noop_device();
+        let external = Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: vec![Arc::new(BindGroupLayout::new(
+                vec![ext_entry(0, SHADER_STAGE_COMPUTE)],
+                false,
+                false,
+            ))],
+            immediate_size: 0,
+            error: None,
+        }));
+        let immediate = Arc::new(device.create_pipeline_layout(PipelineLayoutDescriptor {
+            bind_group_layouts: Vec::new(),
+            immediate_size: 4,
+            error: None,
+        }));
+        assert_eq!(validate_passthrough_layout(&external, false), Ok(()));
+        assert_eq!(validate_passthrough_layout(&immediate, true), Ok(()));
+        for (spirv, layout, expected) in [
+            (
+                true,
+                external,
+                "SPIR-V passthrough does not support external texture bindings",
+            ),
+            (
+                false,
+                immediate,
+                "MSL passthrough does not support immediates",
+            ),
+        ] {
+            let module = if spirv {
+                spirv_passthrough_module(&device)
+            } else {
+                msl_passthrough_module(&device, vec![msl_compute_entry("cs", [1; 3])])
+            };
+            let descriptor =
+                spirv_passthrough_descriptor(module, ComputePipelineLayout::Explicit(layout));
+            device.push_error_scope(ErrorFilter::Validation);
+            assert!(device.create_compute_pipeline(descriptor).is_error());
+            let error = device.pop_error_scope().unwrap().unwrap();
+            assert_eq!(error.kind, crate::ErrorKind::Validation);
+            assert_eq!(error.message, expected);
+        }
     }
 
     #[cfg(feature = "shader-passthrough")]
@@ -3797,7 +4021,7 @@ var<workgroup> sink: vec4f;
         let device = noop_device();
         let module = spirv_passthrough_module(&device);
         let layout = make_layout(&device, vec![buf_entry(7, SHADER_STAGE_COMPUTE)]);
-        let metal_bindings = metal_buffer_binding_map(&[layout]);
+        let metal_bindings = metal_buffer_binding_map(&[layout], false);
 
         let (source, entry, descriptor_bindings) = select_compute_shader_source(
             HalBackend::Vulkan,

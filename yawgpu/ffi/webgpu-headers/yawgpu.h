@@ -17,7 +17,7 @@
  * \par Sections
  * - **Instance backend select** (always available): explicit backend
  *   pick-list, chained into `WGPUInstanceDescriptor`.
- * - **Shader passthrough** (compile-time macro): raw native shader source
+ * - **Shader passthrough** (declarations always available): raw native shader source
  *   chained into `WGPUShaderModuleDescriptor`.
  * - **External texture creation** (always available): vendor creation API for
  *   WebGPU external textures.
@@ -112,7 +112,11 @@ typedef struct YaWGPUInstanceBackendSelect {
  * @{
  */
 
-/** Defined when yawgpu's shader-passthrough declarations are available. */
+/**
+ * Indicates that shader-passthrough declarations exist, independently of the
+ * Cargo feature. With `shader-passthrough` disabled, shader creation returns an
+ * error module with "shader passthrough not enabled".
+ */
 #define YAWGPU_HAS_SHADER_PASSTHROUGH 1
 
 /**
@@ -144,7 +148,25 @@ typedef struct YaWGPUShaderSourceMSL {
 } YaWGPUShaderSourceMSL;
 
 /**
- * Metal binding-slot ABI for passthrough MSL.
+ * Native shader passthrough ABI.
+ *
+ * Every pipeline stage requires an explicit, non-empty entry point name.
+ * Pipeline-overridable constants are rejected. MSL compute entries supply a
+ * non-zero workgroup size within the device limits.
+ *
+ * On both Metal and Vulkan, a passthrough shader stage may only use layout
+ * entries whose visibility includes that stage. In render pipelines, entries
+ * visible to neither vertex nor fragment receive no Metal slot and no Vulkan
+ * descriptor.
+ *
+ * SPIR-V requires WGPUInstanceFeatureName_ShaderSourceSPIRV in the instance's
+ * requiredFeatures. Vulkan maps group to descriptor set and binding to binding,
+ * uses a negative-height viewport for WebGPU clip space, and exposes push
+ * constants at offset 0 with the layout's immediateSize, visible to every stage.
+ * SPIR-V passthrough rejects external-texture bindings.
+ * MSL passthrough rejects non-zero immediateSize (no immediates binding).
+ *
+ * Metal binding-slot ABI for passthrough MSL:
  *
  * Shader passthrough requires an explicit pipeline layout. yawgpu derives Metal
  * argument indices from that layout, never from shader reflection, so the MSL
@@ -165,6 +187,11 @@ typedef struct YaWGPUShaderSourceMSL {
  * in that stage's function. For example, a buffer visible only to fragment can
  * be `[[buffer(0)]]` in the fragment entry point even when the vertex entry
  * point also has its own `[[buffer(0)]]`.
+ *
+ * Vertex buffers use consecutive buffer slots immediately after the last
+ * vertex-stage bind-group buffer slot (including external-texture params).
+ * Only used vertex-buffer layouts consume slots, in vertex-buffer array order,
+ * matching the WGSL path.
  *
  * Example compute layout:
  * - group 0 binding 0: storage buffer  -> `device T* data [[buffer(0)]]`

@@ -681,14 +681,22 @@ impl Device {
         &self,
         descriptor: ComputePipelineDescriptor,
     ) -> ComputePipeline {
-        self.create_compute_pipeline_inner(descriptor, true)
+        self.create_compute_pipeline_inner(descriptor, true, self.inner.hal.backend())
     }
 
     fn create_compute_pipeline_inner(
         &self,
-        descriptor: ComputePipelineDescriptor,
+        mut descriptor: ComputePipelineDescriptor,
         dispatch_errors: bool,
+        #[allow(unused_variables)] backend: yawgpu_hal::HalBackend,
     ) -> ComputePipeline {
+        #[cfg(feature = "shader-passthrough")]
+        if descriptor.error.is_none() {
+            descriptor.error = descriptor
+                .shader_module
+                .validate_passthrough_backend(backend)
+                .err();
+        }
         self.inner
             .compute_pipeline_creation_count
             .fetch_add(1, Ordering::Relaxed);
@@ -712,6 +720,7 @@ impl Device {
             error
         };
         let is_error = error.is_some();
+        descriptor.error = error.clone();
         if dispatch_errors {
             if let Some(message) = error {
                 self.dispatch_error(ErrorKind::Validation, message);
@@ -733,20 +742,35 @@ impl Device {
         &self,
         descriptor: ComputePipelineDescriptor,
     ) -> ComputePipeline {
-        self.create_compute_pipeline_inner(descriptor, false)
+        self.create_compute_pipeline_inner(descriptor, false, self.inner.hal.backend())
     }
 
     /// Validates and creates a render pipeline, routing any failure to the active error scope.
     #[must_use]
     pub fn create_render_pipeline(&self, descriptor: RenderPipelineDescriptor) -> RenderPipeline {
-        self.create_render_pipeline_inner(descriptor, true)
+        self.create_render_pipeline_inner(descriptor, true, self.inner.hal.backend())
     }
 
     fn create_render_pipeline_inner(
         &self,
-        descriptor: RenderPipelineDescriptor,
+        mut descriptor: RenderPipelineDescriptor,
         dispatch_errors: bool,
+        #[allow(unused_variables)] backend: yawgpu_hal::HalBackend,
     ) -> RenderPipeline {
+        #[cfg(feature = "shader-passthrough")]
+        if descriptor.error.is_none() {
+            descriptor.error = descriptor
+                .vertex
+                .shader
+                .module
+                .validate_passthrough_backend(backend)
+                .and_then(|()| {
+                    descriptor.fragment.as_ref().map_or(Ok(()), |fragment| {
+                        fragment.shader.module.validate_passthrough_backend(backend)
+                    })
+                })
+                .err();
+        }
         self.inner
             .render_pipeline_creation_count
             .fetch_add(1, Ordering::Relaxed);
@@ -770,6 +794,7 @@ impl Device {
             error
         };
         let is_error = error.is_some();
+        descriptor.error = error.clone();
         if dispatch_errors {
             if let Some(message) = error {
                 self.dispatch_error(ErrorKind::Validation, message);
@@ -798,7 +823,7 @@ impl Device {
     #[cfg(feature = "tiled")]
     fn create_subpass_render_pipeline_inner(
         &self,
-        descriptor: SubpassRenderPipelineDescriptor,
+        mut descriptor: SubpassRenderPipelineDescriptor,
         dispatch_errors: bool,
     ) -> RenderPipeline {
         let pipeline_id = next_pipeline_id();
@@ -843,6 +868,7 @@ impl Device {
             }
         };
         let is_error = error.is_some();
+        descriptor.error = error.clone();
         if dispatch_errors {
             if let Some(message) = error {
                 self.dispatch_error(ErrorKind::Validation, message);
@@ -864,7 +890,7 @@ impl Device {
         &self,
         descriptor: RenderPipelineDescriptor,
     ) -> RenderPipeline {
-        self.create_render_pipeline_inner(descriptor, false)
+        self.create_render_pipeline_inner(descriptor, false, self.inner.hal.backend())
     }
 }
 
@@ -1756,6 +1782,75 @@ mod tests {
 
         assert!(error.is_none());
         assert!(!command_buffer.is_error());
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn native_pipeline_backend_mismatches_are_validation_errors_sync_and_async() {
+        use yawgpu_hal::HalBackend;
+        let device = noop_device();
+        for spirv in [false, true] {
+            let module = Arc::new(device.create_shader_module(if spirv {
+                ShaderModuleSource::SpirvPassthrough(vec![0x0723_0203])
+            } else {
+                ShaderModuleSource::MslPassthrough {
+                    source: "native source".to_owned(),
+                    entries: Vec::new(),
+                }
+            }));
+            let expected = if spirv {
+                "SPIR-V passthrough shader requires the Vulkan backend"
+            } else {
+                "MSL passthrough shader requires the Metal backend"
+            };
+            for backend in [
+                if spirv {
+                    HalBackend::Metal
+                } else {
+                    HalBackend::Vulkan
+                },
+                #[cfg(feature = "gles")]
+                HalBackend::Gles,
+            ] {
+                for conversion_error in [None, Some("descriptor conversion error")] {
+                    let expected = conversion_error.unwrap_or(expected);
+                    for dispatch_errors in [true, false] {
+                        device.push_error_scope(ErrorFilter::Validation);
+                        let mut descriptor = compute_pipeline_descriptor(Arc::clone(&module));
+                        descriptor.error = conversion_error.map(str::to_owned);
+                        let pipeline = device.create_compute_pipeline_inner(
+                            descriptor,
+                            dispatch_errors,
+                            backend,
+                        );
+                        assert!(pipeline.is_error());
+                        assert_eq!(pipeline.diagnostic(), Some(expected));
+                        let error = device.pop_error_scope().unwrap();
+                        assert_eq!(error.is_some(), dispatch_errors);
+                        if let Some(error) = error {
+                            assert_eq!(error.kind, ErrorKind::Validation);
+                            assert_eq!(error.message, expected);
+                        }
+                        device.push_error_scope(ErrorFilter::Validation);
+                        let mut descriptor = render_pipeline_descriptor(Arc::clone(&module));
+                        descriptor.error = conversion_error.map(str::to_owned);
+                        let pipeline = device.create_render_pipeline_inner(
+                            descriptor,
+                            dispatch_errors,
+                            backend,
+                        );
+                        assert!(pipeline.is_error());
+                        assert_eq!(pipeline.diagnostic(), Some(expected));
+                        let error = device.pop_error_scope().unwrap();
+                        assert_eq!(error.is_some(), dispatch_errors);
+                        if let Some(error) = error {
+                            assert_eq!(error.kind, ErrorKind::Validation);
+                            assert_eq!(error.message, expected);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

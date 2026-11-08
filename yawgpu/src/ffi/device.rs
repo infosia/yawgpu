@@ -357,6 +357,14 @@ pub unsafe extern "C" fn wgpuDeviceCreateShaderModule(
         .as_ref()
         .expect("WGPUShaderModuleDescriptor must not be null");
     let source = map_shader_module_descriptor(descriptor);
+    #[cfg(feature = "shader-passthrough")]
+    let source = if matches!(source, core::ShaderModuleSource::SpirvPassthrough(_))
+        && !device.instance.shader_source_spirv_enabled
+    {
+        core::ShaderModuleSource::Invalid("SPIR-V is disallowed.".to_owned())
+    } else {
+        source
+    };
     let key = shader_module_cache_key(&source);
     // This per-device cache only stores non-error modules; a live hit is a
     // previously valid module, and lost devices must keep returning fresh errors.

@@ -517,6 +517,8 @@ pub(crate) struct RenderPipelineInner {
     #[allow(dead_code)]
     pub(crate) subpass_compatibility: Option<SubpassPipelineCompatibility>,
     pub(crate) is_error: bool,
+    /// Recorded descriptor validation or backend creation failure.
+    pub(crate) diagnostic: Option<String>,
 }
 
 /// Describes subpass-pipeline compatibility metadata.
@@ -582,7 +584,7 @@ impl RenderPipeline {
                 Vec::new(),
             )
         });
-        let metal_bindings = metal_buffer_binding_map(&bind_group_layouts);
+        let metal_bindings = metal_buffer_binding_map(&bind_group_layouts, true);
         let vertex_buffer_bindings =
             metal_vertex_buffer_binding_map(&descriptor.vertex.buffers, &metal_bindings);
         let framebuffer_fetch_color_slots = render_pipeline_framebuffer_fetch_color_slots(
@@ -623,6 +625,7 @@ impl RenderPipeline {
                     framebuffer_fetch_color_slots,
                     #[cfg(feature = "tiled")]
                     subpass_compatibility: None,
+                    diagnostic: descriptor.error.or_else(|| backend_error.clone()),
                     is_error,
                 }),
             },
@@ -667,7 +670,7 @@ impl RenderPipeline {
                 Vec::new(),
             )
         });
-        let metal_bindings = metal_buffer_binding_map(&bind_group_layouts);
+        let metal_bindings = metal_buffer_binding_map(&bind_group_layouts, true);
         let vertex_buffer_bindings =
             metal_vertex_buffer_binding_map(&descriptor.base.vertex.buffers, &metal_bindings);
         let framebuffer_fetch_color_slots = render_pipeline_framebuffer_fetch_color_slots(
@@ -724,6 +727,7 @@ impl RenderPipeline {
                     required_buffer_sizes,
                     framebuffer_fetch_color_slots,
                     subpass_compatibility: Some(compatibility),
+                    diagnostic: descriptor.error.or_else(|| backend_error.clone()),
                     is_error,
                 }),
             },
@@ -735,6 +739,12 @@ impl RenderPipeline {
     #[must_use]
     pub fn is_error(&self) -> bool {
         self.inner.is_error
+    }
+
+    /// Returns the recorded pipeline creation error, if any.
+    #[must_use]
+    pub fn diagnostic(&self) -> Option<&str> {
+        self.inner.diagnostic.as_deref()
     }
 
     /// Returns vertex entry name.
@@ -909,7 +919,7 @@ pub(crate) fn resolve_render_pipeline_descriptor_for_source(
 ) -> Result<ResolvedRenderPipelineParts, String> {
     #[cfg(feature = "shader-passthrough")]
     if render_pipeline_uses_shader_passthrough(descriptor) {
-        return resolve_shader_passthrough_render_pipeline_descriptor(descriptor);
+        return resolve_shader_passthrough_render_pipeline_descriptor(descriptor, limits, features);
     }
     resolve_render_pipeline_descriptor(
         descriptor,
@@ -1877,8 +1887,6 @@ fn merge_texture_metadata_slots(
 /// `vertex = true` selects `vertex_metal_index`; `vertex = false` selects
 /// `fragment_metal_index`.  Entries that have no index for the requested stage
 /// are omitted, so only bindings that the stage actually uses are included.
-/// When both per-stage indices are `None` (compute-style flat map) the flat
-/// `metal_index` is used for both stages as a fallback.
 pub(crate) fn msl_stage_resource_bindings(
     bindings: &[MetalBufferBinding],
     vertex: bool,
@@ -1886,27 +1894,16 @@ pub(crate) fn msl_stage_resource_bindings(
     bindings
         .iter()
         .filter_map(|binding| {
-            // Choose the stage-specific index; fall back to flat metal_index when
-            // no per-stage indices are stored (backwards compat, or compute maps).
             let metal_index = if vertex {
-                match binding.vertex_metal_index {
-                    Some(idx) => idx,
-                    None if binding.fragment_metal_index.is_none() => binding.metal_index,
-                    None => return None, // not visible to vertex stage
-                }
+                binding.vertex_metal_index
             } else {
-                match binding.fragment_metal_index {
-                    Some(idx) => idx,
-                    None if binding.vertex_metal_index.is_none() => binding.metal_index,
-                    None => return None, // not visible to fragment stage
-                }
-            };
+                binding.fragment_metal_index
+            }?;
             let ext_params_buffer_slot = if vertex {
                 binding.ext_params_vertex_buffer_slot
             } else {
                 binding.ext_params_fragment_buffer_slot
-            }
-            .or(binding.ext_params_buffer_slot);
+            };
             Some(frontend::MslResourceBinding {
                 group: binding.group,
                 binding: binding.binding,
@@ -2460,6 +2457,8 @@ pub(crate) fn resolve_render_pipeline_descriptor(
 #[cfg(feature = "shader-passthrough")]
 pub(crate) fn resolve_shader_passthrough_render_pipeline_descriptor(
     descriptor: &RenderPipelineDescriptor,
+    limits: Limits,
+    features: &FeatureSet,
 ) -> Result<ResolvedRenderPipelineParts, String> {
     if descriptor.vertex.shader.module.is_error()
         || descriptor
@@ -2499,7 +2498,6 @@ pub(crate) fn resolve_shader_passthrough_render_pipeline_descriptor(
     if layout.is_error() {
         return Err("render pipeline layout must not be an error pipeline layout".to_owned());
     }
-    validate_render_presence(descriptor)?;
     let Some(vertex_entry) = descriptor
         .vertex
         .shader
@@ -2522,6 +2520,25 @@ pub(crate) fn resolve_shader_passthrough_render_pipeline_descriptor(
                 .ok_or_else(|| "shader passthrough fragment entry point is required".to_owned())
         })
         .transpose()?;
+
+    validate_vertex_buffer_state(&descriptor.vertex, limits)?;
+    validate_render_presence(descriptor)?;
+    validate_primitive_state(descriptor.primitive, features)?;
+    if let Some(depth_stencil) = descriptor.depth_stencil {
+        validate_depth_bias_state(descriptor.primitive.topology, depth_stencil)?;
+        validate_depth_stencil_aspects(depth_stencil, features)?;
+    }
+    validate_color_targets_inner(descriptor, None, limits, features, None, false)?;
+    crate::compute_pipeline::validate_passthrough_layout(
+        layout,
+        kind == RenderPassthroughKind::Spirv,
+    )?;
+    validate_multisample_state(descriptor, None)?;
+    validate_bind_groups_plus_vertex_buffers(
+        layout.bind_group_layouts(),
+        descriptor.vertex.buffer_count,
+        limits,
+    )?;
 
     Ok((
         vertex_entry.to_owned(),
@@ -2555,6 +2572,34 @@ pub(crate) fn validate_vertex_state(
     vertex_entry: &str,
     limits: Limits,
 ) -> Result<(), String> {
+    let attribute_classes = validate_vertex_buffer_state(vertex, limits)?;
+
+    for (location, input) in vertex_inputs(vertex, vertex_entry)? {
+        let Some(attribute_class) = attribute_classes.get(&location) else {
+            return Err(
+                "render pipeline vertex shader input has no matching vertex attribute".to_owned(),
+            );
+        };
+        let input_class = match input.scalar {
+            frontend::ReflectedTypeScalarClass::Float => FormatOutputClass::Float,
+            frontend::ReflectedTypeScalarClass::Sint => FormatOutputClass::Sint,
+            frontend::ReflectedTypeScalarClass::Uint => FormatOutputClass::Uint,
+            frontend::ReflectedTypeScalarClass::Bool => {
+                return Err("render pipeline vertex shader input type is incompatible".to_owned());
+            }
+        };
+        if *attribute_class != input_class {
+            return Err("render pipeline vertex shader input type is incompatible".to_owned());
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_vertex_buffer_state(
+    vertex: &RenderPipelineVertexState,
+    limits: Limits,
+) -> Result<BTreeMap<u32, FormatOutputClass>, String> {
     if vertex.buffer_count > limits.max_vertex_buffers as usize {
         return Err("render pipeline vertex buffer count exceeds the device limit".to_owned());
     }
@@ -2633,26 +2678,7 @@ pub(crate) fn validate_vertex_state(
         }
     }
 
-    for (location, input) in vertex_inputs(vertex, vertex_entry)? {
-        let Some(attribute_class) = attribute_classes.get(&location) else {
-            return Err(
-                "render pipeline vertex shader input has no matching vertex attribute".to_owned(),
-            );
-        };
-        let input_class = match input.scalar {
-            frontend::ReflectedTypeScalarClass::Float => FormatOutputClass::Float,
-            frontend::ReflectedTypeScalarClass::Sint => FormatOutputClass::Sint,
-            frontend::ReflectedTypeScalarClass::Uint => FormatOutputClass::Uint,
-            frontend::ReflectedTypeScalarClass::Bool => {
-                return Err("render pipeline vertex shader input type is incompatible".to_owned());
-            }
-        };
-        if *attribute_class != input_class {
-            return Err("render pipeline vertex shader input type is incompatible".to_owned());
-        }
-    }
-
-    Ok(())
+    Ok(attribute_classes)
 }
 
 /// Returns vertex inputs.
@@ -2910,6 +2936,24 @@ pub(crate) fn validate_color_targets(
     features: &FeatureSet,
     subpass_color_attachment_indices: Option<&[u32]>,
 ) -> Result<(), String> {
+    validate_color_targets_inner(
+        descriptor,
+        fragment_entry,
+        limits,
+        features,
+        subpass_color_attachment_indices,
+        true,
+    )
+}
+
+fn validate_color_targets_inner(
+    descriptor: &RenderPipelineDescriptor,
+    fragment_entry: Option<&str>,
+    limits: Limits,
+    features: &FeatureSet,
+    subpass_color_attachment_indices: Option<&[u32]>,
+    reflected: bool,
+) -> Result<(), String> {
     let Some(fragment) = &descriptor.fragment else {
         return Ok(());
     };
@@ -2961,7 +3005,7 @@ pub(crate) fn validate_color_targets(
                             .to_owned(),
                     );
                 }
-                if !fragment_writes_blend_src_1 {
+                if reflected && !fragment_writes_blend_src_1 {
                     return Err(
                         "render pipeline dual-source blend factors require the fragment shader to write a @blend_src(1) output"
                             .to_owned(),
@@ -2987,6 +3031,9 @@ pub(crate) fn validate_color_targets(
             .and_then(|indices| indices.get(index).copied())
             .unwrap_or(subpass_local);
         let output = outputs.get(&subpass_local).or_else(|| outputs.get(&flat));
+        if !reflected && caps.output_class.is_none() {
+            return Err("render pipeline color target format has no output class".to_owned());
+        }
         match output {
             Some(output) => {
                 validate_fragment_output_compat(*output, caps)?;
@@ -2997,7 +3044,7 @@ pub(crate) fn validate_color_targets(
                     );
                 }
             }
-            None if target.write_mask != 0 => {
+            None if reflected && target.write_mask != 0 => {
                 return Err(
                     "render pipeline color target without shader output must use writeMask 0"
                         .to_owned(),
@@ -6192,13 +6239,190 @@ fn fs() -> @builtin(frag_depth) f32 {
 
     #[cfg(feature = "shader-passthrough")]
     #[test]
+    fn native_render_runs_reflection_free_validators_in_wgsl_order() {
+        let device = noop_device();
+        for spirv in [false, true] {
+            let base = if spirv {
+                spirv_render_passthrough_descriptor(&device)
+            } else {
+                msl_render_passthrough_descriptor(&device)
+            };
+            let vertex = VertexBufferLayout {
+                used: true,
+                array_stride: 4,
+                step_mode: VertexStepMode::Vertex,
+                attributes: vec![VertexAttribute {
+                    format: VertexFormat::from_raw(0x1C),
+                    offset: 4,
+                    shader_location: 0,
+                }],
+            };
+            let mut cases = Vec::new();
+            let mut d = base.clone();
+            d.vertex.buffer_count = 1;
+            d.vertex.buffers = vec![vertex];
+            d.multisample.count = 3;
+            cases.push((
+                d,
+                device.limits(),
+                "render pipeline vertex attribute byte range exceeds the buffer arrayStride",
+            ));
+            let mut d = base.clone();
+            d.primitive.unclipped_depth = true;
+            cases.push((
+                d,
+                device.limits(),
+                "render pipeline unclippedDepth requires the depth-clip-control feature",
+            ));
+            let mut d = base.clone();
+            let mut depth = depth_stencil_state();
+            depth.depth_bias_slope_scale = f32::NAN;
+            d.depth_stencil = Some(depth);
+            cases.push((
+                d,
+                device.limits(),
+                "render pipeline depth bias values must be finite",
+            ));
+            let mut d = base.clone();
+            let mut depth = depth_stencil_state();
+            depth.format = rgba8_unorm();
+            d.depth_stencil = Some(depth);
+            cases.push((
+                d,
+                device.limits(),
+                "render pipeline depthStencil format must have depth or stencil",
+            ));
+            let mut d = base.clone();
+            d.fragment.as_mut().unwrap().targets[0].format = depth32_float();
+            cases.push((
+                d,
+                device.limits(),
+                "render pipeline color target format has no output class",
+            ));
+            let mut d = base.clone();
+            let fragment = d.fragment.as_mut().unwrap();
+            fragment.targets =
+                vec![fragment.targets[0]; device.limits().max_color_attachments as usize + 1];
+            fragment.target_count = fragment.targets.len();
+            cases.push((
+                d,
+                device.limits(),
+                "render pipeline color target count exceeds the device limit",
+            ));
+            let mut d = base.clone();
+            d.multisample.count = 3;
+            cases.push((
+                d,
+                device.limits(),
+                "render pipeline multisample count must be 1 or 4",
+            ));
+            let mut d = base.clone();
+            d.vertex.buffer_count = 1;
+            d.vertex.buffers = vec![VertexBufferLayout {
+                used: true,
+                array_stride: 4,
+                step_mode: VertexStepMode::Vertex,
+                attributes: Vec::new(),
+            }];
+            let limits = Limits {
+                max_bind_groups_plus_vertex_buffers: 0,
+                ..device.limits()
+            };
+            cases.push((
+                d,
+                limits,
+                "render pipeline bind group plus vertex buffer count exceeds the device limit",
+            ));
+            for (descriptor, limits, expected) in cases {
+                assert_eq!(
+                    resolve_shader_passthrough_render_pipeline_descriptor(
+                        &descriptor,
+                        limits,
+                        &FeatureSet::default()
+                    )
+                    .unwrap_err(),
+                    expected
+                );
+                // The same independent checks keep their messages and precedence for WGSL.
+                let mut wgsl = descriptor;
+                let module = render_shader_module(&device);
+                wgsl.vertex.shader.module = Arc::clone(&module);
+                wgsl.fragment.as_mut().unwrap().shader.module = module;
+                assert_eq!(
+                    resolve_render_pipeline_descriptor(
+                        &wgsl,
+                        limits,
+                        &FeatureSet::default(),
+                        None,
+                        1
+                    )
+                    .unwrap_err(),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn native_render_layout_restrictions_are_validation_errors() {
+        let device = noop_device();
+        for spirv in [false, true] {
+            let mut descriptor = if spirv {
+                spirv_render_passthrough_descriptor(&device)
+            } else {
+                msl_render_passthrough_descriptor(&device)
+            };
+            let groups = if spirv {
+                vec![Arc::new(device.create_bind_group_layout(
+                    crate::BindGroupLayoutDescriptor {
+                        entries: vec![crate::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: SHADER_STAGE_FRAGMENT,
+                            binding_array_size: 0,
+                            kind: Some(BindingLayoutKind::ExternalTexture),
+                        }],
+                        error: None,
+                    },
+                ))]
+            } else {
+                Vec::new()
+            };
+            descriptor.layout = RenderPipelineLayout::Explicit(Arc::new(
+                device.create_pipeline_layout(crate::PipelineLayoutDescriptor {
+                    bind_group_layouts: groups,
+                    immediate_size: if spirv { 0 } else { 4 },
+                    error: None,
+                }),
+            ));
+            device.push_error_scope(ErrorFilter::Validation);
+            assert!(device.create_render_pipeline(descriptor).is_error());
+            let error = device.pop_error_scope().unwrap().unwrap();
+            assert_eq!(error.kind, crate::ErrorKind::Validation);
+            assert_eq!(
+                error.message,
+                if spirv {
+                    "SPIR-V passthrough does not support external texture bindings"
+                } else {
+                    "MSL passthrough does not support immediates"
+                }
+            );
+        }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
     fn resolve_shader_passthrough_render_pipeline_uses_explicit_layout_and_entries() {
         let device = noop_device();
         let descriptor = msl_render_passthrough_descriptor(&device);
 
         let (vertex_entry, fragment_entry, layouts, immediate_written, required_buffer_sizes) =
-            resolve_shader_passthrough_render_pipeline_descriptor(&descriptor)
-                .expect("MSL render passthrough resolve");
+            resolve_shader_passthrough_render_pipeline_descriptor(
+                &descriptor,
+                device.limits(),
+                &FeatureSet::default(),
+            )
+            .expect("MSL render passthrough resolve");
 
         assert_eq!(vertex_entry, "vs");
         assert_eq!(fragment_entry.as_deref(), Some("fs"));
