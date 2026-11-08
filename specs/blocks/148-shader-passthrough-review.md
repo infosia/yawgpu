@@ -154,6 +154,24 @@ reference-only.
 | webgpu-native-cts, Metal, `webgpu:api,*` | pass 589,574, skip 101,793, fail 0, crash 0, on the library after R11; identical to Block 145 |
 | webgpu-native-cts, Metal, `webgpu:shader,execution,*` | pass 857,330, skip 25,860, fail 0, crash 0, xfail 63, xpass 9 (F-160), on the library after R11; pass + xfail identical to Block 146 |
 
+### Windows native Vulkan (2026-11-08)
+
+Run on Windows 11, NVIDIA GeForce RTX 5060 Ti, driver 617.14, Vulkan 1.4.351, at yawgpu
+`c4cbb5b`. The Khronos validation layer was on for the HAL ignored and e2e runs.
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace` | 1,441 passed, 0 failed |
+| clippy `-D warnings`, default (workspace), `vulkan,tiled`, `vulkan,shader-passthrough` and `gles` (`yawgpu-core`, `yawgpu-hal`, `yawgpu`, `yawgpu-tint`), all targets | clean |
+| Vulkan HAL lib tests, `vulkan,tiled` | 386 passed, 0 failed |
+| Vulkan HAL ignored tests | 82 passed, 0 failed, 0 VUIDs |
+| Vulkan e2e, every integration test, `vulkan,tiled,shader-passthrough`, `--ignored` | 178 passed, 0 failed, 0 VUIDs |
+
+On Vulkan the Block 148 paths ran: `vulkan_spirv_passthrough_compute_doubles_storage_buffer`,
+`vulkan_spirv_passthrough_render_draws_solid_color`,
+`vulkan_compute_bindings_with_render_visibility_reach_their_buffers` and
+`vulkan_render_ignores_compute_only_bindings` pass.
+
 ## Phase Review
 
 Two fresh reviews: one after S1 (R1-R10) and one after S1b (R11 and the MINOR fixes).

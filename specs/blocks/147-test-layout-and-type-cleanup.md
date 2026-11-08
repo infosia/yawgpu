@@ -102,6 +102,19 @@ R2 also moved the test-only `buffer_ranges_overlap`, `PendingWriteBatch::pool_si
 their test modules, unchanged. The `#[cfg(test)]` items left outside test modules are
 called from other modules' tests or are test hooks threaded through library code.
 
+### Windows native Vulkan (2026-11-08)
+
+Run on Windows 11, NVIDIA GeForce RTX 5060 Ti, driver 617.14, Vulkan 1.4.351, at yawgpu
+`c4cbb5b`. The Khronos validation layer was on for the HAL ignored and e2e runs.
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace` | 1,441 passed, 0 failed |
+| clippy `-D warnings`, default (workspace), `vulkan,tiled`, `vulkan,shader-passthrough` and `gles` (`yawgpu-core`, `yawgpu-hal`, `yawgpu`, `yawgpu-tint`), all targets | clean |
+| Vulkan HAL lib tests, `vulkan,tiled` | 386 passed, 0 failed |
+| Vulkan HAL ignored tests | 82 passed, 0 failed, 0 VUIDs |
+| Vulkan e2e, every integration test, `vulkan,tiled,shader-passthrough`, `--ignored` | 178 passed, 0 failed, 0 VUIDs |
+
 ## Phase Review
 
 | ID | Finding | Disposition |
