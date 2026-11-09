@@ -294,6 +294,53 @@ pub struct SubpassRenderPassDescriptor {
     pub error: Option<String>,
 }
 
+/// Builds the attachment writes that seed the whole subpass pass's scope.
+#[cfg(feature = "tiled")]
+pub(crate) fn subpass_attachment_scope_uses(
+    descriptor: &SubpassRenderPassDescriptor,
+) -> Vec<TextureScopeUse> {
+    let mut uses = Vec::new();
+    for attachment in &descriptor.color_attachments {
+        let SubpassAttachmentResource::Persistent {
+            view,
+            resolve_target,
+        } = &attachment.resource;
+        uses.push(texture_attachment_scope_use(
+            view,
+            TextureAccess::AttachmentWrite,
+            TextureAspectMask::COLOR,
+            None,
+        ));
+        if let Some(resolve_target) = resolve_target {
+            uses.push(texture_attachment_scope_use(
+                resolve_target,
+                TextureAccess::AttachmentWrite,
+                TextureAspectMask::COLOR,
+                None,
+            ));
+        }
+    }
+    if let Some(attachment) = &descriptor.depth_stencil_attachment {
+        let SubpassAttachmentResource::Persistent { view, .. } = &attachment.resource;
+        if let Some(caps) = view.texture().view_format_caps(view.format()) {
+            for (present, aspect) in [
+                (caps.aspects.depth, TextureAspectMask::DEPTH),
+                (caps.aspects.stencil, TextureAspectMask::STENCIL),
+            ] {
+                if present {
+                    uses.push(texture_attachment_scope_use(
+                        view,
+                        TextureAccess::AttachmentWrite,
+                        aspect,
+                        None,
+                    ));
+                }
+            }
+        }
+    }
+    uses
+}
+
 /// Stores the data needed to replay one subpass draw.
 #[cfg(feature = "tiled")]
 #[derive(Debug, Clone)]
@@ -312,6 +359,7 @@ pub(crate) struct SubpassDrawExecution {
 #[cfg(feature = "tiled")]
 #[derive(Debug, Default)]
 struct SubpassDrawState {
+    usage_scope: RenderUsageScope,
     render_pipeline: Option<Arc<RenderPipeline>>,
     bind_groups: std::collections::BTreeMap<u32, BoundBindGroup>,
     vertex_buffers: std::collections::BTreeMap<u32, BoundVertexBuffer>,
@@ -354,6 +402,7 @@ impl SubpassRenderPass {
         descriptor: SubpassRenderPassDescriptor,
         hal: Option<HalSubpassRenderPass>,
         is_error: bool,
+        usage_scope: RenderUsageScope,
     ) -> Self {
         Self {
             inner: Arc::new(SubpassRenderPassInner {
@@ -365,7 +414,10 @@ impl SubpassRenderPass {
                 depth_stencil_attachment: descriptor.depth_stencil_attachment,
                 hal: Mutex::new(hal),
                 active_subpass: Mutex::new(0),
-                draw_state: Mutex::new(SubpassDrawState::default()),
+                draw_state: Mutex::new(SubpassDrawState {
+                    usage_scope,
+                    ..SubpassDrawState::default()
+                }),
                 ended: Mutex::new(false),
                 is_error,
             }),
@@ -425,6 +477,7 @@ impl SubpassRenderPass {
         draw_state.bind_groups.clear();
         draw_state.vertex_buffers.clear();
         draw_state.index_buffer = None;
+        // All subpasses share one scope, including resources no longer bound.
         None
     }
 
@@ -464,13 +517,12 @@ impl SubpassRenderPass {
                 self.inner
                     .encoder
                     .record_referenced_textures(bind_group_texture_resources(&group));
-                state.bind_groups.insert(
-                    index,
-                    BoundBindGroup {
-                        group,
-                        dynamic_offsets,
-                    },
-                );
+                let bound = BoundBindGroup {
+                    group,
+                    dynamic_offsets,
+                };
+                state.usage_scope.record_bind_group(&bound)?;
+                state.bind_groups.insert(index, bound);
             } else {
                 state.bind_groups.remove(&index);
             }
@@ -494,6 +546,15 @@ impl SubpassRenderPass {
                 self.inner
                     .encoder
                     .record_referenced_buffer(Arc::clone(&buffer));
+                state.usage_scope.record_uses(
+                    [BufferScopeUse {
+                        buffer: Arc::clone(&buffer),
+                        offset,
+                        size,
+                        access: ResourceAccess::Read,
+                    }],
+                    [],
+                )?;
                 state.vertex_buffers.insert(
                     slot,
                     BoundVertexBuffer {
@@ -525,6 +586,15 @@ impl SubpassRenderPass {
             self.inner
                 .encoder
                 .record_referenced_buffer(Arc::clone(&buffer));
+            state.usage_scope.record_uses(
+                [BufferScopeUse {
+                    buffer: Arc::clone(&buffer),
+                    offset,
+                    size,
+                    access: ResourceAccess::Read,
+                }],
+                [],
+            )?;
             state.index_buffer = Some(BoundIndexBuffer {
                 buffer,
                 format,
@@ -640,6 +710,10 @@ impl SubpassRenderPass {
             return None;
         }
         *ended = true;
+        // Release encoding-time bindings and the scope even if HAL end fails.
+        // Draws move into the parent command; a retained ended handle owns no
+        // scope history or index buckets.
+        let draw_state = std::mem::take(&mut *self.inner.draw_state.lock());
         if let Some(pass) = self.inner.hal.lock().take() {
             if let Err(error) = pass.end() {
                 let message = error.to_string();
@@ -656,7 +730,7 @@ impl SubpassRenderPass {
                     extent: self.inner.extent,
                     color_attachments: self.inner.color_attachments.clone(),
                     depth_stencil_attachment: self.inner.depth_stencil_attachment.clone(),
-                    draws: self.inner.draw_state.lock().draws.clone(),
+                    draws: draw_state.draws,
                 });
         }
         self.inner.encoder.end_pass(self.inner.token);
@@ -2003,6 +2077,544 @@ mod tests {
             let (command_buffer, finish_error) = encoder.finish();
             assert!(command_buffer.is_error());
             assert!(finish_error.is_some());
+        }
+    }
+
+    mod usage_scope_tests {
+        use super::*;
+        use crate::shader::SHADER_STAGE_FRAGMENT;
+
+        const BUFFER_CONFLICT: &str =
+            "usage scope cannot read and write or write the same buffer range twice";
+        const TEXTURE_CONFLICT: &str =
+            "usage scope cannot read and write or write the same texture subresource twice";
+
+        fn sampled_view(device: &Device, format: TextureFormat, samples: u32) -> Arc<TextureView> {
+            let texture = device.create_texture(TextureDescriptor {
+                usage: TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
+                format,
+                sample_count: samples,
+                ..crate::test_helpers::texture_descriptor_4x4()
+            });
+            assert!(!texture.is_error());
+            let (view, error) = texture.create_view(TextureViewDescriptor {
+                format: None,
+                dimension: None,
+                base_mip_level: 0,
+                mip_level_count: None,
+                base_array_layer: 0,
+                array_layer_count: None,
+                aspect: None,
+                usage: None,
+                swizzle: None,
+            });
+            assert_eq!(error, None);
+            Arc::new(view)
+        }
+
+        fn sampled_group(device: &Device, view: Arc<TextureView>) -> Arc<BindGroup> {
+            let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+                entries: vec![BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: SHADER_STAGE_FRAGMENT,
+                    binding_array_size: 0,
+                    kind: Some(BindingLayoutKind::Texture {
+                        sample_type: if view.format() == rgba8_unorm() {
+                            TextureSampleType::Float
+                        } else if view.format() == TextureFormat::from_raw(TextureFormat::STENCIL8)
+                        {
+                            TextureSampleType::Uint
+                        } else {
+                            TextureSampleType::Depth
+                        },
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    }),
+                }],
+                error: None,
+            }));
+            let group = Arc::new(device.create_bind_group(
+                layout,
+                vec![BindGroupEntry {
+                    binding: 0,
+                    resource: BindGroupResource::TextureView {
+                        texture_view: view,
+                        device: Arc::new(device.clone()),
+                    },
+                }],
+            ));
+            assert!(!group.is_error());
+            group
+        }
+
+        fn buffer_group(
+            device: &Device,
+            buffer: &Arc<Buffer>,
+            ty: BufferBindingType,
+        ) -> Arc<BindGroup> {
+            let layout = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+                entries: vec![BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: SHADER_STAGE_FRAGMENT,
+                    binding_array_size: 0,
+                    kind: Some(BindingLayoutKind::Buffer {
+                        ty,
+                        has_dynamic_offset: false,
+                        min_binding_size: 0,
+                    }),
+                }],
+                error: None,
+            }));
+            let group = Arc::new(device.create_bind_group(
+                layout,
+                vec![BindGroupEntry {
+                    binding: 0,
+                    resource: BindGroupResource::Buffer {
+                        buffer: Arc::clone(buffer),
+                        device: Arc::new(device.clone()),
+                        offset: 0,
+                        size: 16,
+                    },
+                }],
+            ));
+            assert!(!group.is_error());
+            group
+        }
+
+        fn begin(device: &Device) -> (CommandEncoder, SubpassRenderPass) {
+            let layout =
+                Arc::new(device.create_subpass_pass_layout(valid_two_subpass_deferred_layout()));
+            let encoder = device.create_command_encoder();
+            let (pass, error) =
+                encoder.begin_subpass_render_pass(device, subpass_descriptor(layout, device));
+            assert_eq!(error, None);
+            assert!(!pass.is_error());
+            (encoder, pass)
+        }
+
+        fn finish_rejected(encoder: &CommandEncoder, pass: &SubpassRenderPass, expected: &str) {
+            // A subsequent error must not replace the usage conflict.
+            assert_eq!(pass.record_validation_error("later error"), None);
+            assert_eq!(pass.end(), None);
+            let (command, error) = encoder.finish();
+            assert!(command.is_error());
+            assert_eq!(error.as_deref(), Some(expected));
+        }
+
+        #[test]
+        fn duplicate_color_slots_are_rejected_at_begin() {
+            let device = noop_device();
+            let layout =
+                Arc::new(device.create_subpass_pass_layout(valid_two_subpass_deferred_layout()));
+            let mut descriptor = subpass_descriptor(layout, &device);
+            descriptor.color_attachments[1].resource =
+                descriptor.color_attachments[0].resource.clone();
+            let encoder = device.create_command_encoder();
+            let (pass, error) = encoder.begin_subpass_render_pass(&device, descriptor);
+            assert_eq!(error, None);
+            assert!(pass.is_error());
+            finish_rejected(&encoder, &pass, TEXTURE_CONFLICT);
+        }
+
+        #[test]
+        fn color_and_depth_attachment_sampling_are_rejected() {
+            for depth in [false, true] {
+                let device = noop_device();
+                let format = if depth {
+                    TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS)
+                } else {
+                    rgba8_unorm()
+                };
+                let view = sampled_view(&device, format, 1);
+                let group = sampled_group(&device, Arc::clone(&view));
+                let mut layout = valid_two_subpass_deferred_layout();
+                if depth {
+                    layout.depth_stencil_attachment = Some(depth_attachment_layout());
+                    layout.subpasses[0].uses_depth_stencil = true;
+                }
+                let layout = Arc::new(device.create_subpass_pass_layout(layout));
+                let mut descriptor = subpass_descriptor(layout, &device);
+                let resource = SubpassAttachmentResource::Persistent {
+                    view,
+                    resolve_target: None,
+                };
+                if depth {
+                    descriptor.depth_stencil_attachment =
+                        Some(SubpassDepthStencilAttachmentBinding {
+                            resource,
+                            depth_load_op: LoadOp::Clear,
+                            depth_store_op: StoreOp::Store,
+                            depth_clear_value: 1.0,
+                            stencil_load_op: LoadOp::Undefined,
+                            stencil_store_op: StoreOp::Undefined,
+                            stencil_clear_value: 0,
+                        });
+                } else {
+                    descriptor.color_attachments[0].resource = resource;
+                }
+                let encoder = device.create_command_encoder();
+                let (pass, error) = encoder.begin_subpass_render_pass(&device, descriptor);
+                assert_eq!(error, None);
+                assert!(!pass.is_error());
+                assert_eq!(
+                    pass.set_bind_group(0, Some(group), Vec::new(), device.limits()),
+                    None
+                );
+                assert!(pass.inner.draw_state.lock().bind_groups.is_empty());
+                finish_rejected(&encoder, &pass, TEXTURE_CONFLICT);
+            }
+        }
+
+        #[test]
+        fn combined_depth_stencil_attachment_rejects_sampling_either_aspect() {
+            for aspect in [TextureAspect::DepthOnly, TextureAspect::StencilOnly] {
+                let device = noop_device();
+                let format = TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8);
+                let view = sampled_view(&device, format, 1);
+                let (sampled, error) = view.texture().create_view(TextureViewDescriptor {
+                    format: None,
+                    dimension: None,
+                    base_mip_level: 0,
+                    mip_level_count: None,
+                    base_array_layer: 0,
+                    array_layer_count: None,
+                    aspect: Some(aspect),
+                    usage: Some(TextureUsage::TEXTURE_BINDING),
+                    swizzle: None,
+                });
+                assert_eq!(error, None);
+                let group = sampled_group(&device, Arc::new(sampled));
+                let mut layout = valid_two_subpass_deferred_layout();
+                layout.depth_stencil_attachment = Some(AttachmentLayout {
+                    format,
+                    sample_count: 1,
+                });
+                layout.subpasses[0].uses_depth_stencil = true;
+                let layout = Arc::new(device.create_subpass_pass_layout(layout));
+                let mut descriptor = subpass_descriptor(layout, &device);
+                descriptor.depth_stencil_attachment = Some(SubpassDepthStencilAttachmentBinding {
+                    resource: SubpassAttachmentResource::Persistent {
+                        view,
+                        resolve_target: None,
+                    },
+                    depth_load_op: LoadOp::Clear,
+                    depth_store_op: StoreOp::Store,
+                    depth_clear_value: 1.0,
+                    stencil_load_op: LoadOp::Clear,
+                    stencil_store_op: StoreOp::Store,
+                    stencil_clear_value: 0,
+                });
+                let encoder = device.create_command_encoder();
+                let (pass, error) = encoder.begin_subpass_render_pass(&device, descriptor);
+                assert_eq!(error, None);
+                assert!(!pass.is_error());
+                assert_eq!(
+                    pass.set_bind_group(0, Some(group), Vec::new(), device.limits()),
+                    None
+                );
+                finish_rejected(&encoder, &pass, TEXTURE_CONFLICT);
+            }
+        }
+
+        #[test]
+        fn resolve_target_sampling_is_rejected() {
+            let device = noop_device();
+            let source = sampled_view(&device, rgba8_unorm(), 4);
+            let resolve = sampled_view(&device, rgba8_unorm(), 1);
+            let group = sampled_group(&device, Arc::clone(&resolve));
+            let mut layout = valid_two_subpass_deferred_layout();
+            layout.color_attachments[0].sample_count = 4;
+            let layout = Arc::new(device.create_subpass_pass_layout(layout));
+            let mut descriptor = subpass_descriptor(layout, &device);
+            descriptor.color_attachments[0].resource = SubpassAttachmentResource::Persistent {
+                view: source,
+                resolve_target: Some(resolve),
+            };
+            let encoder = device.create_command_encoder();
+            let (pass, error) = encoder.begin_subpass_render_pass(&device, descriptor);
+            assert_eq!(error, None);
+            assert!(!pass.is_error());
+            assert_eq!(
+                pass.set_bind_group(0, Some(group), Vec::new(), device.limits()),
+                None
+            );
+            finish_rejected(&encoder, &pass, TEXTURE_CONFLICT);
+        }
+
+        #[test]
+        fn conflicting_groups_are_rejected_across_bindings_and_subpasses() {
+            for advance in [false, true] {
+                for read_type in [
+                    BufferBindingType::Uniform,
+                    BufferBindingType::ReadOnlyStorage,
+                ] {
+                    let device = noop_device();
+                    let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+                        usage: BufferUsage::STORAGE | BufferUsage::UNIFORM,
+                        size: 64,
+                        mapped_at_creation: false,
+                    }));
+                    let write = buffer_group(&device, &buffer, BufferBindingType::Storage);
+                    let read = buffer_group(&device, &buffer, read_type);
+                    let (encoder, pass) = begin(&device);
+                    assert_eq!(
+                        pass.set_bind_group(0, Some(write), Vec::new(), device.limits()),
+                        None
+                    );
+                    if advance {
+                        assert_eq!(pass.next_subpass(), None);
+                        assert!(pass.inner.draw_state.lock().bind_groups.is_empty());
+                    }
+                    assert_eq!(
+                        pass.set_bind_group(1, Some(read), Vec::new(), device.limits()),
+                        None
+                    );
+                    assert!(!pass.inner.draw_state.lock().bind_groups.contains_key(&1));
+                    finish_rejected(&encoder, &pass, BUFFER_CONFLICT);
+                }
+            }
+        }
+
+        #[test]
+        fn vertex_and_index_buffers_share_the_render_scope() {
+            for index in [false, true] {
+                for writable in [false, true] {
+                    // Exercise both setter orders: the rejected binding must not be stored.
+                    for storage_first in [false, true] {
+                        let device = noop_device();
+                        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+                            usage: BufferUsage::STORAGE | BufferUsage::VERTEX | BufferUsage::INDEX,
+                            size: 64,
+                            mapped_at_creation: false,
+                        }));
+                        let group = buffer_group(
+                            &device,
+                            &buffer,
+                            if writable {
+                                BufferBindingType::Storage
+                            } else {
+                                BufferBindingType::ReadOnlyStorage
+                            },
+                        );
+                        let (encoder, pass) = begin(&device);
+                        let set_storage = || {
+                            pass.set_bind_group(
+                                0,
+                                Some(Arc::clone(&group)),
+                                Vec::new(),
+                                device.limits(),
+                            )
+                        };
+                        let set_buffer = || {
+                            if index {
+                                pass.set_index_buffer(
+                                    Arc::clone(&buffer),
+                                    Some(IndexFormat::Uint16),
+                                    8,
+                                    32,
+                                )
+                            } else {
+                                pass.set_vertex_buffer(
+                                    0,
+                                    Some(Arc::clone(&buffer)),
+                                    8,
+                                    32,
+                                    device.limits(),
+                                )
+                            }
+                        };
+                        if storage_first {
+                            assert_eq!(set_storage(), None);
+                            assert_eq!(set_buffer(), None);
+                        } else {
+                            assert_eq!(set_buffer(), None);
+                            assert_eq!(set_storage(), None);
+                        }
+                        if writable {
+                            let state = pass.inner.draw_state.lock();
+                            if storage_first {
+                                assert!(state.vertex_buffers.is_empty());
+                                assert!(state.index_buffer.is_none());
+                            } else {
+                                assert!(state.bind_groups.is_empty());
+                            }
+                            drop(state);
+                            finish_rejected(&encoder, &pass, BUFFER_CONFLICT);
+                        } else {
+                            let state = pass.inner.draw_state.lock();
+                            let usage = &state.usage_scope.buffer_uses;
+                            assert_eq!(usage.len(), 2);
+                            let buffer_use = &usage[usize::from(storage_first)];
+                            assert_eq!((buffer_use.offset, buffer_use.size), (8, 32));
+                            drop(state);
+                            assert_eq!(pass.end(), None);
+                            let (command, error) = encoder.finish();
+                            assert_eq!(error, None);
+                            assert_eq!(device.queue().submit(&[Arc::new(command)]), None);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn deferred_mixed_group_and_non_attachment_sampling_record_and_submit() {
+            let device = noop_device();
+            let layout =
+                Arc::new(device.create_subpass_pass_layout(valid_two_subpass_deferred_layout()));
+            let module = Arc::new(
+                device.create_shader_module(ShaderModuleSource::Wgsl(
+                    "enable chromium_internal_input_attachments;
+                 @group(0) @binding(0) @input_attachment_index(0) var ia: input_attachment<f32>;
+                 @group(0) @binding(1) var<uniform> tint: vec4f;
+                 @group(0) @binding(2) var tex: texture_2d<f32>;
+                 @vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0, 0.0, 0.0, 1.0); }
+                 @fragment fn fs() -> @location(0) vec4f {
+                     return inputAttachmentLoad(ia) + tint + textureLoad(tex, vec2i(0), 0);
+                 }"
+                    .to_owned(),
+                )),
+            );
+            assert!(!module.is_error());
+            let pipeline = Arc::new(device.create_subpass_render_pipeline(
+                SubpassRenderPipelineDescriptor {
+                    base: render_pipeline_descriptor(module),
+                    pass_layout: Arc::clone(&layout),
+                    subpass_index: 1,
+                    error: None,
+                },
+            ));
+            assert!(!pipeline.is_error());
+            let uniform = Arc::new(device.create_buffer(BufferDescriptor {
+                usage: BufferUsage::UNIFORM,
+                size: 16,
+                mapped_at_creation: false,
+            }));
+            let sampled = sampled_view(&device, rgba8_unorm(), 1);
+            let group = Arc::new(device.create_bind_group(
+                Arc::clone(&pipeline.bind_group_layouts()[0]),
+                vec![
+                    BindGroupEntry {
+                        binding: 1,
+                        resource: BindGroupResource::Buffer {
+                            buffer: uniform,
+                            device: Arc::new(device.clone()),
+                            offset: 0,
+                            size: 16,
+                        },
+                    },
+                    BindGroupEntry {
+                        binding: 2,
+                        resource: BindGroupResource::TextureView {
+                            texture_view: sampled,
+                            device: Arc::new(device.clone()),
+                        },
+                    },
+                ],
+            ));
+            assert!(!group.is_error());
+            let encoder = device.create_command_encoder();
+            let (pass, error) = encoder.begin_subpass_render_pass(
+                &device,
+                subpass_descriptor(Arc::clone(&layout), &device),
+            );
+            assert_eq!(error, None);
+            assert_eq!(
+                pass.set_pipeline(subpass_pipeline(&device, layout, 0)),
+                None
+            );
+            assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+            assert_eq!(pass.next_subpass(), None);
+            assert_eq!(pass.set_pipeline(pipeline), None);
+            assert_eq!(
+                pass.set_bind_group(0, Some(group), Vec::new(), device.limits()),
+                None
+            );
+            {
+                let state = pass.inner.draw_state.lock();
+                assert_eq!(state.usage_scope.buffer_uses.len(), 1);
+                // Two attachment writes plus the unrelated sampled texture.
+                assert_eq!(state.usage_scope.texture_uses.len(), 3);
+            }
+            assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+            assert_eq!(pass.end(), None);
+            let (command, error) = encoder.finish();
+            assert_eq!(error, None);
+            let CommandExecution::SubpassRenderPass(recorded) = &command.command_ops()[0] else {
+                panic!("expected recorded subpass pass");
+            };
+            assert_eq!(recorded.draws.len(), 2);
+            assert_eq!(recorded.draws[1].bind_groups[&0].group.entries().len(), 2);
+            assert_eq!(device.queue().submit(&[Arc::new(command)]), None);
+        }
+
+        #[test]
+        fn end_releases_scope_and_bound_texture_handles() {
+            let device = noop_device();
+            let (encoder, pass) = begin(&device);
+            let view = sampled_view(&device, rgba8_unorm(), 1);
+            let group = sampled_group(&device, view);
+            let caller_refs = Arc::strong_count(&group);
+            assert_eq!(
+                pass.set_bind_group(0, Some(Arc::clone(&group)), Vec::new(), device.limits()),
+                None
+            );
+            let state = pass.inner.draw_state.lock();
+            let attachment = state.usage_scope.texture_uses[0].texture.clone();
+            let attachment_refs = Arc::strong_count(&attachment.inner);
+            assert_eq!(state.usage_scope.texture_uses.len(), 3);
+            drop(state);
+            assert_eq!(pass.end(), None);
+            assert!(pass
+                .inner
+                .draw_state
+                .lock()
+                .usage_scope
+                .texture_uses
+                .is_empty());
+            // End added the parent command's view handles but removed both the
+            // scope history and its cloned index bucket for this attachment.
+            assert_eq!(Arc::strong_count(&attachment.inner), attachment_refs - 2);
+            assert_eq!(Arc::strong_count(&group), caller_refs);
+            let (command, error) = encoder.finish();
+            assert_eq!(error, None);
+            assert_eq!(device.queue().submit(&[Arc::new(command)]), None);
+            // Keep `pass` alive until after these checks to model a leaked handle.
+            assert!(*pass.inner.ended.lock());
+        }
+
+        #[test]
+        fn drop_finishes_with_scope_history_and_keeps_the_first_error() {
+            let device = noop_device();
+            let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+                usage: BufferUsage::STORAGE | BufferUsage::UNIFORM,
+                size: 64,
+                mapped_at_creation: false,
+            }));
+            let (encoder, pass) = begin(&device);
+            assert_eq!(
+                pass.set_bind_group(
+                    0,
+                    Some(buffer_group(&device, &buffer, BufferBindingType::Storage)),
+                    Vec::new(),
+                    device.limits()
+                ),
+                None
+            );
+            assert_eq!(pass.next_subpass(), None);
+            assert_eq!(
+                pass.set_bind_group(
+                    1,
+                    Some(buffer_group(&device, &buffer, BufferBindingType::Uniform)),
+                    Vec::new(),
+                    device.limits()
+                ),
+                None
+            );
+            drop(pass);
+            let (command, error) = encoder.finish();
+            assert!(command.is_error());
+            assert_eq!(error.as_deref(), Some(BUFFER_CONFLICT));
         }
     }
 }

@@ -72,9 +72,7 @@ pub(crate) struct PassEncoderState {
     pub(crate) used_occlusion_queries: BTreeSet<u32>,
     pub(crate) written_occlusion_queries: BTreeSet<u32>,
     pub(crate) command_referenced_buffers: Vec<Arc<Buffer>>,
-    pub(crate) scope_buffer_uses: Vec<BufferScopeUse>,
-    pub(crate) scope_texture_uses: Vec<TextureScopeUse>,
-    scope_usage_index: LenientUsageScopeIndex,
+    pub(crate) usage_scope: RenderUsageScope,
     pub(crate) draw_count: u64,
     pub(crate) max_draw_count: u64,
     pub(crate) immediate_data: Vec<u8>,
@@ -147,9 +145,7 @@ impl PassEncoderState {
             used_occlusion_queries: BTreeSet::new(),
             written_occlusion_queries: BTreeSet::new(),
             command_referenced_buffers: Vec::new(),
-            scope_buffer_uses: Vec::new(),
-            scope_texture_uses: Vec::new(),
-            scope_usage_index: LenientUsageScopeIndex::default(),
+            usage_scope: RenderUsageScope::default(),
             draw_count: 0,
             max_draw_count: init.max_draw_count,
             // Dawn: `ImmediateDataContent::mData` is zero-initialized
@@ -182,7 +178,7 @@ impl PassEncoderState {
     /// Private on purpose: [`PassEncoderInner::end`], in this module, is the
     /// only correct caller, and it calls this after `ended` has been set. The
     /// other owner of a [`PassEncoderState`] -- `RenderBundleEncoderState` --
-    /// has no `ended` flag and reads `scope_buffer_uses`, `scope_texture_uses`
+    /// has no `ended` flag and reads the usage-scope histories
     /// and `immediate_data` back out at `finish()` time, so clearing there
     /// would silently produce an empty bundle.
     ///
@@ -196,14 +192,8 @@ impl PassEncoderState {
     /// `overlay_written_immediates` index unchecked, under the documented
     /// precondition that it is never reset for the lifetime of the pass.
     ///
-    /// `scope_usage_index` is cleared with the rest even though it looks like
-    /// pure bookkeeping: its texture buckets hold *clones* of
-    /// [`TextureScopeUse`], and each of those owns a [`Texture`] handle. Leaving
-    /// it behind is what kept a leaked, ended render pass encoder pinning its
-    /// attachment textures after every other field had been released. Clearing
-    /// it also *restores* the index's documented invariant -- that every entry
-    /// has a corresponding owning handle in the scope history -- which dropping
-    /// `scope_buffer_uses` / `scope_texture_uses` on their own would falsify.
+    /// The usage scope is replaced as a unit so its identity index and owning
+    /// histories are released together, preserving the index's invariant.
     fn clear_ended_resources(&mut self) {
         self.end_timestamp = None;
         self.render_pipeline = None;
@@ -217,12 +207,7 @@ impl PassEncoderState {
         self.render_depth_stencil_attachment = None;
         self.occlusion_query_set = None;
         self.command_referenced_buffers.clear();
-        self.scope_buffer_uses.clear();
-        self.scope_texture_uses.clear();
-        // A default index is the empty index, so this keeps the type's
-        // invariants self-evident, and replacing rather than clearing the maps
-        // releases their table allocations too.
-        self.scope_usage_index = LenientUsageScopeIndex::default();
+        self.usage_scope = RenderUsageScope::default();
         // `end()` only `mem::take`s `render_commands` when the pass has at
         // least one attachment; a render pass begun with zero color
         // attachments and no depth-stencil takes the other arm and records no
@@ -289,6 +274,56 @@ impl PassEncoderState {
     ) -> Result<(), String> {
         record_resource_usage_scope_uses(self, Vec::new(), uses.clone())?;
         self.attachment_texture_uses = uses;
+        Ok(())
+    }
+}
+
+/// Owns a lenient render usage scope, shared by regular and subpass passes.
+///
+/// The histories keep every identity in the index alive. Keep them and the
+/// index together when moving or releasing a scope; subpass transitions retain
+/// this entire tracker even though they clear the currently bound resources.
+#[derive(Debug, Default)]
+pub(crate) struct RenderUsageScope {
+    /// Buffer history retained for identity ownership and render-bundle replay.
+    pub(crate) buffer_uses: Vec<BufferScopeUse>,
+    /// Texture history retained for identity ownership and render-bundle replay.
+    pub(crate) texture_uses: Vec<TextureScopeUse>,
+    index: LenientUsageScopeIndex,
+}
+
+impl RenderUsageScope {
+    /// Collects and records a bind group's uses, including dynamic offsets.
+    pub(crate) fn record_bind_group(&mut self, bound: &BoundBindGroup) -> Result<(), String> {
+        let mut buffer_uses = Vec::new();
+        let mut texture_uses = Vec::new();
+        collect_bind_group_usage(
+            bound.group.layout(),
+            bound,
+            &mut buffer_uses,
+            &mut texture_uses,
+        )?;
+        self.record_uses(buffer_uses, texture_uses)
+    }
+
+    /// Validates a batch atomically, then retains its owning resource handles.
+    pub(crate) fn record_uses(
+        &mut self,
+        buffer_uses: impl IntoIterator<Item = BufferScopeUse>,
+        texture_uses: impl IntoIterator<Item = TextureScopeUse>,
+    ) -> Result<(), String> {
+        let buffer_uses = buffer_uses.into_iter().collect::<Vec<_>>();
+        let texture_uses = texture_uses.into_iter().collect::<Vec<_>>();
+        // The index contains only already-valid uses. One access therefore fully
+        // represents a buffer, while textures need per-resource subresource
+        // buckets. Identical bucket entries add no information to pairwise,
+        // symmetric validation, so they are recorded once; this keeps repeated
+        // binding of the same group O(1) amortized. The history vectors retain
+        // every use in original order for their non-validation consumers.
+        self.index
+            .validate_and_record(&buffer_uses, &texture_uses)?;
+        self.buffer_uses.extend(buffer_uses);
+        self.texture_uses.extend(texture_uses);
         Ok(())
     }
 }
@@ -1328,15 +1363,7 @@ pub(crate) fn record_bind_group_usage_scope(
     state: &mut PassEncoderState,
     bound: &BoundBindGroup,
 ) -> Result<(), String> {
-    let mut buffer_uses = Vec::new();
-    let mut texture_uses = Vec::new();
-    collect_bind_group_usage(
-        bound.group.layout(),
-        bound,
-        &mut buffer_uses,
-        &mut texture_uses,
-    )?;
-    record_resource_usage_scope_uses(state, buffer_uses, texture_uses)
+    state.usage_scope.record_bind_group(bound)
 }
 
 pub(crate) fn record_buffer_usage_scope_use(
@@ -1359,20 +1386,7 @@ pub(crate) fn record_resource_usage_scope_uses(
     buffer_uses: impl IntoIterator<Item = BufferScopeUse>,
     texture_uses: impl IntoIterator<Item = TextureScopeUse>,
 ) -> Result<(), String> {
-    let buffer_uses = buffer_uses.into_iter().collect::<Vec<_>>();
-    let texture_uses = texture_uses.into_iter().collect::<Vec<_>>();
-    // The index contains only already-valid uses. One access therefore fully
-    // represents a buffer, while textures need per-resource subresource
-    // buckets. Identical bucket entries add no information to pairwise,
-    // symmetric validation, so they are recorded once; this keeps repeated
-    // binding of the same group O(1) amortized. The history vectors retain
-    // every use in original order for their non-validation consumers.
-    state
-        .scope_usage_index
-        .validate_and_record(&buffer_uses, &texture_uses)?;
-    state.scope_buffer_uses.extend(buffer_uses);
-    state.scope_texture_uses.extend(texture_uses);
-    Ok(())
+    state.usage_scope.record_uses(buffer_uses, texture_uses)
 }
 
 pub(crate) fn validate_resource_usage_scope(
@@ -2807,6 +2821,91 @@ mod tests {
     }
 
     #[test]
+    fn render_usage_scope_retains_handles_and_rolls_back_rejected_batches() {
+        let device = noop_device();
+        let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE | BufferUsage::UNIFORM,
+            size: 64,
+            mapped_at_creation: false,
+        }));
+        let texture = noop_texture();
+        let buffer_refs = Arc::strong_count(&buffer);
+        let texture_refs = Arc::strong_count(&texture.inner);
+        let mut scope = RenderUsageScope::default();
+        assert_eq!(
+            scope.record_uses(
+                [buffer_scope_use(
+                    Arc::clone(&buffer),
+                    0,
+                    16,
+                    ResourceAccess::Read
+                )],
+                [],
+            ),
+            Ok(())
+        );
+        // The texture fails after the index has tentatively accepted the
+        // buffer write, so neither half of this batch may enter the scope.
+        let write = texture_use(
+            &texture,
+            0,
+            1,
+            0,
+            1,
+            TextureAspectMask::COLOR,
+            TextureAccess::AttachmentWrite,
+        );
+        let other = Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::STORAGE | BufferUsage::UNIFORM,
+            size: 64,
+            mapped_at_creation: false,
+        }));
+        let other_refs = Arc::strong_count(&other);
+        assert!(scope
+            .record_uses(
+                [buffer_scope_use(
+                    Arc::clone(&other),
+                    0,
+                    16,
+                    ResourceAccess::Write
+                )],
+                [write.clone(), write],
+            )
+            .is_err());
+        assert_eq!(Arc::strong_count(&other), other_refs);
+        assert_eq!(Arc::strong_count(&texture.inner), texture_refs);
+        assert!(scope.texture_uses.is_empty());
+        assert!(scope.index.texture_uses_by_identity.is_empty());
+        assert_eq!(scope.index.buffer_accesses.len(), 1);
+        assert_eq!(
+            scope.record_uses(
+                [buffer_scope_use(
+                    Arc::clone(&other),
+                    0,
+                    16,
+                    ResourceAccess::Read
+                )],
+                [texture_use(
+                    &texture,
+                    0,
+                    1,
+                    0,
+                    1,
+                    TextureAspectMask::COLOR,
+                    TextureAccess::Read,
+                )],
+            ),
+            Ok(())
+        );
+        assert_eq!(Arc::strong_count(&buffer), buffer_refs + 1);
+        assert_eq!(Arc::strong_count(&texture.inner), texture_refs + 2);
+        drop(scope);
+        assert_eq!(Arc::strong_count(&buffer), buffer_refs);
+        assert_eq!(Arc::strong_count(&other), other_refs);
+        assert_eq!(Arc::strong_count(&texture.inner), texture_refs);
+    }
+
+    #[test]
     fn incremental_buffer_scope_rejects_read_write_across_bind_groups() {
         let device = noop_device();
         let buffer = Arc::new(device.create_buffer(BufferDescriptor {
@@ -2831,7 +2930,7 @@ mod tests {
             record_bind_group_usage_scope(&mut state, &write_group),
             expected
         );
-        assert_eq!(state.scope_buffer_uses.len(), 1);
+        assert_eq!(state.usage_scope.buffer_uses.len(), 1);
     }
 
     #[test]
@@ -2860,8 +2959,8 @@ mod tests {
             record_bind_group_usage_scope(&mut state, &conflicting_group),
             expected
         );
-        assert!(state.scope_buffer_uses.is_empty());
-        assert!(state.scope_usage_index.buffer_accesses.is_empty());
+        assert!(state.usage_scope.buffer_uses.is_empty());
+        assert!(state.usage_scope.index.buffer_accesses.is_empty());
     }
 
     #[test]
@@ -2882,8 +2981,8 @@ mod tests {
                 .expect("repeated identical bind group use should remain valid");
         }
 
-        assert_eq!(state.scope_buffer_uses.len(), BIND_COUNT);
-        assert_eq!(state.scope_usage_index.buffer_accesses.len(), 1);
+        assert_eq!(state.usage_scope.buffer_uses.len(), BIND_COUNT);
+        assert_eq!(state.usage_scope.index.buffer_accesses.len(), 1);
     }
 
     #[test]
@@ -3283,7 +3382,7 @@ mod tests {
             ),
             validate_texture_usage_scope_lenient(&[write_color_mip_0, read_color_mip_0])
         );
-        assert_eq!(state.scope_texture_uses.len(), 3);
+        assert_eq!(state.usage_scope.texture_uses.len(), 3);
     }
 
     #[test]
@@ -3315,8 +3414,8 @@ mod tests {
             record_resource_usage_scope_uses(&mut state, Vec::new(), uses.clone()),
             validate_texture_usage_scope_lenient(&uses)
         );
-        assert!(state.scope_texture_uses.is_empty());
-        assert!(state.scope_usage_index.texture_uses_by_identity.is_empty());
+        assert!(state.usage_scope.texture_uses.is_empty());
+        assert!(state.usage_scope.index.texture_uses_by_identity.is_empty());
     }
 
     #[test]
@@ -3339,11 +3438,12 @@ mod tests {
                 .expect("repeated identical texture use should remain valid");
         }
 
-        assert_eq!(state.scope_texture_uses.len(), 100);
-        assert_eq!(state.scope_usage_index.texture_uses_by_identity.len(), 1);
+        assert_eq!(state.usage_scope.texture_uses.len(), 100);
+        assert_eq!(state.usage_scope.index.texture_uses_by_identity.len(), 1);
         assert_eq!(
             state
-                .scope_usage_index
+                .usage_scope
+                .index
                 .texture_uses_by_identity
                 .values()
                 .next()
@@ -3403,7 +3503,7 @@ mod tests {
             },
         )
         .expect("index buffer read use should be valid");
-        assert_eq!(state.scope_buffer_uses.len(), 2);
+        assert_eq!(state.usage_scope.buffer_uses.len(), 2);
     }
 
     #[test]
@@ -4096,7 +4196,7 @@ mod tests {
         assert_eq!(Arc::strong_count(&bind_group), bind_group_refs);
         assert_eq!(Arc::strong_count(&vertex_buffer), vertex_buffer_refs);
         // The attachment texture is reached both directly and through
-        // `scope_usage_index`'s cloned `TextureScopeUse` buckets; `end()` has to
+        // the usage scope index's cloned `TextureScopeUse` buckets; `end()` has to
         // release every one of those for this to hold.
         assert_eq!(
             Arc::strong_count(&attachment_texture.inner),

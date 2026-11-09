@@ -100,6 +100,11 @@ file is created.
 | `143-destroy-frees-gpu-memory.md` | `destroy()` frees GPU memory |
 | `144-external-texture-plane-lazy-init.md` | External texture planes are lazily zero-initialized |
 | `145-external-texture-plane-views.md` | External texture planes are bound as their views |
+| `146-vulkan-external-textures.md` | External textures on Vulkan |
+| `147-test-layout-and-type-cleanup.md` | Test-module layout, a test-only shim, the pass timestamp type, and `HalError: Clone` |
+| `148-shader-passthrough-review.md` | Shader passthrough Phase Review fixes and the `ShaderSourceSPIRV` instance feature |
+| `149-subpass-external-textures-and-color-target-format.md` | External textures in subpass draws, color-target format check, suboptimal surfaces |
+| `150-subpass-usage-scope.md` | Usage-scope validation for subpass render passes |
 
 Vendor-extension blocks (33, 55) are **not** Dawn ports — their rules are
 exercised by direct unit tests (principle 1) + GPU-gated e2e, and they live

@@ -474,7 +474,14 @@ impl CommandEncoder {
         state.next_pass_id = state.next_pass_id.saturating_add(1);
         if state.lifecycle != CommandEncoderLifecycle::Recording {
             return (
-                SubpassRenderPass::new(self.clone(), token, descriptor, None, true),
+                SubpassRenderPass::new(
+                    self.clone(),
+                    token,
+                    descriptor,
+                    None,
+                    true,
+                    RenderUsageScope::default(),
+                ),
                 Some("command encoder cannot record after finish".to_owned()),
             );
         }
@@ -484,7 +491,14 @@ impl CommandEncoder {
                 "command encoder cannot begin a pass while another pass is open",
             );
             return (
-                SubpassRenderPass::new(self.clone(), token, descriptor, None, true),
+                SubpassRenderPass::new(
+                    self.clone(),
+                    token,
+                    descriptor,
+                    None,
+                    true,
+                    RenderUsageScope::default(),
+                ),
                 None,
             );
         }
@@ -494,14 +508,27 @@ impl CommandEncoder {
                 "subpass render pass must be the first command encoder operation",
             );
             return (
-                SubpassRenderPass::new(self.clone(), token, descriptor, None, true),
+                SubpassRenderPass::new(
+                    self.clone(),
+                    token,
+                    descriptor,
+                    None,
+                    true,
+                    RenderUsageScope::default(),
+                ),
                 None,
             );
         }
 
+        let mut usage_scope = RenderUsageScope::default();
         let validation_error =
             validate_subpass_render_pass_descriptor(&descriptor, &self.inner.features)
-                .or_else(|| resolve_subpass_render_pass_resources(device, &descriptor).err());
+                .or_else(|| resolve_subpass_render_pass_resources(device, &descriptor).err())
+                .or_else(|| {
+                    usage_scope
+                        .record_uses([], subpass_attachment_scope_uses(&descriptor))
+                        .err()
+                });
         let mut hal = None;
         let mut is_error = validation_error.is_some();
         if let Some(message) = validation_error {
@@ -518,7 +545,7 @@ impl CommandEncoder {
         state.has_recorded_command = true;
         state.open_pass = Some(token);
         (
-            SubpassRenderPass::new(self.clone(), token, descriptor, hal, is_error),
+            SubpassRenderPass::new(self.clone(), token, descriptor, hal, is_error, usage_scope),
             None,
         )
     }

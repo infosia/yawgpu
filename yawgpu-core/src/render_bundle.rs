@@ -188,8 +188,8 @@ impl RenderBundleEncoder {
         let error = state.first_error.clone();
         let referenced_buffers = render_bundle_referenced_buffers(&state.commands);
         let referenced_textures = render_bundle_referenced_textures(&state.commands);
-        let buffer_uses = state.pass_state.scope_buffer_uses.clone();
-        let texture_uses = state.pass_state.scope_texture_uses.clone();
+        let buffer_uses = state.pass_state.usage_scope.buffer_uses.clone();
+        let texture_uses = state.pass_state.usage_scope.texture_uses.clone();
         let commands = state.commands.clone();
         let draw_count = state.pass_state.draw_count;
         let final_immediate_data = state.pass_state.immediate_data.clone();
