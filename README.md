@@ -159,9 +159,8 @@ the `YAWGPU_GLES_BACKEND` environment variable.
 
 `yawgpuDeviceCreateExternalTexture` creates a `WGPUExternalTexture` from one
 plane (RGBA) or two planes (NV12, with YUV→RGB conversion). It is experimental
-and implemented on **Metal and Vulkan**. GLES has no lowering, and a tiled
-(multi-subpass) pipeline that uses an external texture is rejected with a device
-error.
+and implemented on **Metal and Vulkan**, including in tiled (multi-subpass)
+draws. GLES has no lowering.
 
 ### Tiled rendering (TBDR / multi-subpass) — `tiled`
 

@@ -69,7 +69,8 @@ R5. **Unchanged.**
 - Tiled subpass pipelines: if one uses an external texture, it fails with an internal
   error that names the subpass path, on every backend; supporting it is out of scope. On
   Metal this replaces a silent failure: the subpass encoder passed no external-texture
-  bindings, so the planes were left unbound.
+  bindings, so the planes were left unbound. **Superseded by Block 149:** subpass draws now
+  bind external textures on Metal and Vulkan.
 - `shader-passthrough` SPIR-V: no change.
 
 ## Tests
@@ -91,7 +92,7 @@ R5. **Unchanged.**
 
 ## Out of scope
 
-- External textures in tiled subpass pipelines.
+- External textures in tiled subpass pipelines (done later in Block 149).
 - GLES.
 - Dawn's static sampler for external textures (`NeedsStaticSamplerForExternalTexture`).
 
