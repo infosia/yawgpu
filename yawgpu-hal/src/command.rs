@@ -589,6 +589,8 @@ pub struct HalSubpassDraw {
     pub bind_textures: Vec<HalBoundTexture>,
     /// Bind samplers.
     pub bind_samplers: Vec<HalBoundSampler>,
+    /// Bound external texture planes and conversion parameters.
+    pub bind_external_textures: Vec<HalBoundExternalTexture>,
     /// Vertex buffers.
     pub vertex_buffers: Vec<HalBoundBuffer>,
     /// Bound index buffer for indexed draws.

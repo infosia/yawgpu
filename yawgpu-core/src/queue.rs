@@ -1576,6 +1576,7 @@ fn hal_subpass_draw_execution(draw: &SubpassDrawExecution) -> Option<HalSubpassD
         bind_buffers: bindings.buffers,
         bind_textures: bindings.textures,
         bind_samplers: bindings.samplers,
+        bind_external_textures: bindings.external_textures,
         vertex_buffers,
         viewport: draw.viewport.map(hal_viewport),
         scissor_rect: draw.scissor_rect.map(hal_scissor_rect),
@@ -4367,6 +4368,8 @@ fn fs() -> @location(0) vec4<f32> {
         Compute,
         Render,
         Bundle,
+        #[cfg(feature = "tiled")]
+        Subpass,
     }
 
     fn external_texture_commands(
@@ -4410,6 +4413,76 @@ fn fs() -> @location(0) vec4<f32> {
                     None
                 );
                 assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
+                assert_eq!(pass.end(), None);
+            }
+            #[cfg(feature = "tiled")]
+            ExternalTexturePass::Subpass => {
+                let module = Arc::new(device.create_shader_module(ShaderModuleSource::Wgsl(
+                    "@group(0) @binding(0) var ext: texture_external;
+                     @vertex fn vs() -> @builtin(position) vec4f { return vec4f(0, 0, 0, 1); }
+                     @fragment fn fs() -> @location(0) vec4f { return textureLoad(ext, vec2u(0)); }"
+                        .to_owned(),
+                )));
+                let mut base = render_pipeline_descriptor(module);
+                base.layout = RenderPipelineLayout::Explicit(layout);
+                let pass_layout = Arc::new(device.create_subpass_pass_layout(
+                    SubpassPassLayoutDescriptor {
+                        color_attachments: vec![AttachmentLayout {
+                            format: rgba8_unorm(),
+                            sample_count: 1,
+                        }],
+                        depth_stencil_attachment: None,
+                        subpasses: vec![SubpassLayoutDesc {
+                            color_attachment_indices: vec![0],
+                            uses_depth_stencil: false,
+                            input_attachments: Vec::new(),
+                        }],
+                        dependencies: Vec::new(),
+                        error: None,
+                    },
+                ));
+                let pipeline = Arc::new(device.create_subpass_render_pipeline(
+                    SubpassRenderPipelineDescriptor {
+                        base,
+                        pass_layout: pass_layout.clone(),
+                        subpass_index: 0,
+                        error: None,
+                    },
+                ));
+                assert!(!pipeline.is_error());
+                let view = noop_render_attachment(device);
+                view.texture()
+                    .set_initialized(0, 0, InitAspect::Color, true);
+                let (pass, error) = encoder.begin_subpass_render_pass(
+                    device,
+                    SubpassRenderPassDescriptor {
+                        pass_layout,
+                        extent: view.texture().size(),
+                        color_attachments: vec![SubpassColorAttachmentBinding {
+                            resource: SubpassAttachmentResource::Persistent {
+                                view,
+                                resolve_target: None,
+                            },
+                            load_op: LoadOp::Clear,
+                            store_op: StoreOp::Store,
+                            clear_value: Color {
+                                r: 0.0,
+                                g: 0.0,
+                                b: 0.0,
+                                a: 0.0,
+                            },
+                        }],
+                        depth_stencil_attachment: None,
+                        error: None,
+                    },
+                );
+                assert_eq!(error, None);
+                assert_eq!(pass.set_pipeline(pipeline), None);
+                assert_eq!(
+                    pass.set_bind_group(0, Some(group), Vec::new(), device.limits()),
+                    None
+                );
+                assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
                 assert_eq!(pass.end(), None);
             }
             ExternalTexturePass::Render | ExternalTexturePass::Bundle => {
@@ -4578,6 +4651,10 @@ fn fs() -> @location(0) vec4<f32> {
                         ExternalTexturePass::Compute => {
                             assert!(matches!(copies.last(), Some(HalCopy::ComputePass(_))))
                         }
+                        #[cfg(feature = "tiled")]
+                        ExternalTexturePass::Subpass => {
+                            assert!(matches!(copies.last(), Some(HalCopy::SubpassRenderPass(_))))
+                        }
                         ExternalTexturePass::Render | ExternalTexturePass::Bundle => assert!(
                             matches!(copies.last(), Some(HalCopy::RenderPassCommandStream(_)))
                         ),
@@ -4590,6 +4667,50 @@ fn fs() -> @location(0) vec4<f32> {
                     }
                 }
             }
+        }
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn subpass_external_texture_lazy_init() {
+        external_texture_lazy_init_cases(ExternalTexturePass::Subpass);
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn subpass_submit_validates_external_texture_planes() {
+        external_texture_plane_submit_cases(ExternalTexturePass::Subpass);
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn hal_subpass_draw_execution_carries_external_texture_resources() {
+        let device = noop_device();
+        for format in [ExternalTextureFormat::Rgba, ExternalTextureFormat::Nv12] {
+            let external = submit_external_texture(&device, format);
+            let commands =
+                external_texture_commands(&device, &external, ExternalTexturePass::Subpass);
+            let CommandExecution::SubpassRenderPass(pass) = &commands.command_ops()[0] else {
+                panic!("expected subpass command");
+            };
+            let draw = hal_subpass_draw_execution(&pass.draws[0]).unwrap();
+            assert_eq!(draw.bind_external_textures.len(), 1);
+            let bound = &draw.bind_external_textures[0];
+            assert_eq!((bound.group, bound.binding), (0, 0));
+            assert!(bound.vulkan_plane1_binding.is_some());
+            assert!(bound.vulkan_params_binding.is_some());
+            assert!(bound.plane0.fragment_metal_index.is_some());
+            assert!(bound.plane1.fragment_metal_index.is_some());
+            assert!(bound.params_fragment_metal_index.is_some());
+            assert_eq!(bound.params_size, external.inner().params.size());
+            assert_eq!(
+                bound.plane0.format,
+                hal_texture_format(external.inner().planes[0].format())
+            );
+            assert_eq!(
+                commands.referenced_textures().len(),
+                external.inner().planes.len()
+            );
         }
     }
 
@@ -4670,6 +4791,10 @@ fn fs() -> @location(0) vec4<f32> {
                 ExternalTexturePass::Compute => {
                     assert!(matches!(sampling_pass, HalCopy::ComputePass(_)))
                 }
+                #[cfg(feature = "tiled")]
+                ExternalTexturePass::Subpass => {
+                    assert!(matches!(sampling_pass, HalCopy::SubpassRenderPass(_)))
+                }
                 ExternalTexturePass::Render | ExternalTexturePass::Bundle => {
                     assert!(matches!(sampling_pass, HalCopy::RenderPassCommandStream(_)))
                 }
@@ -4733,6 +4858,10 @@ fn fs() -> @location(0) vec4<f32> {
             match kind {
                 ExternalTexturePass::Compute => {
                     assert!(matches!(sampling_pass, HalCopy::ComputePass(_)))
+                }
+                #[cfg(feature = "tiled")]
+                ExternalTexturePass::Subpass => {
+                    assert!(matches!(sampling_pass, HalCopy::SubpassRenderPass(_)))
                 }
                 ExternalTexturePass::Render | ExternalTexturePass::Bundle => {
                     assert!(matches!(sampling_pass, HalCopy::RenderPassCommandStream(_)))

@@ -1108,17 +1108,6 @@ pub(crate) fn create_hal_subpass_render_pipeline(
             Some("subpass render pipeline requires a fragment stage".to_owned()),
         );
     }
-    if metal_bindings
-        .iter()
-        .any(|binding| matches!(binding.kind, MetalBindingKind::ExternalTexture))
-    {
-        return (
-            None,
-            Some(
-                "external textures are not supported in the tiled subpass pipeline path".to_owned(),
-            ),
-        );
-    }
     let Some(hal_device) = hal_device else {
         return (None, None);
     };
@@ -2993,8 +2982,8 @@ fn validate_color_targets_inner(
             .format
             .caps(features)
             .ok_or_else(|| "render pipeline color target format must be defined".to_owned())?;
-        if !caps.renderable {
-            return Err("render pipeline color target format must be renderable".to_owned());
+        if !caps.aspects.color || !caps.renderable {
+            return Err("render pipeline color target format must be color-renderable".to_owned());
         }
         if let Some(blend) = target.blend {
             validate_blend_state(blend)?;
@@ -3031,9 +3020,6 @@ fn validate_color_targets_inner(
             .and_then(|indices| indices.get(index).copied())
             .unwrap_or(subpass_local);
         let output = outputs.get(&subpass_local).or_else(|| outputs.get(&flat));
-        if !reflected && caps.output_class.is_none() {
-            return Err("render pipeline color target format has no output class".to_owned());
-        }
         match output {
             Some(output) => {
                 validate_fragment_output_compat(*output, caps)?;
@@ -3689,6 +3675,110 @@ mod tests {
     use crate::ShaderStage;
     use crate::{Device, ErrorFilter, TextureViewDimension};
     use std::sync::Arc;
+
+    #[test]
+    fn render_pipeline_color_targets_require_color_renderable_formats() {
+        let device = noop_device();
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0, 0, 0, 1); }
+             @fragment fn fs() {}"
+                    .to_owned(),
+            )),
+        );
+        for format in [
+            TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS),
+            TextureFormat::from_raw(TextureFormat::STENCIL8),
+            rgba8_unorm(),
+        ] {
+            let mut descriptor = render_pipeline_descriptor(module.clone());
+            let target = &mut descriptor.fragment.as_mut().unwrap().targets[0];
+            target.format = format;
+            target.write_mask = 0;
+            device.push_error_scope(ErrorFilter::Validation);
+            let pipeline = device.create_render_pipeline(descriptor.clone());
+            let expected = if format == rgba8_unorm() {
+                None
+            } else {
+                Some("render pipeline color target format must be color-renderable")
+            };
+            assert_eq!(pipeline.is_error(), expected.is_some());
+            assert_eq!(
+                device
+                    .pop_error_scope()
+                    .unwrap()
+                    .as_ref()
+                    .map(|error| error.message.as_str()),
+                expected
+            );
+            #[cfg(feature = "tiled")]
+            if expected.is_some() {
+                let pass_layout = Arc::new(
+                    device
+                        .create_subpass_pass_layout(valid_two_subpass_deferred_layout_descriptor()),
+                );
+                device.push_error_scope(ErrorFilter::Validation);
+                let pipeline =
+                    device.create_subpass_render_pipeline(SubpassRenderPipelineDescriptor {
+                        base: descriptor.clone(),
+                        pass_layout,
+                        subpass_index: 0,
+                        error: None,
+                    });
+                assert!(pipeline.is_error());
+                assert_eq!(
+                    device
+                        .pop_error_scope()
+                        .unwrap()
+                        .as_ref()
+                        .map(|error| error.message.as_str()),
+                    expected
+                );
+            }
+            if expected.is_some() {
+                descriptor.fragment.as_mut().unwrap().targets[0].write_mask = 0x10;
+                assert_eq!(
+                    resolve_render_pipeline_descriptor_for_source(
+                        &descriptor,
+                        device.limits(),
+                        &device.features(),
+                        None,
+                        1
+                    )
+                    .err()
+                    .as_deref(),
+                    Some("render pipeline color target writeMask has invalid bits")
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "shader-passthrough")]
+    #[test]
+    fn passthrough_render_pipeline_rejects_depth_color_target() {
+        let device = noop_device();
+        for mut descriptor in [
+            msl_render_passthrough_descriptor(&device),
+            spirv_render_passthrough_descriptor(&device),
+        ] {
+            let target = &mut descriptor.fragment.as_mut().unwrap().targets[0];
+            target.format = TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS);
+            target.write_mask = 0;
+            assert_eq!(
+                resolve_render_pipeline_descriptor_for_source(
+                    &descriptor,
+                    device.limits(),
+                    &device.features(),
+                    None,
+                    1
+                )
+                .err()
+                .as_deref(),
+                Some("render pipeline color target format must be color-renderable")
+            );
+            assert!(device.create_render_pipeline(descriptor).is_error());
+        }
+    }
 
     #[test]
     fn point_size_is_emitted_only_for_point_lists() {
@@ -6297,7 +6387,7 @@ fn fs() -> @builtin(frag_depth) f32 {
             cases.push((
                 d,
                 device.limits(),
-                "render pipeline color target format has no output class",
+                "render pipeline color target format must be color-renderable",
             ));
             let mut d = base.clone();
             let fragment = d.fragment.as_mut().unwrap();
@@ -7353,6 +7443,76 @@ fn fs() -> @builtin(frag_depth) f32 {
         );
     }
 
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn subpass_pipeline_combines_input_attachments_and_external_texture_bindings() {
+        let device = noop_device();
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "enable chromium_internal_input_attachments;
+             @group(0) @binding(0) @input_attachment_index(0) var input: input_attachment<f32>;
+             @group(1) @binding(0) var ext: texture_external;
+             @vertex fn vs() -> @builtin(position) vec4f { return vec4f(0, 0, 0, 1); }
+             @fragment fn fs() -> @location(1) vec4f {
+                 return inputAttachmentLoad(input) + textureLoad(ext, vec2u(0));
+             }"
+                .to_owned(),
+            )),
+        );
+        let base = render_pipeline_descriptor(module);
+        let pass_layout = Arc::new(
+            device.create_subpass_pass_layout(valid_two_subpass_deferred_layout_descriptor()),
+        );
+        let pipeline = device.create_subpass_render_pipeline(SubpassRenderPipelineDescriptor {
+            base: base.clone(),
+            pass_layout: pass_layout.clone(),
+            subpass_index: 1,
+            error: None,
+        });
+        assert!(!pipeline.is_error(), "{:?}", pipeline.diagnostic());
+        let slots = compute_subpass_color_slots(pass_layout.descriptor(), 1);
+        for backend in [HalBackend::Metal, HalBackend::Vulkan] {
+            let selection = select_render_shader_source(
+                backend,
+                &base,
+                "vs",
+                Some("fs"),
+                pipeline.metal_bindings(),
+                &[],
+                &slots,
+                false,
+                pipeline.bind_group_layouts(),
+                true,
+                Default::default(),
+            )
+            .unwrap();
+            let external = pipeline
+                .metal_bindings()
+                .iter()
+                .find(|binding| matches!(binding.kind, MetalBindingKind::ExternalTexture))
+                .unwrap();
+            assert!(external.fragment_metal_index.is_some());
+            assert!(external.ext_params_fragment_buffer_slot.is_some());
+            if backend == HalBackend::Vulkan {
+                let (plane1, params) = external.vulkan_external_bindings.unwrap();
+                let mut descriptors = selection.3;
+                descriptors.extend(
+                    input_attachment_hal_bindings(pipeline.bind_group_layouts(), &slots).unwrap(),
+                );
+                assert!(descriptors.iter().any(|binding| binding.group == 0
+                    && matches!(
+                        binding.kind,
+                        HalDescriptorBindingKind::InputAttachment { color_slot: 0 }
+                    )));
+                for binding in [external.binding, plane1, params] {
+                    assert!(descriptors
+                        .iter()
+                        .any(|descriptor| descriptor.group == 1 && descriptor.binding == binding));
+                }
+            }
+        }
+    }
+
     #[test]
     fn select_render_shader_source_supports_external_texture_on_vulkan() {
         let device = noop_device();
@@ -7398,26 +7558,6 @@ fn fs() -> @builtin(frag_depth) f32 {
         )
         .expect("Vulkan expands external textures");
         assert_eq!(selection.3.len(), 3);
-        #[cfg(feature = "tiled")]
-        {
-            let (pipeline, error) = create_hal_subpass_render_pipeline(
-                None,
-                &descriptor,
-                "vs",
-                Some("fs"),
-                &external,
-                &[],
-                &[],
-                &valid_two_subpass_deferred_layout_descriptor(),
-                1,
-                &[],
-            );
-            assert!(pipeline.is_none());
-            assert_eq!(
-                error.as_deref(),
-                Some("external textures are not supported in the tiled subpass pipeline path")
-            );
-        }
     }
 
     /// Regression B / F-081: a fragment-only `texture_external` render pipeline

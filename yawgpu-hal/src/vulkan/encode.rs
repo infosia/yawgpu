@@ -800,6 +800,9 @@ fn retain_subpass_resources(pass: &HalSubpassRenderPassCommand, retained: &mut R
         for bound in &draw.bind_samplers {
             retain_hal_sampler(&bound.sampler, retained);
         }
+        for bound in &draw.bind_external_textures {
+            retain_hal_external_texture(bound, retained);
+        }
         for bound in &draw.vertex_buffers {
             retain_hal_buffer(&bound.buffer, retained);
         }
@@ -2456,7 +2459,7 @@ pub(super) fn encode_subpass_render_pass(
     if let Some((texture, range)) = &depth_stencil_texture {
         attachments.push((texture.inner()?.image, *range));
     }
-    let bound = subpass_bound_textures(pass);
+    let bound = subpass_bound_textures(pass)?;
     // Barriers precede the pass and exclude only the attachment view ranges.
     transition_sampled_textures(
         layouts,
@@ -2567,15 +2570,39 @@ pub(super) fn encode_subpass_render_pass(
 
 /// Collects bound textures in subpass execution order, retaining repeated bindings.
 #[cfg(feature = "tiled")]
-fn subpass_bound_textures(pass: &HalSubpassRenderPassCommand) -> Vec<HalBoundTexture> {
-    (0..pass.layout.subpasses.len())
-        .flat_map(|subpass_index| {
-            pass.draws
-                .iter()
-                .filter(move |draw| draw.subpass_index as usize == subpass_index)
-                .flat_map(|draw| draw.bind_textures.iter().cloned())
-        })
-        .collect()
+fn subpass_bound_textures(
+    pass: &HalSubpassRenderPassCommand,
+) -> Result<Vec<HalBoundTexture>, HalError> {
+    let mut textures = Vec::new();
+    for subpass_index in 0..pass.layout.subpasses.len() {
+        for draw in pass
+            .draws
+            .iter()
+            .filter(|draw| draw.subpass_index as usize == subpass_index)
+        {
+            let (_, bound) = subpass_draw_bind_resources(draw)?;
+            textures.extend(bound);
+        }
+    }
+    Ok(textures)
+}
+
+/// Expands external textures into the descriptor resources used by subpass draws.
+#[cfg(feature = "tiled")]
+fn subpass_draw_bind_resources(
+    draw: &HalSubpassDraw,
+) -> Result<(Vec<HalBoundBuffer>, Vec<HalBoundTexture>), HalError> {
+    let mut buffers = draw.bind_buffers.clone();
+    let mut textures = draw.bind_textures.clone();
+    for external in &draw.bind_external_textures {
+        let (planes, params) =
+            super::pipeline::external_texture_resources(external).map_err(|_| {
+                shader_error("subpass external texture descriptor bindings are missing")
+            })?;
+        textures.extend(planes);
+        buffers.push(params);
+    }
+    Ok((buffers, textures))
 }
 
 #[cfg(feature = "tiled")]
@@ -2723,6 +2750,7 @@ fn update_subpass_descriptor_sets(
     if pipeline.inner.descriptor_bindings.is_empty() {
         return Ok(Vec::new());
     }
+    let (buffers, textures) = subpass_draw_bind_resources(draw)?;
     let mut buffer_infos = Vec::new();
     let mut image_infos = Vec::new();
     let mut image_views = Vec::new();
@@ -2770,11 +2798,11 @@ fn update_subpass_descriptor_sets(
                     }
                     _ => descriptor_info(
                         descriptor,
-                        &draw.bind_buffers,
-                        &draw.bind_textures,
+                        &buffers,
+                        &textures,
                         &draw.bind_samplers,
                         &mut scratch,
-                        "render",
+                        "subpass render",
                     )?,
                 };
                 write_specs.push((
@@ -7418,6 +7446,7 @@ mod tests {
                 pipeline: crate::HalRenderPipeline::Noop,
                 bind_buffers: Vec::new(),
                 bind_textures: vec![bound],
+                bind_external_textures: Vec::new(),
                 bind_samplers: Vec::new(),
                 vertex_buffers: Vec::new(),
                 viewport: None,
@@ -7432,6 +7461,7 @@ mod tests {
         }
         assert_eq!(
             subpass_bound_textures(&pass)
+                .unwrap()
                 .iter()
                 .map(|bound| bound.binding)
                 .collect::<Vec<_>>(),
@@ -7439,11 +7469,124 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn subpass_external_textures_expand_descriptors_and_layout_ranges() {
+        let device = crate::HalDevice::Noop(noop::NoopDevice::new());
+        let params = device
+            .create_buffer(512, crate::HalBufferUsage::default())
+            .unwrap();
+        let texture = dummy_texture(HalTextureFormat::Rgba8Unorm);
+        let mut external = bound_external_texture(texture.clone(), texture.clone(), params);
+        external.group = 1;
+        external.binding = 7;
+        external.vulkan_plane1_binding = Some(8);
+        external.vulkan_params_binding = Some(9);
+        external.params_offset = 16;
+        external.params_size = 288;
+        external.plane0.base_mip_level = 2;
+        external.plane1.base_array_layer = 3;
+        let mut pass = bound_texture_subpass_fixture();
+        pass.draws.push(HalSubpassDraw {
+            subpass_index: 1,
+            pipeline: crate::HalRenderPipeline::Noop,
+            bind_buffers: vec![],
+            bind_textures: vec![],
+            bind_samplers: vec![],
+            bind_external_textures: vec![external],
+            vertex_buffers: vec![],
+            index_buffer: None,
+            viewport: None,
+            scissor_rect: None,
+            draw: HalDraw::Direct {
+                vertex_count: 3,
+                instance_count: 1,
+                first_vertex: 0,
+                first_instance: 0,
+            },
+        });
+        let (buffers, textures) = subpass_draw_bind_resources(&pass.draws[0]).unwrap();
+        assert_eq!(buffers.len(), 1);
+        assert_eq!(
+            (
+                buffers[0].group,
+                buffers[0].binding,
+                buffers[0].offset,
+                buffers[0].size
+            ),
+            (1, 9, 16, 288)
+        );
+        assert_eq!(textures.len(), 2);
+        assert_eq!((textures[0].group, textures[0].binding), (1, 7));
+        assert_eq!((textures[1].group, textures[1].binding), (1, 8));
+        let layouts = subpass_bound_textures(&pass).unwrap();
+        assert_eq!(layouts.len(), 2);
+        assert_eq!(
+            bound_view_subresource_range(&layouts[0]),
+            subresource_range(2, 1, 0, 1)
+        );
+        assert_eq!(
+            bound_view_subresource_range(&layouts[1]),
+            subresource_range(0, 1, 3, 1)
+        );
+        pass.draws[0].bind_external_textures[0].vulkan_params_binding = None;
+        assert!(subpass_bound_textures(&pass)
+            .unwrap_err()
+            .to_string()
+            .contains("subpass"));
+        assert!(subpass_draw_bind_resources(&pass.draws[0]).is_err());
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    fn subpass_external_texture_resources_remain_retained_until_completion() {
+        let device = vulkan_device();
+        let params = device
+            .create_buffer(288, HalBufferUsage::default())
+            .unwrap();
+        let plane0 = device.create_texture(&texture_descriptor()).unwrap();
+        let plane1 = device.create_texture(&texture_descriptor()).unwrap();
+        let params_inner = params.inner.as_ref().unwrap().clone();
+        let plane0_inner = plane0.inner.as_ref().unwrap().clone();
+        let plane1_inner = plane1.inner.as_ref().unwrap().clone();
+        let external = bound_external_texture(
+            HalTexture::Vulkan(plane0),
+            HalTexture::Vulkan(plane1),
+            HalBuffer::Vulkan(params),
+        );
+        let mut pass = bound_texture_subpass_fixture();
+        pass.draws.push(HalSubpassDraw {
+            subpass_index: 1,
+            pipeline: crate::HalRenderPipeline::Noop,
+            bind_buffers: vec![],
+            bind_textures: vec![],
+            bind_samplers: vec![],
+            bind_external_textures: vec![external],
+            vertex_buffers: vec![],
+            index_buffer: None,
+            viewport: None,
+            scissor_rect: None,
+            draw: HalDraw::Direct {
+                vertex_count: 3,
+                instance_count: 1,
+                first_vertex: 0,
+                first_instance: 0,
+            },
+        });
+        let retained = collect_retained_resources(&[HalCopy::SubpassRenderPass(pass)]);
+        assert_eq!(retained_buffer_count(&retained, &params_inner), 1);
+        assert_eq!(retained_texture_count(&retained, &plane0_inner), 1);
+        assert_eq!(retained_texture_count(&retained, &plane1_inner), 1);
+    }
+
     /// Subpasses without draws contribute no bound textures.
     #[cfg(feature = "tiled")]
     #[test]
     fn subpass_bound_textures_is_empty_without_draws() {
-        assert!(subpass_bound_textures(&bound_texture_subpass_fixture()).is_empty());
+        assert!(subpass_bound_textures(&bound_texture_subpass_fixture())
+            .unwrap()
+            .is_empty());
     }
 
     #[cfg(feature = "tiled")]

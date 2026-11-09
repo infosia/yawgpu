@@ -208,6 +208,12 @@ static bool wall_clock_seconds(double *seconds) {
     return true;
 }
 
+bool yawgpu_surface_texture_acquired(const WGPUSurfaceTexture *current) {
+    return current->texture != NULL &&
+           (current->status == WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal ||
+            current->status == WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal);
+}
+
 // Blocks until `future` is done by processing queued events and then waiting
 // on it. This is how the examples turn async operations into synchronous code.
 // Returns true if the future completed, false if the wait errored or hit the

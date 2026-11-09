@@ -52,6 +52,11 @@ YawgpuWindow *yawgpu_window_create(int width, int height, const char *title) {
     // framebufferOnly=NO allows the layer's drawable texture to be copied
     // from (needed for read-back / blit paths).
     [layer setFramebufferOnly:NO];
+    // The surface is configured with the framebuffer size in pixels, so the
+    // layer's scale must match the window's backing scale. Otherwise the
+    // layer's natural drawable size is in points, and Vulkan on MoltenVK
+    // reports every acquired texture as suboptimal.
+    [layer setContentsScale:[native_window backingScaleFactor]];
     [content_view setLayer:layer];
 
     YawgpuWindow *window = (YawgpuWindow *)calloc(1, sizeof(YawgpuWindow));

@@ -1,6 +1,8 @@
 # Block 149 — External textures in subpass draws, color-target format check, suboptimal surfaces
 
-Status: **IN PROGRESS**.
+Status: **COMPLETE (2026-11-09)**. Phase Review: 0 CRITICAL, 2 MAJOR (both fixed), 6 MINOR;
+four fixed, one moved to the backlog, one declined, see below. A focused second review of
+the fixes found one MINOR, fixed.
 Source: backlog A29 and A30 and the examples' MoltenVK acquire failure, started by user
 request on 2026-11-09.
 Oracle: Dawn at the pinned `third_party/dawn` (paths relative to `src/dawn/native/`):
@@ -116,3 +118,36 @@ Metal and GLES surfaces.
 
 - **S1 (coding agent):** R1, R2, R3 with their unit tests.
 - **S2 (Claude):** R4, the e2e, verification, Phase Review.
+
+## Verification (2026-11-09)
+
+Run on Apple M2, macOS 27.2. MoltenVK runs used the Khronos validation layer.
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace` | 1,443 passed, 0 failed; with `shader-passthrough` 1,493 passed, 0 failed |
+| fmt; clippy `-D warnings` on default, `metal`, `vulkan`, `gles`, `metal,tiled`, `vulkan,tiled`, `shader-passthrough`, `metal,shader-passthrough`, `vulkan,shader-passthrough` | clean |
+| HAL lib tests including ignored, `metal,tiled` | 274 passed, 0 failed |
+| HAL lib tests including ignored, `vulkan,tiled`, MoltenVK | 471 passed, 0 failed, 0 VUIDs |
+| Metal e2e, every integration test, `metal,tiled,shader-passthrough`, `--ignored` | 181 passed, 0 failed |
+| Vulkan e2e, every `e2e_vulkan_*`, `vulkan,tiled,shader-passthrough`, MoltenVK | 173 passed, 1 failed: `vulkan_3d_attachment_discard_lazily_zeroes_the_whole_mip`, the known MoltenVK `imageView2DOn3DImage` failure, with its VUIDs only |
+| New e2e `*_subpass_samples_external_texture`, `*_subpass_reads_input_attachment_and_external_texture` | pass on Metal and MoltenVK; before R1 both failed at pipeline creation with the rejection |
+| New e2e `*_subpass_unused_external_texture_keeps_buffer_sizes` (Phase Review M2) | pass on Metal and MoltenVK; before the M2 fix Metal read `arrayLength` 0 instead of 64 |
+| Examples `--verify`: `surface_smoke`, `triangle`, `hello_triangle`, `triangle_passthrough`, `tiled_deferred` on Metal and MoltenVK; `tiled_msaa` on MoltenVK | all exit 0; before R4 every windowed example failed on MoltenVK at the first acquire |
+| webgpu-native-cts, Metal, `webgpu:api,*` | pass 589,574, skip 101,793, fail 0, crash 0; identical to Block 148. Run before the Phase Review fixes, which change only the Metal subpass path and remove an unreachable check |
+
+## Phase Review
+
+A fresh review of the S1 diff, then a focused review of the fixes.
+
+| ID | Finding | Disposition |
+|---|---|---|
+| M1 | The passthrough unit test `native_render_runs_reflection_free_validators_in_wgsl_order` still expected the old "no output class" error for a depth color target; the workspace run without `shader-passthrough` does not build it | Expectation updated |
+| M2 | The Metal subpass encoder wrote the immediates block before textures, external textures, samplers and vertex buffers. An external texture the entry point does not use has a params slot the immediate-slot chooser may pick, so its params buffer overwrote the block (Block 118 R7a) | The block is written last; e2e `*_subpass_unused_external_texture_keeps_buffer_sizes` |
+| m1 | The passthrough-only "no output class" check became unreachable | Removed |
+| m2 | Dawn checks the blend state before `writeMask` and the format; yawgpu checks it after the format | Declined: both reject the same descriptors, only the first message differs, and the order predates this block |
+| m3 | Metal external-texture errors on the subpass path did not name it | Wrapped as "subpass external texture binding failed" |
+| m4 | Subpass passes do no usage-scope validation for any bind-group resource, external planes included | Predates this block; added to backlog E5 |
+| m5 | The new examples helper split a comment from `yawgpu_wait_for_future` | Moved |
+| m6 | The e2e covers RGBA only; NV12 in a subpass is covered by the core and Vulkan unit tests | Accepted |
+| m7 (second review) | Block 118 R7a still said the subpass path may write after the block and has no external textures | R7a updated |

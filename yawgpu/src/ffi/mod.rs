@@ -12039,6 +12039,55 @@ mod tests {
     }
 
     #[test]
+    fn wgpuDeviceCreateRenderPipeline_rejects_depth_color_target_with_zero_write_mask() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let errors = Arc::new(Mutex::new(Vec::new()));
+            let captured = errors.clone();
+            borrow_handle(device, "WGPUDevice").set_uncaptured_error_callback(Some(move |error| {
+                captured.lock().unwrap().push(error);
+            }));
+            let module = create_wgsl_module(
+                device,
+                "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0, 0, 0, 1); }
+                 @fragment fn fs() {}",
+            );
+            let mut descriptor = render_pipeline_descriptor(module, module, std::ptr::null());
+            let target = native::WGPUColorTargetState {
+                nextInChain: std::ptr::null_mut(),
+                format: native::WGPUTextureFormat_Depth24Plus,
+                blend: std::ptr::null(),
+                writeMask: 0,
+            };
+            let fragment = native::WGPUFragmentState {
+                nextInChain: std::ptr::null_mut(),
+                module,
+                entryPoint: label_view("fs"),
+                constantCount: 0,
+                constants: std::ptr::null(),
+                targetCount: 1,
+                targets: &target,
+            };
+            descriptor.fragment = &fragment;
+            let pipeline = wgpuDeviceCreateRenderPipeline(device, &descriptor);
+            assert!(!pipeline.is_null());
+            assert!(borrow_handle(pipeline, "WGPURenderPipeline")
+                ._core
+                .is_error());
+            let observed = errors.lock().unwrap();
+            assert_eq!(observed.len(), 1);
+            assert_eq!(
+                observed[0].message,
+                "render pipeline color target format must be color-renderable"
+            );
+            drop(observed);
+            wgpuRenderPipelineRelease(pipeline);
+            wgpuShaderModuleRelease(module);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
     fn render_pipeline_cache_hit_skips_core_compile() {
         unsafe {
             let (instance, adapter, device) = noop_chain();

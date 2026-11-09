@@ -91,6 +91,10 @@ WGPUBuffer yawgpu_create_buffer_init(WGPUDevice device,
 // or an internal deadline expires. Returns true only when the future actually
 // completed, so a caller can tell a failed operation from a wait that gave up.
 bool yawgpu_wait_for_future(WGPUInstance instance, WGPUFuture future);
+// Returns true when `current` holds a texture to render into: SuccessOptimal or
+// SuccessSuboptimal. A suboptimal texture is valid; only presentation may be
+// less efficient until the surface is reconfigured.
+bool yawgpu_surface_texture_acquired(const WGPUSurfaceTexture *current);
 // Prints the adapter's vendor/architecture/device/backend info.
 void yawgpu_print_adapter_info(WGPUAdapter adapter);
 

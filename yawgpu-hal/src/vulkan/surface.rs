@@ -569,8 +569,7 @@ impl VulkanSurface {
                 vk::Fence::null(),
             )
         };
-        let (image_index, suboptimal) = acquire.map_err(surface_status_error)?;
-        self.suboptimal |= suboptimal;
+        let image_index = acquired_image_status(&mut self.suboptimal, acquire)?;
         let mut state = self
             .pending_state
             .lock()
@@ -684,16 +683,7 @@ impl VulkanSurface {
                         .queue_present(queue.inner.queue, &present_info)
                 }
             };
-            match present_result {
-                Ok(suboptimal) => {
-                    self.suboptimal |= suboptimal;
-                    Ok(())
-                }
-                Err(error) => {
-                    self.present_error = Some(error);
-                    Err(surface_status_error(error))
-                }
-            }
+            presented_image_status(&mut self.present_error, present_result)
         })();
         if result.is_err() && !transition_submitted {
             if let Some(pending) = pending {
@@ -1111,6 +1101,27 @@ fn swapchain_pre_transform(
     }
 }
 
+/// Records only the status of the image returned by this acquire.
+fn acquired_image_status(
+    suboptimal: &mut bool,
+    result: Result<(u32, bool), vk::Result>,
+) -> Result<u32, HalError> {
+    let (image_index, acquired_suboptimal) = result.map_err(surface_status_error)?;
+    *suboptimal = acquired_suboptimal;
+    Ok(image_index)
+}
+
+/// Treats suboptimal presentation as success and retains presentation errors.
+fn presented_image_status(
+    present_error: &mut Option<vk::Result>,
+    result: Result<bool, vk::Result>,
+) -> Result<(), HalError> {
+    result.map(|_| ()).map_err(|error| {
+        *present_error = Some(error);
+        surface_status_error(error)
+    })
+}
+
 fn surface_status_error(error: vk::Result) -> HalError {
     match error {
         vk::Result::ERROR_OUT_OF_DATE_KHR => HalError::SurfaceOutdated,
@@ -1387,6 +1398,38 @@ fn hal_usage_to_vk_image_usage(usage: HalTextureUsage) -> vk::ImageUsageFlags {
 mod tests {
     use super::super::test_helpers::*;
     use super::*;
+
+    #[test]
+    fn suboptimal_status_belongs_to_current_acquire() {
+        let mut suboptimal = false;
+        let mut present_error = None;
+        assert_eq!(
+            acquired_image_status(&mut suboptimal, Ok((2, true))).unwrap(),
+            2
+        );
+        assert!(suboptimal);
+        assert!(presented_image_status(&mut present_error, Ok(false)).is_ok());
+        assert!(suboptimal);
+        assert_eq!(
+            acquired_image_status(&mut suboptimal, Ok((1, false))).unwrap(),
+            1
+        );
+        assert!(!suboptimal);
+        assert!(presented_image_status(&mut present_error, Ok(true)).is_ok());
+        assert!(!suboptimal);
+        assert!(acquired_image_status(&mut suboptimal, Ok((0, false))).is_ok());
+        assert!(!suboptimal);
+        assert!(present_error.is_none());
+        assert!(
+            presented_image_status(&mut present_error, Err(vk::Result::ERROR_OUT_OF_DATE_KHR))
+                .is_err()
+        );
+        assert_eq!(present_error, Some(vk::Result::ERROR_OUT_OF_DATE_KHR));
+        assert!(
+            acquired_image_status(&mut suboptimal, Err(vk::Result::ERROR_OUT_OF_DATE_KHR)).is_err()
+        );
+        assert!(!suboptimal);
+    }
 
     #[test]
     fn phase_review_configured_extent_wins_inside_wide_fixed_surface_range() {

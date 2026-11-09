@@ -242,8 +242,7 @@ static bool triangle_render_frame(const TriangleApp *app) {
     if (current.status == WGPUSurfaceGetCurrentTextureStatus_Lost && !current.texture) {
         return true;
     }
-    if (current.status != WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal ||
-        !current.texture) {
+    if (!yawgpu_surface_texture_acquired(&current)) {
         fprintf(stderr, "failed to acquire surface texture, status=%u\n", current.status);
         return false;
     }

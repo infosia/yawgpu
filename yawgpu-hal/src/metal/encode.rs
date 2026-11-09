@@ -1648,7 +1648,7 @@ pub(super) fn encode_subpass_render_pass(
             pipeline,
             bind_buffers: &draw.bind_buffers,
             bind_textures: &draw.bind_textures,
-            bind_external_textures: &[],
+            bind_external_textures: &draw.bind_external_textures,
             bind_samplers: &draw.bind_samplers,
             vertex_buffers: &draw.vertex_buffers,
             index_buffer: draw.index_buffer.as_ref(),
@@ -1752,6 +1752,26 @@ fn encode_render_state(
     for binding in state.bind_buffers {
         encode_render_bind_buffer(encoder, binding)?;
     }
+    for binding in state.bind_textures {
+        encode_render_bind_texture(encoder, binding)?;
+    }
+    for binding in state.bind_external_textures {
+        encode_render_bind_external_texture(encoder, binding).map_err(|error| {
+            HalError::QueueSubmissionFailed {
+                backend: BACKEND,
+                message: format!("subpass external texture binding failed: {error}"),
+            }
+        })?;
+    }
+    for binding in state.bind_samplers {
+        encode_render_bind_sampler(encoder, binding)?;
+    }
+    for binding in state.vertex_buffers {
+        encode_render_vertex_buffer(encoder, binding)?;
+    }
+    // Must stay the last binding written: Tint only reserves slots for used
+    // resources, so an unused external texture's params buffer can share the
+    // immediates slot.
     encode_render_immediates(
         encoder,
         pipeline,
@@ -1760,18 +1780,6 @@ fn encode_render_state(
         state.bind_buffers,
         state.vertex_buffers,
     )?;
-    for binding in state.bind_textures {
-        encode_render_bind_texture(encoder, binding)?;
-    }
-    for binding in state.bind_external_textures {
-        encode_render_bind_external_texture(encoder, binding)?;
-    }
-    for binding in state.bind_samplers {
-        encode_render_bind_sampler(encoder, binding)?;
-    }
-    for binding in state.vertex_buffers {
-        encode_render_vertex_buffer(encoder, binding)?;
-    }
     encode_render_draw(
         encoder,
         state.index_buffer,
@@ -2253,6 +2261,102 @@ mod tests {
         HalSubpassAttachmentLayout, HalSubpassColorAttachment, HalSubpassInputAttachment,
         HalSubpassLayout, HalSubpassPassLayout, HalSubpassRenderPassCommand,
     };
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    fn subpass_draw_binds_external_texture_planes_and_params() {
+        let device = metal_device();
+        let texture = device.create_texture(&texture_descriptor()).unwrap();
+        let params = device
+            .create_buffer(288, HalBufferUsage::default())
+            .unwrap();
+        let pipeline = device
+            .create_render_pipeline(
+                render_msl(),
+                "vs_main",
+                Some("fs_main"),
+                &render_descriptor(),
+                &[],
+            )
+            .unwrap();
+        let plane0 = HalBoundTexture {
+            group: 1,
+            binding: 0,
+            metal_index: 2,
+            vertex_metal_index: None,
+            fragment_metal_index: Some(2),
+            texture: HalTexture::Metal(texture.clone()),
+            format: HalTextureFormat::Rgba8Unorm,
+            dimension: HalTextureViewDimension::D2,
+            base_mip_level: 0,
+            mip_level_count: 1,
+            base_array_layer: 0,
+            array_layer_count: 1,
+            aspect: HalTextureAspect::All,
+            swizzle: HalTextureComponentSwizzle::default(),
+            storage_access: None,
+        };
+        let external = HalBoundExternalTexture {
+            group: 1,
+            binding: 0,
+            vulkan_plane1_binding: None,
+            vulkan_params_binding: None,
+            plane1: HalBoundTexture {
+                metal_index: 3,
+                fragment_metal_index: Some(3),
+                ..plane0.clone()
+            },
+            plane0,
+            params: HalBuffer::Metal(params),
+            params_metal_index: 4,
+            params_vertex_metal_index: None,
+            params_fragment_metal_index: Some(4),
+            params_offset: 0,
+            params_size: 288,
+        };
+        let mut pass = two_subpass_shared_color_command(vec![subpass_attachment(
+            HalTexture::Metal(texture.clone()),
+        )]);
+        pass.draws.push(crate::HalSubpassDraw {
+            subpass_index: 0,
+            pipeline: crate::HalRenderPipeline::Metal(pipeline),
+            bind_buffers: vec![],
+            bind_textures: vec![],
+            bind_samplers: vec![],
+            bind_external_textures: vec![external],
+            vertex_buffers: vec![],
+            index_buffer: None,
+            viewport: None,
+            scissor_rect: None,
+            draw: HalDraw::Direct {
+                vertex_count: 0,
+                instance_count: 1,
+                first_vertex: 0,
+                first_instance: 0,
+            },
+        });
+        let descriptor = MTLRenderPassDescriptor::new();
+        let target = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
+        target.setTexture(Some(texture.inner().unwrap()));
+        target.setLoadAction(MTLLoadAction::Clear);
+        target.setStoreAction(MTLStoreAction::Store);
+        let command = device.queue().inner.commandBuffer().unwrap();
+        let encoder = command
+            .renderCommandEncoderWithDescriptor(&descriptor)
+            .unwrap();
+        assert!(encode_subpass_render_pass(&encoder, &pass).is_ok());
+        pass.draws[0].bind_external_textures[0]
+            .plane1
+            .fragment_metal_index = None;
+        let error = encode_subpass_render_pass(&encoder, &pass)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("subpass external texture binding failed"));
+        assert!(error.contains("plane1 fragment slot"));
+        encoder.endEncoding();
+        finish_clear_test_commands(&command);
+    }
 
     #[test]
     fn mismatched_compressed_mip_edges_stage_both_copy_directions() {

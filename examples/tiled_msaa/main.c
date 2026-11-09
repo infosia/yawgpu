@@ -426,8 +426,7 @@ static int run_windowed(YawgpuContext *ctx, WGPUQueue queue,
     while (!yawgpu_window_should_close(window)) {
         WGPUSurfaceTexture current = {0};
         wgpuSurfaceGetCurrentTexture(surface, &current);
-        if (current.status != WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal ||
-            !current.texture) {
+        if (!yawgpu_surface_texture_acquired(&current)) {
             yawgpu_window_poll_events();
             continue;
         }
