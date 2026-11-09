@@ -16,11 +16,10 @@ instances.
 | **1** | `yawgpu-core/src/format.rs:345` `RGB10A2_UNORM` caps | `float_color(4,4).blendable().renderable().multisample()` — never calls `.alpha()`, so `has_alpha = false` (every other 4-component color format sets it). The sole consumer is the alpha-to-coverage check (`render_pipeline.rs:2046`), so a render pipeline whose only color target is `rgb10a2unorm` with `multisample.alphaToCoverageEnabled = true` is **wrongly rejected** ("alphaToCoverage requires an alpha blendable color target"), while the identical `rgba8unorm` pipeline is accepted. (`rgb10a2uint` also lacks `.alpha()` but is uint → not blendable → no consequence.) | over-strict / wrong-cap (narrow) | **FIX (this slice)** |
 | **2** | `yawgpu-core/src/adapter.rs:206` `supported_features()` | advertises `TextureCompressionBc`/`BcSliced3d`/`Etc2`/`Astc`/`AstcSliced3d` **unconditionally**, and the core `caps()` table accepts compressed 2D textures once the feature is enabled — but NO compressed format has a `HalTextureFormat` variant (`hal_texture_format` → `Unsupported`), so Vulkan + Metal **hard-error at `create_texture`**. The device advertises 5 features it cannot fulfill. WebGPU requires an advertised feature to be fully usable. Invisible on the Noop CTS gate (Noop doesn't allocate). `cts-coverage.md:345` notes the HAL compressed-format deferral but not that core still over-advertises. | conformance (feature-set) | **PENDING USER DECISION** (stop-advertise / implement / document) |
 
-## Ambiguous (needs spec confirmation — not fixed)
-- `texture-formats-tier2` read-write-storage set: yawgpu grants it to `{R32Float, RGBA16Float, RGBA32Float}`
-  (+ always-on `R32Uint/Sint`); the impl and its CTS port (`tier2_read_write_formats`) agree, but the current
-  WebGPU `texture-formats-tier2` spec may extend read-write storage to a broader set (rg32*, rgba32*,
-  rgba16*, rgba8*). Impl+test self-consistent → low confidence; confirm against current spec before changing.
+## Ambiguous — none open
+- `texture-formats-tier2` read-write-storage set: yawgpu grants the 15 formats Dawn grants (`r8*`, `r16uint/sint/float`,
+  `rgba8unorm/uint/sint`, `rgba16uint/sint/float`, `rgba32uint/sint/float`; `yawgpu-core/src/format.rs`,
+  Dawn `Format.cpp` `TextureFormatsTier2`), on top of the always-on `r32float/uint/sint`.
 
 ## RESOLVED (commit pending push)
 - **#1 rgb10a2unorm** now sets `.alpha()`; alpha-to-coverage pipeline targeting it accepted (Noop unit).
@@ -40,5 +39,4 @@ instances.
   `bufferImageHeight` MAJOR — per-layer block correct after the fix). 13→14 e2e probes per backend green; no
   regression. Noop unit tests (rgb10a2 alpha, gating, copy-block, Vulkan layout conversion). Clean Review:
   no CRITICAL/MAJOR after the Round-2 fix.
-- **Ambiguous (still deferred):** tier2 read-write-storage breadth (impl + CTS port agree; needs spec
-  confirmation).
+- **Tier2 read-write-storage breadth:** matches Dawn (see above).

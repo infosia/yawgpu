@@ -641,13 +641,14 @@ sources repeat across batches, and about 98% of it is in the Metal compiler serv
 P-004 **resolved**, including the constant-factor follow-up (399 → 224 ns,
 2.27× of Dawn, no superlinearity). All three findings from Run 1 are **resolved**: P-001 and P-002 in Block 96,
 P-003 in Block 97. The remaining gaps against Dawn are small and none is
-structural: `queue/write_buffer_then_wait` 1.53×, `bindgroup/create_destroy`
-1.33×, `encode/compute_1_dispatch` 1.14×, `encode/render_draw` 1.16×.
+structural (Run 9): `queue/write_buffer_then_wait` 1.99×, `encode/render_bind_draw`
+1.84×, `queue/write_buffer_4kb` 1.63×, `bindgroup/create_destroy` 1.55×,
+`encode/compute_1_dispatch` 1.22×, `encode/render_draw` 1.20×.
 
 Block 97 **S3** is **done** (`88cfe58`) and **S4** is **done** (Run 7,
 2026-11-02). Run 7 found **P-005**, fixed by Block 121. Run 8 found **P-006**, fixed by Block 122
 (Run 9: `queue/write_buffer_4kb` 2.98× to 1.63×; the cause was staging recycling, not
-the blit encoder). The other gaps are per-command recording cost, at 1.84× or below.
+the blit encoder). The other gaps are per-command recording cost, at 1.99× or below.
 
 ## Superseded status notes
 
