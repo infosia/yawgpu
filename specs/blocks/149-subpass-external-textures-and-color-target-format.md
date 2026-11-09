@@ -136,6 +136,25 @@ Run on Apple M2, macOS 27.2. MoltenVK runs used the Khronos validation layer.
 | Examples `--verify`: `surface_smoke`, `triangle`, `hello_triangle`, `triangle_passthrough`, `tiled_deferred` on Metal and MoltenVK; `tiled_msaa` on MoltenVK | all exit 0; before R4 every windowed example failed on MoltenVK at the first acquire |
 | webgpu-native-cts, Metal, `webgpu:api,*` | pass 589,574, skip 101,793, fail 0, crash 0; identical to Block 148. Run before the Phase Review fixes, which change only the Metal subpass path and remove an unreachable check |
 
+### Windows native Vulkan (2026-11-09)
+
+Run on Windows 11, NVIDIA GeForce RTX 5060 Ti, driver 617.14, Vulkan 1.4.351, at yawgpu
+`be17a0d`. The Khronos validation layer was on for the HAL ignored, e2e, and example runs.
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace` | 1,443 passed, 0 failed |
+| clippy `-D warnings`, default (workspace), `vulkan,tiled`, `vulkan,shader-passthrough` and `gles` (`yawgpu-core`, `yawgpu-hal`, `yawgpu`, `yawgpu-tint`), all targets | clean |
+| Vulkan HAL lib tests, `vulkan,tiled`; core lib tests, `tiled` | 388 passed; 774 passed |
+| Vulkan HAL ignored tests, `vulkan,tiled` | 83 passed, 0 failed, 0 VUIDs |
+| Vulkan e2e, every integration test, `vulkan,tiled,shader-passthrough`, `--ignored` | 181 passed, 0 failed, 0 VUIDs |
+| `e2e_vulkan_tiled_external_texture` | 3 of 3 on the native subpass path: an external texture sampled in a subpass, read together with an input attachment, and unused while the layout binds it |
+| `e2e_vulkan_surface` (hidden Win32 window) | 10 of 10 |
+| C examples, `-DYAWGPU_FEATURE=vulkan -DYAWGPU_TILED=ON -DYAWGPU_SHADER_PASSTHROUGH=ON`, MSVC Debug | build clean apart from the existing C4819 code-page warnings |
+| `device_info`, `enumerate_adapters`, `compute`, `capture` | exit 0, no validation output |
+| windowed `hello_triangle`, `triangle`, `triangle_passthrough`, `surface_smoke`, `tiled_msaa`, `tiled_deferred` | each ran for 8 s until stopped, with no acquire failure, error, or VUID |
+| `tiled_deferred --verify` | center pixel (110, 109, 109, 255), PNG written |
+
 ## Phase Review
 
 A fresh review of the S1 diff, then a focused review of the fixes.
