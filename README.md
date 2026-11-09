@@ -506,9 +506,8 @@ identically — a CTS port quirk, not a yawgpu defect.
 
 ‡ On both hosts, all 117 fails are documented non-defects, each cross-checked
 against a Dawn-Vulkan oracle on the same GPU (e.g. the spec-in-flux per-sample
-`sample_mask` builtin, and `external_texture` render pipelines, which Vulkan
-rejected at the time of that sweep and now supports). They
-are carried as `xfail`, so the suite exits `fail = 0`.
+`sample_mask` builtin). They are carried as `xfail`, so the suite exits
+`fail = 0`.
 
 Shader conformance falls out **by construction**: yawgpu compiles WGSL with the
 same Tint compiler Dawn uses, so the entire `shader/*` surface is
@@ -530,9 +529,8 @@ Linux / NVIDIA RTX 5060 Ti, OpenGL ES 3.2 (yawgpu `9977e34`, 2026-11-01):
 | `shader/validation` | 377,272 | 305,562 | 2 | 0 |
 | **total** | **1,004,531** | **1,224,117** | **28,810** | **0** |
 
-The suite was re-baselined before this sweep, so the counts are not comparable per area
-with older snapshots. The 2 `shader/validation` failures are the same two
-language-feature cases as on Vulkan.
+The 2 `shader/validation` failures are the same two language-feature cases as on
+Vulkan.
 
 Linux / Mesa `crocus` on Intel Haswell:
 
