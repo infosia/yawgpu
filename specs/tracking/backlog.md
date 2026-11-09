@@ -171,6 +171,26 @@ reference `> i32::MAX`, `first_instance` indirect, external textures,
 
 ## Decided, not backlog
 
+- A21, the Intel Gen9 subgroups gate: the user decided on 2026-11-10 to fix it only when
+  a real report arrives, since no Gen9 host is available to verify it. State of the
+  prerequisites on 2026-11-10:
+  - Vulkan: the PCI vendor and device ids are read from `VkPhysicalDeviceProperties`
+    (`yawgpu-hal/src/vulkan/mod.rs`), so Dawn's `IsIntelGen9` test (vendor `0x8086`,
+    `device_id & 0xFF00` in `0x1900, 0x3100, 0x3E00, 0x5A00, 0x5900, 0x8700, 0x9B00`) can be
+    applied directly. `yawgpu-hal/src/gpu_info.rs` already carries Dawn's architecture
+    table, and it has no `is_intel_gen9` helper yet.
+  - Metal: missing. `MetalAdapter::info` derives the vendor id from the device name and
+    always reports device id 0 (Block 135 R3 left Dawn's IOKit PCI lookup out of scope).
+    An Intel Mac (`MTLGPUFamily::Mac2`) therefore advertises `subgroups` with no way to
+    tell Gen9 apart. The gate needs that IOKit lookup first
+    (Dawn `metal/PhysicalDeviceMTL.mm` `GetDeviceIORegistryPCIInfo`).
+  - Tint shim: `polyfill_subgroup_broadcast_f16` exists in Tint's MSL and SPIR-V writer
+    options but is not in `YawgpuTintMslWorkarounds` / `YawgpuTintSpirvWorkarounds`, so it
+    would cross the shim ABI (add the offset guards on both sides).
+  - Dawn hides `subgroups` on Gen9 unless the adapter toggle `enable_subgroups_intel_gen9`
+    is set, and that toggle also turns the polyfill on. yawgpu has no toggle surface, so
+    the simplest match is to hide the feature on Gen9 and leave the polyfill unwired.
+
 - Zero-count indirect dispatch on Mesa ANV Haswell wedges the machine. The user
   decided on 2026-07-05 not to implement the conditional-rendering workaround, and
   the affected CTS files stay quarantined on that host. Block 119 R5d adds a second
@@ -180,7 +200,7 @@ reference `> i32::MAX`, `first_instance` indirect, external textures,
 
 ## Recommended order
 
-1. **A31** subpass usage-scope validation, then **A21** Intel Gen9 subgroups gate.
+1. ~~A31~~ (Block 150). A21 is deferred until a real report (see "Decided, not backlog").
 2. **C2 / C1** surfaces as separate initiatives.
 3. **E5** small items and **E15**; **E11** after its bench case exists.
 4. Lowered by user direction: **C4** feature-gated clippy in CI, then **B2**
@@ -361,3 +381,9 @@ Re-verification after the fixes: `cargo test --workspace` 1093/0, clippy default
   bind groups, vertex and index buffers), shared with the regular render pass through
   `RenderUsageScope`. The Phase Review also closed two subpass gaps: a depth-stencil view
   narrowed to one aspect is rejected, and an ended pass no longer holds its attachments.
+
+### 2026-11-10 — A21 deferred
+
+- No Gen9 host is available, so A21 waits for a real report. Its prerequisites were
+  surveyed and recorded under "Decided, not backlog": Vulkan has the device id, Metal does
+  not (IOKit lookup missing), and the Tint shim lacks the polyfill option.
