@@ -1,6 +1,8 @@
 # Block 150 — Usage-scope validation for subpass render passes
 
-Status: **IN PROGRESS (2026-11-10)**.
+Status: **COMPLETE (2026-11-10)**. Phase Review: 0 CRITICAL, 0 MAJOR, 6 MINOR. m1 (R2
+wording), m2 and m3 (tests), m4 (R8), and m5 (R7) are fixed in S2; m6 is the bookkeeping
+below.
 Source: backlog A31 (Block 149 Phase Review m4), started by user request on 2026-11-10.
 Oracle: subpass rendering (`tiled`) is a yawgpu extension with no Dawn counterpart. Every
 rule below copies what yawgpu's regular render pass already does, which follows Dawn's
@@ -47,8 +49,11 @@ passes, the scope is seeded with one `TextureScopeUse` per attachment, built the
   has (`DEPTH`, `STENCIL`). Subpass passes have no read-only depth or stencil flags.
 
 A seeding conflict (for example, the same texture subresource in two attachment slots) is
-a validation error. It is recorded with `record_first_error` on the parent encoder, as the
-regular render pass does. This is a new rejection: such a descriptor was accepted before.
+a validation error. It is recorded as the encoder's first error, and the subpass pass
+becomes an error pass, the same as any other begin-time validation failure of a subpass
+pass: the HAL pass is not begun and later commands do nothing. (A regular render pass
+stays a recording pass after a seeding conflict; the encoder's result is the same.) This
+is a new rejection: such a descriptor was accepted before.
 
 R3. **Bind groups are recorded at `set_bind_group`.** `SubpassRenderPass::set_bind_group`
 with `Some(group)` records the group's uses (`collect_bind_group_usage`, the same helper
@@ -76,15 +81,32 @@ the index and the two history vectors, is in scope. `PassEncoderState` and rende
 may switch to the new type only if the change is mechanical and their behaviour is the
 same. A second copy of the validation logic is out of scope.
 
+R7. **The depth-stencil attachment encompasses every aspect of its format.**
+`validate_subpass_depth_stencil_attachment` rejects a view whose aspect does not cover
+every aspect of its texture's format (for example a `DepthOnly` view of
+`depth24plus-stencil8`), with the same check and message wording as the regular render
+pass (`command_encoder.rs`, "must encompass all aspects of its texture's format"; Dawn
+`ValidateRenderPassDepthStencilAttachment`). R2's seeding reads the view format's
+aspects and relies on this.
+
+R8. **An ended pass releases its attachments.** After `end()` (or the `Drop` path), an
+ended `SubpassRenderPass` handle no longer holds its color, resolve, or depth-stencil
+attachment views: `finish_pass` moves them into the parent command instead of cloning
+them (Block 50 D1). The accessors `color_attachment_count` and
+`has_depth_stencil_attachment` keep returning the counts the pass began with.
+
 ## Slices
 
-S1 (single slice): R1–R6 in `yawgpu-core`, with inline unit tests in
-`yawgpu-core/src/subpass.rs` (and in `pass.rs` for any extracted type). The tests run on
-Noop with the `tiled` feature.
+S1: R1–R6 in `yawgpu-core`, with inline unit tests in `yawgpu-core/src/subpass.rs` (and in
+`pass.rs` for any extracted type). The tests run on Noop with the `tiled` feature.
+
+S2 (Phase Review fixes): R7, R8, and two tests: one buffer bound as both vertex and index
+buffer in one pass is accepted; the Drop-path test checks that dropping an unended pass
+releases what its scope held.
 
 ## Verification
 
-- Inline unit tests, one or more per rule: each of the four problem cases is rejected; a
+- Inline unit tests, one or more per rule (R1–R8): each of the four problem cases is rejected; a
   conflict seen only after `next_subpass` is still rejected (R1); a valid deferred
   two-subpass pass with a mixed input-attachment + uniform group and a sampled texture
   that is not an attachment is still accepted; vertex/index + read-only use of the same
@@ -95,3 +117,22 @@ Noop with the `tiled` feature.
 - Claude: the workspace test, and the real-GPU `e2e_metal_tiled*` and `e2e_vulkan_tiled*`
   suites (MoltenVK) plus the `tiled` examples, to confirm that no valid pass now fails
   R2.
+
+## Phase Review (2026-11-10, fresh-context reviewer over `9df3616..bd1958d`)
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| m1 | MINOR | A seeding conflict makes the subpass pass an error pass; R2 said "as the regular render pass does" | R2 reworded to the implemented behaviour |
+| m2 | MINOR | The Drop-path test checked nothing scope-specific | S2: the test checks that the scope's handles are released |
+| m3 | MINOR | No test bound one buffer as both vertex and index buffer | S2: test added |
+| m4 | MINOR | An ended, leaked handle kept its attachment views (cloned into the command) | S2: R8, attachments move into the command |
+| m5 | MINOR | A depth-stencil attachment view narrowed to one aspect was accepted | S2: R7, the regular pass's check is shared |
+| m6 | MINOR | Block status and backlog row still open | Closed |
+
+## Verification record
+
+At S2: workspace test 1,445/0 (default features); `yawgpu-core --features tiled --lib`
+788/0; `tiled_subpass_ffi` 8/0; clippy clean with and without `tiled`. Real GPU on the M2:
+Metal `e2e_metal_tiled*` 6/6; MoltenVK `e2e_vulkan_tiled*` 8/8 under the Khronos
+validation layer with 0 VUIDs. At S1 also `tiled_deferred --verify` on Metal and Vulkan and
+`tiled_msaa --verify` on Vulkan, with the expected center pixels and 0 VUIDs.

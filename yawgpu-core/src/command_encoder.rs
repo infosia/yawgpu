@@ -1910,6 +1910,22 @@ fn validate_single_mip_attachment_view(view: &TextureView, label: &str) -> Resul
     Ok(())
 }
 
+/// Validates that a depth-stencil attachment view covers every texture aspect.
+pub(crate) fn validate_depth_stencil_attachment_aspects(
+    view: &TextureView,
+    label: &str,
+) -> Result<(), String> {
+    // Attachment scope seeding and lazy initialization rely on the view
+    // covering the texture's complete format (Dawn depth-stencil validation).
+    let texture = view.texture();
+    if texture.init_aspects(view.aspect()) != InitAspects::from_caps(texture.format_caps()) {
+        return Err(format!(
+            "{label} must encompass all aspects of its texture's format"
+        ));
+    }
+    Ok(())
+}
+
 /// Validates depth stencil attachment and returns a descriptive error on failure.
 pub(crate) fn validate_depth_stencil_attachment(
     attachment: &RenderPassDepthStencilAttachment,
@@ -1927,21 +1943,10 @@ pub(crate) fn validate_depth_stencil_attachment(
             "render pass depth-stencil attachment requires RenderAttachment usage".to_owned(),
         );
     }
-    // The attachment must encompass every aspect of its texture's format, so
-    // that the rest of this function -- and the lazy-init lowering in
-    // `queue.rs` -- may assume the view's format is the texture's. A view
-    // narrowed to one aspect of a combined depth-stencil texture would
-    // otherwise let the pass claim an aspect the backend is never told about
-    // (Dawn `ValidateRenderPassDepthStencilAttachment`).
-    let texture = attachment.view.texture();
-    if texture.init_aspects(attachment.view.aspect())
-        != InitAspects::from_caps(texture.format_caps())
-    {
-        return Err(
-            "render pass depth-stencil attachment must encompass all aspects of its texture's format"
-                .to_owned(),
-        );
-    }
+    validate_depth_stencil_attachment_aspects(
+        &attachment.view,
+        "render pass depth-stencil attachment",
+    )?;
     if !format_caps.aspects.depth && !format_caps.aspects.stencil {
         return Err(
             "render pass depth-stencil attachment format must have depth or stencil aspect"
@@ -3434,6 +3439,33 @@ mod tests {
                     .to_owned()
             )
         );
+    }
+
+    #[test]
+    fn depth_stencil_attachment_aspect_helper_preserves_the_error_label() {
+        let device = noop_device();
+        let combined = aspect_render_attachment_texture(
+            &device,
+            TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8),
+        );
+        for (aspect, format) in [
+            (TextureAspect::All, TextureFormat::DEPTH24_PLUS_STENCIL8),
+            (TextureAspect::DepthOnly, TextureFormat::DEPTH24_PLUS),
+            (TextureAspect::StencilOnly, TextureFormat::STENCIL8),
+        ] {
+            let view = aspect_view(&combined, TextureFormat::from_raw(format), aspect);
+            assert_eq!(
+                validate_depth_stencil_attachment_aspects(&view, "test attachment"),
+                if aspect == TextureAspect::All {
+                    Ok(())
+                } else {
+                    Err(
+                        "test attachment must encompass all aspects of its texture's format"
+                            .to_owned(),
+                    )
+                }
+            );
+        }
     }
 
     /// Dawn `ValidateRenderPassDepthStencilAttachment`: a depth-stencil

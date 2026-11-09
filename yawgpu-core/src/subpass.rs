@@ -384,8 +384,10 @@ pub(crate) struct SubpassRenderPassInner {
     token: PassToken,
     layout: Arc<SubpassPassLayout>,
     extent: Extent3d,
-    color_attachments: Vec<SubpassColorAttachmentBinding>,
-    depth_stencil_attachment: Option<SubpassDepthStencilAttachmentBinding>,
+    color_attachments: Mutex<Vec<SubpassColorAttachmentBinding>>,
+    depth_stencil_attachment: Mutex<Option<SubpassDepthStencilAttachmentBinding>>,
+    color_attachment_count: usize,
+    has_depth_stencil_attachment: bool,
     hal: Mutex<Option<HalSubpassRenderPass>>,
     active_subpass: Mutex<u32>,
     draw_state: Mutex<SubpassDrawState>,
@@ -410,8 +412,10 @@ impl SubpassRenderPass {
                 token,
                 layout: Arc::clone(&descriptor.pass_layout),
                 extent: descriptor.extent,
-                color_attachments: descriptor.color_attachments,
-                depth_stencil_attachment: descriptor.depth_stencil_attachment,
+                color_attachment_count: descriptor.color_attachments.len(),
+                has_depth_stencil_attachment: descriptor.depth_stencil_attachment.is_some(),
+                color_attachments: Mutex::new(descriptor.color_attachments),
+                depth_stencil_attachment: Mutex::new(descriptor.depth_stencil_attachment),
                 hal: Mutex::new(hal),
                 active_subpass: Mutex::new(0),
                 draw_state: Mutex::new(SubpassDrawState {
@@ -436,16 +440,16 @@ impl SubpassRenderPass {
         *self.inner.active_subpass.lock()
     }
 
-    /// Returns retained color attachment count.
+    /// Returns the color attachment count at begin, including after the pass ends.
     #[must_use]
     pub fn color_attachment_count(&self) -> usize {
-        self.inner.color_attachments.len()
+        self.inner.color_attachment_count
     }
 
-    /// Returns true when a depth-stencil attachment is retained.
+    /// Returns whether the pass began with a depth-stencil attachment, even after end.
     #[must_use]
     pub fn has_depth_stencil_attachment(&self) -> bool {
-        self.inner.depth_stencil_attachment.is_some()
+        self.inner.has_depth_stencil_attachment
     }
 
     /// Advances to the next subpass.
@@ -710,10 +714,12 @@ impl SubpassRenderPass {
             return None;
         }
         *ended = true;
-        // Release encoding-time bindings and the scope even if HAL end fails.
+        // Release attachments, encoding-time bindings and the scope even if HAL end fails.
         // Draws move into the parent command; a retained ended handle owns no
         // scope history or index buckets.
         let draw_state = std::mem::take(&mut *self.inner.draw_state.lock());
+        let color_attachments = std::mem::take(&mut *self.inner.color_attachments.lock());
+        let depth_stencil_attachment = self.inner.depth_stencil_attachment.lock().take();
         if let Some(pass) = self.inner.hal.lock().take() {
             if let Err(error) = pass.end() {
                 let message = error.to_string();
@@ -728,8 +734,8 @@ impl SubpassRenderPass {
                 .record_subpass_render_pass(SubpassRenderPassCommand {
                     layout: Arc::clone(&self.inner.layout),
                     extent: self.inner.extent,
-                    color_attachments: self.inner.color_attachments.clone(),
-                    depth_stencil_attachment: self.inner.depth_stencil_attachment.clone(),
+                    color_attachments,
+                    depth_stencil_attachment,
                     draws: draw_state.draws,
                 });
         }
@@ -806,8 +812,12 @@ impl Drop for SubpassRenderPassInner {
                     token: self.token,
                     layout: Arc::clone(&self.layout),
                     extent: self.extent,
-                    color_attachments: self.color_attachments.clone(),
-                    depth_stencil_attachment: self.depth_stencil_attachment.clone(),
+                    color_attachments: Mutex::new(std::mem::take(self.color_attachments.get_mut())),
+                    depth_stencil_attachment: Mutex::new(
+                        self.depth_stencil_attachment.get_mut().take(),
+                    ),
+                    color_attachment_count: self.color_attachment_count,
+                    has_depth_stencil_attachment: self.has_depth_stencil_attachment,
                     hal: Mutex::new(self.hal.lock().take()),
                     active_subpass: Mutex::new(*self.active_subpass.lock()),
                     draw_state: Mutex::new(std::mem::take(&mut *self.draw_state.lock())),
@@ -1152,6 +1162,10 @@ fn validate_subpass_depth_stencil_attachment(
                 .to_owned(),
         );
     }
+    validate_depth_stencil_attachment_aspects(
+        view,
+        "subpass render pass depth-stencil attachment",
+    )?;
     if !format_caps.aspects.depth && !format_caps.aspects.stencil {
         return Err(
             "subpass render pass depth-stencil attachment format must have depth or stencil aspect"
@@ -2376,6 +2390,130 @@ mod tests {
         }
 
         #[test]
+        fn depth_stencil_attachment_requires_all_texture_aspects_at_begin() {
+            for aspect in [
+                TextureAspect::DepthOnly,
+                TextureAspect::StencilOnly,
+                TextureAspect::All,
+            ] {
+                let device = noop_device();
+                let format = TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8);
+                let texture = device.create_texture(TextureDescriptor {
+                    usage: TextureUsage::RENDER_ATTACHMENT,
+                    format,
+                    ..crate::test_helpers::texture_descriptor_4x4()
+                });
+                let (view, error) = texture.create_view(TextureViewDescriptor {
+                    format: None,
+                    dimension: None,
+                    base_mip_level: 0,
+                    mip_level_count: None,
+                    base_array_layer: 0,
+                    array_layer_count: None,
+                    aspect: Some(aspect),
+                    usage: Some(TextureUsage::RENDER_ATTACHMENT),
+                    swizzle: None,
+                });
+                assert_eq!(error, None);
+                let mut layout = valid_two_subpass_deferred_layout();
+                layout.depth_stencil_attachment = Some(AttachmentLayout {
+                    format: view.format(),
+                    sample_count: 1,
+                });
+                layout.subpasses[0].uses_depth_stencil = true;
+                let layout = Arc::new(device.create_subpass_pass_layout(layout));
+                assert!(!layout.is_error());
+                let mut descriptor = subpass_descriptor(layout, &device);
+                descriptor.depth_stencil_attachment = Some(SubpassDepthStencilAttachmentBinding {
+                    resource: SubpassAttachmentResource::Persistent {
+                        view: Arc::new(view),
+                        resolve_target: None,
+                    },
+                    depth_load_op: if aspect == TextureAspect::StencilOnly {
+                        LoadOp::Undefined
+                    } else {
+                        LoadOp::Clear
+                    },
+                    depth_store_op: if aspect == TextureAspect::StencilOnly {
+                        StoreOp::Undefined
+                    } else {
+                        StoreOp::Store
+                    },
+                    depth_clear_value: 1.0,
+                    stencil_load_op: if aspect == TextureAspect::DepthOnly {
+                        LoadOp::Undefined
+                    } else {
+                        LoadOp::Clear
+                    },
+                    stencil_store_op: if aspect == TextureAspect::DepthOnly {
+                        StoreOp::Undefined
+                    } else {
+                        StoreOp::Store
+                    },
+                    stencil_clear_value: 0,
+                });
+                let encoder = device.create_command_encoder();
+                let (pass, error) = encoder.begin_subpass_render_pass(&device, descriptor);
+                assert_eq!(error, None);
+                if aspect == TextureAspect::All {
+                    assert!(!pass.is_error());
+                    assert_eq!(pass.end(), None);
+                    let (command, error) = encoder.finish();
+                    assert_eq!(error, None);
+                    assert_eq!(device.queue().submit(&[Arc::new(command)]), None);
+                } else {
+                    assert!(pass.is_error());
+                    assert!(pass.inner.hal.lock().is_none());
+                    assert!(pass
+                        .inner
+                        .draw_state
+                        .lock()
+                        .usage_scope
+                        .texture_uses
+                        .is_empty());
+                    finish_rejected(
+                        &encoder,
+                        &pass,
+                        "subpass render pass depth-stencil attachment must encompass all aspects of its texture's format",
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn one_buffer_can_be_both_vertex_and_index_buffer() {
+            let device = noop_device();
+            let buffer = Arc::new(device.create_buffer(BufferDescriptor {
+                usage: BufferUsage::VERTEX | BufferUsage::INDEX,
+                size: 64,
+                mapped_at_creation: false,
+            }));
+            let (encoder, pass) = begin(&device);
+            assert_eq!(
+                pass.set_vertex_buffer(0, Some(Arc::clone(&buffer)), 8, 32, device.limits()),
+                None
+            );
+            assert_eq!(
+                pass.set_index_buffer(Arc::clone(&buffer), Some(IndexFormat::Uint16), 8, 32),
+                None
+            );
+            {
+                let state = pass.inner.draw_state.lock();
+                assert!(Arc::ptr_eq(&state.vertex_buffers[&0].buffer, &buffer));
+                assert!(Arc::ptr_eq(
+                    &state.index_buffer.as_ref().unwrap().buffer,
+                    &buffer
+                ));
+                assert_eq!(state.usage_scope.buffer_uses.len(), 2);
+            }
+            assert_eq!(pass.end(), None);
+            let (command, error) = encoder.finish();
+            assert_eq!(error, None);
+            assert!(!command.is_error());
+            assert_eq!(device.queue().submit(&[Arc::new(command)]), None);
+        }
+
+        #[test]
         fn vertex_and_index_buffers_share_the_render_scope() {
             for index in [false, true] {
                 for writable in [false, true] {
@@ -2552,6 +2690,8 @@ mod tests {
         fn end_releases_scope_and_bound_texture_handles() {
             let device = noop_device();
             let (encoder, pass) = begin(&device);
+            assert_eq!(pass.color_attachment_count(), 2);
+            assert!(!pass.has_depth_stencil_attachment());
             let view = sampled_view(&device, rgba8_unorm(), 1);
             let group = sampled_group(&device, view);
             let caller_refs = Arc::strong_count(&group);
@@ -2581,17 +2721,21 @@ mod tests {
             assert_eq!(device.queue().submit(&[Arc::new(command)]), None);
             // Keep `pass` alive until after these checks to model a leaked handle.
             assert!(*pass.inner.ended.lock());
+            assert_eq!(pass.color_attachment_count(), 2);
+            assert!(!pass.has_depth_stencil_attachment());
         }
 
         #[test]
-        fn drop_finishes_with_scope_history_and_keeps_the_first_error() {
+        fn drop_releases_scope_history_apart_from_parent_references() {
             let device = noop_device();
             let buffer = Arc::new(device.create_buffer(BufferDescriptor {
-                usage: BufferUsage::STORAGE | BufferUsage::UNIFORM,
+                usage: BufferUsage::STORAGE,
                 size: 64,
                 mapped_at_creation: false,
             }));
             let (encoder, pass) = begin(&device);
+            let view = sampled_view(&device, rgba8_unorm(), 1);
+            let texture = view.texture().clone();
             assert_eq!(
                 pass.set_bind_group(
                     0,
@@ -2601,20 +2745,107 @@ mod tests {
                 ),
                 None
             );
-            assert_eq!(pass.next_subpass(), None);
             assert_eq!(
                 pass.set_bind_group(
                     1,
-                    Some(buffer_group(&device, &buffer, BufferBindingType::Uniform)),
+                    Some(sampled_group(&device, view)),
                     Vec::new(),
                     device.limits()
                 ),
                 None
             );
+            assert_eq!(pass.next_subpass(), None);
+            assert!(pass.inner.draw_state.lock().bind_groups.is_empty());
+            // Only the scope and parent retain these now-unbound resources.
+            assert!(Arc::strong_count(&buffer) > 2);
+            assert!(Arc::strong_count(&texture.inner) > 2);
             drop(pass);
+            assert_eq!(Arc::strong_count(&buffer), 2);
+            assert_eq!(Arc::strong_count(&texture.inner), 2);
             let (command, error) = encoder.finish();
-            assert!(command.is_error());
-            assert_eq!(error.as_deref(), Some(BUFFER_CONFLICT));
+            assert!(!command.is_error());
+            assert_eq!(error, None);
+            assert_eq!(command.command_ops().len(), 1);
+            drop(command);
+            assert_eq!(Arc::strong_count(&buffer), 1);
+            assert_eq!(Arc::strong_count(&texture.inner), 1);
+        }
+
+        #[test]
+        fn end_and_drop_transfer_all_attachments_to_parent_command() {
+            for from_drop in [false, true] {
+                let device = noop_device();
+                let mut layout = valid_two_subpass_deferred_layout();
+                layout.color_attachments[0].sample_count = 4;
+                layout.depth_stencil_attachment = Some(AttachmentLayout {
+                    sample_count: 4,
+                    ..depth_attachment_layout()
+                });
+                layout.subpasses[0].uses_depth_stencil = true;
+                let layout = Arc::new(device.create_subpass_pass_layout(layout));
+                assert!(!layout.is_error());
+                let mut descriptor = subpass_descriptor(layout, &device);
+                let color = sampled_view(&device, rgba8_unorm(), 4);
+                let resolve = sampled_view(&device, rgba8_unorm(), 1);
+                let depth = sampled_view(&device, depth_attachment_layout().format, 4);
+                let views = [&color, &resolve, &depth].map(Arc::downgrade);
+                let textures =
+                    [&color, &resolve, &depth].map(|view| Arc::downgrade(&view.texture().inner));
+                descriptor.color_attachments[0].resource = SubpassAttachmentResource::Persistent {
+                    view: color,
+                    resolve_target: Some(resolve),
+                };
+                descriptor.depth_stencil_attachment = Some(SubpassDepthStencilAttachmentBinding {
+                    resource: SubpassAttachmentResource::Persistent {
+                        view: depth,
+                        resolve_target: None,
+                    },
+                    depth_load_op: LoadOp::Clear,
+                    depth_store_op: StoreOp::Store,
+                    depth_clear_value: 1.0,
+                    stencil_load_op: LoadOp::Undefined,
+                    stencil_store_op: StoreOp::Undefined,
+                    stencil_clear_value: 0,
+                });
+                let encoder = device.create_command_encoder();
+                let (pass, error) = encoder.begin_subpass_render_pass(&device, descriptor);
+                assert_eq!(error, None);
+                assert!(!pass.is_error());
+                assert_eq!(pass.color_attachment_count(), 2);
+                assert!(pass.has_depth_stencil_attachment());
+                let retained = if from_drop {
+                    drop(pass);
+                    None
+                } else {
+                    assert_eq!(pass.end(), None);
+                    assert_eq!(pass.color_attachment_count(), 2);
+                    assert!(pass.has_depth_stencil_attachment());
+                    Some(pass)
+                };
+                // Each view and texture is owned only by the parent command.
+                for view in &views {
+                    assert_eq!(view.strong_count(), 1);
+                }
+                for texture in &textures {
+                    assert_eq!(texture.strong_count(), 1);
+                }
+                let (command, error) = encoder.finish();
+                assert_eq!(error, None);
+                assert!(!command.is_error());
+                assert_eq!(command.command_ops().len(), 1);
+                drop(command);
+                for view in &views {
+                    assert_eq!(view.strong_count(), 0);
+                }
+                for texture in &textures {
+                    assert_eq!(texture.strong_count(), 0);
+                }
+                if let Some(pass) = retained {
+                    assert_eq!(pass.color_attachment_count(), 2);
+                    assert!(pass.has_depth_stencil_attachment());
+                    assert_eq!(pass.end(), None);
+                }
+            }
         }
     }
 }

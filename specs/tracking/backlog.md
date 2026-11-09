@@ -354,3 +354,10 @@ Re-verification after the fixes: `cargo test --workspace` 1093/0, clippy default
 ### 2026-11-10 — snapshot re-taken at `8e42774`
 
 - Every open row was compared with the source. B6 closed as stale (the tier-2 read-write storage set equals Dawn's). Rewritten to the current state: A3, A7, D3, D5, E2, E5. New rows: A31 (subpass usage-scope validation, split out of E5) and E15 (`strip_all_names`, the last Block 124 survey item). Headline counts re-measured (2 `TODO`, 542 `#[ignore]`).
+
+### 2026-11-10 — A31 closed (Block 150)
+
+- Subpass render passes now validate one usage scope for the whole pass (attachments,
+  bind groups, vertex and index buffers), shared with the regular render pass through
+  `RenderUsageScope`. The Phase Review also closed two subpass gaps: a depth-stencil view
+  narrowed to one aspect is rejected, and an ended pass no longer holds its attachments.
