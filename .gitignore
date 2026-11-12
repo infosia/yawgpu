@@ -7,5 +7,7 @@
 *.transcript
 /HANDOFF.md
 /REPORT.md
+/HANDOFF-*.md
+/REPORT-*.md
 /AGENTS.md
 __pycache__/
