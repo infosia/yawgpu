@@ -1,6 +1,6 @@
 # Block 152 — FFI receivers survive a reentrant release in the error callback
 
-Status: **PLANNED (2026-11-13)**.
+Status: **S1 landed (2026-11-13)**; Phase Review pending.
 Source: whole-code review at `92e38c7` (`REPORT-review.md`), finding R01. It extends Block
 113 M1 / audit rule C11, which covered device receivers only.
 
@@ -55,3 +55,12 @@ S1: R1–R3 with tests.
 - Agent gates: `cargo test -p yawgpu --lib`, `cargo test -p yawgpu --features tiled --lib`,
   clippy with and without `tiled`.
 - Claude: workspace test; optional AddressSanitizer run of the new tests on nightly.
+
+## Verification record
+
+S1: workspace test 1,459/0; `yawgpu --lib` 315/0; `yawgpu --features tiled --lib` 319/0;
+clippy clean with and without `tiled`. Nine `audit_r01_*` tests were red before the fix.
+The R2 audit changed 22 of 175 production `borrow_handle` sites (texture view, 14
+command-encoder entry points, bundle finish, both `GetBindGroupLayout`s,
+`CreateBindGroup`'s layout, `BeginSubpassRenderPass`, `ProcessEvents`, `WaitAny`); the
+rest either cannot dispatch or dispatch only as their last wrapper access.

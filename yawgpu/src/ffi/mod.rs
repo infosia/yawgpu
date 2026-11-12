@@ -3486,6 +3486,322 @@ mod tests {
         }
     }
 
+    struct ReentrantReleaseState<T> {
+        handle: *const T,
+        release: unsafe extern "C" fn(*const T),
+        weak: Weak<T>,
+        fired: usize,
+        retained_during_callback: bool,
+    }
+
+    impl<T> ReentrantReleaseState<T> {
+        fn new(release: unsafe extern "C" fn(*const T)) -> Self {
+            Self {
+                handle: std::ptr::null(),
+                release,
+                weak: Weak::new(),
+                fired: 0,
+                retained_during_callback: false,
+            }
+        }
+
+        unsafe fn arm(&mut self, handle: *const T) {
+            self.handle = handle;
+            self.weak = Arc::downgrade(&clone_handle(handle, "reentrant release target"));
+            assert_eq!(self.weak.strong_count(), 1);
+        }
+
+        fn assert_released(&self) {
+            assert_eq!(self.fired, 1);
+            assert!(self.retained_during_callback);
+            assert!(self.weak.upgrade().is_none());
+        }
+    }
+
+    unsafe extern "C" fn release_reentrant_target<T>(
+        _: *const native::WGPUDevice,
+        kind: native::WGPUErrorType,
+        _: native::WGPUStringView,
+        data: *mut c_void,
+        _: *mut c_void,
+    ) {
+        let state = &mut *data.cast::<ReentrantReleaseState<T>>();
+        state.fired += 1;
+        // Avoid executing a use-after-free if retention regresses: the test
+        // still fails its lifetime assertions, without relying on silent UB.
+        if kind == native::WGPUErrorType_Validation
+            && state.fired == 1
+            && state.weak.strong_count() > 1
+        {
+            (state.release)(state.handle);
+            state.retained_during_callback = state.weak.upgrade().is_some();
+        }
+    }
+
+    unsafe fn noop_chain_with_reentrant_release<T>(
+        state: &mut ReentrantReleaseState<T>,
+    ) -> (
+        native::WGPUInstance,
+        native::WGPUAdapter,
+        native::WGPUDevice,
+    ) {
+        let instance = make_noop_instance();
+        let adapter = request_noop_adapter(instance);
+        let mut descriptor: native::WGPUDeviceDescriptor = std::mem::zeroed();
+        descriptor.uncapturedErrorCallbackInfo.callback = Some(release_reentrant_target::<T>);
+        descriptor.uncapturedErrorCallbackInfo.userdata1 =
+            (state as *mut ReentrantReleaseState<T>).cast();
+        let device = request_noop_device_with_descriptor(instance, adapter, &descriptor);
+        (instance, adapter, device)
+    }
+
+    #[test]
+    fn audit_r01_texture_view_retains_reentrantly_released_texture() {
+        unsafe {
+            let mut state = ReentrantReleaseState::new(wgpuTextureRelease);
+            let (instance, adapter, device) = noop_chain_with_reentrant_release(&mut state);
+            let texture = wgpuDeviceCreateTexture(
+                device,
+                &texture_descriptor(native::WGPUTextureUsage_TextureBinding, 4),
+            );
+            state.arm(texture);
+            let mut descriptor =
+                texture_view_descriptor_with_format(native::WGPUTextureFormat_Undefined);
+            descriptor.baseMipLevel = 1;
+            let view = wgpuTextureCreateView(texture, &descriptor);
+            state.assert_released();
+            assert!(borrow_handle(view, "WGPUTextureView")._core.is_error());
+            wgpuTextureViewRelease(view);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn audit_r01_command_encoder_finish_retains_reentrantly_released_receiver() {
+        unsafe {
+            let mut state = ReentrantReleaseState::new(wgpuCommandEncoderRelease);
+            let (instance, adapter, device) = noop_chain_with_reentrant_release(&mut state);
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            wgpuCommandEncoderPopDebugGroup(encoder);
+            assert_eq!(state.fired, 0);
+            state.arm(encoder);
+            let commands = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            state.assert_released();
+            assert!(borrow_handle(commands, "WGPUCommandBuffer").core.is_error());
+            wgpuCommandBufferRelease(commands);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn audit_r01_begin_pass_retains_reentrantly_released_command_encoder() {
+        unsafe {
+            for render in [false, true] {
+                let mut state = ReentrantReleaseState::new(wgpuCommandEncoderRelease);
+                let (instance, adapter, device) = noop_chain_with_reentrant_release(&mut state);
+                let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+                let commands = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+                state.arm(encoder);
+                if render {
+                    let descriptor = noop_render_pass_descriptor(&[], std::ptr::null());
+                    let pass = wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
+                    state.assert_released();
+                    assert!(borrow_handle(pass, "WGPURenderPassEncoder")
+                        .core
+                        .end()
+                        .is_some());
+                    wgpuRenderPassEncoderRelease(pass);
+                } else {
+                    let pass = wgpuCommandEncoderBeginComputePass(encoder, std::ptr::null());
+                    state.assert_released();
+                    assert!(borrow_handle(pass, "WGPUComputePassEncoder")
+                        .core
+                        .end()
+                        .is_some());
+                    wgpuComputePassEncoderRelease(pass);
+                }
+                wgpuCommandBufferRelease(commands);
+                release_handles(instance, adapter, device);
+            }
+        }
+    }
+
+    #[test]
+    fn audit_r01_bundle_finish_retains_reentrantly_released_receiver() {
+        unsafe {
+            let mut state = ReentrantReleaseState::new(wgpuRenderBundleEncoderRelease);
+            let (instance, adapter, device) = noop_chain_with_reentrant_release(&mut state);
+            let encoder = wgpuDeviceCreateRenderBundleEncoder(
+                device,
+                &render_bundle_encoder_descriptor(&[native::WGPUTextureFormat_RGBA8Unorm]),
+            );
+            wgpuRenderBundleEncoderPopDebugGroup(encoder);
+            assert_eq!(state.fired, 0);
+            state.arm(encoder);
+            let bundle = wgpuRenderBundleEncoderFinish(encoder, std::ptr::null());
+            state.assert_released();
+            assert!(borrow_handle(bundle, "WGPURenderBundle").core.is_error());
+            wgpuRenderBundleRelease(bundle);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn audit_r01_compute_pipeline_layout_retains_reentrantly_released_pipeline() {
+        unsafe {
+            let mut state = ReentrantReleaseState::new(wgpuComputePipelineRelease);
+            let (instance, adapter, device) = noop_chain_with_reentrant_release(&mut state);
+            let module = create_wgsl_module(device, "@compute @workgroup_size(1) fn cs() {}");
+            let pipeline = wgpuDeviceCreateComputePipeline(
+                device,
+                &compute_pipeline_descriptor(module, std::ptr::null()),
+            );
+            state.arm(pipeline);
+            let layout = wgpuComputePipelineGetBindGroupLayout(pipeline, u32::MAX);
+            state.assert_released();
+            assert!(borrow_handle(layout, "WGPUBindGroupLayout")
+                ._core
+                .is_error());
+            wgpuBindGroupLayoutRelease(layout);
+            wgpuShaderModuleRelease(module);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn audit_r01_render_pipeline_layout_retains_reentrantly_released_pipeline() {
+        unsafe {
+            let mut state = ReentrantReleaseState::new(wgpuRenderPipelineRelease);
+            let (instance, adapter, device) = noop_chain_with_reentrant_release(&mut state);
+            let module = create_wgsl_module(device, "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0); } @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }");
+            let descriptor = render_pipeline_descriptor(module, module, std::ptr::null());
+            let pipeline = wgpuDeviceCreateRenderPipeline(device, &descriptor);
+            state.arm(pipeline);
+            let layout = wgpuRenderPipelineGetBindGroupLayout(pipeline, u32::MAX);
+            state.assert_released();
+            assert!(borrow_handle(layout, "WGPUBindGroupLayout")
+                ._core
+                .is_error());
+            wgpuBindGroupLayoutRelease(layout);
+            // The shared descriptor helper allocates these two nested structs.
+            drop(Box::from_raw((*descriptor.fragment).targets.cast_mut()));
+            drop(Box::from_raw(descriptor.fragment.cast_mut()));
+            wgpuShaderModuleRelease(module);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn audit_r01_bind_group_retains_reentrantly_released_secondary_layout() {
+        unsafe {
+            let mut state = ReentrantReleaseState::new(wgpuBindGroupLayoutRelease);
+            let (instance, adapter, device) = noop_chain_with_reentrant_release(&mut state);
+            let layout = wgpuDeviceCreateBindGroupLayout(device, &bind_group_layout_descriptor());
+            let entry: native::WGPUBindGroupEntry = std::mem::zeroed();
+            let mut descriptor = bind_group_descriptor(layout);
+            descriptor.entryCount = 1;
+            descriptor.entries = &entry;
+            state.arm(layout);
+            let group = wgpuDeviceCreateBindGroup(device, &descriptor);
+            state.assert_released();
+            assert!(borrow_handle(group, "WGPUBindGroup")._core.is_error());
+            wgpuBindGroupRelease(group);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn audit_r01_tiled_begin_retains_reentrantly_released_command_encoder() {
+        unsafe {
+            let mut state = ReentrantReleaseState::new(wgpuCommandEncoderRelease);
+            let (instance, adapter, device) = noop_chain_with_reentrant_release(&mut state);
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let layout_descriptor: crate::YaWGPUSubpassPassLayoutDescriptor = std::mem::zeroed();
+            let layout = crate::yawgpuDeviceCreateSubpassPassLayout(device, &layout_descriptor);
+            assert_validation_error_contains(instance, device, "");
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let commands = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+            state.arm(encoder);
+            let descriptor = crate::YaWGPUSubpassRenderPassDescriptor {
+                passLayout: layout,
+                extent: extent(1, 1, 1),
+                ..std::mem::zeroed()
+            };
+            let pass = crate::yawgpuCommandEncoderBeginSubpassRenderPass(encoder, &descriptor);
+            state.assert_released();
+            assert!(borrow_handle(pass, "YaWGPUSubpassRenderPassEncoder")
+                .core
+                .is_error());
+            crate::yawgpuSubpassRenderPassEncoderRelease(pass);
+            crate::yawgpuSubpassPassLayoutRelease(layout);
+            wgpuCommandBufferRelease(commands);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn audit_r01_instance_polling_retains_reentrantly_released_receiver() {
+        unsafe extern "C" fn dispatch_error(
+            _: native::WGPUQueueWorkDoneStatus,
+            _: native::WGPUStringView,
+            data: *mut c_void,
+            _: *mut c_void,
+        ) {
+            let device = &*data.cast::<core::Device>();
+            device.dispatch_error(core::ErrorKind::Validation, "reentrant polling error");
+        }
+        unsafe {
+            for wait in [false, true] {
+                let instance = make_noop_instance();
+                // A core-only device leaves the instance's C reference as the
+                // sole owner, so the callback can release its last reference.
+                let adapter = borrow_handle(instance, "WGPUInstance")
+                    .core
+                    .enumerate_adapters()
+                    .remove(0);
+                let device = Arc::new(adapter.create_device(None, &[], "", "").unwrap());
+                let mut state = ReentrantReleaseState::new(wgpuInstanceRelease);
+                state.arm(instance);
+                let address = (&mut state as *mut ReentrantReleaseState<WGPUInstanceImpl>) as usize;
+                device.set_uncaptured_error_callback(Some(move |_| {
+                    release_reentrant_target::<WGPUInstanceImpl>(
+                        std::ptr::null(),
+                        native::WGPUErrorType_Validation,
+                        empty_string_view(),
+                        address as *mut c_void,
+                        std::ptr::null_mut(),
+                    );
+                }));
+                let future = borrow_handle(instance, "WGPUInstance").register_callback(
+                    PendingCallback::QueueWorkDone {
+                        mode: native::WGPUCallbackMode_AllowProcessEvents,
+                        callback: Some(dispatch_error),
+                        device: Arc::clone(&device),
+                        status: core::QueueWorkDoneStatus::Success,
+                        gate: None,
+                        userdata1: Arc::as_ptr(&device) as usize,
+                        userdata2: 0,
+                    },
+                );
+                if wait {
+                    let mut info = native::WGPUFutureWaitInfo {
+                        future,
+                        completed: 0,
+                    };
+                    assert_eq!(
+                        wgpuInstanceWaitAny(instance, 1, &mut info, 0),
+                        native::WGPUWaitStatus_Success
+                    );
+                    assert_eq!(info.completed, 1);
+                } else {
+                    wgpuInstanceProcessEvents(instance);
+                }
+                state.assert_released();
+            }
+        }
+    }
+
     #[test]
     fn audit_c11_uncaptured_callback_can_release_its_device_reentrantly() {
         unsafe extern "C" fn release(

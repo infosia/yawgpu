@@ -41,7 +41,7 @@ pub unsafe extern "C" fn wgpuComputePipelineGetBindGroupLayout(
     compute_pipeline: native::WGPUComputePipeline,
     group_index: u32,
 ) -> native::WGPUBindGroupLayout {
-    let pipeline = borrow_handle(compute_pipeline, "WGPUComputePipeline");
+    let pipeline = clone_handle(compute_pipeline, "WGPUComputePipeline");
     get_pipeline_bind_group_layout(
         pipeline._core.bind_group_layouts(),
         &pipeline._device,
@@ -62,7 +62,7 @@ pub unsafe extern "C" fn wgpuRenderPipelineGetBindGroupLayout(
     render_pipeline: native::WGPURenderPipeline,
     group_index: u32,
 ) -> native::WGPUBindGroupLayout {
-    let pipeline = borrow_handle(render_pipeline, "WGPURenderPipeline");
+    let pipeline = clone_handle(render_pipeline, "WGPURenderPipeline");
     get_pipeline_bind_group_layout(
         pipeline._core.bind_group_layouts(),
         &pipeline._device,

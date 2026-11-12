@@ -23,7 +23,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderBeginRenderPass(
     command_encoder: native::WGPUCommandEncoder,
     descriptor: *const native::WGPURenderPassDescriptor,
 ) -> native::WGPURenderPassEncoder {
-    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let encoder = clone_handle(command_encoder, "WGPUCommandEncoder");
     let native_descriptor = descriptor
         .as_ref()
         .expect("WGPURenderPassDescriptor must not be null");
@@ -78,7 +78,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderBeginComputePass(
     command_encoder: native::WGPUCommandEncoder,
     descriptor: *const native::WGPUComputePassDescriptor,
 ) -> native::WGPUComputePassEncoder {
-    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let encoder = clone_handle(command_encoder, "WGPUCommandEncoder");
     let mut mapped_writes = None;
     if let Some(timestamp_writes) = descriptor
         .as_ref()
@@ -130,7 +130,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderFinish(
     command_encoder: native::WGPUCommandEncoder,
     descriptor: *const native::WGPUCommandBufferDescriptor,
 ) -> native::WGPUCommandBuffer {
-    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let encoder = clone_handle(command_encoder, "WGPUCommandEncoder");
     let (command_buffer, error) = encoder.core.finish();
     dispatch_optional_error(&encoder.device, error);
     arc_to_handle(Arc::new(WGPUCommandBufferImpl {
@@ -156,7 +156,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderInsertDebugMarker(
     command_encoder: native::WGPUCommandEncoder,
     _marker_label: native::WGPUStringView,
 ) {
-    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let encoder = clone_handle(command_encoder, "WGPUCommandEncoder");
     dispatch_optional_error(&encoder.device, encoder.core.insert_debug_marker());
 }
 
@@ -171,7 +171,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderPushDebugGroup(
     command_encoder: native::WGPUCommandEncoder,
     _group_label: native::WGPUStringView,
 ) {
-    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let encoder = clone_handle(command_encoder, "WGPUCommandEncoder");
     dispatch_optional_error(&encoder.device, encoder.core.push_debug_group());
 }
 
@@ -185,7 +185,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderPushDebugGroup(
 pub unsafe extern "C" fn wgpuCommandEncoderPopDebugGroup(
     command_encoder: native::WGPUCommandEncoder,
 ) {
-    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let encoder = clone_handle(command_encoder, "WGPUCommandEncoder");
     dispatch_optional_error(&encoder.device, encoder.core.pop_debug_group());
 }
 
@@ -205,7 +205,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyBufferToBuffer(
     destination_offset: u64,
     size: u64,
 ) {
-    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let encoder = clone_handle(command_encoder, "WGPUCommandEncoder");
     let source = borrow_handle(source, "WGPUBuffer");
     let destination = borrow_handle(destination, "WGPUBuffer");
     if !source.device.same(&encoder.device) || !destination.device.same(&encoder.device) {
@@ -242,7 +242,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderClearBuffer(
     offset: u64,
     size: u64,
 ) {
-    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let encoder = clone_handle(command_encoder, "WGPUCommandEncoder");
     let buffer = borrow_handle(buffer, "WGPUBuffer");
     if !buffer.device.same(&encoder.device) {
         dispatch_optional_error(
@@ -288,7 +288,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderWriteBuffer(
     data: *const c_void,
     size: usize,
 ) {
-    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let encoder = clone_handle(command_encoder, "WGPUCommandEncoder");
     let buffer = borrow_handle(buffer, "WGPUBuffer");
     if size > isize::MAX as usize {
         dispatch_optional_error(
@@ -325,7 +325,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderWriteTimestamp(
     query_set: native::WGPUQuerySet,
     query_index: u32,
 ) {
-    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let encoder = clone_handle(command_encoder, "WGPUCommandEncoder");
     let query_set = borrow_handle(query_set, "WGPUQuerySet");
     dispatch_optional_error(
         &encoder.device,
@@ -351,7 +351,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderResolveQuerySet(
     destination: native::WGPUBuffer,
     destination_offset: u64,
 ) {
-    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let encoder = clone_handle(command_encoder, "WGPUCommandEncoder");
     let query_set = borrow_handle(query_set, "WGPUQuerySet");
     let destination = borrow_handle(destination, "WGPUBuffer");
     if !query_set._device.same(&encoder.device) || !destination.device.same(&encoder.device) {
@@ -390,7 +390,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyBufferToTexture(
     destination: *const native::WGPUTexelCopyTextureInfo,
     copy_size: *const native::WGPUExtent3D,
 ) {
-    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let encoder = clone_handle(command_encoder, "WGPUCommandEncoder");
     let source = source
         .as_ref()
         .expect("wgpuCommandEncoderCopyBufferToTexture source must not be null");
@@ -457,7 +457,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToBuffer(
     destination: *const native::WGPUTexelCopyBufferInfo,
     copy_size: *const native::WGPUExtent3D,
 ) {
-    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let encoder = clone_handle(command_encoder, "WGPUCommandEncoder");
     let source = source
         .as_ref()
         .expect("wgpuCommandEncoderCopyTextureToBuffer source must not be null");
@@ -523,7 +523,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToTexture(
     destination: *const native::WGPUTexelCopyTextureInfo,
     copy_size: *const native::WGPUExtent3D,
 ) {
-    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let encoder = clone_handle(command_encoder, "WGPUCommandEncoder");
     let source = source
         .as_ref()
         .expect("wgpuCommandEncoderCopyTextureToTexture source must not be null");

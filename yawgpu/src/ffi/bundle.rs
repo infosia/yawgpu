@@ -381,7 +381,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderFinish(
     render_bundle_encoder: native::WGPURenderBundleEncoder,
     descriptor: *const native::WGPURenderBundleDescriptor,
 ) -> native::WGPURenderBundle {
-    let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
+    let encoder = clone_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
     let (bundle, error) = encoder.core.finish();
     dispatch_optional_error(&encoder.device, error);
     arc_to_handle(Arc::new(WGPURenderBundleImpl {

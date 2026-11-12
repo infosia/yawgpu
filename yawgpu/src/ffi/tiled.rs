@@ -138,7 +138,7 @@ pub unsafe extern "C" fn yawgpuCommandEncoderBeginSubpassRenderPass(
     command_encoder: native::WGPUCommandEncoder,
     descriptor: *const YaWGPUSubpassRenderPassDescriptor,
 ) -> crate::YaWGPUSubpassRenderPassEncoder {
-    let encoder = borrow_handle(command_encoder, "WGPUCommandEncoder");
+    let encoder = clone_handle(command_encoder, "WGPUCommandEncoder");
     let native_descriptor = descriptor
         .as_ref()
         .expect("YaWGPUSubpassRenderPassDescriptor must not be null");

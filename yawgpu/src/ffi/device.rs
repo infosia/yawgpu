@@ -431,7 +431,8 @@ pub unsafe extern "C" fn wgpuDeviceCreateBindGroup(
     let descriptor = descriptor
         .as_ref()
         .expect("WGPUBindGroupDescriptor must not be null");
-    let layout = borrow_handle(descriptor.layout, "WGPUBindGroupLayout");
+    // Creation can dispatch before the result wrapper captures the layout.
+    let layout = clone_handle(descriptor.layout, "WGPUBindGroupLayout");
     let mut entries = map_bind_group_entries(descriptor);
     if !layout._device.same(&device.core) {
         entries.push(core::BindGroupEntry {

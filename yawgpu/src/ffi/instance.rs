@@ -562,7 +562,8 @@ fn backend_type_name(backend_type: native::WGPUBackendType) -> String {
 /// Returns WGPU instance process events.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuInstanceProcessEvents(instance: native::WGPUInstance) {
-    let instance = borrow_handle(instance, "WGPUInstance");
+    // Polling submission gates can dispatch an uncaptured error reentrantly.
+    let instance = clone_handle(instance, "WGPUInstance");
     instance.process_callbacks();
 }
 
@@ -590,7 +591,8 @@ pub unsafe extern "C" fn wgpuInstanceWaitAny(
     futures: *mut native::WGPUFutureWaitInfo,
     timeout_ns: u64,
 ) -> native::WGPUWaitStatus {
-    let instance = borrow_handle(instance, "WGPUInstance");
+    // Polling submission gates can dispatch an uncaptured error reentrantly.
+    let instance = clone_handle(instance, "WGPUInstance");
     if future_count > 0 && futures.is_null() {
         return native::WGPUWaitStatus_Error;
     }

@@ -43,7 +43,8 @@ pub unsafe extern "C" fn wgpuTextureCreateView(
     texture: native::WGPUTexture,
     descriptor: *const native::WGPUTextureViewDescriptor,
 ) -> native::WGPUTextureView {
-    let texture = borrow_handle(texture, "WGPUTexture");
+    // The uncaptured-error callback may release the last external texture reference.
+    let texture = clone_handle(texture, "WGPUTexture");
     let native_descriptor = descriptor.as_ref();
     let label = native_descriptor.and_then(|descriptor| label_from_string_view(descriptor.label));
     let mut conversion_error = None;
