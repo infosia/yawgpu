@@ -318,7 +318,7 @@ fn fs() -> @builtin(frag_depth) f32 {
             for col in 0..WIDTH as usize {
                 let off = row * BYTES_PER_ROW as usize + col * 4;
                 let got = f32::from_ne_bytes(bytes[off..off + 4].try_into().expect("four bytes"));
-                if (got - 0.625).abs() > 1e-5 {
+                if !got.is_finite() || (got - 0.625).abs() > 1e-5 {
                     mismatches.push((col, row, got));
                 }
             }

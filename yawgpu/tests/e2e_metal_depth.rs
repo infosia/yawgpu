@@ -154,7 +154,7 @@ fn metal_frag_depth_into_mip_level_1() {
                     mapped[off + 2],
                     mapped[off + 3],
                 ]);
-                if (got - 0.7).abs() > 1e-5 {
+                if !got.is_finite() || (got - 0.7).abs() > 1e-5 {
                     mismatches.push((col, row, got));
                 }
             }
@@ -288,7 +288,7 @@ fn metal_sampled_frag_depth_writes_per_texel_depth() {
             for col in 0..WIDTH as usize {
                 let got = depths[row * WIDTH as usize + col];
                 let want = expected_depth(col, row);
-                if (got - want).abs() > 1e-5 {
+                if !got.is_finite() || (got - want).abs() > 1e-5 {
                     mismatches.push((col, row, want, got));
                 }
             }
@@ -786,7 +786,7 @@ fn metal_sampled_frag_depth_explicit_layout_per_texel() {
             for col in 0..WIDTH as usize {
                 let got = depths[row * WIDTH as usize + col];
                 let want = expected_depth(col, row);
-                if (got - want).abs() > 1e-5 {
+                if !got.is_finite() || (got - want).abs() > 1e-5 {
                     mismatches.push((col, row, want, got));
                 }
             }
@@ -1018,7 +1018,7 @@ fn metal_sampled_frag_depth_into_mip_level_1() {
                     mapped[off + 3],
                 ]);
                 let want = expected_depth(col, row);
-                if (got - want).abs() > 1e-5 {
+                if !got.is_finite() || (got - want).abs() > 1e-5 {
                     mismatches.push((col, row, want, got));
                 }
             }
@@ -1719,7 +1719,7 @@ fn metal_sampled_frag_depth_packed_per_texel() {
             for col in 0..WIDTH as usize {
                 let got = depths[row * WIDTH as usize + col];
                 let want = expected_depth(col, row);
-                if (got - want).abs() > 1e-5 {
+                if !got.is_finite() || (got - want).abs() > 1e-5 {
                     mismatches.push((col, row, want, got));
                 }
             }
@@ -1938,7 +1938,7 @@ fn metal_sampled_frag_depth_packed_3x3() {
                     mapped[off + 3],
                 ]);
                 let want = expected_depth(col, row);
-                if (got - want).abs() > 1e-5 {
+                if !got.is_finite() || (got - want).abs() > 1e-5 {
                     mismatches.push((col, row, want, got));
                 }
             }
@@ -3825,7 +3825,7 @@ const DS_CHECK_PASS_SHADER: &str = r#"
     let initStencil = texel.x + 1;
     let initDepth = f32(texel.y + 1) / 10.0;
     if textureLoad(stencilTex, texel, 0).r != initStencil { return 0u; }
-    if abs(textureLoad(depthTex, texel, 0).r - initDepth) > 0.01 { return 0u; }
+    if !(abs(textureLoad(depthTex, texel, 0).r - initDepth) <= 0.01) { return 0u; }
     return 1u;
 }
 "#;

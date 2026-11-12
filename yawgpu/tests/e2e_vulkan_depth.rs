@@ -234,7 +234,7 @@ fn vulkan_sampled_frag_depth_per_texel() {
             for col in 0..WIDTH as usize {
                 let got = depths[row * WIDTH as usize + col];
                 let want = expected_depth(col, row);
-                if (got - want).abs() > 1e-5 {
+                if !got.is_finite() || (got - want).abs() > 1e-5 {
                     mismatches.push((col, row, want, got));
                 }
             }
@@ -1398,7 +1398,7 @@ fn vulkan_depth_render_mip2_then_t2b() {
                     mapped[off + 2],
                     mapped[off + 3],
                 ]);
-                if (got - DEPTH_VALUE).abs() > 1e-5 {
+                if !got.is_finite() || (got - DEPTH_VALUE).abs() > 1e-5 {
                     mismatches.push((col, row, got));
                 }
             }
@@ -1574,7 +1574,7 @@ fn vulkan_sampled_frag_depth_layer1() {
             for col in 0..WIDTH as usize {
                 let got = depths[row * WIDTH as usize + col];
                 let want = expected_depth(col, row);
-                if (got - want).abs() > 1e-5 {
+                if !got.is_finite() || (got - want).abs() > 1e-5 {
                     mismatches.push((col, row, want, got));
                 }
             }
