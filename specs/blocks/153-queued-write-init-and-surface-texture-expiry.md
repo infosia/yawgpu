@@ -1,6 +1,6 @@
 # Block 153 — Transactional queued-write initialization; surface textures expire
 
-Status: **S1–S3 landed (2026-11-13)**; S4 (S2 Phase Review m3, m4) pending.
+Status: **COMPLETE (2026-11-13)**.
 Source: whole-code review at `92e38c7` (`specs/tracking/code-review-2026-11.md`), findings R06 and R05.
 Oracle: pinned Dawn — `native/SwapChain.cpp` (`SwapChainBase::Present` checks that the
 backend destroyed the current texture, line 155; the destructor checks the same, line 88);
@@ -142,3 +142,7 @@ from the core texture's HAL handle (R4). m1 and m2 belong to Block 152 (its S3).
 |---|---|---|---|
 | m3 | MINOR | No test that a validation-rejected configure keeps the acquisition, nor of present's failed-flush expiry path | S4: both tests |
 | m4 | MINOR | `Drop for WGPUSurfaceImpl` `.expect`s a lock | S4: `unwrap_or_else(PoisonError::into_inner)` |
+
+S4: tests that a validation-rejected configure keeps the acquisition and that present's
+failed pending-write flush expires it and dispatches one error; surface drop recovers a
+poisoned lock. Workspace test 1,485/0; `triangle` and `surface_smoke --verify` on Metal.

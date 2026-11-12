@@ -69,6 +69,10 @@ The most accessible high-priority starting points are R02, R03, R04, and R09. R0
 | R16 | 157 | fixed (`3328d0d`); Linux GLES hardware run owed |
 | X01, X02 | — | fixed in `examples/` (`20f4362`, Claude-owned) |
 
+All seven blocks (151-157) passed their Phase Reviews with every CRITICAL and MAJOR
+resolved (one MAJOR, Block 156 M1, fixed in its S3). Owed: the Linux GLES hardware run for
+Blocks 156 S3 and 157.
+
 ## Findings
 
 ### R01 — Retain every input handle used after an error callback

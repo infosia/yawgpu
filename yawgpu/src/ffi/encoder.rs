@@ -56,7 +56,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderBeginRenderPass(
     };
     let (pass, error) = encoder.core.begin_render_pass(&descriptor);
     // A failed encoder-state check takes precedence over FFI validation.
-    dispatch_optional_error(&encoder.device, error.or(mapping_error));
+    dispatch_optional_error!(&encoder.device, error.or(mapping_error));
     arc_to_handle(Arc::new(WGPURenderPassEncoderImpl {
         core: Arc::new(pass),
         device: Arc::clone(&encoder.device),
@@ -86,7 +86,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderBeginComputePass(
     {
         let query_set = borrow_handle(timestamp_writes.querySet, "WGPUQuerySet");
         if !query_set._device.same(&encoder.device) {
-            dispatch_optional_error(
+            dispatch_optional_error!(
                 &encoder.device,
                 encoder.core.record_validation_error(
                     "compute pass timestamp query set must belong to the command encoder device",
@@ -95,7 +95,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderBeginComputePass(
         } else {
             let timestamp_writes = map_render_pass_timestamp_writes(timestamp_writes);
             if let Err(message) = validate_compute_pass_timestamp_writes(&timestamp_writes) {
-                dispatch_optional_error(
+                dispatch_optional_error!(
                     &encoder.device,
                     encoder.core.record_validation_error(message),
                 );
@@ -105,7 +105,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderBeginComputePass(
         }
     }
     let (pass, error) = encoder.core.begin_compute_pass(mapped_writes);
-    dispatch_optional_error(&encoder.device, error);
+    dispatch_optional_error!(&encoder.device, error);
     arc_to_handle(Arc::new(WGPUComputePassEncoderImpl {
         core: Arc::new(pass),
         device: Arc::clone(&encoder.device),
@@ -132,7 +132,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderFinish(
 ) -> native::WGPUCommandBuffer {
     let encoder = clone_handle(command_encoder, "WGPUCommandEncoder");
     let (command_buffer, error) = encoder.core.finish();
-    dispatch_optional_error(&encoder.device, error);
+    dispatch_optional_error!(&encoder.device, error);
     arc_to_handle(Arc::new(WGPUCommandBufferImpl {
         core: Arc::new(command_buffer),
         _device: Arc::clone(&encoder.device),
@@ -157,7 +157,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderInsertDebugMarker(
     _marker_label: native::WGPUStringView,
 ) {
     let encoder = clone_handle(command_encoder, "WGPUCommandEncoder");
-    dispatch_optional_error(&encoder.device, encoder.core.insert_debug_marker());
+    dispatch_optional_error!(&encoder.device, encoder.core.insert_debug_marker());
 }
 
 /// Pushes an encoder debug group.
@@ -172,7 +172,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderPushDebugGroup(
     _group_label: native::WGPUStringView,
 ) {
     let encoder = clone_handle(command_encoder, "WGPUCommandEncoder");
-    dispatch_optional_error(&encoder.device, encoder.core.push_debug_group());
+    dispatch_optional_error!(&encoder.device, encoder.core.push_debug_group());
 }
 
 /// Pops an encoder debug group.
@@ -186,7 +186,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderPopDebugGroup(
     command_encoder: native::WGPUCommandEncoder,
 ) {
     let encoder = clone_handle(command_encoder, "WGPUCommandEncoder");
-    dispatch_optional_error(&encoder.device, encoder.core.pop_debug_group());
+    dispatch_optional_error!(&encoder.device, encoder.core.pop_debug_group());
 }
 
 /// Records a buffer-to-buffer copy command.
@@ -209,7 +209,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyBufferToBuffer(
     let source = borrow_handle(source, "WGPUBuffer");
     let destination = borrow_handle(destination, "WGPUBuffer");
     if !source.device.same(&encoder.device) || !destination.device.same(&encoder.device) {
-        dispatch_optional_error(
+        dispatch_optional_error!(
             &encoder.device,
             encoder
                 .core
@@ -217,7 +217,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyBufferToBuffer(
         );
         return;
     }
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &encoder.device,
         encoder.core.copy_buffer_to_buffer(
             Arc::clone(&source.core),
@@ -245,7 +245,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderClearBuffer(
     let encoder = clone_handle(command_encoder, "WGPUCommandEncoder");
     let buffer = borrow_handle(buffer, "WGPUBuffer");
     if !buffer.device.same(&encoder.device) {
-        dispatch_optional_error(
+        dispatch_optional_error!(
             &encoder.device,
             encoder
                 .core
@@ -258,7 +258,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderClearBuffer(
     } else {
         size
     };
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &encoder.device,
         encoder
             .core
@@ -291,21 +291,21 @@ pub unsafe extern "C" fn wgpuCommandEncoderWriteBuffer(
     let encoder = clone_handle(command_encoder, "WGPUCommandEncoder");
     let buffer = borrow_handle(buffer, "WGPUBuffer");
     if size > isize::MAX as usize {
-        dispatch_optional_error(
+        dispatch_optional_error!(
             &encoder.device,
             Some("command encoder write buffer size is too large".to_owned()),
         );
         return;
     }
     if size > 0 && data.is_null() {
-        dispatch_optional_error(
+        dispatch_optional_error!(
             &encoder.device,
             Some("command encoder write buffer data must not be null".to_owned()),
         );
         return;
     }
     let data = ffi_slice(data.cast::<u8>(), size);
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &encoder.device,
         encoder
             .core
@@ -327,7 +327,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderWriteTimestamp(
 ) {
     let encoder = clone_handle(command_encoder, "WGPUCommandEncoder");
     let query_set = borrow_handle(query_set, "WGPUQuerySet");
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &encoder.device,
         encoder
             .core
@@ -355,7 +355,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderResolveQuerySet(
     let query_set = borrow_handle(query_set, "WGPUQuerySet");
     let destination = borrow_handle(destination, "WGPUBuffer");
     if !query_set._device.same(&encoder.device) || !destination.device.same(&encoder.device) {
-        dispatch_optional_error(
+        dispatch_optional_error!(
             &encoder.device,
             encoder.core.record_validation_error(
                 "query set and destination buffer must belong to the command encoder device",
@@ -363,7 +363,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderResolveQuerySet(
         );
         return;
     }
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &encoder.device,
         encoder.core.resolve_query_set(
             Arc::clone(&query_set.core),
@@ -403,7 +403,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyBufferToTexture(
     let source_buffer = borrow_handle(source.buffer, "WGPUBuffer");
     let destination_texture = borrow_handle(destination.texture, "WGPUTexture");
     if !destination_texture.device.same(&encoder.device) {
-        dispatch_optional_error(
+        dispatch_optional_error!(
             &encoder.device,
             encoder.core.record_validation_error(
                 "copy buffer to texture destination texture must belong to the command encoder device",
@@ -415,7 +415,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyBufferToTexture(
         match map_texel_copy_texture_info_parts(destination) {
             Ok(parts) => parts,
             Err(error) => {
-                dispatch_optional_error(
+                dispatch_optional_error!(
                     &encoder.device,
                     encoder.core.record_validation_error(error),
                 );
@@ -423,7 +423,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyBufferToTexture(
             }
         };
 
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &encoder.device,
         encoder.core.copy_buffer_to_texture(
             core::TexelCopyBufferInfo {
@@ -470,7 +470,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToBuffer(
     let source_texture = borrow_handle(source.texture, "WGPUTexture");
     let destination_buffer = borrow_handle(destination.buffer, "WGPUBuffer");
     if !source_texture.device.same(&encoder.device) {
-        dispatch_optional_error(
+        dispatch_optional_error!(
             &encoder.device,
             encoder.core.record_validation_error(
                 "copy texture to buffer source texture must belong to the command encoder device",
@@ -482,7 +482,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToBuffer(
         match map_texel_copy_texture_info_parts(source) {
             Ok(parts) => parts,
             Err(error) => {
-                dispatch_optional_error(
+                dispatch_optional_error!(
                     &encoder.device,
                     encoder.core.record_validation_error(error),
                 );
@@ -490,7 +490,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToBuffer(
             }
         };
 
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &encoder.device,
         encoder.core.copy_texture_to_buffer(
             core::TexelCopyTextureInfo {
@@ -538,7 +538,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToTexture(
     if !source_texture.device.same(&encoder.device)
         || !destination_texture.device.same(&encoder.device)
     {
-        dispatch_optional_error(
+        dispatch_optional_error!(
             &encoder.device,
             encoder
                 .core
@@ -550,7 +550,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToTexture(
         match map_texel_copy_texture_info_parts(source) {
             Ok(parts) => parts,
             Err(error) => {
-                dispatch_optional_error(
+                dispatch_optional_error!(
                     &encoder.device,
                     encoder.core.record_validation_error(error),
                 );
@@ -561,7 +561,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToTexture(
         match map_texel_copy_texture_info_parts(destination) {
             Ok(parts) => parts,
             Err(error) => {
-                dispatch_optional_error(
+                dispatch_optional_error!(
                     &encoder.device,
                     encoder.core.record_validation_error(error),
                 );
@@ -569,7 +569,7 @@ pub unsafe extern "C" fn wgpuCommandEncoderCopyTextureToTexture(
             }
         };
 
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &encoder.device,
         encoder.core.copy_texture_to_texture(
             core::TexelCopyTextureInfo {

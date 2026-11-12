@@ -34,7 +34,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderSetPipeline(
     let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
     let pipeline = borrow_handle(pipeline, "WGPURenderPipeline");
     if !pipeline._device.same(&encoder.device) {
-        dispatch_optional_error(
+        dispatch_optional_error!(
             &encoder.device,
             encoder.core.record_validation_error(
                 "render pipeline must belong to the render bundle encoder device",
@@ -42,7 +42,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderSetPipeline(
         );
         return;
     }
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &encoder.device,
         encoder.core.set_pipeline(Arc::clone(&pipeline._core)),
     );
@@ -69,7 +69,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderSetBindGroup(
         (!group.is_null()).then(|| borrow_handle::<WGPUBindGroupImpl>(group, "WGPUBindGroup"));
     if let Some(group) = group.as_ref() {
         if !group._device.same(&encoder.device) {
-            dispatch_optional_error(
+            dispatch_optional_error!(
                 &encoder.device,
                 encoder.core.record_validation_error(
                     "bind group must belong to the render bundle encoder device",
@@ -81,11 +81,11 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderSetBindGroup(
     let offsets = match dynamic_offsets_slice(dynamic_offset_count, dynamic_offsets) {
         Ok(offsets) => offsets,
         Err(error) => {
-            dispatch_optional_error(&encoder.device, encoder.core.record_validation_error(error));
+            dispatch_optional_error!(&encoder.device, encoder.core.record_validation_error(error));
             return;
         }
     };
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &encoder.device,
         encoder.core.set_bind_group(
             group_index,
@@ -120,7 +120,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderSetImmediates(
         return;
     }
     let data = ffi_slice(data.cast::<u8>(), size);
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &encoder.device,
         encoder
             .core
@@ -147,7 +147,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderSetVertexBuffer(
     let buffer = (!buffer.is_null()).then(|| borrow_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer"));
     if let Some(buffer) = buffer.as_ref() {
         if !buffer.device.same(&encoder.device) {
-            dispatch_optional_error(
+            dispatch_optional_error!(
                 &encoder.device,
                 encoder.core.record_validation_error(
                     "vertex buffer must belong to the render bundle encoder device",
@@ -156,7 +156,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderSetVertexBuffer(
             return;
         }
     }
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &encoder.device,
         encoder.core.set_vertex_buffer(
             slot,
@@ -185,7 +185,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderSetIndexBuffer(
     let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
     let buffer = borrow_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer");
     if !buffer.device.same(&encoder.device) {
-        dispatch_optional_error(
+        dispatch_optional_error!(
             &encoder.device,
             encoder.core.record_validation_error(
                 "index buffer must belong to the render bundle encoder device",
@@ -193,7 +193,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderSetIndexBuffer(
         );
         return;
     }
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &encoder.device,
         encoder.core.set_index_buffer(
             Arc::clone(&buffer.core),
@@ -219,7 +219,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderDraw(
     first_instance: u32,
 ) {
     let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &encoder.device,
         encoder.core.draw(
             vertex_count,
@@ -247,7 +247,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderDrawIndexed(
     first_instance: u32,
 ) {
     let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &encoder.device,
         encoder.core.draw_indexed(
             index_count,
@@ -275,7 +275,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderDrawIndirect(
     let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
     let indirect_buffer = borrow_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
     if !indirect_buffer.device.same(&encoder.device) {
-        dispatch_optional_error(
+        dispatch_optional_error!(
             &encoder.device,
             encoder.core.record_validation_error(
                 "indirect buffer must belong to the render bundle encoder device",
@@ -283,7 +283,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderDrawIndirect(
         );
         return;
     }
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &encoder.device,
         encoder.core.draw_indirect(
             Arc::clone(&indirect_buffer.core),
@@ -308,7 +308,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderDrawIndexedIndirect(
     let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
     let indirect_buffer = borrow_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
     if !indirect_buffer.device.same(&encoder.device) {
-        dispatch_optional_error(
+        dispatch_optional_error!(
             &encoder.device,
             encoder.core.record_validation_error(
                 "indirect buffer must belong to the render bundle encoder device",
@@ -316,7 +316,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderDrawIndexedIndirect(
         );
         return;
     }
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &encoder.device,
         encoder.core.draw_indexed_indirect(
             Arc::clone(&indirect_buffer.core),
@@ -338,7 +338,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderInsertDebugMarker(
     _marker_label: native::WGPUStringView,
 ) {
     let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
-    dispatch_optional_error(&encoder.device, encoder.core.insert_debug_marker());
+    dispatch_optional_error!(&encoder.device, encoder.core.insert_debug_marker());
 }
 
 /// Pushes a render bundle debug group.
@@ -353,7 +353,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderPushDebugGroup(
     _group_label: native::WGPUStringView,
 ) {
     let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
-    dispatch_optional_error(&encoder.device, encoder.core.push_debug_group());
+    dispatch_optional_error!(&encoder.device, encoder.core.push_debug_group());
 }
 
 /// Pops a render bundle debug group.
@@ -367,7 +367,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderPopDebugGroup(
     render_bundle_encoder: native::WGPURenderBundleEncoder,
 ) {
     let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
-    dispatch_optional_error(&encoder.device, encoder.core.pop_debug_group());
+    dispatch_optional_error!(&encoder.device, encoder.core.pop_debug_group());
 }
 
 /// Finishes a render bundle encoder.
@@ -383,7 +383,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderFinish(
 ) -> native::WGPURenderBundle {
     let encoder = clone_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
     let (bundle, error) = encoder.core.finish();
-    dispatch_optional_error(&encoder.device, error);
+    dispatch_optional_error!(&encoder.device, error);
     arc_to_handle(Arc::new(WGPURenderBundleImpl {
         core: Arc::new(bundle),
         _device: Arc::clone(&encoder.device),

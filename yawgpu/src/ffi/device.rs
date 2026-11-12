@@ -660,7 +660,7 @@ pub unsafe extern "C" fn wgpuDeviceCreateRenderBundleEncoder(
     };
     let (encoder, error) =
         core::RenderBundleEncoder::new(descriptor, device.core.limits(), device.core.features());
-    dispatch_optional_error(&device.core, mapping_error.or(error));
+    dispatch_optional_error!(&device.core, mapping_error.or(error));
     arc_to_handle(Arc::new(WGPURenderBundleEncoderImpl {
         core: Arc::new(encoder),
         device: Arc::clone(&device.core),

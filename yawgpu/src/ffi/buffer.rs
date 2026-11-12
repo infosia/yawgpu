@@ -30,7 +30,7 @@ pub unsafe extern "C" fn wgpuBufferDestroy(buffer: native::WGPUBuffer) {
 #[no_mangle]
 pub unsafe extern "C" fn wgpuBufferUnmap(buffer: native::WGPUBuffer) {
     let buffer = borrow_handle(buffer, "WGPUBuffer");
-    dispatch_optional_device_error(&buffer.device, buffer.core.unmap());
+    dispatch_optional_device_error!(&buffer.device, buffer.core.unmap());
 }
 
 /// Asynchronously maps a buffer range.

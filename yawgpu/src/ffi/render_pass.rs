@@ -21,7 +21,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderEnd(
     render_pass_encoder: native::WGPURenderPassEncoder,
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
-    dispatch_optional_error(&pass.device, pass.core.end());
+    dispatch_optional_error!(&pass.device, pass.core.end());
 }
 
 /// Begins an occlusion query in a render pass.
@@ -36,7 +36,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderBeginOcclusionQuery(
     query_index: u32,
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
-    dispatch_optional_error(&pass.device, pass.core.begin_occlusion_query(query_index));
+    dispatch_optional_error!(&pass.device, pass.core.begin_occlusion_query(query_index));
 }
 
 /// Ends the current occlusion query in a render pass.
@@ -50,7 +50,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderEndOcclusionQuery(
     render_pass_encoder: native::WGPURenderPassEncoder,
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
-    dispatch_optional_error(&pass.device, pass.core.end_occlusion_query());
+    dispatch_optional_error!(&pass.device, pass.core.end_occlusion_query());
 }
 
 /// Inserts a render pass debug marker.
@@ -65,7 +65,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderInsertDebugMarker(
     _marker_label: native::WGPUStringView,
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
-    dispatch_optional_error(&pass.device, pass.core.insert_debug_marker());
+    dispatch_optional_error!(&pass.device, pass.core.insert_debug_marker());
 }
 
 /// Pushes a render pass debug group.
@@ -80,7 +80,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderPushDebugGroup(
     _group_label: native::WGPUStringView,
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
-    dispatch_optional_error(&pass.device, pass.core.push_debug_group());
+    dispatch_optional_error!(&pass.device, pass.core.push_debug_group());
 }
 
 /// Pops a render pass debug group.
@@ -94,7 +94,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderPopDebugGroup(
     render_pass_encoder: native::WGPURenderPassEncoder,
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
-    dispatch_optional_error(&pass.device, pass.core.pop_debug_group());
+    dispatch_optional_error!(&pass.device, pass.core.pop_debug_group());
 }
 
 /// Sets the render pipeline for a render pass.
@@ -111,14 +111,14 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetPipeline(
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
     let pipeline = borrow_handle(pipeline, "WGPURenderPipeline");
     if !pipeline._device.same(&pass.device) {
-        dispatch_optional_error(
+        dispatch_optional_error!(
             &pass.device,
             pass.core
                 .record_validation_error("render pipeline must belong to the render pass device"),
         );
         return;
     }
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core.set_pipeline(Arc::clone(&pipeline._core)),
     );
@@ -145,7 +145,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetBindGroup(
         (!group.is_null()).then(|| borrow_handle::<WGPUBindGroupImpl>(group, "WGPUBindGroup"));
     if let Some(group) = group.as_ref() {
         if !group._device.same(&pass.device) {
-            dispatch_optional_error(
+            dispatch_optional_error!(
                 &pass.device,
                 pass.core
                     .record_validation_error("bind group must belong to the render pass device"),
@@ -156,11 +156,11 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetBindGroup(
     let offsets = match dynamic_offsets_slice(dynamic_offset_count, dynamic_offsets) {
         Ok(offsets) => offsets,
         Err(error) => {
-            dispatch_optional_error(&pass.device, pass.core.record_validation_error(error));
+            dispatch_optional_error!(&pass.device, pass.core.record_validation_error(error));
             return;
         }
     };
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core.set_bind_group(
             group_index,
@@ -190,7 +190,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetVertexBuffer(
     let buffer = (!buffer.is_null()).then(|| borrow_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer"));
     if let Some(buffer) = buffer.as_ref() {
         if !buffer.device.same(&pass.device) {
-            dispatch_optional_error(
+            dispatch_optional_error!(
                 &pass.device,
                 pass.core
                     .record_validation_error("vertex buffer must belong to the render pass device"),
@@ -198,7 +198,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetVertexBuffer(
             return;
         }
     }
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core.set_vertex_buffer(
             slot,
@@ -227,14 +227,14 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetIndexBuffer(
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
     let buffer = borrow_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer");
     if !buffer.device.same(&pass.device) {
-        dispatch_optional_error(
+        dispatch_optional_error!(
             &pass.device,
             pass.core
                 .record_validation_error("index buffer must belong to the render pass device"),
         );
         return;
     }
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core.set_index_buffer(
             Arc::clone(&buffer.core),
@@ -260,7 +260,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderDraw(
     first_instance: u32,
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core.draw(
             vertex_count,
@@ -288,7 +288,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderDrawIndexed(
     first_instance: u32,
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core.draw_indexed(
             index_count,
@@ -316,14 +316,14 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderDrawIndirect(
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
     let indirect_buffer = borrow_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
     if !indirect_buffer.device.same(&pass.device) {
-        dispatch_optional_error(
+        dispatch_optional_error!(
             &pass.device,
             pass.core
                 .record_validation_error("indirect buffer must belong to the render pass device"),
         );
         return;
     }
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core.draw_indirect(
             Arc::clone(&indirect_buffer.core),
@@ -348,14 +348,14 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderDrawIndexedIndirect(
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
     let indirect_buffer = borrow_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
     if !indirect_buffer.device.same(&pass.device) {
-        dispatch_optional_error(
+        dispatch_optional_error!(
             &pass.device,
             pass.core
                 .record_validation_error("indirect buffer must belong to the render pass device"),
         );
         return;
     }
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core.draw_indexed_indirect(
             Arc::clone(&indirect_buffer.core),
@@ -389,7 +389,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetImmediates(
         return;
     }
     let data = ffi_slice(data.cast::<u8>(), size);
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core.set_immediates(offset, data, pass.device.limits()),
     );
@@ -412,7 +412,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetViewport(
     max_depth: f32,
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core
             .set_viewport(x, y, width, height, min_depth, max_depth),
@@ -434,7 +434,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetScissorRect(
     height: u32,
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core.set_scissor_rect(x, y, width, height),
     );
@@ -455,7 +455,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetBlendConstant(
     let color = color
         .as_ref()
         .expect("WGPUColor for SetBlendConstant must not be null");
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core.set_blend_constant(map_color(*color)),
     );
@@ -473,7 +473,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetStencilReference(
     reference: u32,
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
-    dispatch_optional_error(&pass.device, pass.core.set_stencil_reference(reference));
+    dispatch_optional_error!(&pass.device, pass.core.set_stencil_reference(reference));
 }
 
 /// Executes render bundles in a render pass.
@@ -494,7 +494,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderExecuteBundles(
     let bundle_handles = match render_bundle_slice(bundle_count, bundles) {
         Ok(bundles) => bundles,
         Err(error) => {
-            dispatch_optional_error(&pass.device, pass.core.record_validation_error(error));
+            dispatch_optional_error!(&pass.device, pass.core.record_validation_error(error));
             return;
         }
     };
@@ -502,7 +502,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderExecuteBundles(
         .iter()
         .any(|bundle| !bundle._device.same(&pass.device))
     {
-        dispatch_optional_error(
+        dispatch_optional_error!(
             &pass.device,
             pass.core
                 .record_validation_error("render bundle must belong to the render pass device"),
@@ -513,5 +513,5 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderExecuteBundles(
         .iter()
         .map(|bundle| Arc::clone(&bundle.core))
         .collect::<Vec<_>>();
-    dispatch_optional_error(&pass.device, pass.core.execute_bundles(&bundles));
+    dispatch_optional_error!(&pass.device, pass.core.execute_bundles(&bundles));
 }

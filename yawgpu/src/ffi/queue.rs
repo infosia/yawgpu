@@ -122,7 +122,7 @@ pub unsafe extern "C" fn wgpuQueueSubmit(
     let error = queue.core.submit(&commands);
     // Core submit has released its locks before a reentrant lost callback runs.
     queue.instance.observe_device_loss(&queue.device);
-    dispatch_optional_device_error(&queue.device, error);
+    dispatch_optional_device_error!(&queue.device, error);
 }
 
 /// Writes CPU data into a buffer through the queue.
@@ -160,7 +160,7 @@ pub unsafe extern "C" fn wgpuQueueWriteBuffer(
         return;
     }
     let data = ffi_slice(data.cast::<u8>(), size);
-    dispatch_optional_device_error(
+    dispatch_optional_device_error!(
         &queue.device,
         queue.core.write_buffer(core::QueueBufferWrite {
             device: queue.device.hal(),
@@ -246,7 +246,7 @@ pub unsafe extern "C" fn wgpuQueueWriteTexture(
     }
 
     let data = ffi_slice(data.cast::<u8>(), data_size_usize);
-    dispatch_optional_device_error(
+    dispatch_optional_device_error!(
         &queue.device,
         queue.core.write_texture(core::QueueTextureWrite {
             device: queue.device.hal(),

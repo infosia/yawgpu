@@ -21,7 +21,7 @@ pub unsafe extern "C" fn wgpuComputePassEncoderEnd(
     compute_pass_encoder: native::WGPUComputePassEncoder,
 ) {
     let pass = borrow_handle(compute_pass_encoder, "WGPUComputePassEncoder");
-    dispatch_optional_error(&pass.device, pass.core.end());
+    dispatch_optional_error!(&pass.device, pass.core.end());
 }
 
 /// Inserts a compute pass debug marker.
@@ -36,7 +36,7 @@ pub unsafe extern "C" fn wgpuComputePassEncoderInsertDebugMarker(
     _marker_label: native::WGPUStringView,
 ) {
     let pass = borrow_handle(compute_pass_encoder, "WGPUComputePassEncoder");
-    dispatch_optional_error(&pass.device, pass.core.insert_debug_marker());
+    dispatch_optional_error!(&pass.device, pass.core.insert_debug_marker());
 }
 
 /// Pushes a compute pass debug group.
@@ -51,7 +51,7 @@ pub unsafe extern "C" fn wgpuComputePassEncoderPushDebugGroup(
     _group_label: native::WGPUStringView,
 ) {
     let pass = borrow_handle(compute_pass_encoder, "WGPUComputePassEncoder");
-    dispatch_optional_error(&pass.device, pass.core.push_debug_group());
+    dispatch_optional_error!(&pass.device, pass.core.push_debug_group());
 }
 
 /// Pops a compute pass debug group.
@@ -65,7 +65,7 @@ pub unsafe extern "C" fn wgpuComputePassEncoderPopDebugGroup(
     compute_pass_encoder: native::WGPUComputePassEncoder,
 ) {
     let pass = borrow_handle(compute_pass_encoder, "WGPUComputePassEncoder");
-    dispatch_optional_error(&pass.device, pass.core.pop_debug_group());
+    dispatch_optional_error!(&pass.device, pass.core.pop_debug_group());
 }
 
 /// Sets the compute pipeline for a compute pass.
@@ -82,14 +82,14 @@ pub unsafe extern "C" fn wgpuComputePassEncoderSetPipeline(
     let pass = borrow_handle(compute_pass_encoder, "WGPUComputePassEncoder");
     let pipeline = borrow_handle(pipeline, "WGPUComputePipeline");
     if !pipeline._device.same(&pass.device) {
-        dispatch_optional_error(
+        dispatch_optional_error!(
             &pass.device,
             pass.core
                 .record_validation_error("compute pipeline must belong to the compute pass device"),
         );
         return;
     }
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core.set_pipeline(Arc::clone(&pipeline._core)),
     );
@@ -116,7 +116,7 @@ pub unsafe extern "C" fn wgpuComputePassEncoderSetBindGroup(
         (!group.is_null()).then(|| borrow_handle::<WGPUBindGroupImpl>(group, "WGPUBindGroup"));
     if let Some(group) = group.as_ref() {
         if !group._device.same(&pass.device) {
-            dispatch_optional_error(
+            dispatch_optional_error!(
                 &pass.device,
                 pass.core
                     .record_validation_error("bind group must belong to the compute pass device"),
@@ -127,11 +127,11 @@ pub unsafe extern "C" fn wgpuComputePassEncoderSetBindGroup(
     let offsets = match dynamic_offsets_slice(dynamic_offset_count, dynamic_offsets) {
         Ok(offsets) => offsets,
         Err(error) => {
-            dispatch_optional_error(&pass.device, pass.core.record_validation_error(error));
+            dispatch_optional_error!(&pass.device, pass.core.record_validation_error(error));
             return;
         }
     };
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core.set_bind_group(
             group_index,
@@ -166,7 +166,7 @@ pub unsafe extern "C" fn wgpuComputePassEncoderSetImmediates(
         return;
     }
     let data = ffi_slice(data.cast::<u8>(), size);
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core.set_immediates(offset, data, pass.device.limits()),
     );
@@ -186,7 +186,7 @@ pub unsafe extern "C" fn wgpuComputePassEncoderDispatchWorkgroups(
     workgroup_count_z: u32,
 ) {
     let pass = borrow_handle(compute_pass_encoder, "WGPUComputePassEncoder");
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core.dispatch_workgroups(
             workgroup_count_x,
@@ -212,14 +212,14 @@ pub unsafe extern "C" fn wgpuComputePassEncoderDispatchWorkgroupsIndirect(
     let pass = borrow_handle(compute_pass_encoder, "WGPUComputePassEncoder");
     let indirect_buffer = borrow_handle::<WGPUBufferImpl>(indirect_buffer, "WGPUBuffer");
     if !indirect_buffer.device.same(&pass.device) {
-        dispatch_optional_error(
+        dispatch_optional_error!(
             &pass.device,
             pass.core
                 .record_validation_error("indirect buffer must belong to the compute pass device"),
         );
         return;
     }
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core.dispatch_workgroups_indirect(
             Arc::clone(&indirect_buffer.core),

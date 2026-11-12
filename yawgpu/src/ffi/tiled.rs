@@ -150,7 +150,7 @@ pub unsafe extern "C" fn yawgpuCommandEncoderBeginSubpassRenderPass(
     let (pass, error) = encoder
         .core
         .begin_subpass_render_pass(&encoder.device, descriptor);
-    dispatch_optional_error(&encoder.device, error);
+    dispatch_optional_error!(&encoder.device, error);
     arc_to_handle(Arc::new(YaWGPUSubpassRenderPassEncoderImpl {
         core: Arc::new(pass),
         device: Arc::clone(&encoder.device),
@@ -170,7 +170,7 @@ pub unsafe extern "C" fn yawgpuSubpassRenderPassEncoderNextSubpass(
     encoder: crate::YaWGPUSubpassRenderPassEncoder,
 ) {
     let pass = borrow_handle(encoder, "YaWGPUSubpassRenderPassEncoder");
-    dispatch_optional_error(&pass.device, pass.core.next_subpass());
+    dispatch_optional_error!(&pass.device, pass.core.next_subpass());
 }
 
 /// Ends a subpass render pass.
@@ -184,7 +184,7 @@ pub unsafe extern "C" fn yawgpuSubpassRenderPassEncoderEnd(
     encoder: crate::YaWGPUSubpassRenderPassEncoder,
 ) {
     let pass = borrow_handle(encoder, "YaWGPUSubpassRenderPassEncoder");
-    dispatch_optional_error(&pass.device, pass.core.end());
+    dispatch_optional_error!(&pass.device, pass.core.end());
 }
 
 /// Sets a subpass render pipeline.
@@ -201,7 +201,7 @@ pub unsafe extern "C" fn yawgpuSubpassRenderPassEncoderSetPipeline(
     let pass = borrow_handle(encoder, "YaWGPUSubpassRenderPassEncoder");
     let pipeline = borrow_handle::<WGPURenderPipelineImpl>(pipeline, "WGPURenderPipeline");
     if !pipeline._device.same(&pass.device) {
-        dispatch_optional_error(
+        dispatch_optional_error!(
             &pass.device,
             pass.core.record_validation_error(
                 "render pipeline must belong to the subpass render pass device",
@@ -209,7 +209,7 @@ pub unsafe extern "C" fn yawgpuSubpassRenderPassEncoderSetPipeline(
         );
         return;
     }
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core.set_pipeline(Arc::clone(&pipeline._core)),
     );
@@ -235,7 +235,7 @@ pub unsafe extern "C" fn yawgpuSubpassRenderPassEncoderSetBindGroup(
         (!group.is_null()).then(|| borrow_handle::<WGPUBindGroupImpl>(group, "WGPUBindGroup"));
     if let Some(group) = group.as_ref() {
         if !group._device.same(&pass.device) {
-            dispatch_optional_error(
+            dispatch_optional_error!(
                 &pass.device,
                 pass.core.record_validation_error(
                     "bind group must belong to the subpass render pass device",
@@ -247,11 +247,11 @@ pub unsafe extern "C" fn yawgpuSubpassRenderPassEncoderSetBindGroup(
     let offsets = match dynamic_offsets_slice(dynamic_offset_count, dynamic_offsets) {
         Ok(offsets) => offsets,
         Err(error) => {
-            dispatch_optional_error(&pass.device, pass.core.record_validation_error(error));
+            dispatch_optional_error!(&pass.device, pass.core.record_validation_error(error));
             return;
         }
     };
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core.set_bind_group(
             group_index,
@@ -280,7 +280,7 @@ pub unsafe extern "C" fn yawgpuSubpassRenderPassEncoderSetVertexBuffer(
     let buffer = (!buffer.is_null()).then(|| borrow_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer"));
     if let Some(buffer) = buffer.as_ref() {
         if !buffer.device.same(&pass.device) {
-            dispatch_optional_error(
+            dispatch_optional_error!(
                 &pass.device,
                 pass.core.record_validation_error(
                     "vertex buffer must belong to the subpass render pass device",
@@ -289,7 +289,7 @@ pub unsafe extern "C" fn yawgpuSubpassRenderPassEncoderSetVertexBuffer(
             return;
         }
     }
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core.set_vertex_buffer(
             slot,
@@ -318,7 +318,7 @@ pub unsafe extern "C" fn yawgpuSubpassRenderPassEncoderSetIndexBuffer(
     let pass = borrow_handle(encoder, "YaWGPUSubpassRenderPassEncoder");
     let buffer = borrow_handle::<WGPUBufferImpl>(buffer, "WGPUBuffer");
     if !buffer.device.same(&pass.device) {
-        dispatch_optional_error(
+        dispatch_optional_error!(
             &pass.device,
             pass.core.record_validation_error(
                 "index buffer must belong to the subpass render pass device",
@@ -326,7 +326,7 @@ pub unsafe extern "C" fn yawgpuSubpassRenderPassEncoderSetIndexBuffer(
         );
         return;
     }
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core.set_index_buffer(
             Arc::clone(&buffer.core),
@@ -352,7 +352,7 @@ pub unsafe extern "C" fn yawgpuSubpassRenderPassEncoderDraw(
     first_instance: u32,
 ) {
     let pass = borrow_handle(encoder, "YaWGPUSubpassRenderPassEncoder");
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core.draw(
             vertex_count,
@@ -380,7 +380,7 @@ pub unsafe extern "C" fn yawgpuSubpassRenderPassEncoderDrawIndexed(
     first_instance: u32,
 ) {
     let pass = borrow_handle(encoder, "YaWGPUSubpassRenderPassEncoder");
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core.draw_indexed(
             index_count,
@@ -410,7 +410,7 @@ pub unsafe extern "C" fn yawgpuSubpassRenderPassEncoderSetViewport(
     max_depth: f32,
 ) {
     let pass = borrow_handle(encoder, "YaWGPUSubpassRenderPassEncoder");
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core
             .set_viewport(x, y, width, height, min_depth, max_depth),
@@ -432,7 +432,7 @@ pub unsafe extern "C" fn yawgpuSubpassRenderPassEncoderSetScissorRect(
     height: u32,
 ) {
     let pass = borrow_handle(encoder, "YaWGPUSubpassRenderPassEncoder");
-    dispatch_optional_error(
+    dispatch_optional_error!(
         &pass.device,
         pass.core.set_scissor_rect(x, y, width, height),
     );

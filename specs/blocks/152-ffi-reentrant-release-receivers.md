@@ -1,6 +1,6 @@
 # Block 152 — FFI receivers survive a reentrant release in the error callback
 
-Status: **S1, S2 landed (2026-11-13)**; S3 (S2 Phase Review m1, m2) pending.
+Status: **COMPLETE (2026-11-13)**.
 Source: whole-code review at `92e38c7` (`specs/tracking/code-review-2026-11.md`), finding R01. It extends Block
 113 M1 / audit rule C11, which covered device receivers only.
 
@@ -109,3 +109,9 @@ error branches. Three `audit_r4_*` tests were red before the fix. Workspace test
 |---|---|---|---|
 | m1 | MINOR | `dispatch_optional_*` take `&Arc<core::Device>` pointing into the borrowed wrapper; that parameter is still protected across the callback | S3 |
 | m2 | MINOR | `WGPUDeviceImpl::dispatch_error(&self)` from borrowed devices (surface configure, capability-query failure, testing hook) | S3 |
+
+S3: `dispatch_optional_error!` / `dispatch_optional_device_error!` macros expand at the
+caller (111 sites) and dispatch through `Arc::clone($device)` only on the error branch;
+`wgpuSurfaceConfigure`'s error branches, `dispatch_capability_query_failure`, and
+`testing_dispatch_device_error` dispatch through owned clones. Workspace test 1,485/0;
+clippy (workspace, `tiled`) and fmt clean; every `e2e_metal_*` 170/0.

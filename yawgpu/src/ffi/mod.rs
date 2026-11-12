@@ -42,6 +42,26 @@ macro_rules! wgpu_handle_exports {
     };
 }
 
+// Expand at the caller so no helper argument borrows a wrapper across user
+// callbacks. Only the error branch evaluates and retains the device Arc.
+macro_rules! dispatch_optional_error {
+    ($device:expr, $error:expr $(,)?) => {{
+        let error: Option<String> = $error;
+        if let Some(message) = error {
+            Arc::clone($device).dispatch_error(core::ErrorKind::Validation, message);
+        }
+    }};
+}
+
+macro_rules! dispatch_optional_device_error {
+    ($device:expr, $error:expr $(,)?) => {{
+        let error: Option<core::DeviceError> = $error;
+        if let Some(error) = error {
+            Arc::clone($device).dispatch_error(error.kind, error.message);
+        }
+    }};
+}
+
 /// Adapter module.
 pub mod adapter;
 /// Bindings module.
@@ -500,6 +520,8 @@ pub struct WGPUSurfaceImpl {
     pub(crate) configure_error_override: Mutex<Option<yawgpu_hal::HalError>>,
     #[cfg(test)]
     pub(crate) present_error_override: Mutex<Option<yawgpu_hal::HalError>>,
+    #[cfg(test)]
+    pub(crate) pending_flush_error_override: Mutex<Option<core::DeviceError>>,
     pub(crate) hal: Mutex<Option<HalSurface>>,
     pub(crate) is_error: bool,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
@@ -2757,22 +2779,6 @@ unsafe fn create_render_pipeline_handle(
     cache_if_valid(&device.render_pipeline_cache, key, handle)
 }
 
-fn dispatch_optional_error(device: &Arc<core::Device>, error: Option<String>) {
-    if let Some(message) = error {
-        // The callback may release the wrapper that owns this Arc. Dispatch
-        // through an owned device without retaining anything on success.
-        let device = Arc::clone(device);
-        device.dispatch_error(core::ErrorKind::Validation, message);
-    }
-}
-
-fn dispatch_optional_device_error(device: &Arc<core::Device>, error: Option<core::DeviceError>) {
-    if let Some(error) = error {
-        let device = Arc::clone(device);
-        device.dispatch_error(error.kind, error.message);
-    }
-}
-
 unsafe fn view_belongs_to_device(view: native::WGPUTextureView, device: &core::Device) -> bool {
     borrow_handle::<WGPUTextureViewImpl>(view, "WGPUTextureView")
         ._device
@@ -3104,7 +3110,7 @@ pub unsafe fn testing_dispatch_device_error(
     kind: core::ErrorKind,
     message: impl Into<String>,
 ) {
-    borrow_handle(device, "WGPUDevice").dispatch_error(kind, message);
+    Arc::clone(&borrow_handle(device, "WGPUDevice").core).dispatch_error(kind, message);
 }
 
 /// Returns a bind group layout entry's visibility for validation tests.
@@ -3573,12 +3579,12 @@ mod tests {
             device_core.set_uncaptured_error_callback(Some(move |_| {
                 counts.lock().unwrap().push(weak.strong_count());
             }));
-            dispatch_optional_error(device_core, None);
-            dispatch_optional_device_error(device_core, None);
+            dispatch_optional_error!(device_core, None);
+            dispatch_optional_device_error!(device_core, None);
             assert!(observed.lock().unwrap().is_empty());
             assert_eq!(Arc::strong_count(device_core), baseline);
-            dispatch_optional_error(device_core, Some("validation".to_owned()));
-            dispatch_optional_device_error(
+            dispatch_optional_error!(device_core, Some("validation".to_owned()));
+            dispatch_optional_device_error!(
                 device_core,
                 Some(core::DeviceError::new(
                     core::ErrorKind::Internal,
@@ -3591,7 +3597,7 @@ mod tests {
         }
     }
 
-    unsafe fn assert_borrowed_dispatch_owns_device<T: 'static>(
+    pub(super) unsafe fn assert_borrowed_dispatch_owns_device<T: 'static>(
         device: native::WGPUDevice,
         receiver: *const T,
         release: unsafe extern "C" fn(*const T),
@@ -3621,6 +3627,46 @@ mod tests {
         assert_eq!(during, baseline + 1);
         assert!(weak_receiver.upgrade().is_none());
         core_device.set_uncaptured_error_callback(None::<fn(core::DeviceError)>);
+    }
+
+    #[test]
+    fn audit_r4_optional_dispatch_allows_reentrant_wrapper_release() {
+        unsafe {
+            for device_error in [false, true] {
+                let (instance, adapter, device) = noop_chain();
+                let buffer = wgpuDeviceCreateBuffer(
+                    device,
+                    &buffer_descriptor(native::WGPUBufferUsage_CopyDst, 4),
+                );
+                assert_borrowed_dispatch_owns_device(device, buffer, wgpuBufferRelease, || {
+                    let buffer = borrow_handle(buffer, "WGPUBuffer");
+                    if device_error {
+                        dispatch_optional_device_error!(
+                            &buffer.device,
+                            Some(core::DeviceError::new(
+                                core::ErrorKind::Internal,
+                                "internal"
+                            )),
+                        );
+                    } else {
+                        dispatch_optional_error!(&buffer.device, Some("validation".to_owned()));
+                    }
+                });
+                release_handles(instance, adapter, device);
+            }
+        }
+    }
+
+    #[test]
+    fn audit_r4_testing_dispatch_allows_reentrant_device_release() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            assert_borrowed_dispatch_owns_device(device, device, wgpuDeviceRelease, || {
+                testing_dispatch_device_error(device, core::ErrorKind::Validation, "validation");
+            });
+            wgpuAdapterRelease(adapter);
+            wgpuInstanceRelease(instance);
+        }
     }
 
     #[test]

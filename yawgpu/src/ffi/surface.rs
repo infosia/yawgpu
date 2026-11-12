@@ -12,7 +12,7 @@ impl Drop for WGPUSurfaceImpl {
         expire_current_texture(
             self.current_texture
                 .get_mut()
-                .expect("surface current texture lock is not poisoned"),
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
     }
 }
@@ -111,18 +111,18 @@ pub unsafe extern "C" fn wgpuSurfaceConfigure(
     }
     let device = borrow_handle(config.device, "WGPUDevice");
     if surface.is_error {
-        device.dispatch_error(core::ErrorKind::Validation, "surface is invalid");
+        Arc::clone(&device.core).dispatch_error(core::ErrorKind::Validation, "surface is invalid");
         return;
     }
     let caps = match query_surface_capabilities(surface, device.adapter.hal()) {
         Ok(caps) => caps,
         Err(error) => {
-            dispatch_capability_query_failure(device, &error);
+            dispatch_capability_query_failure(Arc::clone(&device.core), &error);
             return;
         }
     };
     if let Some(message) = surface_configuration_error(device, config, &caps) {
-        device.dispatch_error(core::ErrorKind::Validation, message);
+        Arc::clone(&device.core).dispatch_error(core::ErrorKind::Validation, message);
         return;
     }
     let present_mode = resolved_present_mode(config.presentMode);
@@ -193,7 +193,7 @@ pub unsafe extern "C" fn wgpuSurfaceConfigure(
             .lock()
             .expect("surface configuration lock is not poisoned") = None;
         drop(current_texture);
-        device.dispatch_error(core::ErrorKind::Internal, error.to_string());
+        Arc::clone(&device.core).dispatch_error(core::ErrorKind::Internal, error.to_string());
         return;
     }
     *surface
@@ -392,7 +392,13 @@ pub unsafe extern "C" fn wgpuSurfacePresent(surface: native::WGPUSurface) -> nat
         .as_ref()
         .map(|config| Arc::clone(&config.device));
     if let Some(device) = device.as_ref() {
-        if let Some(error) = device.queue().flush_pending_writes() {
+        // Core's submit-failure hook is private to its unit tests. Inject the
+        // flush result here to exercise the FFI failure path on Noop.
+        #[cfg(test)]
+        let flush_error = surface.pending_flush_error_override.lock().unwrap().take();
+        #[cfg(not(test))]
+        let flush_error: Option<core::DeviceError> = None;
+        if let Some(error) = flush_error.or_else(|| device.queue().flush_pending_writes()) {
             // A failed flush also ends the acquisition, before invoking user code.
             expire_current_texture(&mut current_texture);
             drop(current_texture);
@@ -488,7 +494,7 @@ fn query_surface_capabilities(
 /// match the adapter's has no capability set to validate the configuration
 /// against -- so this is an internal error, not a validation error. Validation
 /// against a capability set that *was* obtained stays `Validation`.
-fn dispatch_capability_query_failure(device: &WGPUDeviceImpl, error: &yawgpu_hal::HalError) {
+fn dispatch_capability_query_failure(device: Arc<core::Device>, error: &yawgpu_hal::HalError) {
     device.dispatch_error(core::ErrorKind::Internal, error.to_string());
 }
 
@@ -526,10 +532,56 @@ fn fill_surface_capabilities(
 #[cfg(test)]
 mod tests {
     use super::super::tests::{
-        create_noop_surface, noop_chain, noop_surface_caps, release_handles, valid_surface_config,
+        assert_borrowed_dispatch_owns_device, create_noop_surface, noop_chain, noop_surface_caps,
+        release_handles, valid_surface_config,
     };
     use super::*;
     use yawgpu_hal::{HalCompositeAlphaMode as A, HalSurfaceCapabilities};
+
+    #[test]
+    fn audit_r4_surface_configure_errors_allow_reentrant_device_release() {
+        unsafe {
+            for failure in 0..3 {
+                let (instance, adapter, device) = noop_chain();
+                let surface = if failure == 0 {
+                    wgpuInstanceCreateSurface(instance, std::ptr::null())
+                } else {
+                    create_noop_surface(instance)
+                };
+                let mut config = valid_surface_config(device);
+                if failure == 1 {
+                    config.viewFormatCount = 1;
+                    config.viewFormats = std::ptr::null();
+                } else if failure == 2 {
+                    *borrow_handle(surface, "WGPUSurface")
+                        .configure_error_override
+                        .lock()
+                        .unwrap() = Some(yawgpu_hal::HalError::SurfaceLost);
+                }
+                assert_borrowed_dispatch_owns_device(device, device, wgpuDeviceRelease, || {
+                    wgpuSurfaceConfigure(surface, &config);
+                });
+                wgpuSurfaceRelease(surface);
+                wgpuAdapterRelease(adapter);
+                wgpuInstanceRelease(instance);
+            }
+        }
+    }
+
+    #[test]
+    fn audit_r4_capability_query_error_allows_reentrant_device_release() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            assert_borrowed_dispatch_owns_device(device, device, wgpuDeviceRelease, || {
+                dispatch_capability_query_failure(
+                    Arc::clone(&borrow_handle(device, "WGPUDevice").core),
+                    &yawgpu_hal::HalError::SurfaceLost,
+                );
+            });
+            wgpuAdapterRelease(adapter);
+            wgpuInstanceRelease(instance);
+        }
+    }
 
     #[test]
     fn audit_t2_surface_configure_forwards_view_formats_to_hal() {
@@ -770,10 +822,12 @@ mod tests {
     enum AcquisitionEnd {
         Present,
         FailedPresent,
+        FailedFlush,
         Configure,
         FailedConfigure,
         Unconfigure,
         Drop,
+        PoisonedDrop,
     }
 
     unsafe fn record_surface_view(
@@ -802,12 +856,13 @@ mod tests {
         command
     }
 
-    unsafe fn assert_acquired_texture_expires(end: AcquisitionEnd) {
-        let (instance, adapter, device) = noop_chain();
+    unsafe fn configured_surface_with_acquisition(
+        instance: native::WGPUInstance,
+        device: native::WGPUDevice,
+    ) -> (native::WGPUSurface, native::WGPUSurfaceConfiguration) {
         let surface = create_noop_surface(instance);
         let config = valid_surface_config(device);
-        let core_device = Arc::clone(&borrow_handle(device, "WGPUDevice").core);
-        let allocator = Arc::clone(&core_device);
+        let allocator = Arc::clone(&borrow_handle(device, "WGPUDevice").core);
         *borrow_handle(surface, "WGPUSurface")
             .acquire_texture_override
             .lock()
@@ -827,6 +882,13 @@ mod tests {
                 })
         }));
         wgpuSurfaceConfigure(surface, &config);
+        (surface, config)
+    }
+
+    unsafe fn assert_acquired_texture_expires(end: AcquisitionEnd) {
+        let (instance, adapter, device) = noop_chain();
+        let (surface, config) = configured_surface_with_acquisition(instance, device);
+        let core_device = Arc::clone(&borrow_handle(device, "WGPUDevice").core);
         let mut acquired: native::WGPUSurfaceTexture = std::mem::zeroed();
         wgpuSurfaceGetCurrentTexture(surface, &mut acquired);
         assert_eq!(
@@ -851,6 +913,48 @@ mod tests {
                     .unwrap() = Some(yawgpu_hal::HalError::SurfaceLost);
                 assert_eq!(wgpuSurfacePresent(surface), native::WGPUStatus_Error);
             }
+            AcquisitionEnd::FailedFlush => {
+                let queue = core_device.queue();
+                let buffer = core_device.create_buffer(core::BufferDescriptor {
+                    usage: core::BufferUsage::COPY_DST,
+                    size: 4,
+                    mapped_at_creation: false,
+                });
+                assert_eq!(
+                    queue.write_buffer(core::QueueBufferWrite {
+                        device: core_device.hal(),
+                        buffer: &buffer,
+                        offset: 0,
+                        data: &[5; 4],
+                    }),
+                    None
+                );
+                let failure = core::DeviceError::new(
+                    core::ErrorKind::Internal,
+                    "injected pending submit failure",
+                );
+                *borrow_handle(surface, "WGPUSurface")
+                    .pending_flush_error_override
+                    .lock()
+                    .unwrap() = Some(failure.clone());
+                let errors = Arc::new(Mutex::new(Vec::new()));
+                let captured = Arc::clone(&errors);
+                let surface_address = surface as usize;
+                core_device.set_uncaptured_error_callback(Some(move |error| {
+                    let surface =
+                        borrow_handle(surface_address as native::WGPUSurface, "WGPUSurface");
+                    // Expiry and lock release must precede the callback.
+                    assert!(surface.current_texture.try_lock().unwrap().is_none());
+                    assert!(surface.configured.try_lock().is_ok());
+                    assert!(surface.hal.try_lock().is_ok());
+                    captured.lock().unwrap().push(error);
+                }));
+                let before = queue.latest_submission_index();
+                assert_eq!(wgpuSurfacePresent(surface), native::WGPUStatus_Error);
+                assert_eq!(queue.latest_submission_index(), before);
+                assert_eq!(*errors.lock().unwrap(), [failure]);
+                core_device.set_uncaptured_error_callback(None::<fn(core::DeviceError)>);
+            }
             AcquisitionEnd::Configure => wgpuSurfaceConfigure(surface, &config),
             AcquisitionEnd::FailedConfigure => {
                 *borrow_handle(surface, "WGPUSurface")
@@ -863,6 +967,16 @@ mod tests {
             }
             AcquisitionEnd::Unconfigure => wgpuSurfaceUnconfigure(surface),
             AcquisitionEnd::Drop => wgpuSurfaceRelease(surface),
+            AcquisitionEnd::PoisonedDrop => {
+                let surface_impl = borrow_handle(surface, "WGPUSurface");
+                let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _guard = surface_impl.current_texture.lock().unwrap();
+                    panic!("poison current texture lock");
+                }));
+                assert!(poisoned.is_err());
+                assert!(surface_impl.current_texture.is_poisoned());
+                wgpuSurfaceRelease(surface);
+            }
         }
 
         let queue = wgpuDeviceGetQueue(device);
@@ -881,7 +995,7 @@ mod tests {
         wgpuTextureDestroy(texture);
         assert!(core_device.pop_error_scope().unwrap().is_none());
 
-        if !matches!(end, AcquisitionEnd::Drop) {
+        if !matches!(end, AcquisitionEnd::Drop | AcquisitionEnd::PoisonedDrop) {
             if matches!(
                 end,
                 AcquisitionEnd::Unconfigure | AcquisitionEnd::FailedConfigure
@@ -938,6 +1052,69 @@ mod tests {
     #[test]
     fn acquired_texture_expires_on_surface_drop() {
         unsafe { assert_acquired_texture_expires(AcquisitionEnd::Drop) }
+    }
+
+    #[test]
+    fn acquired_texture_expires_and_dispatches_error_after_failed_pending_flush() {
+        unsafe { assert_acquired_texture_expires(AcquisitionEnd::FailedFlush) }
+    }
+
+    #[test]
+    fn acquired_texture_expires_on_surface_drop_with_poisoned_lock() {
+        unsafe { assert_acquired_texture_expires(AcquisitionEnd::PoisonedDrop) }
+    }
+
+    #[test]
+    fn validation_rejected_configure_preserves_acquired_texture() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let (surface, mut config) = configured_surface_with_acquisition(instance, device);
+            let core_device = Arc::clone(&borrow_handle(device, "WGPUDevice").core);
+            let mut first: native::WGPUSurfaceTexture = std::mem::zeroed();
+            wgpuSurfaceGetCurrentTexture(surface, &mut first);
+            assert_eq!(
+                first.status,
+                native::WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal
+            );
+            let view = wgpuTextureCreateView(first.texture, std::ptr::null());
+            let command = record_surface_view(device, view);
+
+            config.viewFormatCount = 1;
+            config.viewFormats = std::ptr::null();
+            core_device.push_error_scope(core::ErrorFilter::Validation);
+            wgpuSurfaceConfigure(surface, &config);
+            let error = core_device
+                .pop_error_scope()
+                .unwrap()
+                .expect("invalid configure must fail");
+            assert_eq!(error.kind, core::ErrorKind::Validation);
+            assert_eq!(
+                error.message,
+                "surface configuration viewFormats pointer is null"
+            );
+
+            let mut second: native::WGPUSurfaceTexture = std::mem::zeroed();
+            wgpuSurfaceGetCurrentTexture(surface, &mut second);
+            assert_eq!(second.status, first.status);
+            assert_eq!(second.texture, first.texture);
+            let queue = wgpuDeviceGetQueue(device);
+            core_device.push_error_scope(core::ErrorFilter::Validation);
+            wgpuQueueSubmit(queue, 1, &command);
+            assert!(core_device.pop_error_scope().unwrap().is_none());
+            let fresh_view = wgpuTextureCreateView(second.texture, std::ptr::null());
+            assert!(!borrow_handle(fresh_view, "WGPUTextureView")
+                ._core
+                .is_error());
+
+            wgpuTextureViewRelease(fresh_view);
+            wgpuQueueRelease(queue);
+            wgpuCommandBufferRelease(command);
+            wgpuTextureViewRelease(view);
+            wgpuTextureRelease(first.texture);
+            wgpuTextureRelease(second.texture);
+            wgpuSurfaceRelease(surface);
+            release_handles(instance, adapter, device);
+        }
     }
 
     fn varied_caps() -> HalSurfaceCapabilities {
@@ -1169,7 +1346,7 @@ mod tests {
             };
 
             handle.core.push_error_scope(core::ErrorFilter::Internal);
-            dispatch_capability_query_failure(handle, &failure);
+            dispatch_capability_query_failure(Arc::clone(&handle.core), &failure);
             let error = handle
                 .core
                 .pop_error_scope()
@@ -1181,7 +1358,7 @@ mod tests {
 
             // A validation scope must not capture it.
             handle.core.push_error_scope(core::ErrorFilter::Validation);
-            dispatch_capability_query_failure(handle, &failure);
+            dispatch_capability_query_failure(Arc::clone(&handle.core), &failure);
             assert_eq!(
                 handle
                     .core
