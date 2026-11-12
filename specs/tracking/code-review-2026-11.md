@@ -58,12 +58,13 @@ The most accessible high-priority starting points are R02, R03, R04, and R09. R0
 
 | ID | Block | State |
 |---|---|---|
-| R01 | 152 | planned |
+| R01 | 152 | fixed (S1; S2 = Phase Review m1 in progress) |
 | R02, R03, R04, R09, R10, R12 | 151 | fixed |
-| R05, R06 | 153 | planned |
-| R07 | 155 | planned |
-| R08 | 154 | planned |
-| R11, R13, R14 | 156 | planned |
+| R05 | 153 S2 | in progress |
+| R06 | 153 S1 | fixed |
+| R07 | 155 | fixed |
+| R08 | 154 | fixed |
+| R11, R13, R14 | 156 | in progress |
 | R15 | — | fixed in the e2e tests (Claude-owned): every listed check also rejects a non-finite value |
 | R16 | 157 | planned (GLES, last) |
 | X01, X02 | — | fixed in `examples/` (Claude-owned) |
