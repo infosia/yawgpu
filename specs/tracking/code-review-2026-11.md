@@ -58,16 +58,16 @@ The most accessible high-priority starting points are R02, R03, R04, and R09. R0
 
 | ID | Block | State |
 |---|---|---|
-| R01 | 152 | fixed (S1; S2 = Phase Review m1 in progress) |
-| R02, R03, R04, R09, R10, R12 | 151 | fixed |
-| R05 | 153 S2 | in progress |
-| R06 | 153 S1 | fixed |
-| R07 | 155 | fixed |
-| R08 | 154 | fixed |
-| R11, R13, R14 | 156 | in progress |
-| R15 | — | fixed in the e2e tests (Claude-owned): every listed check also rejects a non-finite value |
-| R16 | 157 | planned (GLES, last) |
-| X01, X02 | — | fixed in `examples/` (Claude-owned) |
+| R01 | 152 | fixed (`16965af`, `665fe1f`) |
+| R02, R03, R04, R09, R10, R12 | 151 | fixed (`1855795`) |
+| R05 | 153 S2 | fixed (`665fe1f`) |
+| R06 | 153 S1 | fixed (`d0839ee`) |
+| R07 | 155 | fixed (`26a12ae`) |
+| R08 | 154 | fixed (`e9d97c0`) |
+| R11, R13, R14 | 156 | fixed (`f4b59a3`) |
+| R15 | — | fixed in the e2e tests (`36c8e3c`, Claude-owned): every listed check also rejects a non-finite value |
+| R16 | 157 | fixed (`3328d0d`); Linux GLES hardware run owed |
+| X01, X02 | — | fixed in `examples/` (`20f4362`, Claude-owned) |
 
 ## Findings
 
