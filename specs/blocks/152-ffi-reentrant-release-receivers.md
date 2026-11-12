@@ -1,6 +1,6 @@
 # Block 152 — FFI receivers survive a reentrant release in the error callback
 
-Status: **COMPLETE (2026-11-13)**.
+Status: **S1, S2 landed (2026-11-13)**; S3 (S2 Phase Review m1, m2) pending.
 Source: whole-code review at `92e38c7` (`specs/tracking/code-review-2026-11.md`), finding R01. It extends Block
 113 M1 / audit rule C11, which covered device receivers only.
 
@@ -52,6 +52,13 @@ S1: R1–R3 with tests.
 
 S2 (Phase Review m1): R4.
 
+S3 (S2 Phase Review m1, m2): R4 holds for every frame, not only the callee's: no function
+parameter that is live across the callback may point into a borrowed wrapper. The
+optional-dispatch helpers become macros (or callers pass an owned `Arc` built on the
+error branch), and the borrowed-device callers of `WGPUDeviceImpl::dispatch_error`
+(`wgpuSurfaceConfigure`'s `config.device`, `dispatch_capability_query_failure`,
+`testing_dispatch_device_error`) retain the device or dispatch through an owned clone.
+
 ## Verification
 
 - Inline FFI unit tests modeled on
@@ -95,3 +102,10 @@ clone only on the error branch (covering all 111 production call sites);
 `WGPUDeviceImpl::dispatch_error` forwards through a clone; the direct dispatches in the
 three `SetImmediates` entry points and `wgpuQueueWriteBuffer`/`WriteTexture` clone on their
 error branches. Three `audit_r4_*` tests were red before the fix. Workspace test 1,476/0.
+
+## Phase Review S2 (2026-11-13, fresh-context reviewer over `665fe1f`)
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| m1 | MINOR | `dispatch_optional_*` take `&Arc<core::Device>` pointing into the borrowed wrapper; that parameter is still protected across the callback | S3 |
+| m2 | MINOR | `WGPUDeviceImpl::dispatch_error(&self)` from borrowed devices (surface configure, capability-query failure, testing hook) | S3 |

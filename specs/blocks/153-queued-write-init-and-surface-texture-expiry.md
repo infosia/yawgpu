@@ -1,6 +1,6 @@
 # Block 153 — Transactional queued-write initialization; surface textures expire
 
-Status: **S1 and S2 landed (2026-11-13)**; S3 (S1 Phase Review fixes) and the S2 Phase Review pending.
+Status: **S1–S3 landed (2026-11-13)**; S4 (S2 Phase Review m3, m4) pending.
 Source: whole-code review at `92e38c7` (`specs/tracking/code-review-2026-11.md`), findings R06 and R05.
 Oracle: pinned Dawn — `native/SwapChain.cpp` (`SwapChainBase::Present` checks that the
 backend destroyed the current texture, line 155; the destructor checks the same, line 88);
@@ -130,3 +130,15 @@ Noop tests instead.
 S3: A-m1 (the `fail_next_pending_submit` hook now sits in the shared copy-submit path; two
 new tests — empty submit and command-buffer submit with queued marks — were red before),
 A-m2 (no clone of an empty queued overlay), A-m3 (comment). Workspace test 1,478/0.
+
+## Phase Review S2 (2026-11-13, fresh-context reviewer over `665fe1f`)
+
+0 CRITICAL, 0 MAJOR. Expiry runs on every acquisition-ending path and after the flush and
+the HAL present; it is skipped for rejected descriptors and the cached GetCurrentTexture;
+no lock is held across a callback; every backend presents from its own surface state, not
+from the core texture's HAL handle (R4). m1 and m2 belong to Block 152 (its S3).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| m3 | MINOR | No test that a validation-rejected configure keeps the acquisition, nor of present's failed-flush expiry path | S4: both tests |
+| m4 | MINOR | `Drop for WGPUSurfaceImpl` `.expect`s a lock | S4: `unwrap_or_else(PoisonError::into_inner)` |
