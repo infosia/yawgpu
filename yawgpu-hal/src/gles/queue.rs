@@ -3289,6 +3289,65 @@ fn submit_texture_clear(gl: &glow::Context, clear: &HalTextureClear) -> Result<(
     }
 }
 
+const ZERO_UPLOAD_BLOCK_BYTES: usize = 4 * 1024 * 1024;
+
+// Generate uploads lazily so the plan itself does not grow with the texture.
+// Layers are actual texture indices, including an array clear's base layer.
+fn zero_upload_plan(
+    width: u32,
+    height: u32,
+    layers: &[u32],
+    bytes_per_pixel: u32,
+    block_bytes: usize,
+) -> Result<impl Iterator<Item = (u32, u32, u32, u32, u32)> + '_, HalError> {
+    let bytes_per_pixel =
+        usize::try_from(bytes_per_pixel).map_err(|_| HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "texture clear pixel size exceeds host limit",
+        })?;
+    let pixel_count = block_bytes
+        .checked_div(bytes_per_pixel)
+        .filter(|&count| count != 0)
+        .ok_or(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "texture clear zero upload block cannot hold one pixel",
+        })?;
+    let tile_width = width
+        .max(1)
+        .min(u32::try_from(pixel_count).unwrap_or(u32::MAX));
+    let tile_height = height
+        .max(1)
+        .min(u32::try_from(pixel_count / tile_width as usize).unwrap_or(u32::MAX));
+    Ok(layers.iter().copied().flat_map(move |layer| {
+        (0..height)
+            .step_by(tile_height as usize)
+            .flat_map(move |y| {
+                (0..width).step_by(tile_width as usize).map(move |x| {
+                    (
+                        layer,
+                        x,
+                        y,
+                        tile_width.min(width - x),
+                        tile_height.min(height - y),
+                    )
+                })
+            })
+    }))
+}
+
+fn zero_upload_block(byte_count: usize) -> Result<Vec<u8>, HalError> {
+    let mut zeros = Vec::new();
+    zeros
+        .try_reserve_exact(byte_count)
+        .map_err(|_| HalError::OutOfMemory {
+            backend: BACKEND,
+            resource: "texture clear zero upload block",
+        })?;
+    // Reservation succeeded, so filling the block cannot allocate again.
+    zeros.resize(byte_count, 0);
+    Ok(zeros)
+}
+
 fn submit_texture_clear_zero_upload(
     gl: &glow::Context,
     meta: &GlesTextureMeta,
@@ -3299,27 +3358,34 @@ fn submit_texture_clear_zero_upload(
 ) -> Result<(), HalError> {
     let mip_width = mip_dimension(meta.width, clear.mip_level);
     let mip_height = mip_dimension(meta.height, clear.mip_level);
-    let layer_count = u32::try_from(layers.len()).map_err(|_| HalError::BufferOperationFailed {
-        backend: BACKEND,
-        message: "texture clear layer count exceeds GLES limit",
-    })?;
+    let uploads = zero_upload_plan(
+        mip_width,
+        mip_height,
+        layers,
+        meta.format.bytes_per_pixel,
+        ZERO_UPLOAD_BLOCK_BYTES,
+    )?;
+    i32_from_u32(mip_width, "texture clear width exceeds GLES limit")?;
+    i32_from_u32(mip_height, "texture clear height exceeds GLES limit")?;
+    for &layer in layers {
+        i32_from_u32(layer, "texture clear layer index exceeds GLES limit")?;
+    }
+    if !matches!(
+        meta.target,
+        glow::TEXTURE_2D | glow::TEXTURE_2D_ARRAY | glow::TEXTURE_3D
+    ) {
+        return Err(HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "unsupported GLES texture clear target",
+        });
+    }
+    // Small subresources need less than a full block. Saturation is safe:
+    // any size exceeding u64 also exceeds the fixed staging limit.
     let byte_count = u64::from(mip_width)
-        .checked_mul(u64::from(mip_height))
-        .and_then(|bytes| bytes.checked_mul(u64::from(layer_count)))
-        .and_then(|bytes| bytes.checked_mul(u64::from(meta.format.bytes_per_pixel)))
-        .ok_or(HalError::BufferOperationFailed {
-            backend: BACKEND,
-            message: "texture clear zero upload size exceeds host limit",
-        })?;
-    let zeros = vec![
-        0u8;
-        usize::try_from(byte_count).map_err(|_| HalError::BufferOperationFailed {
-            backend: BACKEND,
-            message: "texture clear zero upload size exceeds host limit",
-        })?
-    ];
-    let width = i32_from_u32(mip_width, "texture clear width exceeds GLES limit")?;
-    let height = i32_from_u32(mip_height, "texture clear height exceeds GLES limit")?;
+        .saturating_mul(u64::from(mip_height))
+        .saturating_mul(u64::from(meta.format.bytes_per_pixel))
+        .min(ZERO_UPLOAD_BLOCK_BYTES as u64) as usize;
+    let zeros = zero_upload_block(byte_count)?;
 
     unsafe {
         normalize_texture_mip_bounds(gl, meta, texture)?;
@@ -3327,50 +3393,35 @@ fn submit_texture_clear_zero_upload(
         gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
         gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 0);
         gl.pixel_store_i32(glow::UNPACK_IMAGE_HEIGHT, 0);
-        match meta.target {
-            glow::TEXTURE_2D => {
+        for (layer, x, y, width, height) in uploads {
+            // Full dimensions and layer indices were checked before GL state
+            // changes; every tile lies within those bounds.
+            if meta.target == glow::TEXTURE_2D {
                 gl.tex_sub_image_2d(
                     meta.target,
                     mip_level,
-                    0,
-                    0,
-                    width,
-                    height,
+                    x as i32,
+                    y as i32,
+                    width as i32,
+                    height as i32,
                     meta.format.format,
                     meta.format.ty,
                     glow::PixelUnpackData::Slice(&zeros),
                 );
-            }
-            glow::TEXTURE_2D_ARRAY | glow::TEXTURE_3D => {
-                let first_layer = layers
-                    .first()
-                    .copied()
-                    .map(|layer| {
-                        i32_from_u32(layer, "texture clear layer index exceeds GLES limit")
-                    })
-                    .transpose()?
-                    .unwrap_or(0);
+            } else {
                 gl.tex_sub_image_3d(
                     meta.target,
                     mip_level,
-                    0,
-                    0,
-                    first_layer,
-                    width,
-                    height,
-                    i32_from_u32(layer_count, "texture clear depth exceeds GLES limit")?,
+                    x as i32,
+                    y as i32,
+                    layer as i32,
+                    width as i32,
+                    height as i32,
+                    1,
                     meta.format.format,
                     meta.format.ty,
                     glow::PixelUnpackData::Slice(&zeros),
                 );
-            }
-            _ => {
-                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
-                gl.bind_texture(meta.target, None);
-                return Err(HalError::BufferOperationFailed {
-                    backend: BACKEND,
-                    message: "unsupported GLES texture clear target",
-                });
             }
         }
         gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
@@ -4487,6 +4538,150 @@ fn u32_from_u64(value: u64, message: &'static str) -> Result<u32, HalError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zero_upload_plan_fits_one_upload() {
+        for block_bytes in [24, 25, ZERO_UPLOAD_BLOCK_BYTES] {
+            let uploads: Vec<_> = zero_upload_plan(4, 3, &[0], 2, block_bytes)
+                .unwrap()
+                .collect();
+            assert_eq!(uploads, [(0, 0, 0, 4, 3)]);
+        }
+    }
+
+    #[test]
+    fn zero_upload_plan_groups_whole_rows() {
+        let uploads: Vec<_> = zero_upload_plan(4, 5, &[0], 2, 19).unwrap().collect();
+        assert_eq!(uploads, [(0, 0, 0, 4, 2), (0, 0, 2, 4, 2), (0, 0, 4, 4, 1)]);
+    }
+
+    #[test]
+    fn zero_upload_plan_splits_wide_rows_into_columns() {
+        let uploads: Vec<_> = zero_upload_plan(7, 2, &[0], 4, 13).unwrap().collect();
+        assert_eq!(
+            uploads,
+            [
+                (0, 0, 0, 3, 1),
+                (0, 3, 0, 3, 1),
+                (0, 6, 0, 1, 1),
+                (0, 0, 1, 3, 1),
+                (0, 3, 1, 3, 1),
+                (0, 6, 1, 1, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn zero_upload_plan_finishes_each_layer_before_the_next() {
+        let uploads: Vec<_> = zero_upload_plan(2, 3, &[3, 4], 4, 16).unwrap().collect();
+        assert_eq!(
+            uploads,
+            [
+                (3, 0, 0, 2, 2),
+                (3, 0, 2, 2, 1),
+                (4, 0, 0, 2, 2),
+                (4, 0, 2, 2, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn zero_upload_plan_covers_every_pixel_exactly_once_within_budget() {
+        for width in 1..=9 {
+            for height in 1..=7 {
+                for bytes_per_pixel in [1, 2, 3, 4, 8, 16] {
+                    for block_bytes in [16, 17, 31, 64, 128] {
+                        let mut visits = vec![0; (width * height * 3) as usize];
+                        let uploads = zero_upload_plan(
+                            width,
+                            height,
+                            &[2, 3, 4],
+                            bytes_per_pixel,
+                            block_bytes,
+                        )
+                        .unwrap();
+                        for (layer, x, y, tile_width, tile_height) in uploads {
+                            assert!((2..=4).contains(&layer));
+                            assert!(tile_width > 0 && tile_height > 0);
+                            assert!(x + tile_width <= width && y + tile_height <= height);
+                            assert!(
+                                u64::from(tile_width)
+                                    * u64::from(tile_height)
+                                    * u64::from(bytes_per_pixel)
+                                    <= block_bytes as u64
+                            );
+                            if width as usize * bytes_per_pixel as usize <= block_bytes {
+                                assert_eq!((x, tile_width), (0, width));
+                            } else {
+                                assert_eq!(tile_height, 1);
+                            }
+                            for row in y..y + tile_height {
+                                for column in x..x + tile_width {
+                                    let index = ((layer - 2) * height + row) * width + column;
+                                    visits[index as usize] += 1;
+                                }
+                            }
+                        }
+                        assert!(visits.iter().all(|&count| count == 1));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zero_upload_plan_handles_empty_and_invalid_inputs() {
+        for (width, height, layers) in [(0, 2, &[0][..]), (2, 0, &[0][..]), (2, 2, &[][..])] {
+            assert!(zero_upload_plan(width, height, layers, 4, 16)
+                .unwrap()
+                .next()
+                .is_none());
+        }
+        for (bytes_per_pixel, block_bytes) in [(0, 16), (4, 0), (4, 3)] {
+            assert!(matches!(
+                zero_upload_plan(2, 2, &[0], bytes_per_pixel, block_bytes),
+                Err(HalError::BufferOperationFailed {
+                    backend: "gles",
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn zero_upload_plan_keeps_large_dimensions_lazy_and_bounded() {
+        let uploads: Vec<_> =
+            zero_upload_plan(u32::MAX, u32::MAX, &[u32::MAX], 16, ZERO_UPLOAD_BLOCK_BYTES)
+                .unwrap()
+                .take(2)
+                .collect();
+        let tile_width = (ZERO_UPLOAD_BLOCK_BYTES / 16) as u32;
+        assert_eq!(
+            uploads,
+            [
+                (u32::MAX, 0, 0, tile_width, 1),
+                (u32::MAX, tile_width, 0, tile_width, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn zero_upload_block_is_zeroed_and_allocation_failure_is_fallible() {
+        for size in [0, 17, ZERO_UPLOAD_BLOCK_BYTES] {
+            let zeros = zero_upload_block(size).unwrap();
+            assert_eq!(zeros.len(), size);
+            assert!(zeros.iter().all(|&byte| byte == 0));
+        }
+        // Capacity overflow deterministically exercises reservation failure
+        // without exhausting the host's memory.
+        assert!(matches!(
+            zero_upload_block(usize::MAX),
+            Err(HalError::OutOfMemory {
+                backend: "gles",
+                ..
+            })
+        ));
+    }
 
     #[test]
     #[cfg(feature = "noop")]
