@@ -1,7 +1,9 @@
 //! Shared body of the Block 155 e2e (`specs/blocks/155-vulkan-cube-compatible-images.md`),
 //! included by `e2e_metal_cube_views.rs` and `e2e_vulkan_cube_views.rs` through `#[path]`.
 //! A 2D array texture is sampled through a `cube` or `cube-array` view; each face must
-//! return the value written to its own array layer.
+//! return the value written to its own array layer. On Vulkan the missing-flag defect
+//! (VUID-VkImageViewCreateInfo-image-01003 / -viewType-01004) is visible only under
+//! `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation`: drivers sample correctly anyway.
 
 use std::sync::{Arc, Mutex};
 

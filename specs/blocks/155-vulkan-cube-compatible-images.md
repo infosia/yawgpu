@@ -1,6 +1,6 @@
 # Block 155 — Vulkan images and devices support the cube views core accepts
 
-Status: **S1 landed (2026-11-13)**; full `e2e_vulkan_*` regression and Phase Review pending.
+Status: **COMPLETE (2026-11-13)**. Phase Review: 0 CRITICAL, 0 MAJOR, 3 MINOR.
 Source: whole-code review at `92e38c7` (`specs/tracking/code-review-2026-11.md`), finding R07.
 Oracle: pinned Dawn — `native/vulkan/TextureVk.cpp:1515-1517` (cube-compatible flag),
 `native/vulkan/DeviceVk.cpp:575` (enable `imageCubeArray`),
@@ -24,9 +24,10 @@ multisampled textures have one layer, so they never qualify.) Other flags are un
 
 R2. **`imageCubeArray` is enabled.** Logical-device creation enables
 `VkPhysicalDeviceFeatures::imageCubeArray` when the physical device supports it.
-An adapter whose physical device lacks it is not exposed as a core WebGPU adapter, as in
-Dawn; the agent reports how adapter enumeration currently filters unsupported devices
-and applies the same mechanism.
+An adapter whose physical device lacks it is not exposed. Dawn only marks such a device
+core-unsupported and still offers it as a compatibility adapter; yawgpu has no
+compatibility-mode validation that would reject cube-array views, so it drops the device
+entirely.
 
 R3. **Portability subset.** On MoltenVK the portability-subset features are queried and
 chained at device creation (memory `vulkan-portability-subset-moltenvk`). The agent
@@ -58,3 +59,18 @@ VUID-VkShaderModuleCreateInfo-pCode-08740 ×3); `e2e_metal_cube_views` 2/2. R2: 
 without `imageCubeArray` are dropped by the existing `VulkanAdapter::new` → `None` filter.
 R3: the portability subset has no cube-view restriction (`imageView2DOn3DImage` and
 `multisampleArrayImage` do not apply).
+
+Full regression (with Block 153 S1): every `e2e_vulkan_*` on MoltenVK under the layer 163
+passed, 1 failed — the known `imageView2DOn3DImage` case, the source of every VUID.
+
+## Phase Review (2026-11-13, fresh-context reviewer over `26a12ae` and the cube e2e)
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| m1 | MINOR | The cube e2e passes without the fix unless run under the Khronos layer (drivers tolerate the missing flag) | Test doc comment says so; the flag logic itself is covered by the inline `texture_image_flags` tests |
+| m2 | MINOR | R2 said "as in Dawn"; Dawn keeps the device as a compat adapter | R2 reworded |
+| m3 | MINOR | `enabled_texture_features` checks `image_cube_array` support although every exposed adapter has it | Accepted: keeps the builder self-contained |
+
+The reviewer confirmed: `vkCreateImage` has one call site; MSAA textures never reach six
+layers; `max_texture_dimension_2d` is already capped at `maxImageDimensionCube`; the
+sample-count probe passes the same flags as creation.
