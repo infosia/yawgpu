@@ -11,17 +11,14 @@ use crate::{
 
 pub(super) struct GlesSamplerInner {
     device: Arc<GlesDeviceInner>,
-    sampler: Result<glow::Sampler, HalError>,
+    sampler: glow::Sampler,
 }
 
 impl Drop for GlesSamplerInner {
     fn drop(&mut self) {
-        if let Ok(sampler) = self.sampler.as_ref() {
-            let sampler = *sampler;
-            let _ = self.device.with_current_context(|gl| unsafe {
-                gl.delete_sampler(sampler);
-            });
-        }
+        let _ = self.device.with_current_context(|gl| unsafe {
+            gl.delete_sampler(self.sampler);
+        });
     }
 }
 
@@ -45,16 +42,20 @@ impl std::fmt::Debug for GlesSampler {
 }
 
 impl GlesSampler {
-    pub(super) fn new(device: Arc<GlesDeviceInner>, descriptor: &HalSamplerDescriptor) -> Self {
-        let sampler = allocate_sampler(&device, descriptor);
-        Self {
+    pub(super) fn new(
+        device: Arc<GlesDeviceInner>,
+        descriptor: &HalSamplerDescriptor,
+    ) -> Result<Self, HalError> {
+        // with_current_context runs synchronously for both EGL and WGL; no
+        // context-thread allocation needs to be deferred until sampler use.
+        let sampler = allocate_sampler(&device, descriptor)?;
+        Ok(Self {
             inner: Arc::new(GlesSamplerInner { device, sampler }),
-        }
+        })
     }
 
-    #[allow(dead_code)]
-    pub(super) fn raw_or_err(&self) -> Result<glow::Sampler, HalError> {
-        self.inner.sampler.as_ref().copied().map_err(Clone::clone)
+    pub(super) fn raw(&self) -> glow::Sampler {
+        self.inner.sampler
     }
 }
 
@@ -88,12 +89,11 @@ fn allocate_sampler(
 
     device
         .with_current_context(|gl| unsafe {
+            // Clear preceding GL error flags so creation errors belong to this sampler.
+            while gl.get_error() != glow::NO_ERROR {}
             let sampler = gl
                 .create_sampler()
-                .map_err(|_| HalError::BufferOperationFailed {
-                    backend: BACKEND,
-                    message: "glCreateSampler failed",
-                })?;
+                .map_err(|_| sampler_creation_error(gl.get_error()))?;
             gl.sampler_parameter_i32(sampler, glow::TEXTURE_WRAP_S, address_u);
             gl.sampler_parameter_i32(sampler, glow::TEXTURE_WRAP_T, address_v);
             gl.sampler_parameter_i32(sampler, glow::TEXTURE_WRAP_R, address_w);
@@ -120,9 +120,28 @@ fn allocate_sampler(
                     f32::from(descriptor.max_anisotropy),
                 );
             }
+            let error = gl.get_error();
+            if error != glow::NO_ERROR {
+                gl.delete_sampler(sampler);
+                return Err(sampler_creation_error(error));
+            }
             Ok(sampler)
         })
         .and_then(|result| result)
+}
+
+fn sampler_creation_error(error: u32) -> HalError {
+    if error == glow::OUT_OF_MEMORY {
+        HalError::OutOfMemory {
+            backend: BACKEND,
+            resource: "sampler",
+        }
+    } else {
+        HalError::BufferOperationFailed {
+            backend: BACKEND,
+            message: "GLES sampler creation failed",
+        }
+    }
 }
 
 fn map_filter_mode(mode: HalFilterMode) -> i32 {
@@ -167,6 +186,28 @@ fn map_compare_function(function: HalCompareFunction) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sampler_creation_error_preserves_allocation_failures() {
+        assert!(matches!(
+            sampler_creation_error(glow::OUT_OF_MEMORY),
+            HalError::OutOfMemory {
+                backend: BACKEND,
+                resource: "sampler"
+            }
+        ));
+        for error in [
+            glow::NO_ERROR,
+            glow::INVALID_ENUM,
+            glow::INVALID_VALUE,
+            glow::INVALID_OPERATION,
+        ] {
+            assert!(matches!(
+                sampler_creation_error(error),
+                HalError::BufferOperationFailed { .. }
+            ));
+        }
+    }
 
     #[test]
     fn map_filter_mode_maps_known_values() {

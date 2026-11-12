@@ -1,6 +1,6 @@
 # Block 156 — Whole-code review 2026-11-13: P2 library fixes
 
-Status: **PLANNED (2026-11-13)**.
+Status: **S1 and S2 landed (2026-11-13)**; Phase Review pending.
 Source: whole-code review at `92e38c7` (`specs/tracking/code-review-2026-11.md`), findings R13, R14, and R11.
 (R10 and R12 went into Block 151; R15, X01, and X02 are Claude-owned test and example
 fixes; R16, GLES, is Block 157.)
@@ -54,3 +54,16 @@ S1: R1–R2. S2: R3.
 - Claude: workspace test; feature-gated HAL tests; `e2e_vulkan_*` under the validation
   layer (S1), `e2e_metal_*` sampler suites (S2), and a CTS
   `webgpu:api,validation,texture,*` / `format_info` slice on Metal for R1.
+
+## Verification record
+
+S1+S2: workspace test 1,476/0; `yawgpu-core --lib` 735/0 (the two R1 tests red before the
+fix); clippy clean for `yawgpu-hal` with `metal`, `vulkan`, and `gles`. Real GPU on the
+M2: `yawgpu-hal --features metal --lib --include-ignored` 267/0; every `e2e_metal_*`
+170/0; `yawgpu-hal --features vulkan --lib --include-ignored` 460/0 on MoltenVK under the
+Khronos layer, 0 VUIDs, including `vulkan_queue_submit_empty_returns_before_completion_is_observed`;
+every `e2e_vulkan_*` 163 passed, 1 failed (the known `imageView2DOn3DImage` case, the
+source of every VUID). R2 audit: no production caller of `submit_empty` relied on the
+wait. R3 (GLES): EGL and WGL run sampler creation synchronously on the current context,
+so the deferred error path was removed entirely; `GL_OUT_OF_MEMORY` maps to
+`OutOfMemory`, other GL errors to `Internal`.

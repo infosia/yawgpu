@@ -220,11 +220,9 @@ impl Drop for VulkanQueueInner {
 }
 
 impl VulkanQueue {
-    /// Submits an empty command buffer to flush the queue.
+    /// Submits an empty command buffer to flush the queue without waiting for completion.
     pub fn submit_empty(&self) -> Result<SubmissionIndex, HalError> {
-        let index = submit_copies(&self.inner, &[])?;
-        self.wait_for_submission(index)?;
-        Ok(index)
+        submit_copies(&self.inner, &[])
     }
 
     /// Waits until all submitted queue work has completed.
@@ -642,11 +640,24 @@ mod tests {
     #[test]
     #[ignore = "manual real Vulkan backend test"]
     #[cfg(feature = "vulkan")]
-    fn vulkan_queue_submit_empty_completes() {
-        vulkan_device()
-            .queue()
-            .submit_empty()
-            .expect("submit empty queue work");
+    fn vulkan_queue_submit_empty_returns_before_completion_is_observed() {
+        let device = vulkan_device();
+        let queue = device.queue();
+        let index = queue.submit_empty().expect("submit empty queue work");
+        // A fresh queue has no earlier retirements or in-flight-limit pressure.
+        // Observe the tracker without polling the GPU: this stays deterministic
+        // even if the native fence has already signaled on a fast device.
+        {
+            let tracker = queue.inner.submissions.lock().unwrap();
+            assert_eq!(tracker.completed, SubmissionIndex::NONE);
+            assert_eq!(tracker.last_issued, index);
+            assert_eq!(tracker.fences.len(), 1);
+            assert_eq!(tracker.fences[0].0, index);
+        }
+        queue
+            .wait_for_submission(index)
+            .expect("wait for empty work");
+        assert_eq!(queue.completed_submission_index().unwrap(), index);
     }
 
     #[test]

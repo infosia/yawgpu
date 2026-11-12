@@ -552,12 +552,7 @@ impl TextureFormat {
                 .blendable()
                 .renderable()
                 .multisample(),
-            TextureFormat::RG11B10_UFLOAT => {
-                if !features.contains(&Feature::Rg11b10UfloatRenderable) {
-                    return None;
-                }
-                FormatCaps::float_color(4, 3).blendable()
-            }
+            TextureFormat::RG11B10_UFLOAT => FormatCaps::float_color(4, 3).blendable(),
             TextureFormat::RGB9E5_UFLOAT => FormatCaps::float_color(4, 3).blendable(),
             TextureFormat::RG32_FLOAT => FormatCaps::float_color(8, 2).renderable().storage(),
             TextureFormat::RG32_UINT => FormatCaps::uint_color(8, 2).renderable().storage(),
@@ -1355,6 +1350,37 @@ mod tests {
         assert!(!TextureFormat::from_raw(TextureFormat::RGBA8_UNORM)
             .caps(&no_features)
             .is_some_and(|caps| caps.read_write_storage_capable));
+    }
+
+    #[test]
+    fn rg11b10_ufloat_has_core_caps_and_independent_feature_upgrades() {
+        let format = TextureFormat::from_raw(TextureFormat::RG11B10_UFLOAT);
+        let baseline = format.caps(&FeatureSet::new()).expect("core format");
+        assert!(baseline.aspects.color);
+        assert_eq!(baseline.output_class, Some(FormatOutputClass::Float));
+        assert_eq!(baseline.color_components, 3);
+        assert_eq!(baseline.texel_block_size, 4);
+        assert!(baseline.filterable);
+        assert!(baseline.is_blendable);
+        assert!(!baseline.renderable);
+        assert!(!baseline.multisample_capable);
+        assert!(!baseline.storage_capable);
+
+        let renderable = format
+            .caps(&[Feature::Rg11b10UfloatRenderable].into_iter().collect())
+            .unwrap();
+        assert!(renderable.renderable);
+        assert!(renderable.multisample_capable);
+        assert!(!renderable.storage_capable);
+
+        let storage = format
+            .caps(&[Feature::TextureFormatsTier1].into_iter().collect())
+            .unwrap();
+        assert!(storage.storage_capable);
+        assert!(storage.storage_read_only_capable);
+        assert!(!storage.read_write_storage_capable);
+        assert!(!storage.renderable);
+        assert!(!storage.multisample_capable);
     }
 
     #[test]

@@ -60,7 +60,7 @@ impl MetalTexture {
 /// Stores metal sampler data used by validation and backend submission.
 #[derive(Clone)]
 pub struct MetalSampler {
-    pub(super) _inner: Option<Retained<ProtocolObject<dyn MTLSamplerState>>>,
+    pub(super) _inner: Retained<ProtocolObject<dyn MTLSamplerState>>,
 }
 
 unsafe impl Send for MetalSampler {}
@@ -164,7 +164,7 @@ pub(super) fn clamp_anisotropy(requested: u16) -> u16 {
     requested.clamp(1, METAL_MAX_ANISOTROPY)
 }
 
-/// Creates sampler and reports validation errors through the owning device.
+/// Creates a sampler, reporting a nil native allocation as out of memory.
 pub(super) fn create_sampler(
     device: &ProtocolObject<dyn MTLDevice>,
     descriptor: &HalSamplerDescriptor,
@@ -186,7 +186,10 @@ pub(super) fn create_sampler(
     }
     device
         .newSamplerStateWithDescriptor(&sampler_descriptor)
-        .ok_or_else(|| texture_error("sampler allocation failed"))
+        .ok_or(HalError::OutOfMemory {
+            backend: BACKEND,
+            resource: "sampler",
+        })
 }
 
 #[cfg(test)]

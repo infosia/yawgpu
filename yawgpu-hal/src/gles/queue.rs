@@ -654,7 +654,7 @@ fn bind_combined_samplers(
                 });
             };
             unsafe {
-                gl.bind_sampler(unit, Some(gles_sampler.raw_or_err()?));
+                gl.bind_sampler(unit, Some(gles_sampler.raw()));
             }
         }
         units.push(unit);
@@ -6798,18 +6798,20 @@ mod tests {
         device: &super::super::device::GlesDevice,
         binding: u32,
     ) -> HalBoundSampler {
-        let sampler = device.create_sampler(&crate::HalSamplerDescriptor {
-            address_mode_u: crate::HalAddressMode::ClampToEdge,
-            address_mode_v: crate::HalAddressMode::ClampToEdge,
-            address_mode_w: crate::HalAddressMode::ClampToEdge,
-            mag_filter: crate::HalFilterMode::Nearest,
-            min_filter: crate::HalFilterMode::Nearest,
-            mipmap_filter: crate::HalMipmapFilterMode::Nearest,
-            lod_min_clamp: 0.0,
-            lod_max_clamp: 32.0,
-            compare: None,
-            max_anisotropy: 1,
-        });
+        let sampler = device
+            .create_sampler(&crate::HalSamplerDescriptor {
+                address_mode_u: crate::HalAddressMode::ClampToEdge,
+                address_mode_v: crate::HalAddressMode::ClampToEdge,
+                address_mode_w: crate::HalAddressMode::ClampToEdge,
+                mag_filter: crate::HalFilterMode::Nearest,
+                min_filter: crate::HalFilterMode::Nearest,
+                mipmap_filter: crate::HalMipmapFilterMode::Nearest,
+                lod_min_clamp: 0.0,
+                lod_max_clamp: 32.0,
+                compare: None,
+                max_anisotropy: 1,
+            })
+            .expect("create sampler");
         HalBoundSampler {
             group: 0,
             binding,

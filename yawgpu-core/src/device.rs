@@ -51,6 +51,9 @@ pub(crate) struct DeviceInner {
     /// One-shot HAL allocation failure for query-set creation tests.
     #[cfg(test)]
     query_set_failure: Mutex<Option<HalError>>,
+    /// One-shot HAL allocation failure for sampler creation tests.
+    #[cfg(test)]
+    sampler_failure: Mutex<Option<HalError>>,
     pub(crate) hal: HalDevice,
     pub(crate) queue: Queue,
     pub(crate) error_sink: Mutex<ErrorSink>,
@@ -112,6 +115,8 @@ impl Device {
                 dispatch_indirect_buffer_failure: Mutex::new(None),
                 #[cfg(test)]
                 query_set_failure: Mutex::new(None),
+                #[cfg(test)]
+                sampler_failure: Mutex::new(None),
                 hal,
                 queue,
                 error_sink: Mutex::new(ErrorSink::default()),
@@ -523,14 +528,27 @@ impl Device {
         let hal = if is_error {
             None
         } else {
-            Some(
-                self.inner
-                    .hal
-                    .create_sampler(&hal_sampler_descriptor(&resolved)),
-            )
+            match self.create_hal_sampler(&hal_sampler_descriptor(&resolved)) {
+                Ok(hal) => Some(hal),
+                Err(error) => {
+                    self.dispatch_hal_allocation_error(error);
+                    return Sampler::new(resolved, None, true);
+                }
+            }
         };
 
         Sampler::new(resolved, hal, is_error)
+    }
+
+    fn create_hal_sampler(
+        &self,
+        descriptor: &yawgpu_hal::HalSamplerDescriptor,
+    ) -> Result<yawgpu_hal::HalSampler, HalError> {
+        #[cfg(test)]
+        if let Some(error) = self.inner.sampler_failure.lock().take() {
+            return Err(error);
+        }
+        self.inner.hal.create_sampler(descriptor)
     }
 
     /// Compiles and validates a shader module from its WGSL source.
@@ -1782,6 +1800,32 @@ mod tests {
     }
 
     #[test]
+    fn rg11b10_texture_sampling_and_copy_do_not_require_renderability() {
+        let device = noop_device();
+        assert!(!device
+            .features()
+            .contains(&Feature::Rg11b10UfloatRenderable));
+        let mut descriptor = valid_texture_descriptor();
+        descriptor.format = crate::TextureFormat::from_raw(crate::TextureFormat::RG11B10_UFLOAT);
+        descriptor.usage = TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST;
+        device.push_error_scope(ErrorFilter::Validation);
+        let texture = device.create_texture(descriptor.clone());
+        assert!(!texture.is_error());
+        assert!(texture.hal().is_some());
+        assert_eq!(device.pop_error_scope().unwrap(), None);
+
+        descriptor.usage = TextureUsage::RENDER_ATTACHMENT;
+        device.push_error_scope(ErrorFilter::Validation);
+        let texture = device.create_texture(descriptor);
+        assert!(texture.is_error());
+        assert!(texture.hal().is_none());
+        assert_eq!(
+            device.pop_error_scope().unwrap().unwrap().kind,
+            ErrorKind::Validation
+        );
+    }
+
+    #[test]
     fn device_create_texture_happy_path_and_invalid_size_scope_error() {
         let device = noop_device();
         let before = device.allocation_count();
@@ -1804,6 +1848,92 @@ mod tests {
         assert!(error_texture.is_error());
         assert_eq!(error.kind, ErrorKind::Validation);
         assert_eq!(error.message, "2D texture width is out of range");
+    }
+
+    #[test]
+    fn sampler_creation_dispatches_hal_failure_and_returns_error_sampler() {
+        for (failure, filter, kind) in [
+            (
+                HalError::OutOfMemory {
+                    backend: "noop",
+                    resource: "sampler",
+                },
+                ErrorFilter::OutOfMemory,
+                ErrorKind::OutOfMemory,
+            ),
+            (
+                HalError::BufferOperationFailed {
+                    backend: "noop",
+                    message: "sampler creation failed",
+                },
+                ErrorFilter::Internal,
+                ErrorKind::Internal,
+            ),
+        ] {
+            let device = noop_device();
+            let message = failure.to_string();
+            *device.inner.sampler_failure.lock() = Some(failure);
+            let before = device.allocation_count();
+            device.push_error_scope(filter);
+            device.push_error_scope(ErrorFilter::Validation);
+            let sampler = device.create_sampler_with_error(SamplerDescriptor::default(), None);
+            assert!(sampler.is_error());
+            assert!(sampler.hal().is_none());
+            assert_eq!(device.allocation_count(), before);
+            assert_eq!(device.pop_error_scope().unwrap(), None);
+            assert_eq!(
+                device.pop_error_scope().unwrap(),
+                Some(DeviceError::new(kind, message))
+            );
+
+            device.push_error_scope(filter);
+            let sampler = device.create_sampler(SamplerDescriptor::default());
+            assert!(!sampler.is_error());
+            assert!(sampler.hal().is_some());
+            assert_eq!(device.allocation_count(), before + 1);
+            assert_eq!(device.pop_error_scope().unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn invalid_or_lost_sampler_creation_skips_hal_failure() {
+        let device = noop_device();
+        *device.inner.sampler_failure.lock() = Some(HalError::OutOfMemory {
+            backend: "noop",
+            resource: "sampler",
+        });
+        let before = device.allocation_count();
+        for (descriptor, conversion_error) in [
+            (
+                SamplerDescriptor {
+                    max_anisotropy: 0,
+                    ..SamplerDescriptor::default()
+                },
+                None,
+            ),
+            (
+                SamplerDescriptor::default(),
+                Some("invalid compare function".into()),
+            ),
+        ] {
+            device.push_error_scope(ErrorFilter::Validation);
+            let sampler = device.create_sampler_with_error(descriptor, conversion_error);
+            assert!(sampler.is_error());
+            assert!(sampler.hal().is_none());
+            assert_eq!(
+                device.pop_error_scope().unwrap().unwrap().kind,
+                ErrorKind::Validation
+            );
+            assert!(device.inner.sampler_failure.lock().is_some());
+        }
+        device.destroy();
+        device.push_error_scope(ErrorFilter::OutOfMemory);
+        let sampler = device.create_sampler(SamplerDescriptor::default());
+        assert!(sampler.is_error());
+        assert!(sampler.hal().is_none());
+        assert_eq!(device.pop_error_scope().unwrap(), None);
+        assert!(device.inner.sampler_failure.lock().is_some());
+        assert_eq!(device.allocation_count(), before);
     }
 
     #[test]

@@ -109,7 +109,7 @@ impl Drop for VulkanTextureInner {
 /// Stores vulkan sampler data used by validation and backend submission.
 #[derive(Debug, Clone)]
 pub struct VulkanSampler {
-    pub(super) _inner: Option<Arc<VulkanSamplerInner>>,
+    pub(super) _inner: Arc<VulkanSamplerInner>,
 }
 
 /// Holds shared state for the vulkan sampler handle.
@@ -459,7 +459,7 @@ pub(super) fn effective_anisotropy(
     (clamped > 1.0, clamped)
 }
 
-/// Creates sampler and reports validation errors through the owning device.
+/// Creates a sampler and preserves the native allocation error kind.
 pub(super) fn create_sampler(
     device: Arc<VulkanDeviceInner>,
     descriptor: &HalSamplerDescriptor,
@@ -489,9 +489,21 @@ pub(super) fn create_sampler(
         .max_lod(descriptor.lod_max_clamp)
         .border_color(vk::BorderColor::FLOAT_TRANSPARENT_BLACK)
         .unnormalized_coordinates(false);
-    let sampler = unsafe { device.device.create_sampler(&sampler_info, None) }
-        .map_err(|_| texture_error("sampler creation failed"))?;
+    let sampler =
+        unsafe { device.device.create_sampler(&sampler_info, None) }.map_err(map_sampler_error)?;
     Ok(VulkanSamplerInner { device, sampler })
+}
+
+fn map_sampler_error(error: vk::Result) -> HalError {
+    match error {
+        vk::Result::ERROR_OUT_OF_HOST_MEMORY | vk::Result::ERROR_OUT_OF_DEVICE_MEMORY => {
+            HalError::OutOfMemory {
+                backend: BACKEND,
+                resource: "sampler",
+            }
+        }
+        _ => texture_error("sampler creation failed"),
+    }
 }
 
 fn sample_count_flags(sample_count: u32) -> Result<vk::SampleCountFlags, HalError> {
@@ -788,6 +800,31 @@ pub(super) fn color_subresource_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sampler_creation_error_preserves_allocation_failures() {
+        for error in [
+            vk::Result::ERROR_OUT_OF_HOST_MEMORY,
+            vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
+        ] {
+            assert!(matches!(
+                map_sampler_error(error),
+                HalError::OutOfMemory {
+                    backend: BACKEND,
+                    resource: "sampler"
+                }
+            ));
+        }
+        for error in [
+            vk::Result::ERROR_DEVICE_LOST,
+            vk::Result::ERROR_TOO_MANY_OBJECTS,
+        ] {
+            assert!(matches!(
+                map_sampler_error(error),
+                HalError::BufferOperationFailed { .. }
+            ));
+        }
+    }
 
     #[test]
     fn audit_f2_view_formats_require_mutable_images_and_include_base() {

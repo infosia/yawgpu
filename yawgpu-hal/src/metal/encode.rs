@@ -1025,10 +1025,7 @@ fn metal_bound_sampler<'a>(
     let HalSampler::Metal(sampler) = &binding.sampler else {
         return Err(texture_error(backend_error));
     };
-    sampler
-        ._inner
-        .as_deref()
-        .ok_or_else(|| texture_error("sampler allocation failed"))
+    Ok(&sampler._inner)
 }
 
 fn encode_compute_buffer(

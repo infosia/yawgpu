@@ -716,15 +716,14 @@ fn retain_hal_sampler(sampler: &HalSampler, retained: &mut RetainedResources) {
     let HalSampler::Vulkan(sampler) = sampler else {
         return;
     };
-    if let Some(inner) = &sampler._inner {
-        retained.retain(
-            RetainedResourceKind::Sampler,
-            Arc::as_ptr(inner) as usize,
-            RetainedResource::Sampler {
-                _inner: Arc::clone(inner),
-            },
-        );
-    }
+    let inner = &sampler._inner;
+    retained.retain(
+        RetainedResourceKind::Sampler,
+        Arc::as_ptr(inner) as usize,
+        RetainedResource::Sampler {
+            _inner: Arc::clone(inner),
+        },
+    );
 }
 
 fn retain_hal_query_set(query_set: &HalQuerySet, retained: &mut RetainedResources) {
@@ -6901,7 +6900,9 @@ mod tests {
         let external_plane1 = device
             .create_texture(&texture_descriptor())
             .expect("create external plane1 texture");
-        let sampler = device.create_sampler(&sampler_descriptor());
+        let sampler = device
+            .create_sampler(&sampler_descriptor())
+            .expect("create sampler");
         let index_inner = Arc::clone(index.inner.as_ref().expect("index buffer inner"));
         let indirect_inner = Arc::clone(indirect.inner.as_ref().expect("indirect buffer inner"));
         let params_inner = Arc::clone(params.inner.as_ref().expect("params buffer inner"));
@@ -6918,7 +6919,7 @@ mod tests {
                 .as_ref()
                 .expect("plane1 texture inner"),
         );
-        let sampler_inner = Arc::clone(sampler._inner.as_ref().expect("sampler inner"));
+        let sampler_inner = Arc::clone(&sampler._inner);
         let pass = HalRenderPassCommandStream {
             color_targets: Vec::new(),
             framebuffer_fetch_color_slots: Vec::new(),
@@ -6992,7 +6993,9 @@ mod tests {
         let external_plane1 = device
             .create_texture(&texture_descriptor())
             .expect("create external plane1 texture");
-        let sampler = device.create_sampler(&sampler_descriptor());
+        let sampler = device
+            .create_sampler(&sampler_descriptor())
+            .expect("create sampler");
         let pipeline_inner = Arc::clone(&pipeline.inner);
         let indirect_inner = Arc::clone(indirect.inner.as_ref().expect("indirect buffer inner"));
         let params_inner = Arc::clone(params.inner.as_ref().expect("params buffer inner"));
@@ -7009,7 +7012,7 @@ mod tests {
                 .as_ref()
                 .expect("plane1 texture inner"),
         );
-        let sampler_inner = Arc::clone(sampler._inner.as_ref().expect("sampler inner"));
+        let sampler_inner = Arc::clone(&sampler._inner);
         let pass = HalComputePass {
             pipeline: HalComputePipeline::Vulkan(pipeline),
             bind_buffers: Vec::new(),

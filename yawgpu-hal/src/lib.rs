@@ -995,20 +995,23 @@ impl HalDevice {
         }
     }
 
-    /// Creates a sampler matching the given descriptor.
-    #[must_use]
-    pub fn create_sampler(&self, descriptor: &HalSamplerDescriptor) -> HalSampler {
-        #[cfg(not(any(feature = "metal", feature = "vulkan")))]
+    /// Creates a sampler matching the given descriptor, reporting backend allocation errors.
+    #[must_use = "sampler creation can fail"]
+    pub fn create_sampler(
+        &self,
+        descriptor: &HalSamplerDescriptor,
+    ) -> Result<HalSampler, HalError> {
+        #[cfg(not(any(feature = "metal", feature = "vulkan", feature = "gles")))]
         let _ = descriptor;
         match self {
             #[cfg(feature = "noop")]
-            Self::Noop(device) => HalSampler::Noop(device.create_sampler()),
+            Self::Noop(device) => Ok(HalSampler::Noop(device.create_sampler())),
             #[cfg(feature = "vulkan")]
-            Self::Vulkan(device) => HalSampler::Vulkan(device.create_sampler(descriptor)),
+            Self::Vulkan(device) => device.create_sampler(descriptor).map(HalSampler::Vulkan),
             #[cfg(feature = "metal")]
-            Self::Metal(device) => HalSampler::Metal(device.create_sampler(descriptor)),
+            Self::Metal(device) => device.create_sampler(descriptor).map(HalSampler::Metal),
             #[cfg(feature = "gles")]
-            Self::Gles(device) => HalSampler::Gles(device.create_sampler(descriptor)),
+            Self::Gles(device) => device.create_sampler(descriptor).map(HalSampler::Gles),
         }
     }
 
@@ -2013,7 +2016,7 @@ mod tests {
     fn hal_device_create_sampler_noop_returns_sampler_and_increments_allocations(
     ) -> Result<(), HalError> {
         let device = noop_device()?;
-        let sampler = device.create_sampler(&sampler_descriptor());
+        let sampler = device.create_sampler(&sampler_descriptor())?;
 
         assert!(matches!(sampler, HalSampler::Noop(_)));
         assert_eq!(device.allocation_count(), 1);

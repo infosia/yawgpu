@@ -1879,10 +1879,7 @@ pub(super) fn descriptor_info(
             let HalSampler::Vulkan(sampler) = &bound.sampler else {
                 return Err(shader_error("descriptor sampler is not Vulkan-backed"));
             };
-            let sampler = sampler
-                ._inner
-                .as_ref()
-                .ok_or_else(|| shader_error("sampler allocation failed"))?;
+            let sampler = &sampler._inner;
             scratch
                 .image_infos
                 .push(vk::DescriptorImageInfo::default().sampler(sampler.sampler));

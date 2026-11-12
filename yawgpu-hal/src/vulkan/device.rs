@@ -163,15 +163,17 @@ impl VulkanDevice {
         VulkanQuerySet::new(Arc::clone(&self.inner), kind, count)
     }
 
-    /// Creates a sampler matching the given descriptor.
-    #[must_use]
-    pub fn create_sampler(&self, descriptor: &HalSamplerDescriptor) -> VulkanSampler {
+    /// Creates a sampler matching the given descriptor, reporting backend allocation errors.
+    #[must_use = "sampler creation can fail"]
+    pub fn create_sampler(
+        &self,
+        descriptor: &HalSamplerDescriptor,
+    ) -> Result<VulkanSampler, HalError> {
+        let sampler = create_sampler(Arc::clone(&self.inner), descriptor)?;
         self.inner.allocations.fetch_add(1, Ordering::Relaxed);
-        VulkanSampler {
-            _inner: create_sampler(Arc::clone(&self.inner), descriptor)
-                .ok()
-                .map(Arc::new),
-        }
+        Ok(VulkanSampler {
+            _inner: Arc::new(sampler),
+        })
     }
 
     /// Creates a compute pipeline from the given shader, entry point, and bindings.
@@ -292,7 +294,9 @@ mod tests {
         assert_eq!(device.allocation_count(), 0);
         let _buffer = device.create_buffer(4, HalBufferUsage::default());
         let _texture = device.create_texture(&texture_descriptor());
-        let _sampler = device.create_sampler(&sampler_descriptor());
+        let _sampler = device
+            .create_sampler(&sampler_descriptor())
+            .expect("create sampler");
         assert_eq!(device.allocation_count(), 3);
     }
 
@@ -338,8 +342,12 @@ mod tests {
     #[cfg(feature = "vulkan")]
     fn vulkan_device_create_sampler_returns_sampler() {
         let device = vulkan_device();
-        let sampler = device.create_sampler(&sampler_descriptor());
-        assert!(sampler._inner.is_some());
+        let before = device.allocation_count();
+        let sampler = device
+            .create_sampler(&sampler_descriptor())
+            .expect("create sampler");
+        assert_ne!(sampler._inner.sampler, vk::Sampler::null());
+        assert_eq!(device.allocation_count(), before + 1);
     }
 
     #[test]

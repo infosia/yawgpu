@@ -535,11 +535,15 @@ impl GlesDevice {
         Ok(texture)
     }
 
-    /// Creates a sampler matching the given descriptor.
-    #[must_use]
-    pub fn create_sampler(&self, descriptor: &HalSamplerDescriptor) -> GlesSampler {
+    /// Creates a sampler on the current context and reports creation errors immediately.
+    #[must_use = "sampler creation can fail"]
+    pub fn create_sampler(
+        &self,
+        descriptor: &HalSamplerDescriptor,
+    ) -> Result<GlesSampler, HalError> {
+        let sampler = GlesSampler::new(Arc::clone(&self.inner), descriptor)?;
         self.inner.allocation_increment();
-        GlesSampler::new(Arc::clone(&self.inner), descriptor)
+        Ok(sampler)
     }
 
     /// Creates a compute pipeline from the given shader, entry point, and bindings.
@@ -614,5 +618,45 @@ impl GlesDevice {
                 texture_metadata_ubo_binding,
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{HalAddressMode, HalFilterMode, HalMipmapFilterMode};
+
+    #[test]
+    #[ignore = "manual real GLES backend test"]
+    fn gles_device_create_sampler_allocates_native_sampler_immediately() -> Result<(), HalError> {
+        let instance = super::super::GlesInstance::new()?;
+        let adapter = instance
+            .enumerate_adapters()
+            .into_iter()
+            .next()
+            .ok_or(HalError::BackendUnavailable { backend: BACKEND })?;
+        let device = adapter.create_device()?;
+        let before = device.allocation_count();
+        let sampler = device.create_sampler(&HalSamplerDescriptor {
+            address_mode_u: HalAddressMode::ClampToEdge,
+            address_mode_v: HalAddressMode::ClampToEdge,
+            address_mode_w: HalAddressMode::ClampToEdge,
+            mag_filter: HalFilterMode::Nearest,
+            min_filter: HalFilterMode::Nearest,
+            mipmap_filter: HalMipmapFilterMode::Nearest,
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 32.0,
+            compare: None,
+            max_anisotropy: 1,
+        })?;
+        let error = device.inner.with_current_context(|gl| unsafe {
+            gl.bind_sampler(0, Some(sampler.raw()));
+            let error = gl.get_error();
+            gl.bind_sampler(0, None);
+            error
+        })?;
+        assert_eq!(error, glow::NO_ERROR);
+        assert_eq!(device.allocation_count(), before + 1);
+        Ok(())
     }
 }
