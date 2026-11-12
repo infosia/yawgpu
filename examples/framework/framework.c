@@ -496,7 +496,7 @@ WGPUShaderModule yawgpu_load_wgsl_shader(WGPUDevice device, const char *path) {
 // Unmap then hands it to the GPU.
 WGPUBuffer yawgpu_create_buffer_init(WGPUDevice device,
                                      const YawgpuBufferInitDescriptor *descriptor) {
-    if (!descriptor) {
+    if (!descriptor || (descriptor->size > 0 && !descriptor->contents)) {
         return NULL;
     }
     // Buffers must be non-empty; use a 4-byte minimum for a zero-size request.

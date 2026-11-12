@@ -85,6 +85,7 @@ void yawgpu_set_argv0(const char *argv0);
 // current working directory (legacy behaviour).
 WGPUShaderModule yawgpu_load_wgsl_shader(WGPUDevice device, const char *path);
 // Creates a buffer (mappedAtCreation) and memcpy's `contents` into it.
+// Returns NULL when `size` is non-zero and `contents` is NULL.
 WGPUBuffer yawgpu_create_buffer_init(WGPUDevice device,
                                      const YawgpuBufferInitDescriptor *descriptor);
 // Pumps the instance's event loop until `future` completes, the wait errors,

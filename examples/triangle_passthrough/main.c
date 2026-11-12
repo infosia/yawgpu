@@ -402,8 +402,11 @@ static bool create_pipeline(PassthroughApp *app, WGPUTextureFormat format, bool 
     return true;
 }
 
-static bool app_init(PassthroughApp *app, const char *argv0) {
+// Returns false on failure or skip; `*skipped` is set only for a backend
+// this example does not support (a clean self-skip, exit 0).
+static bool app_init(PassthroughApp *app, const char *argv0, bool *skipped) {
     *app = (PassthroughApp){0};
+    *skipped = false;
     set_shader_prefix(app, argv0);
     app->context = yawgpu_context_create();
     if (!app->context.instance || !app->context.adapter || !app->context.device) {
@@ -436,6 +439,7 @@ static bool app_init(PassthroughApp *app, const char *argv0) {
     } else {
         printf("triangle_passthrough skipped: backend type=%u is not Metal or Vulkan\n",
                (unsigned int)backend);
+        *skipped = true;
         return false;
     }
 
@@ -562,13 +566,10 @@ int main(int argc, char **argv) {
     // after a few frames (for headless / CI runs).
     const bool verify = (argc > 1 && strcmp(argv[1], "--verify") == 0);
     PassthroughApp app = {0};
-    if (!app_init(&app, argc > 0 ? argv[0] : NULL)) {
+    bool skipped = false;
+    if (!app_init(&app, argc > 0 ? argv[0] : NULL, &skipped)) {
         app_destroy(&app);
-        // app_init returning false on Metal/Vulkan is a real failure; on
-        // Noop or other backends it's a clean self-skip. Distinguish by
-        // checking whether we even got to the point of creating a window:
-        // if not, treat it as a skip.
-        return app.window ? EXIT_FAILURE : EXIT_SUCCESS;
+        return skipped ? EXIT_SUCCESS : EXIT_FAILURE;
     }
     // Runs until the window is closed (or, with --verify, after 60 frames).
     for (uint32_t frame = 0;
