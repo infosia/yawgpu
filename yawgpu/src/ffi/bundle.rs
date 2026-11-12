@@ -113,7 +113,7 @@ pub unsafe extern "C" fn wgpuRenderBundleEncoderSetImmediates(
 ) {
     let encoder = borrow_handle(render_bundle_encoder, "WGPURenderBundleEncoder");
     if size > 0 && data.is_null() {
-        encoder.device.dispatch_error(
+        Arc::clone(&encoder.device).dispatch_error(
             core::ErrorKind::Validation,
             "render bundle set immediates data must not be null when size is non-zero",
         );

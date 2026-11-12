@@ -159,7 +159,7 @@ pub unsafe extern "C" fn wgpuComputePassEncoderSetImmediates(
 ) {
     let pass = borrow_handle(compute_pass_encoder, "WGPUComputePassEncoder");
     if size > 0 && data.is_null() {
-        pass.device.dispatch_error(
+        Arc::clone(&pass.device).dispatch_error(
             core::ErrorKind::Validation,
             "compute pass set immediates data must not be null when size is non-zero",
         );

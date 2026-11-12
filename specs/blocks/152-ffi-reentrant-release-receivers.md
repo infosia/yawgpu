@@ -1,6 +1,6 @@
 # Block 152 — FFI receivers survive a reentrant release in the error callback
 
-Status: **S1 landed (2026-11-13)**; Phase Review done; S2 (m1) pending.
+Status: **COMPLETE (2026-11-13)**.
 Source: whole-code review at `92e38c7` (`specs/tracking/code-review-2026-11.md`), finding R01. It extends Block
 113 M1 / audit rule C11, which covered device receivers only.
 
@@ -87,3 +87,11 @@ reference).
 |---|---|---|---|
 | m1 | MINOR | Borrowed-receiver dispatch passes a `&core::Device` into the wrapper's allocation; freed during the callback while still a protected argument | S2: R4 |
 | m2 | MINOR | Encoder debug-marker and copy entry points were retained although their dispatch is the last wrapper access | Accepted: retained defensively (not hot paths); the ledger above counts them among the 22 |
+
+## Verification record — S2
+
+`dispatch_optional_error` / `dispatch_optional_device_error` take `&Arc<core::Device>` and
+clone only on the error branch (covering all 111 production call sites);
+`WGPUDeviceImpl::dispatch_error` forwards through a clone; the direct dispatches in the
+three `SetImmediates` entry points and `wgpuQueueWriteBuffer`/`WriteTexture` clone on their
+error branches. Three `audit_r4_*` tests were red before the fix. Workspace test 1,476/0.

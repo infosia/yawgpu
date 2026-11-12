@@ -423,6 +423,8 @@ pub unsafe extern "C" fn wgpuInstanceCreateSurface(
         acquire_texture_override: Mutex::new(None),
         #[cfg(test)]
         configure_error_override: Mutex::new(None),
+        #[cfg(test)]
+        present_error_override: Mutex::new(None),
         hal: Mutex::new(hal),
         is_error,
         _instance: instance,

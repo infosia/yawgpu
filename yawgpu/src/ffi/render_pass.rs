@@ -382,7 +382,7 @@ pub unsafe extern "C" fn wgpuRenderPassEncoderSetImmediates(
 ) {
     let pass = borrow_handle(render_pass_encoder, "WGPURenderPassEncoder");
     if size > 0 && data.is_null() {
-        pass.device.dispatch_error(
+        Arc::clone(&pass.device).dispatch_error(
             core::ErrorKind::Validation,
             "render pass set immediates data must not be null when size is non-zero",
         );

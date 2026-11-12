@@ -146,14 +146,14 @@ pub unsafe extern "C" fn wgpuQueueWriteBuffer(
     }
     let buffer = borrow_handle(buffer, "WGPUBuffer");
     if !buffer.device.same(&queue.device) {
-        queue.device.dispatch_error(
+        Arc::clone(&queue.device).dispatch_error(
             core::ErrorKind::Validation,
             "queue write buffer target must belong to the queue device",
         );
         return;
     }
     if size > 0 && data.is_null() {
-        queue.device.dispatch_error(
+        Arc::clone(&queue.device).dispatch_error(
             core::ErrorKind::Validation,
             "queue write data must not be null when size is non-zero",
         );
@@ -195,35 +195,35 @@ pub unsafe extern "C" fn wgpuQueueWriteTexture(
     }
     let data_size_usize = data_size;
     if data_size > 0 && data.is_null() {
-        queue.device.dispatch_error(
+        Arc::clone(&queue.device).dispatch_error(
             core::ErrorKind::Validation,
             "queue write texture data must not be null when dataSize is non-zero",
         );
         return;
     }
     let Some(destination) = destination.as_ref() else {
-        queue.device.dispatch_error(
+        Arc::clone(&queue.device).dispatch_error(
             core::ErrorKind::Validation,
             "queue write texture destination must not be null",
         );
         return;
     };
     let Some(data_layout) = data_layout.as_ref() else {
-        queue.device.dispatch_error(
+        Arc::clone(&queue.device).dispatch_error(
             core::ErrorKind::Validation,
             "queue write texture dataLayout must not be null",
         );
         return;
     };
     let Some(write_size) = write_size.as_ref() else {
-        queue.device.dispatch_error(
+        Arc::clone(&queue.device).dispatch_error(
             core::ErrorKind::Validation,
             "queue write texture writeSize must not be null",
         );
         return;
     };
     if u64::try_from(data_size).is_err() {
-        queue.device.dispatch_error(
+        Arc::clone(&queue.device).dispatch_error(
             core::ErrorKind::Validation,
             "queue write texture dataSize is too large",
         );
@@ -231,7 +231,7 @@ pub unsafe extern "C" fn wgpuQueueWriteTexture(
     }
     let texture = borrow_handle(destination.texture, "WGPUTexture");
     if !texture.device.same(&queue.device) {
-        queue.device.dispatch_error(
+        Arc::clone(&queue.device).dispatch_error(
             core::ErrorKind::Validation,
             "queue write texture destination texture must belong to the queue device",
         );
@@ -241,9 +241,7 @@ pub unsafe extern "C" fn wgpuQueueWriteTexture(
     let aspect =
         map_texture_aspect(destination.aspect, &mut error).unwrap_or(core::TextureAspect::All);
     if let Some(error) = error {
-        queue
-            .device
-            .dispatch_error(core::ErrorKind::Validation, error);
+        Arc::clone(&queue.device).dispatch_error(core::ErrorKind::Validation, error);
         return;
     }
 

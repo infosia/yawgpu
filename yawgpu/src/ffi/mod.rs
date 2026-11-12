@@ -498,6 +498,8 @@ pub struct WGPUSurfaceImpl {
     pub(crate) acquire_texture_override: Mutex<Option<surface::TestSurfaceAcquire>>,
     #[cfg(test)]
     pub(crate) configure_error_override: Mutex<Option<yawgpu_hal::HalError>>,
+    #[cfg(test)]
+    pub(crate) present_error_override: Mutex<Option<yawgpu_hal::HalError>>,
     pub(crate) hal: Mutex<Option<HalSurface>>,
     pub(crate) is_error: bool,
     pub(crate) _instance: Arc<WGPUInstanceImpl>,
@@ -1115,7 +1117,7 @@ impl WGPUDeviceImpl {
     /// Dispatches the pending error callback.
     #[doc(hidden)]
     pub fn dispatch_error(&self, kind: core::ErrorKind, message: impl Into<String>) {
-        self.core.dispatch_error(kind, message);
+        Arc::clone(&self.core).dispatch_error(kind, message);
     }
 
     fn default_queue(&self) -> Arc<WGPUQueueImpl> {
@@ -2755,14 +2757,18 @@ unsafe fn create_render_pipeline_handle(
     cache_if_valid(&device.render_pipeline_cache, key, handle)
 }
 
-fn dispatch_optional_error(device: &core::Device, error: Option<String>) {
+fn dispatch_optional_error(device: &Arc<core::Device>, error: Option<String>) {
     if let Some(message) = error {
+        // The callback may release the wrapper that owns this Arc. Dispatch
+        // through an owned device without retaining anything on success.
+        let device = Arc::clone(device);
         device.dispatch_error(core::ErrorKind::Validation, message);
     }
 }
 
-fn dispatch_optional_device_error(device: &core::Device, error: Option<core::DeviceError>) {
+fn dispatch_optional_device_error(device: &Arc<core::Device>, error: Option<core::DeviceError>) {
     if let Some(error) = error {
+        let device = Arc::clone(device);
         device.dispatch_error(error.kind, error.message);
     }
 }
@@ -3553,6 +3559,157 @@ mod tests {
             (state as *mut ReentrantReleaseState<T>).cast();
         let device = request_noop_device_with_descriptor(instance, adapter, &descriptor);
         (instance, adapter, device)
+    }
+
+    #[test]
+    fn audit_r4_optional_dispatch_owns_device_only_for_errors() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let device_core = &borrow_handle(device, "WGPUDevice").core;
+            let baseline = Arc::strong_count(device_core);
+            let weak = Arc::downgrade(device_core);
+            let observed = Arc::new(Mutex::new(Vec::new()));
+            let counts = Arc::clone(&observed);
+            device_core.set_uncaptured_error_callback(Some(move |_| {
+                counts.lock().unwrap().push(weak.strong_count());
+            }));
+            dispatch_optional_error(device_core, None);
+            dispatch_optional_device_error(device_core, None);
+            assert!(observed.lock().unwrap().is_empty());
+            assert_eq!(Arc::strong_count(device_core), baseline);
+            dispatch_optional_error(device_core, Some("validation".to_owned()));
+            dispatch_optional_device_error(
+                device_core,
+                Some(core::DeviceError::new(
+                    core::ErrorKind::Internal,
+                    "internal",
+                )),
+            );
+            assert_eq!(*observed.lock().unwrap(), [baseline + 1, baseline + 1]);
+            assert_eq!(Arc::strong_count(device_core), baseline);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    unsafe fn assert_borrowed_dispatch_owns_device<T: 'static>(
+        device: native::WGPUDevice,
+        receiver: *const T,
+        release: unsafe extern "C" fn(*const T),
+        trigger: impl FnOnce(),
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let core_device = Arc::clone(&borrow_handle(device, "WGPUDevice").core);
+        let weak_receiver = Arc::downgrade(&clone_handle(receiver, "borrowed receiver"));
+        let baseline = Arc::strong_count(&core_device);
+        let weak_device = Arc::downgrade(&core_device);
+        let observed = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&observed);
+        let address = receiver as usize;
+        core_device.set_uncaptured_error_callback(Some(move |_| {
+            let during = weak_device.strong_count();
+            count.store(during, Ordering::SeqCst);
+            // Keep a regression safe: release only if dispatch owns the device.
+            if during > baseline {
+                release(address as *const T);
+            }
+        }));
+        trigger();
+        let during = observed.load(Ordering::SeqCst);
+        if during <= baseline {
+            release(receiver);
+        }
+        assert_eq!(during, baseline + 1);
+        assert!(weak_receiver.upgrade().is_none());
+        core_device.set_uncaptured_error_callback(None::<fn(core::DeviceError)>);
+    }
+
+    #[test]
+    fn audit_r4_borrowed_immediates_errors_allow_reentrant_release() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let compute = wgpuCommandEncoderBeginComputePass(encoder, std::ptr::null());
+            assert_borrowed_dispatch_owns_device(
+                device,
+                compute,
+                wgpuComputePassEncoderRelease,
+                || {
+                    wgpuComputePassEncoderSetImmediates(compute, 0, std::ptr::null(), 4);
+                },
+            );
+            wgpuCommandEncoderRelease(encoder);
+
+            let (texture, view) = noop_render_attachment(device);
+            let attachment = render_pass_color_attachment(view);
+            let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+            let render = wgpuCommandEncoderBeginRenderPass(
+                encoder,
+                &noop_render_pass_descriptor(&[attachment], std::ptr::null()),
+            );
+            assert_borrowed_dispatch_owns_device(
+                device,
+                render,
+                wgpuRenderPassEncoderRelease,
+                || {
+                    wgpuRenderPassEncoderSetImmediates(render, 0, std::ptr::null(), 4);
+                },
+            );
+            wgpuCommandEncoderRelease(encoder);
+            wgpuTextureViewRelease(view);
+            wgpuTextureRelease(texture);
+
+            let bundle = wgpuDeviceCreateRenderBundleEncoder(
+                device,
+                &render_bundle_encoder_descriptor(&[native::WGPUTextureFormat_RGBA8Unorm]),
+            );
+            assert_borrowed_dispatch_owns_device(
+                device,
+                bundle,
+                wgpuRenderBundleEncoderRelease,
+                || {
+                    wgpuRenderBundleEncoderSetImmediates(bundle, 0, std::ptr::null(), 4);
+                },
+            );
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn audit_r4_borrowed_queue_write_errors_allow_reentrant_release() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let buffer = wgpuDeviceCreateBuffer(
+                device,
+                &buffer_descriptor(native::WGPUBufferUsage_CopyDst, 4),
+            );
+            let queue = wgpuDeviceGetQueue(device);
+            borrow_handle(device, "WGPUDevice")
+                .default_queue
+                .lock()
+                .unwrap()
+                .take();
+            assert_borrowed_dispatch_owns_device(device, queue, wgpuQueueRelease, || {
+                wgpuQueueWriteBuffer(queue, buffer, 0, std::ptr::null(), 4);
+            });
+            let queue = wgpuDeviceGetQueue(device);
+            borrow_handle(device, "WGPUDevice")
+                .default_queue
+                .lock()
+                .unwrap()
+                .take();
+            assert_borrowed_dispatch_owns_device(device, queue, wgpuQueueRelease, || {
+                wgpuQueueWriteTexture(
+                    queue,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    4,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                );
+            });
+            wgpuBufferRelease(buffer);
+            release_handles(instance, adapter, device);
+        }
     }
 
     #[test]

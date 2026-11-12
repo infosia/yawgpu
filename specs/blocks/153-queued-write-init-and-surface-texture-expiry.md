@@ -1,6 +1,6 @@
 # Block 153 — Transactional queued-write initialization; surface textures expire
 
-Status: **S1 landed (2026-11-13)**; S2 pending.
+Status: **S1 and S2 landed (2026-11-13)**; S3 (S1 Phase Review fixes) and the S2 Phase Review pending.
 Source: whole-code review at `92e38c7` (`specs/tracking/code-review-2026-11.md`), findings R06 and R05.
 Oracle: pinned Dawn — `native/SwapChain.cpp` (`SwapChainBase::Present` checks that the
 backend destroyed the current texture, line 155; the destructor checks the same, line 88);
@@ -112,3 +112,17 @@ texture handles form no cycle.
 | A-m1 | MINOR | No injected HAL failure on the empty-`submit` path or the command-buffer HAL submit while queued marks are pending | Fix slice S3: the `fail_next_pending_submit` hook also covers `submit(&[])` and the command-buffer submit; one failure test per path |
 | A-m2 | MINOR | `queued_init_overlay.clone()` on every command-buffer submit, for the rare lowering-error path | S3: skip the clone when the queued overlay is empty |
 | A-m3 | MINOR | Vague fast-path comment ("Share pending initialization with the repack path above.") | S3: state the rule (earlier queued marks suppress clears until submission) |
+
+## Verification record — S2
+
+Workspace test 1,476/0; `yawgpu --lib` 322/0, with `tiled` 326/0; clippy clean. Four
+`acquired_texture_expires*` FFI tests (present success and failure, configure success and
+HAL failure, unconfigure, surface drop) were red before the fix: each submits a command
+buffer recorded against the old view and gets `queue submit cannot use a destroyed
+texture`, and the next acquisition renders normally. Real GPU on the M2: `triangle`,
+`hello_triangle`, and `surface_smoke` with `--verify` on Metal and on MoltenVK under the
+Khronos layer, exit 0, 0 VUIDs. R4 audit: Metal drops a retained `MTLTexture` (the
+surface keeps the drawable); Vulkan swapchain textures have `owns_image = false`; GLES
+drops a clone of the configured back buffer — no expiry frees or recycles a swapchain
+image. A real-GPU e2e of the expiry error itself needs a window and is covered by the
+Noop tests instead.

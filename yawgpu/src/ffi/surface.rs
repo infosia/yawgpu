@@ -1,5 +1,22 @@
 use super::*;
 
+fn expire_current_texture(current: &mut Option<Arc<WGPUTextureImpl>>) {
+    if let Some(texture) = current.take() {
+        texture.core.destroy();
+    }
+}
+
+impl Drop for WGPUSurfaceImpl {
+    fn drop(&mut self) {
+        // Expire the acquisition before dropping the HAL surface and its swapchain.
+        expire_current_texture(
+            self.current_texture
+                .get_mut()
+                .expect("surface current texture lock is not poisoned"),
+        );
+    }
+}
+
 // Inject a synthetic Noop swapchain acquisition in FFI unit tests. Ordinary
 // Noop surfaces retain their no-backbuffer contract.
 #[cfg(test)]
@@ -125,7 +142,7 @@ pub unsafe extern "C" fn wgpuSurfaceConfigure(
         .current_texture
         .lock()
         .expect("surface current texture lock is not poisoned");
-    *current_texture = None;
+    expire_current_texture(&mut current_texture);
     let configure_error = if let Some(hal) = surface
         .hal
         .lock()
@@ -207,7 +224,7 @@ pub unsafe extern "C" fn wgpuSurfaceUnconfigure(surface: native::WGPUSurface) {
         .current_texture
         .lock()
         .expect("surface current texture lock is not poisoned");
-    *current_texture = None;
+    expire_current_texture(&mut current_texture);
     *surface
         .configured
         .lock()
@@ -368,7 +385,6 @@ pub unsafe extern "C" fn wgpuSurfacePresent(surface: native::WGPUSurface) -> nat
         .current_texture
         .lock()
         .expect("surface current texture lock is not poisoned");
-    *current_texture = None;
     let device = surface
         .configured
         .lock()
@@ -377,31 +393,39 @@ pub unsafe extern "C" fn wgpuSurfacePresent(surface: native::WGPUSurface) -> nat
         .map(|config| Arc::clone(&config.device));
     if let Some(device) = device.as_ref() {
         if let Some(error) = device.queue().flush_pending_writes() {
+            // A failed flush also ends the acquisition, before invoking user code.
+            expire_current_texture(&mut current_texture);
             drop(current_texture);
             device.dispatch_error(error.kind, error.message);
             return native::WGPUStatus_Error;
         }
     }
-    if let Some(hal) = surface
-        .hal
-        .lock()
-        .expect("surface HAL lock is not poisoned")
-        .as_mut()
-    {
-        let device = surface
-            .configured
+    let result = {
+        let mut hal = surface
+            .hal
             .lock()
-            .expect("surface configuration lock is not poisoned")
-            .as_ref()
-            .map(|config| Arc::clone(&config.device));
-        let Some(device) = device else {
-            return native::WGPUStatus_Error;
-        };
-        if hal.present(device.queue().hal()).is_err() {
-            return native::WGPUStatus_Error;
+            .expect("surface HAL lock is not poisoned");
+        match (hal.as_mut(), device.as_ref()) {
+            (Some(hal), Some(device)) => hal.present(device.queue().hal()),
+            (Some(_), None) => Err(yawgpu_hal::HalError::SurfaceLost),
+            (None, _) => Ok(()),
         }
+    };
+    #[cfg(test)]
+    let result = surface
+        .present_error_override
+        .lock()
+        .unwrap()
+        .take()
+        .map_or(result, Err);
+    // Keep the texture live through the flush and HAL present, then expire it
+    // on both success and failure. Submitted work retains its own HAL handles.
+    expire_current_texture(&mut current_texture);
+    if result.is_err() {
+        native::WGPUStatus_Error
+    } else {
+        native::WGPUStatus_Success
     }
-    native::WGPUStatus_Success
 }
 
 /// Sets the debug label for a surface.
@@ -740,6 +764,180 @@ mod tests {
             wgpuSurfaceRelease(surface);
             release_handles(instance, adapter, device);
         }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum AcquisitionEnd {
+        Present,
+        FailedPresent,
+        Configure,
+        FailedConfigure,
+        Unconfigure,
+        Drop,
+    }
+
+    unsafe fn record_surface_view(
+        device: native::WGPUDevice,
+        view: native::WGPUTextureView,
+    ) -> native::WGPUCommandBuffer {
+        let encoder = wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+        let attachment = native::WGPURenderPassColorAttachment {
+            view,
+            depthSlice: native::WGPU_DEPTH_SLICE_UNDEFINED,
+            loadOp: native::WGPULoadOp_Clear,
+            storeOp: native::WGPUStoreOp_Store,
+            ..std::mem::zeroed()
+        };
+        let descriptor = native::WGPURenderPassDescriptor {
+            colorAttachmentCount: 1,
+            colorAttachments: &attachment,
+            ..std::mem::zeroed()
+        };
+        let pass = wgpuCommandEncoderBeginRenderPass(encoder, &descriptor);
+        wgpuRenderPassEncoderEnd(pass);
+        let command = wgpuCommandEncoderFinish(encoder, std::ptr::null());
+        assert!(!borrow_handle(command, "WGPUCommandBuffer").core.is_error());
+        wgpuRenderPassEncoderRelease(pass);
+        wgpuCommandEncoderRelease(encoder);
+        command
+    }
+
+    unsafe fn assert_acquired_texture_expires(end: AcquisitionEnd) {
+        let (instance, adapter, device) = noop_chain();
+        let surface = create_noop_surface(instance);
+        let config = valid_surface_config(device);
+        let core_device = Arc::clone(&borrow_handle(device, "WGPUDevice").core);
+        let allocator = Arc::clone(&core_device);
+        *borrow_handle(surface, "WGPUSurface")
+            .acquire_texture_override
+            .lock()
+            .unwrap() = Some(Box::new(move || {
+            allocator
+                .hal()
+                .create_texture(&yawgpu_hal::HalTextureDescriptor {
+                    view_formats: Vec::new(),
+                    dimension: yawgpu_hal::HalTextureDimension::D2,
+                    format: HalTextureFormat::Bgra8Unorm,
+                    width: config.width,
+                    height: config.height,
+                    depth_or_array_layers: 1,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    usage: hal_surface_usage(config.usage),
+                })
+        }));
+        wgpuSurfaceConfigure(surface, &config);
+        let mut acquired: native::WGPUSurfaceTexture = std::mem::zeroed();
+        wgpuSurfaceGetCurrentTexture(surface, &mut acquired);
+        assert_eq!(
+            acquired.status,
+            native::WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal
+        );
+        let texture = acquired.texture;
+        let view = wgpuTextureCreateView(texture, std::ptr::null());
+        assert!(!borrow_handle(view, "WGPUTextureView")._core.is_error());
+
+        // Finish while the acquisition is live, then submit only after expiry.
+        let command = record_surface_view(device, view);
+
+        match end {
+            AcquisitionEnd::Present => {
+                assert_eq!(wgpuSurfacePresent(surface), native::WGPUStatus_Success)
+            }
+            AcquisitionEnd::FailedPresent => {
+                *borrow_handle(surface, "WGPUSurface")
+                    .present_error_override
+                    .lock()
+                    .unwrap() = Some(yawgpu_hal::HalError::SurfaceLost);
+                assert_eq!(wgpuSurfacePresent(surface), native::WGPUStatus_Error);
+            }
+            AcquisitionEnd::Configure => wgpuSurfaceConfigure(surface, &config),
+            AcquisitionEnd::FailedConfigure => {
+                *borrow_handle(surface, "WGPUSurface")
+                    .configure_error_override
+                    .lock()
+                    .unwrap() = Some(yawgpu_hal::HalError::SurfaceLost);
+                core_device.push_error_scope(core::ErrorFilter::Internal);
+                wgpuSurfaceConfigure(surface, &config);
+                assert!(core_device.pop_error_scope().unwrap().is_some());
+            }
+            AcquisitionEnd::Unconfigure => wgpuSurfaceUnconfigure(surface),
+            AcquisitionEnd::Drop => wgpuSurfaceRelease(surface),
+        }
+
+        let queue = wgpuDeviceGetQueue(device);
+        core_device.push_error_scope(core::ErrorFilter::Validation);
+        wgpuQueueSubmit(queue, 1, &command);
+        let error = core_device
+            .pop_error_scope()
+            .unwrap()
+            .expect("expired acquisition must fail submit");
+        assert_eq!(
+            error.message, "queue submit cannot use a destroyed texture",
+            "{end:?}"
+        );
+        core_device.push_error_scope(core::ErrorFilter::Validation);
+        wgpuTextureDestroy(texture);
+        wgpuTextureDestroy(texture);
+        assert!(core_device.pop_error_scope().unwrap().is_none());
+
+        if !matches!(end, AcquisitionEnd::Drop) {
+            if matches!(
+                end,
+                AcquisitionEnd::Unconfigure | AcquisitionEnd::FailedConfigure
+            ) {
+                wgpuSurfaceConfigure(surface, &config);
+            }
+            wgpuSurfaceGetCurrentTexture(surface, &mut acquired);
+            assert_eq!(
+                acquired.status,
+                native::WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal
+            );
+            assert_ne!(acquired.texture, texture);
+            let fresh_view = wgpuTextureCreateView(acquired.texture, std::ptr::null());
+            assert!(!borrow_handle(fresh_view, "WGPUTextureView")
+                ._core
+                .is_error());
+            let fresh_command = record_surface_view(device, fresh_view);
+            core_device.push_error_scope(core::ErrorFilter::Validation);
+            wgpuQueueSubmit(queue, 1, &fresh_command);
+            assert!(core_device.pop_error_scope().unwrap().is_none());
+            wgpuCommandBufferRelease(fresh_command);
+            wgpuTextureViewRelease(fresh_view);
+            wgpuTextureRelease(acquired.texture);
+            wgpuSurfaceRelease(surface);
+        }
+        wgpuQueueRelease(queue);
+        wgpuCommandBufferRelease(command);
+        wgpuTextureViewRelease(view);
+        wgpuTextureRelease(texture);
+        release_handles(instance, adapter, device);
+    }
+
+    #[test]
+    fn acquired_texture_expires_after_present_success_or_failure() {
+        unsafe {
+            assert_acquired_texture_expires(AcquisitionEnd::Present);
+            assert_acquired_texture_expires(AcquisitionEnd::FailedPresent);
+        }
+    }
+
+    #[test]
+    fn acquired_texture_expires_before_reconfigure_success_or_failure() {
+        unsafe {
+            assert_acquired_texture_expires(AcquisitionEnd::Configure);
+            assert_acquired_texture_expires(AcquisitionEnd::FailedConfigure);
+        }
+    }
+
+    #[test]
+    fn acquired_texture_expires_on_unconfigure() {
+        unsafe { assert_acquired_texture_expires(AcquisitionEnd::Unconfigure) }
+    }
+
+    #[test]
+    fn acquired_texture_expires_on_surface_drop() {
+        unsafe { assert_acquired_texture_expires(AcquisitionEnd::Drop) }
     }
 
     fn varied_caps() -> HalSurfaceCapabilities {
