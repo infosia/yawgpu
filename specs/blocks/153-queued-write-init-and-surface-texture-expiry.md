@@ -1,6 +1,6 @@
 # Block 153 — Transactional queued-write initialization; surface textures expire
 
-Status: **PLANNED (2026-11-13)**.
+Status: **S1 landed (2026-11-13)**; S2 pending.
 Source: whole-code review at `92e38c7` (`specs/tracking/code-review-2026-11.md`), findings R06 and R05.
 Oracle: pinned Dawn — `native/SwapChain.cpp` (`SwapChainBase::Present` checks that the
 backend destroyed the current texture, line 155; the destructor checks the same, line 88);
@@ -83,3 +83,16 @@ real-GPU checks below.
   (F-138 regression); for S2 a new real-GPU e2e test on Metal and MoltenVK: acquire,
   keep a view, present, then submit a pass that uses the view → validation error, no
   backend error; and every windowed C example with `--verify`.
+
+## Verification record
+
+S1 (with Block 151 m1): workspace test 1,465/0; `yawgpu-core --lib` 731/0 (the four S1
+tests red before the fix); clippy and fmt clean. Real GPU on the M2: every `e2e_metal_*`
+170/0 (including `e2e_metal_lazy_init` 7/7); every `e2e_vulkan_*` on MoltenVK under the
+Khronos layer 163 passed, 1 failed — the known MoltenVK `imageView2DOn3DImage` case
+(`vulkan_3d_attachment_discard_lazily_zeroes_the_whole_mip`), which is the source of every
+VUID. R2 audit: `InitOverlay::is_initialized` is the only production reader of committed
+init state outside `texture.rs`; every planning helper (copy, bound view, render and
+subpass attachment, external-texture plane) reads through the pending or combined overlay.
+A failed lowering walk flushes the queued writes with their own overlay only, so its
+aborted discard marks never commit.

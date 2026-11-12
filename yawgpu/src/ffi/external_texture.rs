@@ -49,7 +49,7 @@ pub unsafe extern "C" fn yawgpuDeviceCreateExternalTexture(
     };
 
     for (index, plane) in plane_handles.iter().enumerate() {
-        if !Arc::ptr_eq(&plane._device, &device.core) {
+        if !plane._device.same(&device.core) {
             device.dispatch_error(
                 core::ErrorKind::Validation,
                 format!("external texture plane{index} must belong to the same device"),

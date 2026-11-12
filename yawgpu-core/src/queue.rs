@@ -117,6 +117,8 @@ struct PendingWriteBatch {
     #[cfg(debug_assertions)]
     last_retired_submission_index: Option<SubmissionIndex>,
     copies: Vec<HalCopy>,
+    /// Initialization justified by these copies, committed only after submission.
+    init_overlay: InitOverlay,
     chunks: Vec<StagingChunk>,
     /// Total buffer capacity in `chunks`; excludes in-flight and free buffers.
     staged_bytes: u64,
@@ -134,6 +136,7 @@ struct PendingWriteBatch {
 #[derive(Debug, Default)]
 struct PendingWriteSubmission {
     copies: Vec<HalCopy>,
+    init_overlay: InitOverlay,
     chunks: Vec<StagingChunk>,
 }
 
@@ -236,6 +239,7 @@ impl PendingWriteBatch {
         self.staged_bytes = 0;
         PendingWriteSubmission {
             copies: std::mem::take(&mut self.copies),
+            init_overlay: std::mem::take(&mut self.init_overlay),
             chunks: std::mem::take(&mut self.chunks),
         }
     }
@@ -691,11 +695,8 @@ impl Queue {
                 extent: hal_extent(write_size),
             });
             let mut copies = Vec::new();
-            // A queue write is not part of a command buffer: its copy is
-            // enqueued before the next submit's command buffers and its
-            // staging failure returns above, so its marks apply immediately
-            // (Block 104 R5).
-            let mut overlay = InitOverlay::default();
+            // Earlier queued writes precede this copy; their pending marks
+            // suppress clears until the batch is submitted (Block 153 R1).
             append_texture_write_init_clears(
                 &mut copies,
                 destination_texture,
@@ -703,9 +704,8 @@ impl Queue {
                 origin,
                 write_size,
                 aspect,
-                &mut overlay,
+                &mut pending.init_overlay,
             );
-            overlay.commit();
             copies.push(copy);
             pending.copies.extend(copies);
             drop(pending);
@@ -752,8 +752,7 @@ impl Queue {
             extent: hal_extent(write_size),
         });
         let mut copies = Vec::new();
-        // Marked immediately, as in the repack path above (Block 104 R5).
-        let mut overlay = InitOverlay::default();
+        // Share pending initialization with the repack path above.
         append_texture_write_init_clears(
             &mut copies,
             destination_texture,
@@ -761,9 +760,8 @@ impl Queue {
             origin,
             write_size,
             aspect,
-            &mut overlay,
+            &mut pending.init_overlay,
         );
-        overlay.commit();
         copies.push(copy);
         pending.copies.extend(copies);
         drop(pending);
@@ -877,13 +875,17 @@ impl Queue {
             }
         }
         if command_buffers.is_empty() {
-            let PendingWriteSubmission { copies, chunks } = self.take_pending_writes();
+            let PendingWriteSubmission {
+                copies,
+                chunks,
+                init_overlay,
+            } = self.take_pending_writes();
             let result = if copies.is_empty() {
                 self.inner.hal.submit_empty()
             } else {
                 self.inner.hal.submit_copies(&copies)
             };
-            return self.finish_pending_submission(chunks, result);
+            return self.finish_pending_submission(chunks, init_overlay, result);
         }
         let all_ops: Vec<_> = command_buffers
             .iter()
@@ -906,15 +908,17 @@ impl Queue {
         let PendingWriteSubmission {
             mut copies,
             mut chunks,
+            init_overlay: queued_init_overlay,
         } = pending.take_submission();
         let queued_copy_count = copies.len();
         let mut staging = BufferWriteStaging {
             batch: &mut pending,
             error: None,
         };
-        // Block 104 R5: the walk records its texture-initialization marks here
-        // and they reach the textures only if the HAL submit below succeeds.
-        let mut init_overlay = InitOverlay::default();
+        // Queued copies run first. Preserve their overlay separately so a
+        // lowering failure can flush just those copies and their marks.
+        // The walk's combined marks commit only on HAL success (Block 153 R1).
+        let mut init_overlay = queued_init_overlay.clone();
         for (op_index, op) in all_ops.iter().enumerate() {
             let prefix = if matches!(op, CommandExecution::ResolveQuerySet(resolve) if resolve.query_set.kind() == crate::QueryType::Timestamp)
             {
@@ -956,9 +960,8 @@ impl Queue {
             // still flush, as on the validation-error path above, and every
             // chunk (including the ones the aborted walk staged) is retired
             // against that flush so it recycles only once it is provably
-            // unread. Dropping `init_overlay` unread leaves every texture's
-            // initialization state exactly as it was (Block 104 R5): the
-            // clears the walk planned are discarded with the rest.
+            // unread. Discard the walk's marks with its commands; only the
+            // original queued-write marks may commit with this flush.
             drop(init_overlay);
             copies.truncate(queued_copy_count);
             if copies.is_empty() {
@@ -966,7 +969,7 @@ impl Queue {
                 self.inner.pending_writes.lock().retire(latest, chunks);
             } else {
                 let result = self.inner.hal.submit_copies(&copies);
-                let _ = self.finish_pending_submission(chunks, result);
+                let _ = self.finish_pending_submission(chunks, queued_init_overlay, result);
             }
             return Some(error);
         }
@@ -980,12 +983,7 @@ impl Queue {
         if let Some(hook) = &test_hook {
             hook.pause("submitted");
         }
-        if result.is_ok() {
-            // The clears are on the GPU timeline now, so the marks they
-            // justify become visible to later submissions (Block 104 R5).
-            init_overlay.commit();
-        }
-        let error = self.finish_pending_submission(chunks, result);
+        let error = self.finish_pending_submission(chunks, init_overlay, result);
         #[cfg(test)]
         if let Some(hook) = &test_hook {
             hook.pause("committed");
@@ -1019,7 +1017,11 @@ impl Queue {
 
     // The caller holds submission; write and validation-error paths must not reacquire it.
     fn flush_pending_writes_locked(&self) -> Option<DeviceError> {
-        let PendingWriteSubmission { copies, chunks } = self.take_pending_writes();
+        let PendingWriteSubmission {
+            copies,
+            chunks,
+            init_overlay,
+        } = self.take_pending_writes();
         if copies.is_empty() {
             return None;
         }
@@ -1027,6 +1029,7 @@ impl Queue {
         if std::mem::take(&mut *self.inner.fail_next_pending_submit.lock()) {
             return self.finish_pending_submission(
                 chunks,
+                init_overlay,
                 Err(yawgpu_hal::HalError::QueueSubmissionFailed {
                     backend: "Noop",
                     message: "injected pending submit failure".to_owned(),
@@ -1034,7 +1037,7 @@ impl Queue {
             );
         }
         let result = self.inner.hal.submit_copies(&copies);
-        self.finish_pending_submission(chunks, result)
+        self.finish_pending_submission(chunks, init_overlay, result)
     }
 
     fn take_pending_writes(&self) -> PendingWriteSubmission {
@@ -1044,10 +1047,13 @@ impl Queue {
     fn finish_pending_submission(
         &self,
         chunks: Vec<StagingChunk>,
+        init_overlay: InitOverlay,
         result: Result<SubmissionIndex, yawgpu_hal::HalError>,
     ) -> Option<DeviceError> {
         match result {
             Ok(submission_index) => {
+                // These copies are now on the GPU timeline (Block 104 R5).
+                init_overlay.commit();
                 self.record_submission(submission_index);
                 self.inner
                     .pending_writes
@@ -1081,6 +1087,7 @@ impl Drop for QueueInner {
         let pending = self.pending_writes.get_mut().take_submission();
         if !pending.copies.is_empty() {
             if let Ok(submission_index) = self.hal.submit_copies(&pending.copies) {
+                pending.init_overlay.commit();
                 let latest = self.latest_submission_index.get_mut();
                 if submission_index > *latest {
                     *latest = submission_index;
@@ -1239,9 +1246,8 @@ fn hal_buffer_texture_layout(
     })
 }
 
-/// Returns HAL command execution.
-/// Buffers the texture-initialization marks one submission's lowering walk
-/// intends to make (Block 104 R5).
+/// Buffers texture-initialization marks for queued writes and a submission's
+/// lowering walk (Blocks 104 R5 and 153 R1).
 ///
 /// Marking the textures during the walk would claim subresources are zeroed
 /// before the clears that zero them have run: a staging or HAL failure then
@@ -1251,7 +1257,7 @@ fn hal_buffer_texture_layout(
 /// effect of an earlier op — and the recorded marks reach the textures only
 /// once `HalQueue::submit_copies` has returned `Ok` ([`InitOverlay::commit`]).
 /// Dropping the overlay discards them.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct InitOverlay {
     /// Intended state per `(texture, mip, layer, aspect)`.
     marks: HashMap<(usize, u32, u32, InitAspect), bool>,
@@ -4611,10 +4617,15 @@ fn fs() -> @location(0) vec4<f32> {
                         }),
                         None
                     );
-                    assert!(texture.is_initialized(0, 0, InitAspect::Color));
+                    assert!(!texture.is_initialized(0, 0, InitAspect::Color));
                 }
                 // Flush the params buffer and optional plane write before inspecting passes.
                 assert_eq!(queue.submit(&[]), None);
+                if let Some(plane) = initialized_plane {
+                    assert!(planes[plane]
+                        .texture()
+                        .is_initialized(0, 0, InitAspect::Color));
+                }
                 for submission in 0..2 {
                     let before = submitted_copies(&queue).len();
                     let commands = external_texture_commands(&device, &external, kind);
@@ -8870,6 +8881,195 @@ fn fs() -> @location(0) vec4<f32> {
         let (read, error) = encoder.finish();
         assert_eq!(error, None);
         (texture, Arc::new(write), Arc::new(read))
+    }
+
+    fn queue_texture_init_write(device: &Device, texture: &Texture, repack: bool, partial: bool) {
+        let width = if partial { 2 } else { 4 };
+        assert_eq!(
+            device.queue().write_texture(QueueTextureWrite {
+                device: device.hal(),
+                texture,
+                mip_level: 0,
+                origin: Origin3d { x: 0, y: 0, z: 0 },
+                write_size: Extent3d {
+                    width,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                aspect: TextureAspect::All,
+                layout: TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4 + u32::from(repack)),
+                    rows_per_image: None,
+                },
+                data: &[7; 68],
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn queued_texture_init_failed_flush_leaves_read_uninitialized() {
+        for repack in [false, true] {
+            for partial in [false, true] {
+                let device = noop_device();
+                let queue = device.queue();
+                let (texture, _, read) = texture_write_and_read_commands(&device);
+                queue_texture_init_write(&device, &texture, repack, partial);
+                *queue.inner.fail_next_pending_submit.lock() = true;
+                assert!(queue.flush_pending_writes().is_some());
+                assert!(!texture.is_initialized(0, 0, InitAspect::Color));
+                assert!(submitted_copies(&queue).is_empty());
+                assert_eq!(queue.submit(&[read]), None);
+                assert!(matches!(
+                    submitted_copies(&queue).as_slice(),
+                    [HalCopy::ClearTexture(_), HalCopy::TextureToBuffer(_)]
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn queued_texture_init_second_write_preserves_first_write() {
+        for repack in [false, true] {
+            let device = noop_device();
+            let queue = device.queue();
+            let (texture, _, _) = texture_write_and_read_commands(&device);
+            queue_texture_init_write(&device, &texture, repack, true);
+            queue_texture_init_write(&device, &texture, !repack, true);
+            assert!(matches!(
+                queue.inner.pending_writes.lock().copies.as_slice(),
+                [
+                    HalCopy::ClearTexture(_),
+                    HalCopy::BufferToTexture(_),
+                    HalCopy::BufferToTexture(_)
+                ]
+            ));
+            assert!(!texture.is_initialized(0, 0, InitAspect::Color));
+            assert_eq!(queue.flush_pending_writes(), None);
+            assert!(texture.is_initialized(0, 0, InitAspect::Color));
+        }
+    }
+
+    #[test]
+    fn queued_texture_init_seeds_command_buffer_read() {
+        for repack in [false, true] {
+            let device = noop_device();
+            let queue = device.queue();
+            let (texture, _, read) = texture_write_and_read_commands(&device);
+            queue_texture_init_write(&device, &texture, repack, false);
+            assert!(!texture.is_initialized(0, 0, InitAspect::Color));
+            assert_eq!(queue.submit(&[read]), None);
+            assert!(matches!(
+                submitted_copies(&queue).as_slice(),
+                [HalCopy::BufferToTexture(_), HalCopy::TextureToBuffer(_)]
+            ));
+            assert!(texture.is_initialized(0, 0, InitAspect::Color));
+        }
+    }
+
+    #[test]
+    fn queued_texture_init_successful_flush_commits() {
+        for repack in [false, true] {
+            for empty_submit in [false, true] {
+                let device = noop_device();
+                let queue = device.queue();
+                let (texture, _, read) = texture_write_and_read_commands(&device);
+                queue_texture_init_write(&device, &texture, repack, false);
+                assert!(!texture.is_initialized(0, 0, InitAspect::Color));
+                assert_eq!(
+                    if empty_submit {
+                        queue.submit(&[])
+                    } else {
+                        queue.flush_pending_writes()
+                    },
+                    None
+                );
+                assert!(texture.is_initialized(0, 0, InitAspect::Color));
+                assert_eq!(queue.submit(&[read]), None);
+                assert!(matches!(
+                    submitted_copies(&queue).as_slice(),
+                    [HalCopy::BufferToTexture(_), HalCopy::TextureToBuffer(_)]
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn queued_texture_init_validation_failure_flushes_transactionally() {
+        for fail_flush in [false, true] {
+            let device = noop_device();
+            let queue = device.queue();
+            let (texture, write, _) = texture_write_and_read_commands(&device);
+            queue_texture_init_write(&device, &texture, false, false);
+            *queue.inner.fail_next_pending_submit.lock() = fail_flush;
+            // A duplicate command buffer rejects the submit but flushes queued writes.
+            assert_eq!(
+                queue.submit(&[write.clone(), write]),
+                Some(DeviceError::validation(
+                    "command buffer cannot be submitted more than once"
+                ))
+            );
+            assert_eq!(texture.is_initialized(0, 0, InitAspect::Color), !fail_flush);
+            assert_eq!(submitted_copies(&queue).len(), usize::from(!fail_flush));
+        }
+    }
+
+    #[test]
+    fn queued_texture_init_lowering_failure_commits_only_queued_marks() {
+        for fail_lowering in [false, true] {
+            let device = noop_device();
+            let queue = device.queue();
+            let texture = lazy_init_texture(
+                &device,
+                TextureUsage::COPY_DST | TextureUsage::RENDER_ATTACHMENT,
+                rgba8_unorm(),
+                Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                1,
+                1,
+            );
+            queue_texture_init_write(&device, &texture, false, false);
+            let encoder = device.create_command_encoder();
+            let (pass, error) = encoder.begin_render_pass(&color_attachment(
+                whole_texture_view(&texture),
+                LoadOp::Load,
+                StoreOp::Discard,
+            ));
+            assert_eq!(error, None);
+            assert_eq!(pass.end(), None);
+            let (discard, error) = encoder.finish();
+            assert_eq!(error, None);
+            let (walk_texture, write, read) = texture_write_and_read_commands(&device);
+            // The walk overwrites a queued mark with Discard and adds a clear
+            // for another texture before the encoder write can fail staging.
+            queue.inner.pending_writes.lock().fail_next_stage = fail_lowering;
+            let error = queue.submit(&[Arc::new(discard), read, write]);
+            assert_eq!(error.is_some(), fail_lowering);
+            assert_eq!(
+                texture.is_initialized(0, 0, InitAspect::Color),
+                fail_lowering
+            );
+            assert_eq!(
+                walk_texture.is_initialized(0, 0, InitAspect::Color),
+                !fail_lowering
+            );
+            if fail_lowering {
+                assert!(matches!(
+                    submitted_copies(&queue).as_slice(),
+                    [HalCopy::BufferToTexture(_)]
+                ));
+            } else {
+                let stream = submitted_render_stream(&queue);
+                assert!(matches!(
+                    stream.color_targets[0].as_ref().unwrap().load_op,
+                    HalRenderLoadOp::Load
+                ));
+            }
+        }
     }
 
     #[test]
