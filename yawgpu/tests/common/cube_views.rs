@@ -59,7 +59,14 @@ fn layer_value(layer: u32) -> u8 {
 
 /// A six-layer square texture sampled through a `cube` view returns each face's layer.
 pub fn cube_view_samples_each_face(backend: RealBackend, select: u32) {
-    run(backend, select, 6, native::WGPUTextureViewDimension_Cube, CUBE_SHADER, 0);
+    run(
+        backend,
+        select,
+        6,
+        native::WGPUTextureViewDimension_Cube,
+        CUBE_SHADER,
+        0,
+    );
 }
 
 /// A twelve-layer square texture sampled through a `cube-array` view at cube index 1
@@ -224,8 +231,10 @@ fn run(
 
         let bytes = read_buffer(instance, readback, 24);
         let actual: Vec<u32> = bytes
-            .chunks_exact(4)
-            .map(|word| u32::from_le_bytes(word.try_into().expect("four bytes")))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| u32::from_le_bytes(*word))
             .collect();
         let expected: Vec<u32> = (first_expected_layer..first_expected_layer + 6)
             .map(|layer| u32::from(layer_value(layer)))
