@@ -47,7 +47,9 @@ pub unsafe extern "C" fn wgpuTextureCreateView(
     let native_descriptor = descriptor.as_ref();
     let label = native_descriptor.and_then(|descriptor| label_from_string_view(descriptor.label));
     let mut conversion_error = None;
-    let descriptor = map_texture_view_descriptor(native_descriptor, &mut conversion_error);
+    // SAFETY: The caller provides a live descriptor and its chained structures.
+    let descriptor =
+        unsafe { map_texture_view_descriptor(native_descriptor, &mut conversion_error) };
     let (view, error) = texture
         .core
         .create_view_with_error(descriptor, conversion_error.as_deref());

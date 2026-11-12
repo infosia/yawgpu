@@ -324,9 +324,13 @@ fn validate_external_texture_descriptor(
         }
         _ => {}
     }
-    validate_external_texture_plane(&descriptor.plane0)?;
+    let plane0_components = match descriptor.format {
+        ExternalTextureFormat::Rgba => 4,
+        ExternalTextureFormat::Nv12 => 1,
+    };
+    validate_external_texture_plane(&descriptor.plane0, "plane0", plane0_components)?;
     if let Some(plane1) = &descriptor.plane1 {
-        validate_external_texture_plane(plane1)?;
+        validate_external_texture_plane(plane1, "plane1", 2)?;
     }
     let plane0_extent = view_extent(&descriptor.plane0);
     if descriptor.crop_size.width == 0 || descriptor.crop_size.height == 0 {
@@ -365,7 +369,11 @@ fn validate_external_texture_descriptor(
     Ok(())
 }
 
-fn validate_external_texture_plane(plane: &TextureView) -> Result<(), DeviceError> {
+fn validate_external_texture_plane(
+    plane: &TextureView,
+    name: &str,
+    required_components: u8,
+) -> Result<(), DeviceError> {
     if plane.is_error() {
         return Err(DeviceError::validation(
             "external texture plane must not be an error texture view",
@@ -405,6 +413,12 @@ fn validate_external_texture_plane(plane: &TextureView) -> Result<(), DeviceErro
         return Err(DeviceError::validation(
             "external texture plane must expose filterable-float color samples",
         ));
+    }
+    if caps.color_components != required_components {
+        return Err(DeviceError::validation(format!(
+            "external texture {name} format component count ({}) is not {required_components}",
+            caps.color_components,
+        )));
     }
     Ok(())
 }
@@ -673,6 +687,66 @@ mod tests {
             .create_external_texture(desc)
             .expect_err("one-plane NV12 must fail");
         assert_eq!(error.kind, ErrorKind::Validation);
+    }
+
+    #[test]
+    fn external_texture_plane_component_counts_match_the_layout() {
+        let device = noop_device();
+        for (format, plane0, plane1, expected_error) in [
+            (
+                ExternalTextureFormat::Rgba,
+                TextureFormat::RGBA8_UNORM,
+                None,
+                None,
+            ),
+            (
+                ExternalTextureFormat::Rgba,
+                TextureFormat::R8_UNORM,
+                None,
+                Some("external texture plane0 format component count (1) is not 4"),
+            ),
+            (
+                ExternalTextureFormat::Nv12,
+                TextureFormat::R8_UNORM,
+                Some(TextureFormat::RG8_UNORM),
+                None,
+            ),
+            (
+                ExternalTextureFormat::Nv12,
+                TextureFormat::RGBA8_UNORM,
+                Some(TextureFormat::RG8_UNORM),
+                Some("external texture plane0 format component count (4) is not 1"),
+            ),
+            (
+                ExternalTextureFormat::Nv12,
+                TextureFormat::R8_UNORM,
+                Some(TextureFormat::R8_UNORM),
+                Some("external texture plane1 format component count (1) is not 2"),
+            ),
+        ] {
+            let view = |format| {
+                texture_view(
+                    &device,
+                    TextureFormat::from_raw(format),
+                    TextureUsage::TEXTURE_BINDING,
+                    1,
+                    Some(TextureViewDimension::D2),
+                )
+            };
+            let mut desc = rgba_descriptor(&device);
+            desc.format = format;
+            desc.plane0 = view(plane0);
+            desc.plane1 = plane1.map(view);
+            desc.yuv_to_rgb_conversion_matrix = Some([0.0; 12]);
+            let result = device.create_external_texture(desc);
+            if let Some(message) = expected_error {
+                let error = result.expect_err("invalid component count");
+                assert_eq!(error.kind, ErrorKind::Validation);
+                assert_eq!(error.message, message);
+            } else {
+                assert!(!result.expect("valid plane layout").is_error());
+            }
+        }
     }
 
     #[test]

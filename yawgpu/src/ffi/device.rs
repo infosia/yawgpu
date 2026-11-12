@@ -329,8 +329,8 @@ pub unsafe extern "C" fn wgpuDeviceCreateQuerySet(
     let (query_set, error) = device
         .core
         .create_query_set(map_query_set_descriptor(descriptor));
-    if let Some(message) = error {
-        device.dispatch_error(core::ErrorKind::Validation, message);
+    if let Some(error) = error {
+        device.dispatch_error(error.kind, error.message);
     }
     arc_to_handle(Arc::new(WGPUQuerySetImpl {
         core: Arc::new(query_set),

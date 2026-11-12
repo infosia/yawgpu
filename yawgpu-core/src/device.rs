@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
-use yawgpu_hal::{HalDevice, HalError, HalQueryKind, HalSubgroupSizeControlCaps};
+use yawgpu_hal::{HalDevice, HalError, HalQueryKind, HalQuerySet, HalSubgroupSizeControlCaps};
 
 use crate::adapter::*;
 use crate::bind_group::*;
@@ -48,6 +48,9 @@ pub(crate) struct DeviceInner {
     /// One-shot failure for the next creation of `dispatch_indirect_buffer`.
     #[cfg(test)]
     pub(crate) dispatch_indirect_buffer_failure: Mutex<Option<String>>,
+    /// One-shot HAL allocation failure for query-set creation tests.
+    #[cfg(test)]
+    query_set_failure: Mutex<Option<HalError>>,
     pub(crate) hal: HalDevice,
     pub(crate) queue: Queue,
     pub(crate) error_sink: Mutex<ErrorSink>,
@@ -107,6 +110,8 @@ impl Device {
                 dispatch_indirect_buffer: OnceLock::new(),
                 #[cfg(test)]
                 dispatch_indirect_buffer_failure: Mutex::new(None),
+                #[cfg(test)]
+                query_set_failure: Mutex::new(None),
                 hal,
                 queue,
                 error_sink: Mutex::new(ErrorSink::default()),
@@ -188,8 +193,13 @@ impl Device {
     }
 
     /// Validates the descriptor and creates a query set on this device.
+    /// Returns validation or HAL allocation errors with their original kind.
+    /// A lost device produces an error query set without reporting an error.
     #[must_use]
-    pub fn create_query_set(&self, descriptor: QuerySetDescriptor) -> (QuerySet, Option<String>) {
+    pub fn create_query_set(
+        &self,
+        descriptor: QuerySetDescriptor,
+    ) -> (QuerySet, Option<DeviceError>) {
         if self.is_lost() {
             return (QuerySet::new(descriptor, true, None), None);
         }
@@ -197,11 +207,11 @@ impl Device {
         if let Some(error) = error {
             return (
                 QuerySet::new(descriptor, true, None),
-                Some(error.to_owned()),
+                Some(DeviceError::validation(error)),
             );
         }
         let hal = match descriptor.kind {
-            QueryType::Occlusion | QueryType::Timestamp => match self.inner.hal.create_query_set(
+            QueryType::Occlusion | QueryType::Timestamp => match self.create_hal_query_set(
                 if descriptor.kind == QueryType::Timestamp {
                     HalQueryKind::Timestamp
                 } else {
@@ -213,13 +223,25 @@ impl Device {
                 Err(error) => {
                     return (
                         QuerySet::new(descriptor, true, None),
-                        Some(error.to_string()),
+                        Some(map_hal_allocation_error(error)),
                     );
                 }
             },
             QueryType::Unknown(_) => None,
         };
         (QuerySet::new(descriptor, false, hal), None)
+    }
+
+    fn create_hal_query_set(
+        &self,
+        kind: HalQueryKind,
+        count: u32,
+    ) -> Result<HalQuerySet, HalError> {
+        #[cfg(test)]
+        if let Some(error) = self.inner.query_set_failure.lock().take() {
+            return Err(error);
+        }
+        self.inner.hal.create_query_set(kind, count)
     }
 
     /// Returns true when both handles share the same backing object.
@@ -471,11 +493,8 @@ impl Device {
     }
 
     fn dispatch_hal_allocation_error(&self, error: HalError) {
-        let kind = match error {
-            HalError::OutOfMemory { .. } => ErrorKind::OutOfMemory,
-            _ => ErrorKind::Internal,
-        };
-        self.dispatch_error(kind, error.to_string());
+        let error = map_hal_allocation_error(error);
+        self.dispatch_error(error.kind, error.message);
     }
 
     /// Validates the descriptor and creates a sampler on this device.
@@ -892,6 +911,14 @@ impl Device {
     ) -> RenderPipeline {
         self.create_render_pipeline_inner(descriptor, false, self.inner.hal.backend())
     }
+}
+
+fn map_hal_allocation_error(error: HalError) -> DeviceError {
+    let kind = match error {
+        HalError::OutOfMemory { .. } => ErrorKind::OutOfMemory,
+        _ => ErrorKind::Internal,
+    };
+    DeviceError::new(kind, error.to_string())
 }
 
 /// Tracks the lifecycle state for device lost.
@@ -1548,7 +1575,9 @@ mod tests {
         assert!(error_query_set.is_error());
         assert_eq!(
             error,
-            Some("query set count exceeds the maximum query count".to_owned())
+            Some(DeviceError::validation(
+                "query set count exceeds the maximum query count"
+            ))
         );
 
         let (query_set, error) = device.create_query_set(QuerySetDescriptor {
@@ -1559,6 +1588,59 @@ mod tests {
         assert!(error.is_none());
         assert!(!query_set.is_error());
         assert_eq!(query_set.count(), 4);
+    }
+
+    #[test]
+    fn create_query_set_preserves_hal_error_kind_and_message() {
+        for (failure, expected_kind) in [
+            (
+                HalError::OutOfMemory {
+                    backend: "noop",
+                    resource: "query set",
+                },
+                ErrorKind::OutOfMemory,
+            ),
+            (
+                HalError::BufferOperationFailed {
+                    backend: "noop",
+                    message: "query allocation failed",
+                },
+                ErrorKind::Internal,
+            ),
+        ] {
+            let device = noop_device();
+            let message = failure.to_string();
+            *device.inner.query_set_failure.lock() = Some(failure);
+            let (set, error) = device.create_query_set(QuerySetDescriptor {
+                label: "failed allocation".into(),
+                kind: QueryType::Occlusion,
+                count: 1,
+            });
+            assert!(set.is_error());
+            assert!(set.hal().is_none());
+            assert_eq!(error, Some(DeviceError::new(expected_kind, message)));
+        }
+    }
+
+    #[test]
+    fn create_query_set_on_lost_device_is_silent_and_skips_hal() {
+        let device = noop_device();
+        *device.inner.query_set_failure.lock() = Some(HalError::OutOfMemory {
+            backend: "noop",
+            resource: "query set",
+        });
+        device.destroy();
+        for count in [1, crate::adapter::MAX_QUERY_COUNT + 1] {
+            let (set, error) = device.create_query_set(QuerySetDescriptor {
+                label: "lost".into(),
+                kind: QueryType::Occlusion,
+                count,
+            });
+            assert!(set.is_error());
+            assert!(set.hal().is_none());
+            assert_eq!(error, None);
+            assert!(device.inner.query_set_failure.lock().is_some());
+        }
     }
 
     #[test]

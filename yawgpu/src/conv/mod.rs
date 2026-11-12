@@ -2181,7 +2181,7 @@ mod tests {
             aspect: native::WGPUTextureAspect_All,
             usage: native::WGPUTextureUsage_TextureBinding,
         };
-        let mapped = map_texture_view_descriptor(Some(&descriptor), &mut None);
+        let mapped = unsafe { map_texture_view_descriptor(Some(&descriptor), &mut None) };
         assert_eq!(
             mapped.format,
             Some(native::WGPUTextureFormat_RGBA8Unorm.into())
@@ -2194,7 +2194,7 @@ mod tests {
         assert_eq!(mapped.aspect, Some(core::TextureAspect::All));
         assert_eq!(mapped.swizzle, None);
 
-        let defaulted = map_texture_view_descriptor(None, &mut None);
+        let defaulted = unsafe { map_texture_view_descriptor(None, &mut None) };
         assert_eq!(defaulted.format, None);
         assert_eq!(defaulted.dimension, None);
         assert_eq!(defaulted.mip_level_count, None);
@@ -2229,7 +2229,7 @@ mod tests {
             usage: native::WGPUTextureUsage_None,
         };
 
-        let mapped = map_texture_view_descriptor(Some(&descriptor), &mut None);
+        let mapped = unsafe { map_texture_view_descriptor(Some(&descriptor), &mut None) };
         let mapped_swizzle = mapped.swizzle.expect("swizzle should map from chain");
         assert_eq!(mapped_swizzle.r, core::ComponentSwizzle::G);
         assert_eq!(mapped_swizzle.g, core::ComponentSwizzle::G);
@@ -2250,10 +2250,12 @@ mod tests {
             nextInChain: std::ptr::from_ref(&identity.chain).cast_mut(),
             ..descriptor
         };
-        assert!(map_texture_view_descriptor(Some(&descriptor), &mut None)
-            .swizzle
-            .expect("identity swizzle should map from chain")
-            .is_identity());
+        assert!(
+            unsafe { map_texture_view_descriptor(Some(&descriptor), &mut None) }
+                .swizzle
+                .expect("identity swizzle should map from chain")
+                .is_identity()
+        );
     }
 
     #[test]

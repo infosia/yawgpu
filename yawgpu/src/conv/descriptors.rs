@@ -579,8 +579,14 @@ pub unsafe fn map_texture_descriptor(
 }
 
 /// Converts texture view descriptor into the corresponding yawgpu representation.
+///
+/// # Safety
+///
+/// `value.nextInChain`, when non-null, must point to a valid chain of
+/// `WGPUChainedStruct`s that stays live for this call. Each recognized node
+/// must be a valid instance of the structure identified by its `sType`.
 #[must_use]
-pub fn map_texture_view_descriptor(
+pub unsafe fn map_texture_view_descriptor(
     value: Option<&native::WGPUTextureViewDescriptor>,
     error: &mut Option<String>,
 ) -> core::TextureViewDescriptor {

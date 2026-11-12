@@ -48,6 +48,16 @@ pub unsafe extern "C" fn yawgpuDeviceCreateExternalTexture(
         return std::ptr::null();
     };
 
+    for (index, plane) in plane_handles.iter().enumerate() {
+        if !Arc::ptr_eq(&plane._device, &device.core) {
+            device.dispatch_error(
+                core::ErrorKind::Validation,
+                format!("external texture plane{index} must belong to the same device"),
+            );
+            return std::ptr::null();
+        }
+    }
+
     match device.core.create_external_texture(core_descriptor) {
         Ok(texture) => arc_to_handle(Arc::new(WGPUExternalTextureImpl {
             _core: Arc::new(texture),
@@ -199,6 +209,13 @@ mod tests {
     }
 
     fn texture_view_handle(device: &Arc<WGPUDeviceImpl>) -> native::WGPUTextureView {
+        texture_view_handle_with_format(device, native::WGPUTextureFormat_RGBA8Unorm)
+    }
+
+    fn texture_view_handle_with_format(
+        device: &Arc<WGPUDeviceImpl>,
+        format: native::WGPUTextureFormat,
+    ) -> native::WGPUTextureView {
         let texture = Arc::new(device.core.create_texture(core::TextureDescriptor {
             usage: core::TextureUsage::TEXTURE_BINDING,
             dimension: core::TextureDimension::D2,
@@ -207,7 +224,7 @@ mod tests {
                 height: 4,
                 depth_or_array_layers: 1,
             },
-            format: native::WGPUTextureFormat_RGBA8Unorm.into(),
+            format: format.into(),
             mip_level_count: 1,
             sample_count: 1,
             view_formats: Vec::new(),
@@ -259,6 +276,77 @@ mod tests {
             mirrored: 0,
             rotation: YAWGPU_EXTERNAL_TEXTURE_ROTATION_ROTATE_0_DEGREES,
         }
+    }
+
+    #[test]
+    fn external_texture_planes_must_belong_to_the_creating_device() {
+        let device = device_impl();
+        let other = device_impl();
+        let device_handle = arc_to_handle(Arc::clone(&device));
+        for nv12 in [false, true] {
+            for foreign_plane in [None, Some(0), Some(1)] {
+                if !nv12 && foreign_plane == Some(1) {
+                    continue;
+                }
+                let plane0 = texture_view_handle_with_format(
+                    if foreign_plane == Some(0) {
+                        &other
+                    } else {
+                        &device
+                    },
+                    if nv12 {
+                        native::WGPUTextureFormat_R8Unorm
+                    } else {
+                        native::WGPUTextureFormat_RGBA8Unorm
+                    },
+                );
+                let mut desc = descriptor(plane0);
+                if nv12 {
+                    desc.format = YAWGPU_EXTERNAL_TEXTURE_FORMAT_NV12;
+                    desc.plane1 = texture_view_handle_with_format(
+                        if foreign_plane == Some(1) {
+                            &other
+                        } else {
+                            &device
+                        },
+                        native::WGPUTextureFormat_RG8Unorm,
+                    );
+                }
+                device.core.push_error_scope(core::ErrorFilter::Validation);
+                other.core.push_error_scope(core::ErrorFilter::Validation);
+                let before = device.core.allocation_count();
+                unsafe {
+                    let external = yawgpuDeviceCreateExternalTexture(device_handle, &desc);
+                    let error = device
+                        .core
+                        .pop_error_scope()
+                        .expect("creating device scope");
+                    assert_eq!(other.core.pop_error_scope(), Ok(None));
+                    if let Some(index) = foreign_plane {
+                        assert!(external.is_null());
+                        assert_eq!(
+                            error,
+                            Some(core::DeviceError::new(
+                                core::ErrorKind::Validation,
+                                format!(
+                                    "external texture plane{index} must belong to the same device"
+                                ),
+                            ))
+                        );
+                        assert_eq!(device.core.allocation_count(), before);
+                    } else {
+                        assert!(!external.is_null());
+                        assert_eq!(error, None);
+                        wgpuExternalTextureRelease(external);
+                    }
+                    wgpuTextureViewRelease(plane0);
+                    if nv12 {
+                        wgpuTextureViewRelease(desc.plane1);
+                    }
+                }
+            }
+        }
+        unsafe { wgpuDeviceRelease(device_handle) };
     }
 
     #[test]

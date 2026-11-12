@@ -1,6 +1,6 @@
 # Block 151 — Whole-code review 2026-11-13: small P1 fixes
 
-Status: **IN PROGRESS (2026-11-13)**.
+Status: **COMPLETE (2026-11-13)**.
 Source: whole-code review at `92e38c7` (`REPORT-review.md`), findings R02, R03, R04, R09, R10,
 and R12. These are the review's localized P1 findings, plus R10 (same validation function as
 R04) and R12 (needed so that R09's new allocation error reaches the right error scope).
@@ -14,9 +14,10 @@ R1. **Error textures allocate no initialization state (review R02).** `Texture::
 disabled, empty `TextureInitState`: no per-subresource vector is allocated, whatever the
 descriptor's mip and layer counts are. The getters still return the descriptor values.
 Valid textures keep their current tracking, sized from validated dimensions. A descriptor
-with `mip_level_count == u32::MAX` and `depth_or_array_layers == u32::MAX` produces one
-validation error and an error texture, with no panic and no large allocation, on both the
-live-device and the lost-device paths.
+with `mip_level_count == u32::MAX` and `depth_or_array_layers == u32::MAX` produces an
+error texture with no panic and no large allocation on both the live-device and the
+lost-device paths. On a live device it reports one validation error; on a lost device
+it reports nothing (`dispatch_error` stays silent after loss, unchanged).
 
 R2. **No safe public function follows caller-supplied raw chain pointers (review R03).**
 `yawgpu::conv::map_texture_view_descriptor` becomes `unsafe fn` with a `# Safety` section:
@@ -59,8 +60,9 @@ small local change.
 
 ## Verification
 
-- Inline unit tests: R1 (extreme mip × layer descriptor on a live and a lost Noop device:
-  one validation error, error texture, no panic; init state disabled), R2 (existing conv
+- Inline unit tests: R1 (extreme mip × layer descriptor on a live Noop device: one
+  validation error; on a lost one: no error; both an error texture with disabled, empty
+  init state and no panic), R2 (existing conv
   tests updated to call through `unsafe`), R3 (plane0 and plane1 from another Noop device
   rejected; same-device accepted), R4 (RGBA with an `r8unorm` plane0 rejected; NV12 with
   `rgba8unorm` plane0 or `r8unorm` plane1 rejected; the valid layouts accepted), R6 (a
@@ -73,3 +75,12 @@ small local change.
   `cargo clippy -p yawgpu-hal --features metal --all-targets -- -D warnings`.
 - Claude: workspace test, `cargo test -p yawgpu-hal --features metal --lib`, and the
   Metal external-texture and occlusion-query e2e suites on the M2.
+
+## Verification record
+
+S1: workspace test 1,451/0; `yawgpu-core --lib` 725/0; `yawgpu --lib` 307/0; clippy clean
+(workspace and `yawgpu-hal --features metal`). Real GPU on the M2: `yawgpu-hal --features
+metal --lib` 201/0 plus the 7 ignored query-set tests; `e2e_metal_external_texture` 6/6,
+`e2e_metal_timestamp_query` 4/4, `e2e_metal_depth` 20/20, `e2e_metal_immediates` 3/3,
+`e2e_metal_draw` 3/3. The R2 audit found no other safe `pub` function in `yawgpu::conv`
+that dereferences a caller-supplied raw pointer.

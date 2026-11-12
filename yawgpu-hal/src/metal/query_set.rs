@@ -65,9 +65,13 @@ impl MetalQuerySet {
             .ok_or_else(|| buffer_error("query-set buffer size overflows"))?
             .max(8);
         let buffer = device
-            .newBufferWithLength_options(to_ns(size)?, MTLResourceOptions::StorageModePrivate);
+            .newBufferWithLength_options(to_ns(size)?, MTLResourceOptions::StorageModePrivate)
+            .ok_or(HalError::OutOfMemory {
+                backend: BACKEND,
+                resource: "occlusion visibility buffer",
+            })?;
         let buffer = MetalBuffer {
-            inner: buffer,
+            inner: Some(buffer),
             mapped_ptr: None,
             size,
         };

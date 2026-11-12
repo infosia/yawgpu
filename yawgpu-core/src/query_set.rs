@@ -224,7 +224,10 @@ mod tests {
         assert!(error_query_set.hal().is_none());
         assert_eq!(
             error,
-            Some("query set count exceeds the maximum query count".to_owned())
+            Some(crate::DeviceError::new(
+                crate::ErrorKind::Validation,
+                "query set count exceeds the maximum query count",
+            ))
         );
     }
 }

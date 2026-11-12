@@ -258,7 +258,7 @@ impl Texture {
         is_error: bool,
         features: FeatureSet,
     ) -> Self {
-        let init_enabled = texture_lazy_init_eligible(descriptor.usage);
+        let init_enabled = !is_error && texture_lazy_init_eligible(descriptor.usage);
         let format_caps = descriptor.format.caps(&features);
         let init_aspects = InitAspects::from_caps(format_caps);
         Self {
@@ -1120,6 +1120,61 @@ mod tests {
     use super::*;
     use crate::test_helpers::*;
     use crate::*;
+
+    #[test]
+    fn error_textures_with_extreme_dimensions_have_no_init_tracking() {
+        for lost in [false, true] {
+            let device = noop_device();
+            let errors = Arc::new(Mutex::new(Vec::new()));
+            let captured = Arc::clone(&errors);
+            device.set_uncaptured_error_callback(Some(move |error| captured.lock().push(error)));
+            if lost {
+                device.destroy();
+            }
+            let before = device.allocation_count();
+            let descriptor = TextureDescriptor {
+                mip_level_count: u32::MAX,
+                size: Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: u32::MAX,
+                },
+                usage: TextureUsage::COPY_DST,
+                ..valid_texture_descriptor()
+            };
+            let texture = device.create_texture_with_error(descriptor.clone(), None);
+            assert!(texture.is_error());
+            assert_eq!(texture.mip_level_count(), descriptor.mip_level_count);
+            assert_eq!(texture.size(), descriptor.size);
+            let init = texture.inner.init_state.lock();
+            assert!(!init.enabled);
+            assert!(init.initialized.is_empty());
+            assert_eq!(init.initialized.capacity(), 0);
+            assert_eq!(device.allocation_count(), before);
+            let errors = errors.lock();
+            if lost {
+                assert!(errors.is_empty());
+            } else {
+                assert_eq!(errors.len(), 1);
+                assert_eq!(errors[0].kind, ErrorKind::Validation);
+            }
+        }
+    }
+
+    #[test]
+    fn texture_new_disables_init_tracking_for_error_objects_only() {
+        for is_error in [false, true] {
+            let texture = Texture::new(
+                valid_texture_descriptor(),
+                None,
+                is_error,
+                FeatureSet::new(),
+            );
+            let init = texture.inner.init_state.lock();
+            assert_eq!(init.enabled, !is_error);
+            assert_eq!(init.initialized.len(), usize::from(!is_error));
+        }
+    }
 
     #[test]
     fn audit_empty_depth_stencil_write_still_requires_full_subresource() {
