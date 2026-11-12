@@ -126,3 +126,7 @@ surface keeps the drawable); Vulkan swapchain textures have `owns_image = false`
 drops a clone of the configured back buffer — no expiry frees or recycles a swapchain
 image. A real-GPU e2e of the expiry error itself needs a window and is covered by the
 Noop tests instead.
+
+S3: A-m1 (the `fail_next_pending_submit` hook now sits in the shared copy-submit path; two
+new tests — empty submit and command-buffer submit with queued marks — were red before),
+A-m2 (no clone of an empty queued overlay), A-m3 (comment). Workspace test 1,478/0.

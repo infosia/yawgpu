@@ -1,6 +1,6 @@
 # Block 154 — Subpass draws run the regular draw-range validation
 
-Status: **S1 landed (2026-11-13)**; Phase Review done; S2 (m1) pending.
+Status: **COMPLETE (2026-11-13)**.
 Source: whole-code review at `92e38c7` (`specs/tracking/code-review-2026-11.md`), finding R08.
 Oracle: subpass rendering (`tiled`) has no Dawn counterpart; each rule copies what
 yawgpu's regular render pass already does (`pass.rs` `validate_render_draw_state`, which
@@ -73,3 +73,5 @@ modes, and indirect handling confirmed.
 |---|---|---|---|
 | m1 | MINOR | The helpers take `impl Into<DrawBufferBindings>` only so two old `pass.rs` tests can pass `&state` | S2: take `DrawBufferBindings<'_>`; the two tests call `(&state).into()` |
 | m2 | MINOR | Subpass indirect draws are tested only through `validate_subpass_draw_state`: there is no subpass indirect entry point | Accepted; an indirect entry point, if added, must add an end-to-end draw test |
+
+S2: m1 fixed (helpers take `DrawBufferBindings<'_>`); workspace test 1,478/0; `yawgpu-core --features tiled --lib` 811/0.

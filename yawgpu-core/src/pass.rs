@@ -1084,12 +1084,11 @@ pub(crate) fn resolve_buffer_binding_size(
 }
 
 /// Validates strip index format and returns a descriptive error on failure.
-pub(crate) fn validate_strip_index_format<'a>(
+pub(crate) fn validate_strip_index_format(
     pipeline: &RenderPipeline,
-    bindings: impl Into<DrawBufferBindings<'a>>,
+    bindings: DrawBufferBindings<'_>,
     indexed: bool,
 ) -> Result<(), String> {
-    let bindings = bindings.into();
     if !indexed {
         return Ok(());
     }
@@ -1115,14 +1114,13 @@ pub(crate) fn validate_strip_index_format<'a>(
 }
 
 /// Validates vertex buffer oob and returns a descriptive error on failure.
-pub(crate) fn validate_vertex_buffer_oob<'a>(
+pub(crate) fn validate_vertex_buffer_oob(
     pipeline: &RenderPipeline,
-    bindings: impl Into<DrawBufferBindings<'a>>,
+    bindings: DrawBufferBindings<'_>,
     vertex_draw: Option<(u32, u32)>,
     first_instance: u32,
     instance_count: u32,
 ) -> Result<(), String> {
-    let bindings = bindings.into();
     for (slot, layout) in pipeline.vertex_buffer_layouts().iter().enumerate() {
         if !layout.used {
             continue;
@@ -1176,12 +1174,11 @@ pub(crate) fn validate_vertex_buffer_oob<'a>(
 }
 
 /// Validates index buffer oob and returns a descriptive error on failure.
-pub(crate) fn validate_index_buffer_oob<'a>(
-    bindings: impl Into<DrawBufferBindings<'a>>,
+pub(crate) fn validate_index_buffer_oob(
+    bindings: DrawBufferBindings<'_>,
     first_index: u32,
     index_count: u32,
 ) -> Result<(), String> {
-    let bindings = bindings.into();
     let index_buffer = bindings
         .index_buffer
         .ok_or_else(|| "render pass indexed draw requires an index buffer".to_owned())?;
@@ -4062,8 +4059,8 @@ mod tests {
             offset: 0,
             size: 8,
         });
-        assert_eq!(validate_index_buffer_oob(&state, 0, 4), Ok(()));
-        assert!(validate_index_buffer_oob(&state, u32::MAX, 1)
+        assert_eq!(validate_index_buffer_oob((&state).into(), 0, 4), Ok(()));
+        assert!(validate_index_buffer_oob((&state).into(), u32::MAX, 1)
             .unwrap_err()
             .contains("range exceeds"));
     }
@@ -4096,7 +4093,7 @@ mod tests {
             Ok(())
         );
         assert_eq!(
-            validate_vertex_buffer_oob(&pipeline, &state, Some((0, 2)), 0, 2),
+            validate_vertex_buffer_oob(&pipeline, (&state).into(), Some((0, 2)), 0, 2),
             Ok(())
         );
     }

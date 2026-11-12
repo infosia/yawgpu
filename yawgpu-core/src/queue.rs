@@ -752,7 +752,8 @@ impl Queue {
             extent: hal_extent(write_size),
         });
         let mut copies = Vec::new();
-        // Share pending initialization with the repack path above.
+        // Earlier queued writes precede this copy; their pending marks
+        // suppress clears until the batch is submitted (Block 153 R1).
         append_texture_write_init_clears(
             &mut copies,
             destination_texture,
@@ -883,7 +884,7 @@ impl Queue {
             let result = if copies.is_empty() {
                 self.inner.hal.submit_empty()
             } else {
-                self.inner.hal.submit_copies(&copies)
+                self.submit_copies(&copies)
             };
             return self.finish_pending_submission(chunks, init_overlay, result);
         }
@@ -918,7 +919,11 @@ impl Queue {
         // Queued copies run first. Preserve their overlay separately so a
         // lowering failure can flush just those copies and their marks.
         // The walk's combined marks commit only on HAL success (Block 153 R1).
-        let mut init_overlay = queued_init_overlay.clone();
+        let mut init_overlay = if queued_init_overlay.marks.is_empty() {
+            InitOverlay::default()
+        } else {
+            queued_init_overlay.clone()
+        };
         for (op_index, op) in all_ops.iter().enumerate() {
             let prefix = if matches!(op, CommandExecution::ResolveQuerySet(resolve) if resolve.query_set.kind() == crate::QueryType::Timestamp)
             {
@@ -968,7 +973,7 @@ impl Queue {
                 let latest = self.latest_submission_index();
                 self.inner.pending_writes.lock().retire(latest, chunks);
             } else {
-                let result = self.inner.hal.submit_copies(&copies);
+                let result = self.submit_copies(&copies);
                 let _ = self.finish_pending_submission(chunks, queued_init_overlay, result);
             }
             return Some(error);
@@ -978,7 +983,7 @@ impl Queue {
         if let Some(hook) = &test_hook {
             hook.pause("lowered");
         }
-        let result = self.inner.hal.submit_copies(&copies);
+        let result = self.submit_copies(&copies);
         #[cfg(test)]
         if let Some(hook) = &test_hook {
             hook.pause("submitted");
@@ -1025,19 +1030,19 @@ impl Queue {
         if copies.is_empty() {
             return None;
         }
+        let result = self.submit_copies(&copies);
+        self.finish_pending_submission(chunks, init_overlay, result)
+    }
+
+    fn submit_copies(&self, copies: &[HalCopy]) -> Result<SubmissionIndex, yawgpu_hal::HalError> {
         #[cfg(test)]
         if std::mem::take(&mut *self.inner.fail_next_pending_submit.lock()) {
-            return self.finish_pending_submission(
-                chunks,
-                init_overlay,
-                Err(yawgpu_hal::HalError::QueueSubmissionFailed {
-                    backend: "Noop",
-                    message: "injected pending submit failure".to_owned(),
-                }),
-            );
+            return Err(yawgpu_hal::HalError::QueueSubmissionFailed {
+                backend: "Noop",
+                message: "injected pending submit failure".to_owned(),
+            });
         }
-        let result = self.inner.hal.submit_copies(&copies);
-        self.finish_pending_submission(chunks, init_overlay, result)
+        self.inner.hal.submit_copies(copies)
     }
 
     fn take_pending_writes(&self) -> PendingWriteSubmission {
@@ -8919,6 +8924,54 @@ fn fs() -> @location(0) vec4<f32> {
                 *queue.inner.fail_next_pending_submit.lock() = true;
                 assert!(queue.flush_pending_writes().is_some());
                 assert!(!texture.is_initialized(0, 0, InitAspect::Color));
+                assert!(submitted_copies(&queue).is_empty());
+                assert_eq!(queue.submit(&[read]), None);
+                assert!(matches!(
+                    submitted_copies(&queue).as_slice(),
+                    [HalCopy::ClearTexture(_), HalCopy::TextureToBuffer(_)]
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn queued_texture_init_failed_empty_submit_leaves_read_uninitialized() {
+        for repack in [false, true] {
+            for partial in [false, true] {
+                let device = noop_device();
+                let queue = device.queue();
+                let (texture, _, read) = texture_write_and_read_commands(&device);
+                queue_texture_init_write(&device, &texture, repack, partial);
+                *queue.inner.fail_next_pending_submit.lock() = true;
+
+                assert!(queue.submit(&[]).is_some());
+                assert!(!texture.is_initialized(0, 0, InitAspect::Color));
+                assert_eq!(queue.latest_submission_index(), SubmissionIndex::NONE);
+                assert!(submitted_copies(&queue).is_empty());
+                assert_eq!(queue.submit(&[read]), None);
+                assert!(matches!(
+                    submitted_copies(&queue).as_slice(),
+                    [HalCopy::ClearTexture(_), HalCopy::TextureToBuffer(_)]
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn queued_texture_init_failed_command_buffer_submit_leaves_read_uninitialized() {
+        for repack in [false, true] {
+            for partial in [false, true] {
+                let device = noop_device();
+                let queue = device.queue();
+                let (texture, _, read) = texture_write_and_read_commands(&device);
+                let (walk_texture, write, _) = texture_write_and_read_commands(&device);
+                queue_texture_init_write(&device, &texture, repack, partial);
+                *queue.inner.fail_next_pending_submit.lock() = true;
+
+                assert!(queue.submit(&[write]).is_some());
+                assert!(!texture.is_initialized(0, 0, InitAspect::Color));
+                assert!(!walk_texture.is_initialized(0, 0, InitAspect::Color));
+                assert_eq!(queue.latest_submission_index(), SubmissionIndex::NONE);
                 assert!(submitted_copies(&queue).is_empty());
                 assert_eq!(queue.submit(&[read]), None);
                 assert!(matches!(
