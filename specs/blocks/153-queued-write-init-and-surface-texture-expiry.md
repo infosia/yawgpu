@@ -1,7 +1,7 @@
 # Block 153 — Transactional queued-write initialization; surface textures expire
 
 Status: **PLANNED (2026-11-13)**.
-Source: whole-code review at `92e38c7` (`REPORT-review.md`), findings R06 and R05.
+Source: whole-code review at `92e38c7` (`specs/tracking/code-review-2026-11.md`), findings R06 and R05.
 Oracle: pinned Dawn — `native/SwapChain.cpp` (`SwapChainBase::Present` checks that the
 backend destroyed the current texture, line 155; the destructor checks the same, line 88);
 yawgpu Block 104 R5 for initialization-mark ordering.

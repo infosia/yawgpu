@@ -1,7 +1,7 @@
 # Block 152 — FFI receivers survive a reentrant release in the error callback
 
 Status: **S1 landed (2026-11-13)**; Phase Review pending.
-Source: whole-code review at `92e38c7` (`REPORT-review.md`), finding R01. It extends Block
+Source: whole-code review at `92e38c7` (`specs/tracking/code-review-2026-11.md`), finding R01. It extends Block
 113 M1 / audit rule C11, which covered device receivers only.
 
 ## Problem

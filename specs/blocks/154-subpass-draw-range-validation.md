@@ -1,7 +1,7 @@
 # Block 154 — Subpass draws run the regular draw-range validation
 
 Status: **PLANNED (2026-11-13)**.
-Source: whole-code review at `92e38c7` (`REPORT-review.md`), finding R08.
+Source: whole-code review at `92e38c7` (`specs/tracking/code-review-2026-11.md`), finding R08.
 Oracle: subpass rendering (`tiled`) has no Dawn counterpart; each rule copies what
 yawgpu's regular render pass already does (`pass.rs` `validate_render_draw_state`, which
 follows Dawn `CommandBufferStateTracker::ValidateIndexBufferInRange` / `ValidateBufferInRange`

@@ -1,7 +1,7 @@
 # Block 155 — Vulkan images and devices support the cube views core accepts
 
 Status: **PLANNED (2026-11-13)**.
-Source: whole-code review at `92e38c7` (`REPORT-review.md`), finding R07.
+Source: whole-code review at `92e38c7` (`specs/tracking/code-review-2026-11.md`), finding R07.
 Oracle: pinned Dawn — `native/vulkan/TextureVk.cpp:1515-1517` (cube-compatible flag),
 `native/vulkan/DeviceVk.cpp:575` (enable `imageCubeArray`),
 `native/vulkan/PhysicalDeviceVk.cpp:271-272` (core requires `imageCubeArray`).

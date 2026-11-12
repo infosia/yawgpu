@@ -1,7 +1,7 @@
 # Block 156 — Whole-code review 2026-11-13: P2 library fixes
 
 Status: **PLANNED (2026-11-13)**.
-Source: whole-code review at `92e38c7` (`REPORT-review.md`), findings R13, R14, and R11.
+Source: whole-code review at `92e38c7` (`specs/tracking/code-review-2026-11.md`), findings R13, R14, and R11.
 (R10 and R12 went into Block 151; R15, X01, and X02 are Claude-owned test and example
 fixes; R16, GLES, is Block 157.)
 Oracle: pinned Dawn — `native/Format.cpp` (`RG11B10Ufloat` baseline caps and the

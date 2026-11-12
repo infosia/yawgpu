@@ -1,7 +1,7 @@
 # Block 151 — Whole-code review 2026-11-13: small P1 fixes
 
 Status: **COMPLETE (2026-11-13)**.
-Source: whole-code review at `92e38c7` (`REPORT-review.md`), findings R02, R03, R04, R09, R10,
+Source: whole-code review at `92e38c7` (`specs/tracking/code-review-2026-11.md`), findings R02, R03, R04, R09, R10,
 and R12. These are the review's localized P1 findings, plus R10 (same validation function as
 R04) and R12 (needed so that R09's new allocation error reaches the right error scope).
 Oracle: pinned Dawn — `native/ExternalTexture.cpp` (`ValidateExternalTextureDescriptor`,
