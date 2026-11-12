@@ -241,6 +241,12 @@ fn is_supported_api_version(api_version: u32) -> bool {
     (major, minor) >= (1, 1)
 }
 
+/// Filters physical devices before exposing core WebGPU adapters.
+fn is_supported_adapter(api_version: u32, features: &vk::PhysicalDeviceFeatures) -> bool {
+    // Core WebGPU accepts cube-array views, which require imageCubeArray.
+    is_supported_api_version(api_version) && features.image_cube_array == vk::TRUE
+}
+
 struct VulkanInstanceInner {
     _entry: &'static ash::Entry,
     instance: ash::Instance,
@@ -333,7 +339,12 @@ impl VulkanAdapter {
                 .instance
                 .get_physical_device_properties(physical_device)
         };
-        if !is_supported_api_version(properties.api_version) {
+        let features = unsafe {
+            instance
+                .instance
+                .get_physical_device_features(physical_device)
+        };
+        if !is_supported_adapter(properties.api_version, &features) {
             return None;
         }
         let name = physical_device_name(properties)?;
@@ -1187,7 +1198,7 @@ impl VulkanAdapter {
         // writes (VUID-RuntimeSpirv-NonWritable-06340).
         let fragment_stores_and_atomics =
             supported_features.fragment_stores_and_atomics == vk::TRUE;
-        let mut enabled_features = enabled_texture_compression_features(&supported_features);
+        let mut enabled_features = enabled_texture_features(&supported_features);
         let mut int64_atomics = self.int64_atomics_query().enable(
             requested.atomic_vec2u_min_max,
             &mut enabled_features,
@@ -1612,11 +1623,12 @@ fn astc_sliced_3d_supported(
     astc_supported && astc_ldr_formats().all(|format| format.is_ok_and(&mut probe))
 }
 
-/// Enables each supported compression family; HAL has no requested-feature set.
-fn enabled_texture_compression_features(
-    supported: &vk::PhysicalDeviceFeatures,
-) -> vk::PhysicalDeviceFeatures {
+/// Enables supported texture features; HAL has no requested-feature set here.
+fn enabled_texture_features(supported: &vk::PhysicalDeviceFeatures) -> vk::PhysicalDeviceFeatures {
     let mut enabled = vk::PhysicalDeviceFeatures::default();
+    if supported.image_cube_array == vk::TRUE {
+        enabled.image_cube_array = vk::TRUE;
+    }
     if supported.texture_compression_bc == vk::TRUE {
         enabled.texture_compression_bc = vk::TRUE;
     }
@@ -4055,11 +4067,48 @@ diagnostic(off, derivative_uniformity);
                         texture_compression_astc_ldr: astc,
                         ..Default::default()
                     };
-                    let enabled = enabled_texture_compression_features(&supported);
+                    let enabled = enabled_texture_features(&supported);
                     assert_eq!(enabled.texture_compression_bc, bc);
                     assert_eq!(enabled.texture_compression_etc2, etc2);
                     assert_eq!(enabled.texture_compression_astc_ldr, astc);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn cube_array_feature_is_enabled_only_when_supported() {
+        for image_cube_array in [vk::FALSE, vk::TRUE] {
+            let supported = vk::PhysicalDeviceFeatures {
+                image_cube_array,
+                texture_compression_bc: vk::TRUE,
+                ..Default::default()
+            };
+            let enabled = enabled_texture_features(&supported);
+            assert_eq!(enabled.image_cube_array, image_cube_array);
+            assert_eq!(enabled.texture_compression_bc, vk::TRUE);
+            assert_eq!(enabled.texture_compression_etc2, vk::FALSE);
+            assert_eq!(enabled.texture_compression_astc_ldr, vk::FALSE);
+        }
+    }
+
+    #[test]
+    fn core_adapter_requires_cube_arrays_and_supported_api_version() {
+        for api_version in [
+            vk::API_VERSION_1_0,
+            vk::API_VERSION_1_1,
+            vk::API_VERSION_1_3,
+        ] {
+            for image_cube_array in [vk::FALSE, vk::TRUE] {
+                let features = vk::PhysicalDeviceFeatures {
+                    image_cube_array,
+                    ..Default::default()
+                };
+                assert_eq!(
+                    is_supported_adapter(api_version, &features),
+                    api_version >= vk::API_VERSION_1_1 && image_cube_array == vk::TRUE,
+                    "api_version={api_version}, image_cube_array={image_cube_array}"
+                );
             }
         }
     }
@@ -4097,7 +4146,7 @@ diagnostic(off, derivative_uniformity);
             let sample_rate_shading = supported_features.sample_rate_shading == vk::TRUE;
             let fragment_stores_and_atomics =
                 supported_features.fragment_stores_and_atomics == vk::TRUE;
-            let mut enabled_features = enabled_texture_compression_features(&supported_features);
+            let mut enabled_features = enabled_texture_features(&supported_features);
             if robust_buffer_access {
                 enabled_features.robust_buffer_access = vk::TRUE;
             }

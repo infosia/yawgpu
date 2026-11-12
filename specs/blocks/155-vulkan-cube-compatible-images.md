@@ -1,6 +1,6 @@
 # Block 155 — Vulkan images and devices support the cube views core accepts
 
-Status: **PLANNED (2026-11-13)**.
+Status: **S1 landed (2026-11-13)**; full `e2e_vulkan_*` regression and Phase Review pending.
 Source: whole-code review at `92e38c7` (`specs/tracking/code-review-2026-11.md`), finding R07.
 Oracle: pinned Dawn — `native/vulkan/TextureVk.cpp:1515-1517` (cube-compatible flag),
 `native/vulkan/DeviceVk.cpp:575` (enable `imageCubeArray`),
@@ -48,3 +48,13 @@ enabled-feature builder.
   a `cube` view and a 12-layer texture through a `cube-array` view and reads back the
   expected face colors, run under the Khronos validation layer on MoltenVK with 0 VUIDs;
   full `e2e_vulkan_*` regression under the layer.
+
+## Verification record
+
+S1: `yawgpu-hal --features vulkan --lib --include-ignored` 459/0 on MoltenVK under the
+Khronos validation layer, 0 VUIDs. `e2e_vulkan_cube_views` 2/2 with 0 VUIDs (before the
+fix: VUID-VkImageViewCreateInfo-image-01003 ×6, -viewType-01004 ×3,
+VUID-VkShaderModuleCreateInfo-pCode-08740 ×3); `e2e_metal_cube_views` 2/2. R2: adapters
+without `imageCubeArray` are dropped by the existing `VulkanAdapter::new` → `None` filter.
+R3: the portability subset has no cube-view restriction (`imageView2DOn3DImage` and
+`multisampleArrayImage` do not apply).

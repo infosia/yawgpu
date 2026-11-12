@@ -153,16 +153,23 @@ fn bgra8_storage_view_format_list(
         .map(|rgba_format| [vk::Format::B8G8R8A8_UNORM, rgba_format])
 }
 
-/// Matches Dawn's TextureVk.cpp rule: only 3D COLOR_ATTACHMENT images need
+/// Matches Dawn's TextureVk.cpp rules: square 2D images with at least six
+/// array layers support cube views. Only 3D COLOR_ATTACHMENT images need
 /// TYPE_2D_ARRAY_COMPATIBLE for depth-slice attachment views. Omitting it for
 /// other 3D images avoids VUID-VkImageCreateInfo-imageView2DOn3DImage-04459 on
 /// MoltenVK when imageView2DOn3DImage is false.
 fn texture_image_flags(
     dimension: HalTextureDimension,
+    width: u32,
+    height: u32,
+    depth_or_array_layers: u32,
     usage: vk::ImageUsageFlags,
     bgra8_storage_view: bool,
 ) -> vk::ImageCreateFlags {
     let mut flags = vk::ImageCreateFlags::empty();
+    if dimension == HalTextureDimension::D2 && depth_or_array_layers >= 6 && width == height {
+        flags |= vk::ImageCreateFlags::CUBE_COMPATIBLE;
+    }
     if dimension == HalTextureDimension::D3 && usage.contains(vk::ImageUsageFlags::COLOR_ATTACHMENT)
     {
         flags |= vk::ImageCreateFlags::TYPE_2D_ARRAY_COMPATIBLE;
@@ -233,6 +240,9 @@ pub(super) fn create_texture(
     let view_formats = texture_view_formats(descriptor.format, &descriptor.view_formats)?;
     let image_flags = texture_image_flags(
         descriptor.dimension,
+        descriptor.width,
+        descriptor.height,
+        descriptor.depth_or_array_layers,
         usage,
         bgra8_storage_vk_format.is_some() || view_formats.len() > 1,
     );
@@ -795,6 +805,9 @@ mod tests {
         );
         let flags = texture_image_flags(
             HalTextureDimension::D2,
+            4,
+            4,
+            1,
             vk::ImageUsageFlags::COLOR_ATTACHMENT,
             formats.len() > 1,
         );
@@ -807,6 +820,9 @@ mod tests {
         assert_eq!(formats.len(), 1);
         assert!(texture_image_flags(
             HalTextureDimension::D2,
+            4,
+            4,
+            1,
             vk::ImageUsageFlags::COLOR_ATTACHMENT,
             formats.len() > 1
         )
@@ -1369,10 +1385,15 @@ mod tests {
     fn bgra8_storage_texture_adds_mutable_format_and_format_list() {
         let storage = texture_usage(false, true, false);
 
-        assert!(
-            texture_image_flags(HalTextureDimension::D2, vk::ImageUsageFlags::STORAGE, true)
-                .contains(vk::ImageCreateFlags::MUTABLE_FORMAT)
-        );
+        assert!(texture_image_flags(
+            HalTextureDimension::D2,
+            4,
+            4,
+            1,
+            vk::ImageUsageFlags::STORAGE,
+            true
+        )
+        .contains(vk::ImageCreateFlags::MUTABLE_FORMAT));
         assert_eq!(
             bgra8_storage_view_format_list(HalTextureFormat::Bgra8Unorm, storage),
             Some([vk::Format::B8G8R8A8_UNORM, vk::Format::R8G8B8A8_UNORM])
@@ -1382,8 +1403,14 @@ mod tests {
     #[test]
     fn non_bgra_storage_texture_keeps_default_image_flags_and_no_storage_view() {
         let storage = texture_usage(false, true, false);
-        let flags =
-            texture_image_flags(HalTextureDimension::D2, vk::ImageUsageFlags::STORAGE, false);
+        let flags = texture_image_flags(
+            HalTextureDimension::D2,
+            4,
+            4,
+            1,
+            vk::ImageUsageFlags::STORAGE,
+            false,
+        );
 
         assert!(!flags.contains(vk::ImageCreateFlags::MUTABLE_FORMAT));
         assert_eq!(
@@ -1409,7 +1436,7 @@ mod tests {
                 vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
             ] {
                 for bgra8_storage_view in [false, true] {
-                    let flags = texture_image_flags(dimension, usage, bgra8_storage_view);
+                    let flags = texture_image_flags(dimension, 4, 4, 1, usage, bgra8_storage_view);
                     assert_eq!(
                         flags.contains(vk::ImageCreateFlags::TYPE_2D_ARRAY_COMPATIBLE),
                         dimension == HalTextureDimension::D3
@@ -1420,6 +1447,42 @@ mod tests {
                         flags.contains(vk::ImageCreateFlags::MUTABLE_FORMAT),
                         bgra8_storage_view
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cube_compatible_images_require_square_2d_with_at_least_six_layers() {
+        for (dimension, width, height, layers, cube_compatible) in [
+            (HalTextureDimension::D2, 16, 16, 6, true),
+            (HalTextureDimension::D2, 16, 16, 7, true),
+            (HalTextureDimension::D2, 16, 16, 12, true),
+            (HalTextureDimension::D2, 16, 8, 6, false),
+            (HalTextureDimension::D2, 16, 16, 5, false),
+            (HalTextureDimension::D3, 16, 16, 6, false),
+            (HalTextureDimension::D1, 1, 1, 6, false),
+        ] {
+            for usage in [
+                vk::ImageUsageFlags::SAMPLED,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT,
+            ] {
+                for mutable in [false, true] {
+                    let flags =
+                        texture_image_flags(dimension, width, height, layers, usage, mutable);
+                    let mut expected = vk::ImageCreateFlags::empty();
+                    if cube_compatible {
+                        expected |= vk::ImageCreateFlags::CUBE_COMPATIBLE;
+                    }
+                    if dimension == HalTextureDimension::D3
+                        && usage.contains(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+                    {
+                        expected |= vk::ImageCreateFlags::TYPE_2D_ARRAY_COMPATIBLE;
+                    }
+                    if mutable {
+                        expected |= vk::ImageCreateFlags::MUTABLE_FORMAT;
+                    }
+                    assert_eq!(flags, expected, "{dimension:?}, {width}x{height}, {layers} layers, {usage:?}, mutable={mutable}");
                 }
             }
         }
