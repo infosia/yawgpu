@@ -28,7 +28,7 @@ array pointer, a string pointer) gets the same treatment; list each one in the r
 
 R3. **External-texture planes must belong to the creating device (review R04).**
 `yawgpuDeviceCreateExternalTexture` rejects a `plane0` or `plane1` view whose owning
-device is not the creating device (`Arc::ptr_eq` on the FFI view's `_device` and the
+device is not the creating device (`core::Device::same` on the FFI view's `_device` and the
 device's core). The result is a validation error on the creating device and a null
 return, like the existing descriptor errors. Message: `external texture plane0 must
 belong to the same device` (and `plane1`).
@@ -84,3 +84,12 @@ metal --lib` 201/0 plus the 7 ignored query-set tests; `e2e_metal_external_textu
 `e2e_metal_timestamp_query` 4/4, `e2e_metal_depth` 20/20, `e2e_metal_immediates` 3/3,
 `e2e_metal_draw` 3/3. The R2 audit found no other safe `pub` function in `yawgpu::conv`
 that dereferences a caller-supplied raw pointer.
+
+## Phase Review (2026-11-13, fresh-context reviewer over `92e38c7..1855795`)
+
+0 CRITICAL, 0 MAJOR, 2 MINOR.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| m1 | MINOR | R3 compares the outer `Arc<core::Device>` with `Arc::ptr_eq`; every other FFI cross-device check uses `core::Device::same` | R3 now reads "the same device (`core::Device::same`)"; the code change rides with the Block 152 fix handoff |
+| m2 | MINOR | No FFI-level test that `wgpuDeviceCreateQuerySet` passes `OutOfMemory`/`Internal` through | Accepted: the FFI line only forwards `error.kind`; the core test covers the mapping, and the FFI test module has no HAL fault injection |
