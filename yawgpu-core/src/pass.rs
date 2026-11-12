@@ -680,7 +680,34 @@ pub(crate) fn validate_render_draw_state(
     limits: Limits,
 ) -> Result<(), String> {
     let pipeline = validate_render_draw_base_state(state, limits, kind.is_indexed())?;
-    validate_strip_index_format(&pipeline, state, kind.is_indexed())?;
+    validate_render_draw_ranges(&pipeline, (&*state).into(), kind)
+}
+
+/// Borrows the buffer bindings used by render draw range validation.
+#[derive(Clone, Copy)]
+pub(crate) struct DrawBufferBindings<'a> {
+    /// Bound vertex buffers, including their offsets, binding sizes and allocation sizes.
+    pub(crate) vertex_buffers: &'a BTreeMap<u32, BoundVertexBuffer>,
+    /// Bound index buffer, including its format and range.
+    pub(crate) index_buffer: Option<&'a BoundIndexBuffer>,
+}
+
+impl<'a> From<&'a PassEncoderState> for DrawBufferBindings<'a> {
+    fn from(state: &'a PassEncoderState) -> Self {
+        Self {
+            vertex_buffers: &state.vertex_buffers,
+            index_buffer: state.index_buffer.as_ref(),
+        }
+    }
+}
+
+/// Validates strip formats and the ranges available for each render draw kind.
+pub(crate) fn validate_render_draw_ranges(
+    pipeline: &RenderPipeline,
+    bindings: DrawBufferBindings<'_>,
+    kind: RenderDrawKind,
+) -> Result<(), String> {
+    validate_strip_index_format(pipeline, bindings, kind.is_indexed())?;
     match kind {
         RenderDrawKind::Direct {
             vertex_count,
@@ -688,8 +715,8 @@ pub(crate) fn validate_render_draw_state(
             first_vertex,
             first_instance,
         } => validate_vertex_buffer_oob(
-            &pipeline,
-            state,
+            pipeline,
+            bindings,
             Some((first_vertex, vertex_count)),
             first_instance,
             instance_count,
@@ -700,8 +727,8 @@ pub(crate) fn validate_render_draw_state(
             first_index,
             first_instance,
         } => {
-            validate_index_buffer_oob(state, first_index, index_count)?;
-            validate_vertex_buffer_oob(&pipeline, state, None, first_instance, instance_count)
+            validate_index_buffer_oob(bindings, first_index, index_count)?;
+            validate_vertex_buffer_oob(pipeline, bindings, None, first_instance, instance_count)
         }
         RenderDrawKind::Indirect | RenderDrawKind::IndexedIndirect => Ok(()),
     }
@@ -1057,11 +1084,12 @@ pub(crate) fn resolve_buffer_binding_size(
 }
 
 /// Validates strip index format and returns a descriptive error on failure.
-pub(crate) fn validate_strip_index_format(
+pub(crate) fn validate_strip_index_format<'a>(
     pipeline: &RenderPipeline,
-    state: &PassEncoderState,
+    bindings: impl Into<DrawBufferBindings<'a>>,
     indexed: bool,
 ) -> Result<(), String> {
+    let bindings = bindings.into();
     if !indexed {
         return Ok(());
     }
@@ -1075,9 +1103,8 @@ pub(crate) fn validate_strip_index_format(
     let Some(strip_format) = primitive.strip_index_format else {
         return Err("render pass strip indexed draw requires pipeline stripIndexFormat".to_owned());
     };
-    let index_buffer = state
+    let index_buffer = bindings
         .index_buffer
-        .as_ref()
         .ok_or_else(|| "render pass indexed draw requires an index buffer".to_owned())?;
     if index_buffer.format != strip_format {
         return Err(
@@ -1088,13 +1115,14 @@ pub(crate) fn validate_strip_index_format(
 }
 
 /// Validates vertex buffer oob and returns a descriptive error on failure.
-pub(crate) fn validate_vertex_buffer_oob(
+pub(crate) fn validate_vertex_buffer_oob<'a>(
     pipeline: &RenderPipeline,
-    state: &PassEncoderState,
+    bindings: impl Into<DrawBufferBindings<'a>>,
     vertex_draw: Option<(u32, u32)>,
     first_instance: u32,
     instance_count: u32,
 ) -> Result<(), String> {
+    let bindings = bindings.into();
     for (slot, layout) in pipeline.vertex_buffer_layouts().iter().enumerate() {
         if !layout.used {
             continue;
@@ -1129,7 +1157,7 @@ pub(crate) fn validate_vertex_buffer_oob(
             .ok_or_else(|| "render pass vertex buffer required size overflows".to_owned())?;
         let slot = u32::try_from(slot)
             .map_err(|_| "render pipeline vertex buffer slot is too large".to_owned())?;
-        let bound = state.vertex_buffers.get(&slot).ok_or_else(|| {
+        let bound = bindings.vertex_buffers.get(&slot).ok_or_else(|| {
             "render pass draw requires all declared vertex buffers to be set".to_owned()
         })?;
         let required_end = bound
@@ -1148,14 +1176,14 @@ pub(crate) fn validate_vertex_buffer_oob(
 }
 
 /// Validates index buffer oob and returns a descriptive error on failure.
-pub(crate) fn validate_index_buffer_oob(
-    state: &PassEncoderState,
+pub(crate) fn validate_index_buffer_oob<'a>(
+    bindings: impl Into<DrawBufferBindings<'a>>,
     first_index: u32,
     index_count: u32,
 ) -> Result<(), String> {
-    let index_buffer = state
+    let bindings = bindings.into();
+    let index_buffer = bindings
         .index_buffer
-        .as_ref()
         .ok_or_else(|| "render pass indexed draw requires an index buffer".to_owned())?;
     let required_indices = u64::from(first_index) + u64::from(index_count);
     let required_size = required_indices

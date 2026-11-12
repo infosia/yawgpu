@@ -1,6 +1,6 @@
 # Block 154 — Subpass draws run the regular draw-range validation
 
-Status: **PLANNED (2026-11-13)**.
+Status: **S1 landed (2026-11-13)**; Phase Review pending.
 Source: whole-code review at `92e38c7` (`specs/tracking/code-review-2026-11.md`), finding R08.
 Oracle: subpass rendering (`tiled`) has no Dawn counterpart; each rule copies what
 yawgpu's regular render pass already does (`pass.rs` `validate_render_draw_state`, which
@@ -53,3 +53,13 @@ S1: R1–R2 in `yawgpu-core` (`pass.rs`, `subpass.rs`), inline tests under
   without `tiled`.
 - Claude: workspace test; real-GPU `e2e_metal_tiled*` and `e2e_vulkan_tiled*`, and the
   `tiled` examples with `--verify`, to confirm no valid draw is now rejected.
+
+## Verification record
+
+S1: workspace test 1,465/0; `yawgpu-core --features tiled --lib` 805/0, without `tiled`
+731/0; `tiled_subpass_ffi` 8/0; workspace clippy with `yawgpu/tiled` clean. The shared
+helpers take a borrowed `DrawBufferBindings` view (vertex-buffer map + index buffer), built
+from `PassEncoderState` or `SubpassDrawState`. Real GPU on the M2: `e2e_metal_tiled*` 6/6;
+MoltenVK `e2e_vulkan_tiled*` 8/8 under the Khronos layer, 0 VUIDs; `tiled_deferred
+--verify` on Metal and Vulkan and `tiled_msaa --verify` on Vulkan print the expected
+center pixels with 0 VUIDs.

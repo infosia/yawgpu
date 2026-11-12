@@ -856,7 +856,14 @@ fn validate_subpass_draw_state(
     if kind.is_indexed() && state.index_buffer.is_none() {
         return Err("subpass render pass indexed draw requires an index buffer".to_owned());
     }
-    Ok(())
+    validate_render_draw_ranges(
+        pipeline,
+        DrawBufferBindings {
+            vertex_buffers: &state.vertex_buffers,
+            index_buffer: state.index_buffer.as_ref(),
+        },
+        kind,
+    )
 }
 
 #[cfg(feature = "tiled")]
@@ -1721,6 +1728,253 @@ mod tests {
             )
         );
         assert_eq!(draw_error(32), None);
+    }
+
+    #[cfg(feature = "tiled")]
+    mod draw_range_tests {
+        use super::*;
+
+        const VERTEX_RANGE_ERROR: &str =
+            "render pass draw vertex buffer range exceeds the bound buffer";
+        const INDEX_RANGE_ERROR: &str =
+            "render pass indexed draw index buffer range exceeds the bound buffer";
+        const STRIP_FORMAT_ERROR: &str =
+            "render pass index buffer format must match pipeline stripIndexFormat";
+
+        fn draw_pass(
+            step_mode: VertexStepMode,
+            topology: PrimitiveTopology,
+            strip_index_format: Option<IndexFormat>,
+            index_format: IndexFormat,
+        ) -> (Device, CommandEncoder, SubpassRenderPass) {
+            let device = noop_device();
+            let layout =
+                Arc::new(device.create_subpass_pass_layout(valid_two_subpass_deferred_layout()));
+            let module = Arc::new(
+                device.create_shader_module(ShaderModuleSource::Wgsl(
+                    "@vertex fn vs(@location(0) position: vec2f) -> @builtin(position) vec4f {
+                    return vec4f(position, 0.0, 1.0);
+                }
+                @fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }"
+                        .to_owned(),
+                )),
+            );
+            let mut base = render_pipeline_descriptor(module);
+            base.vertex.buffer_count = 1;
+            base.vertex.buffers = vec![VertexBufferLayout {
+                used: true,
+                array_stride: 8,
+                step_mode,
+                attributes: vec![VertexAttribute {
+                    format: VertexFormat::from_raw(0x0000_001D), // Float32x2.
+                    offset: 0,
+                    shader_location: 0,
+                }],
+            }];
+            base.primitive.topology = topology;
+            base.primitive.strip_index_format = strip_index_format;
+            let pipeline = Arc::new(device.create_subpass_render_pipeline(
+                SubpassRenderPipelineDescriptor {
+                    base,
+                    pass_layout: Arc::clone(&layout),
+                    subpass_index: 0,
+                    error: None,
+                },
+            ));
+            assert!(!pipeline.is_error());
+            let encoder = device.create_command_encoder();
+            let (pass, error) =
+                encoder.begin_subpass_render_pass(&device, subpass_descriptor(layout, &device));
+            assert_eq!(error, None);
+            assert!(!pass.is_error());
+            assert_eq!(pass.set_pipeline(pipeline), None);
+            let vertex_buffer = Arc::new(device.create_buffer(BufferDescriptor {
+                usage: BufferUsage::VERTEX,
+                size: 64,
+                mapped_at_creation: false,
+            }));
+            // Three elements fit in the bound range, despite the larger allocation.
+            assert_eq!(
+                pass.set_vertex_buffer(0, Some(vertex_buffer), 16, 24, device.limits()),
+                None
+            );
+            let index_buffer = Arc::new(device.create_buffer(BufferDescriptor {
+                usage: BufferUsage::INDEX,
+                size: 64,
+                mapped_at_creation: false,
+            }));
+            assert_eq!(
+                pass.set_index_buffer(index_buffer, Some(index_format), 8, 12),
+                None
+            );
+            (device, encoder, pass)
+        }
+
+        fn finish_draw(
+            encoder: CommandEncoder,
+            pass: SubpassRenderPass,
+            expected_error: Option<&str>,
+        ) {
+            assert_eq!(
+                pass.inner.draw_state.lock().draws.len(),
+                usize::from(expected_error.is_none())
+            );
+            assert_eq!(pass.next_subpass(), None);
+            assert_eq!(pass.end(), None);
+            let (command, error) = encoder.finish();
+            assert_eq!(error.as_deref(), expected_error);
+            assert_eq!(command.is_error(), expected_error.is_some());
+        }
+
+        #[test]
+        fn direct_vertex_ranges_match_regular_pass_errors() {
+            for (count, first, error) in [
+                (3, 0, None),
+                (2, 1, None),
+                (4, 0, Some(VERTEX_RANGE_ERROR)),
+                (3, 1, Some(VERTEX_RANGE_ERROR)),
+                (1, u32::MAX, Some(VERTEX_RANGE_ERROR)),
+            ] {
+                let (device, encoder, pass) = draw_pass(
+                    VertexStepMode::Vertex,
+                    PrimitiveTopology::TriangleList,
+                    None,
+                    IndexFormat::Uint16,
+                );
+                assert_eq!(pass.draw(count, 1, first, 0, device.limits()), None);
+                finish_draw(encoder, pass, error);
+            }
+        }
+
+        #[test]
+        fn direct_and_indexed_instance_ranges_match_regular_pass_errors() {
+            for indexed in [false, true] {
+                for (count, first, error) in [
+                    (3, 0, None),
+                    (2, 1, None),
+                    (4, 0, Some(VERTEX_RANGE_ERROR)),
+                    (3, 1, Some(VERTEX_RANGE_ERROR)),
+                    (1, u32::MAX, Some(VERTEX_RANGE_ERROR)),
+                ] {
+                    let (device, encoder, pass) = draw_pass(
+                        VertexStepMode::Instance,
+                        PrimitiveTopology::TriangleList,
+                        None,
+                        IndexFormat::Uint16,
+                    );
+                    let immediate_error = if indexed {
+                        pass.draw_indexed(3, count, 0, 0, first, device.limits())
+                    } else {
+                        pass.draw(3, count, 0, first, device.limits())
+                    };
+                    assert_eq!(immediate_error, None);
+                    finish_draw(encoder, pass, error);
+                }
+            }
+        }
+
+        #[test]
+        fn indexed_ranges_match_regular_pass_errors() {
+            for (format, capacity) in [(IndexFormat::Uint16, 6), (IndexFormat::Uint32, 3)] {
+                for (count, first, error) in [
+                    (capacity, 0, None),
+                    (capacity - 1, 1, None),
+                    (capacity + 1, 0, Some(INDEX_RANGE_ERROR)),
+                    (capacity, 1, Some(INDEX_RANGE_ERROR)),
+                    (1, u32::MAX, Some(INDEX_RANGE_ERROR)),
+                ] {
+                    let (device, encoder, pass) = draw_pass(
+                        VertexStepMode::Vertex,
+                        PrimitiveTopology::TriangleList,
+                        None,
+                        format,
+                    );
+                    // Indexed draws cannot validate the vertex-step range from CPU state.
+                    assert_eq!(
+                        pass.draw_indexed(count, 1, first, i32::MAX, 0, device.limits()),
+                        None
+                    );
+                    finish_draw(encoder, pass, error);
+                }
+            }
+        }
+
+        #[test]
+        fn indexed_range_error_precedes_instance_range_error() {
+            let (device, encoder, pass) = draw_pass(
+                VertexStepMode::Instance,
+                PrimitiveTopology::TriangleList,
+                None,
+                IndexFormat::Uint16,
+            );
+            assert_eq!(pass.draw_indexed(7, 4, 0, 0, 0, device.limits()), None);
+            finish_draw(encoder, pass, Some(INDEX_RANGE_ERROR));
+        }
+
+        #[test]
+        fn indexed_strip_formats_match_regular_pass_errors() {
+            for topology in [
+                PrimitiveTopology::LineStrip,
+                PrimitiveTopology::TriangleStrip,
+            ] {
+                for strip_format in [None, Some(IndexFormat::Uint16), Some(IndexFormat::Uint32)] {
+                    for format in [IndexFormat::Uint16, IndexFormat::Uint32] {
+                        let (device, encoder, pass) =
+                            draw_pass(VertexStepMode::Vertex, topology, strip_format, format);
+                        assert_eq!(pass.draw_indexed(3, 1, 0, 0, 0, device.limits()), None);
+                        let error = match strip_format {
+                            None => Some(
+                                "render pass strip indexed draw requires pipeline stripIndexFormat",
+                            ),
+                            Some(strip) if strip != format => Some(STRIP_FORMAT_ERROR),
+                            Some(_) => None,
+                        };
+                        finish_draw(encoder, pass, error);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn indirect_draws_skip_ranges_but_indexed_indirect_checks_strip_format() {
+            for step_mode in [VertexStepMode::Vertex, VertexStepMode::Instance] {
+                for format in [IndexFormat::Uint16, IndexFormat::Uint32] {
+                    let (device, _encoder, pass) = draw_pass(
+                        step_mode,
+                        PrimitiveTopology::TriangleStrip,
+                        Some(IndexFormat::Uint16),
+                        format,
+                    );
+                    let mut state = pass.inner.draw_state.lock();
+                    // No subpass indirect entry point exists yet; exercise both kinds directly.
+                    state.vertex_buffers.get_mut(&0).unwrap().size = 0;
+                    state.index_buffer.as_mut().unwrap().size = 0;
+                    let pipeline = state.render_pipeline.as_ref().unwrap();
+                    assert_eq!(
+                        validate_subpass_draw_state(
+                            pipeline,
+                            &state,
+                            RenderDrawKind::Indirect,
+                            device.limits(),
+                        ),
+                        Ok(())
+                    );
+                    assert_eq!(
+                        validate_subpass_draw_state(
+                            pipeline,
+                            &state,
+                            RenderDrawKind::IndexedIndirect,
+                            device.limits(),
+                        ),
+                        if format == IndexFormat::Uint16 {
+                            Ok(())
+                        } else {
+                            Err(STRIP_FORMAT_ERROR.to_owned())
+                        }
+                    );
+                }
+            }
+        }
     }
 
     #[test]
