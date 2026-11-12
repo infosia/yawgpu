@@ -1,0 +1,85 @@
+# Block 153 — Transactional queued-write initialization; surface textures expire
+
+Status: **PLANNED (2026-11-13)**.
+Source: whole-code review at `92e38c7` (`REPORT-review.md`), findings R06 and R05.
+Oracle: pinned Dawn — `native/SwapChain.cpp` (`SwapChainBase::Present` checks that the
+backend destroyed the current texture, line 155; the destructor checks the same, line 88);
+yawgpu Block 104 R5 for initialization-mark ordering.
+
+## Problem
+
+R06: `Queue::write_texture` (both the repack and the fast path, `queue.rs` ~698 and ~756)
+commits its `InitOverlay` immediately, before the copy reaches the GPU. If the HAL submit
+that later carries the pending batch fails (`flush_pending_writes_locked` →
+`finish_pending_submission` error), the batch is dropped but the destination stays
+marked initialized, so a later use skips its lazy zero clear. Command-buffer submission
+already commits only after a successful HAL submit (Block 104 R5).
+
+R05: present, configure, and unconfigure only clear the surface's cached
+`current_texture` (`ffi/surface.rs`). An application-held `WGPUTexture`, a view of it,
+or a command buffer recorded against it keeps passing the destroyed-resource checks, so
+a later submit can still use a swapchain image that was presented or belongs to an old
+swapchain.
+
+## Rules
+
+R1. **Queued-write marks are pending until their submit succeeds (R06).** The pending
+write batch owns an `InitOverlay` of its own. `write_texture` plans its clears against the
+committed state *plus* that pending overlay (so a second queued write to the same
+subresource does not clear the first one's data — the F-138 inverse bug) and records its
+marks into the pending overlay, not the texture. The pending overlay is taken together
+with the batch's copies and chunks (`take_submission`) and:
+- on a standalone flush (`flush_pending_writes_locked`, the empty-`submit` path, the
+  validation-error and lowering-error paths in `submit`) it is committed only when the
+  HAL submit of that batch succeeds, and dropped otherwise;
+- on a command-buffer `submit`, it seeds the walk's `init_overlay`, because the queued
+  copies run first in the same HAL submit; the walk's overlay is then committed or
+  dropped as today.
+
+A dropped overlay leaves the textures' committed state unchanged, so their next use
+lazy-clears. The submission lock ordering is unchanged.
+
+R2. **Readers of initialization state.** The coding agent lists every reader of a
+texture's committed initialization state and confirms that, between a queued write and
+its flush, each one either consults the pending overlay or cannot observe the
+difference (report it). Any reader that would now see a stale "uninitialized" for a
+subresource with a queued write must consult the pending overlay.
+
+R3. **The acquired surface texture expires (R05).** The core texture backing the
+surface's current texture is destroyed (`Texture::destroy`) when its acquisition ends:
+- after `wgpuSurfacePresent` hands it to the HAL present (success or failure);
+- in `wgpuSurfaceConfigure` and `wgpuSurfaceUnconfigure`, before the old swapchain
+  state is replaced;
+- when the surface is dropped while a texture is acquired.
+
+Pending queue writes are flushed before present (as today); work already submitted keeps
+its HAL references (Block 143), so destroying the core texture never frees an image the
+GPU still uses. After expiry, using the old texture, a view of it, or a command buffer
+that references it fails with the ordinary destroyed-texture validation errors. Calling
+`wgpuTextureDestroy` on it remains allowed and is a no-op.
+
+R4. **No HAL-level release from R3.** Taking the core texture's HAL handle on destroy
+must not destroy or recycle the swapchain image itself — the HAL surface still owns it.
+The agent confirms this for Metal (drawable), Vulkan (swapchain image), and GLES, and
+reports how each backend's surface texture handle behaves on drop.
+
+## Slices
+
+S1: R1–R2 (`yawgpu-core/src/queue.rs`), with inline tests using the existing
+`fail_next_pending_submit` hook: a failed pending flush leaves the destination
+uninitialized (the next read-back path plans a clear); two queued writes to one
+subresource plan no clear between them; a queued write followed by a command-buffer
+submit that reads the texture plans no clear; a successful flush commits the marks.
+
+S2: R3–R4 (`yawgpu/src/ffi/surface.rs`, `instance.rs` drop path), with inline FFI tests on
+Noop where a surface texture can be simulated, otherwise a core-level test plus the
+real-GPU checks below.
+
+## Verification
+
+- Agent gates: `cargo test -p yawgpu-core --lib`, `cargo test -p yawgpu --lib`, clippy
+  workspace (+ `--features metal`, `--features vulkan` for S2).
+- Claude: workspace test; for S1 `e2e_metal_*` / `e2e_vulkan_*` lazy-init suites
+  (F-138 regression); for S2 a new real-GPU e2e test on Metal and MoltenVK: acquire,
+  keep a view, present, then submit a pass that uses the view → validation error, no
+  backend error; and every windowed C example with `--verify`.
