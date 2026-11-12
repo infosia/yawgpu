@@ -1,6 +1,6 @@
 # Block 152 — FFI receivers survive a reentrant release in the error callback
 
-Status: **S1 landed (2026-11-13)**; Phase Review pending.
+Status: **S1 landed (2026-11-13)**; Phase Review done; S2 (m1) pending.
 Source: whole-code review at `92e38c7` (`specs/tracking/code-review-2026-11.md`), finding R01. It extends Block
 113 M1 / audit rule C11, which covered device receivers only.
 
@@ -37,9 +37,20 @@ per getter). Pass-encoder recording calls that only record an error into the enc
 R3. **Hot paths stay cheap.** Changing a draw/dispatch/set-state recording call that does
 not dispatch is out of scope.
 
+R4. **No borrowed `&core::Device` is a live argument across the callback.** A dispatch
+from a borrowed wrapper passes a `&core::Device` that points into an allocation the
+wrapper owns; if the callback frees the wrapper, that reference is still a protected
+function argument (formal Stacked/Tree Borrows UB, though nothing reads it). The FFI
+dispatch helpers (`dispatch_optional_error`, `dispatch_optional_device_error`, and every
+direct `<wrapper>.device.dispatch_error(..)` reached from a borrowed wrapper) clone the
+`Arc<core::Device>` on the error branch only and dispatch through that owned clone. The
+success path stays free of reference-count traffic (R3).
+
 ## Slices
 
 S1: R1–R3 with tests.
+
+S2 (Phase Review m1): R4.
 
 ## Verification
 
@@ -64,3 +75,15 @@ The R2 audit changed 22 of 175 production `borrow_handle` sites (texture view, 1
 command-encoder entry points, bundle finish, both `GetBindGroupLayout`s,
 `CreateBindGroup`'s layout, `BeginSubpassRenderPass`, `ProcessEvents`, `WaitAny`); the
 rest either cannot dispatch or dispatch only as their last wrapper access.
+
+## Phase Review (2026-11-13, fresh-context reviewer over `16965af`)
+
+0 CRITICAL, 0 MAJOR, 2 MINOR. The reviewer's independent audit of every production
+`borrow_handle` found no wrapper read after a possible dispatch, and confirmed the nine
+tests fail without the fix (the callback releases only while the entry point holds a
+reference).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| m1 | MINOR | Borrowed-receiver dispatch passes a `&core::Device` into the wrapper's allocation; freed during the callback while still a protected argument | S2: R4 |
+| m2 | MINOR | Encoder debug-marker and copy entry points were retained although their dispatch is the last wrapper access | Accepted: retained defensively (not hot paths); the ledger above counts them among the 22 |
