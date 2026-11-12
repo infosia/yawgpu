@@ -71,6 +71,8 @@ uninitialized (the next read-back path plans a clear); two queued writes to one
 subresource plan no clear between them; a queued write followed by a command-buffer
 submit that reads the texture plans no clear; a successful flush commits the marks.
 
+S3 (Phase Review S1 fixes): A-m1, A-m2, A-m3.
+
 S2: R3–R4 (`yawgpu/src/ffi/surface.rs`, `instance.rs` drop path), with inline FFI tests on
 Noop where a surface texture can be simulated, otherwise a core-level test plus the
 real-GPU checks below.
@@ -96,3 +98,17 @@ init state outside `texture.rs`; every planning helper (copy, bound view, render
 subpass attachment, external-texture plane) reads through the pending or combined overlay.
 A failed lowering walk flushes the queued writes with their own overlay only, so its
 aborted discard marks never commit.
+
+## Phase Review S1 (2026-11-13, fresh-context reviewer over `d0839ee`)
+
+0 CRITICAL, 0 MAJOR, 3 MINOR. The reviewer traced every flush path (command-buffer,
+validation-error, duplicate, lowering-error, empty, threshold, map, work-done, present,
+device loss, queue drop) and confirmed marks commit only with a successful HAL submit,
+a later `Discard` in the same submit wins, the lock order is unchanged, and the overlay's
+texture handles form no cycle.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| A-m1 | MINOR | No injected HAL failure on the empty-`submit` path or the command-buffer HAL submit while queued marks are pending | Fix slice S3: the `fail_next_pending_submit` hook also covers `submit(&[])` and the command-buffer submit; one failure test per path |
+| A-m2 | MINOR | `queued_init_overlay.clone()` on every command-buffer submit, for the rare lowering-error path | S3: skip the clone when the queued overlay is empty |
+| A-m3 | MINOR | Vague fast-path comment ("Share pending initialization with the repack path above.") | S3: state the rule (earlier queued marks suppress clears until submission) |

@@ -1,6 +1,6 @@
 # Block 154 — Subpass draws run the regular draw-range validation
 
-Status: **S1 landed (2026-11-13)**; Phase Review pending.
+Status: **S1 landed (2026-11-13)**; Phase Review done; S2 (m1) pending.
 Source: whole-code review at `92e38c7` (`specs/tracking/code-review-2026-11.md`), finding R08.
 Oracle: subpass rendering (`tiled`) has no Dawn counterpart; each rule copies what
 yawgpu's regular render pass already does (`pass.rs` `validate_render_draw_state`, which
@@ -63,3 +63,13 @@ from `PassEncoderState` or `SubpassDrawState`. Real GPU on the M2: `e2e_metal_ti
 MoltenVK `e2e_vulkan_tiled*` 8/8 under the Khronos layer, 0 VUIDs; `tiled_deferred
 --verify` on Metal and Vulkan and `tiled_msaa --verify` on Vulkan print the expected
 center pixels with 0 VUIDs.
+
+## Phase Review (2026-11-13, fresh-context reviewer over `e9d97c0`)
+
+0 CRITICAL, 0 MAJOR, 2 MINOR. Message and precedence parity, overflow handling, step
+modes, and indirect handling confirmed.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| m1 | MINOR | The helpers take `impl Into<DrawBufferBindings>` only so two old `pass.rs` tests can pass `&state` | S2: take `DrawBufferBindings<'_>`; the two tests call `(&state).into()` |
+| m2 | MINOR | Subpass indirect draws are tested only through `validate_subpass_draw_state`: there is no subpass indirect entry point | Accepted; an indirect entry point, if added, must add an end-to-end draw test |
