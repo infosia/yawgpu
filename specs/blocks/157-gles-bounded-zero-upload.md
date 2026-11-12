@@ -1,6 +1,6 @@
 # Block 157 — GLES lazy clears upload zeros from a bounded staging block
 
-Status: **S1 landed (2026-11-13)**; Phase Review pending; Linux GLES hardware run owed. Tier 2 (GLES), ranked last as the backlog directs.
+Status: **COMPLETE (2026-11-13)** apart from the Linux GLES hardware run (owed). Phase Review: 0 CRITICAL, 0 MAJOR, 1 MINOR. Tier 2 (GLES), ranked last as the backlog directs.
 Source: whole-code review at `92e38c7` (`specs/tracking/code-review-2026-11.md`), finding R16.
 
 ## Problem
@@ -46,3 +46,13 @@ clippy clean with `gles`. Uploads are per layer, `(x, y, width, height)` tiles f
 plan, with a single block of `min(subresource bytes, 4 MiB)` allocated through
 `try_reserve_exact`. The `e2e_gles_*` lazy-init suites on the Linux NVIDIA EGL host are
 owed to the next Linux session.
+
+## Phase Review (2026-11-13, fresh-context reviewer over `3328d0d`)
+
+0 CRITICAL, 0 MAJOR. The plan covers every texel exactly once, `step_by` never gets 0,
+the `as i32` casts follow the `i32_from_u32` checks, each tile fits the block, and every
+error exit precedes the GL state changes.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| m1 | MINOR | No GL error check after the tile loop (a failed tile returns `Ok`, as the single upload did) | Fixed with Block 156 S3 (R5) |

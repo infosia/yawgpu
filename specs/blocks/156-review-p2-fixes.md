@@ -1,6 +1,6 @@
 # Block 156 — Whole-code review 2026-11-13: P2 library fixes
 
-Status: **S1 and S2 landed (2026-11-13)**; Phase Review pending.
+Status: **S1 and S2 landed (2026-11-13)**; Phase Review: 0 CRITICAL, 1 MAJOR, 3 MINOR; S3 fixes pending.
 Source: whole-code review at `92e38c7` (`specs/tracking/code-review-2026-11.md`), findings R13, R14, and R11.
 (R10 and R12 went into Block 151; R15, X01, and X02 are Claude-owned test and example
 fixes; R16, GLES, is Block 157.)
@@ -36,9 +36,24 @@ and keeps its deferred path only where GL objects must be created on the context
 agent reports it). `Device::create_sampler_with_error` maps the error through
 `dispatch_hal_allocation_error` and returns an error sampler.
 
+R4. **GLES executes the newly exposed baseline `rg11b10ufloat` (Phase Review M1).** R1
+lets a GLES device without `EXT_color_buffer_float` create a sampled/copyable
+`rg11b10ufloat` texture. Its lazy clear and texture→buffer readback must not need a
+color-renderable framebuffer: the format joins `texture_to_buffer_compute_encoding` (as
+`rgb9e5ufloat` does), so the clear takes the zero-upload path (`R11F_G11F_B10F` / `RGB` /
+`UNSIGNED_INT_10F_11F_11F_REV`, all-zero bits = 0.0) and readback packs the texel in the
+compute shader. The FBO clear path also deletes its framebuffer when attaching a layer
+fails (it returned with `?` and leaked it).
+
+R5. **Phase Review MINORs.** (m1) Blendable is part of the `Rg11b10UfloatRenderable`
+upgrade, not the baseline (Dawn `Format.cpp` baseline `Cap::None`). (m2) The GLES sampler
+pre-creation error drain is capped (16 iterations). (m3) `map_sampler_error` documents why
+`VK_ERROR_TOO_MANY_OBJECTS` is `Internal`. Block 157 m1: `submit_texture_clear_zero_upload`
+checks `glGetError` once after the upload loop and returns a `HalError` on failure.
+
 ## Slices
 
-S1: R1–R2. S2: R3.
+S1: R1–R2. S2: R3. S3 (Phase Review fixes): R4, R5.
 
 ## Verification
 
@@ -67,3 +82,15 @@ source of every VUID). R2 audit: no production caller of `submit_empty` relied o
 wait. R3 (GLES): EGL and WGL run sampler creation synchronously on the current context,
 so the deferred error path was removed entirely; `GL_OUT_OF_MEMORY` maps to
 `OutOfMemory`, other GL errors to `Internal`.
+
+## Phase Review (2026-11-13, fresh-context reviewer over `f4b59a3`)
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| M1 | MAJOR | R1 exposes baseline `rg11b10ufloat` on GLES without `EXT_color_buffer_float`, where its lazy clear (FBO path) and readback fail | S3: R4 |
+| m1 | MINOR | Baseline is blendable; Dawn grants blendable only with the renderable feature | S3: R5 |
+| m2 | MINOR | Unbounded GLES error-drain loop before sampler creation | S3: R5 |
+| m3 | MINOR | `VK_ERROR_TOO_MANY_OBJECTS` maps to `Internal` without a comment | S3: R5 |
+
+R2 (no production caller relied on the empty-submit wait) and R3 (no leaked native
+samplers, error sampler semantics) were confirmed.
