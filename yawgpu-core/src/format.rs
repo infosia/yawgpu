@@ -552,7 +552,7 @@ impl TextureFormat {
                 .blendable()
                 .renderable()
                 .multisample(),
-            TextureFormat::RG11B10_UFLOAT => FormatCaps::float_color(4, 3).blendable(),
+            TextureFormat::RG11B10_UFLOAT => FormatCaps::float_color(4, 3),
             TextureFormat::RGB9E5_UFLOAT => FormatCaps::float_color(4, 3).blendable(),
             TextureFormat::RG32_FLOAT => FormatCaps::float_color(8, 2).renderable().storage(),
             TextureFormat::RG32_UINT => FormatCaps::uint_color(8, 2).renderable().storage(),
@@ -768,6 +768,7 @@ impl TextureFormat {
         if self.0 == TextureFormat::RG11B10_UFLOAT
             && features.contains(&Feature::Rg11b10UfloatRenderable)
         {
+            caps.is_blendable = true;
             caps.renderable = true;
             caps.multisample_capable = true;
         }
@@ -1361,7 +1362,7 @@ mod tests {
         assert_eq!(baseline.color_components, 3);
         assert_eq!(baseline.texel_block_size, 4);
         assert!(baseline.filterable);
-        assert!(baseline.is_blendable);
+        assert!(!baseline.is_blendable);
         assert!(!baseline.renderable);
         assert!(!baseline.multisample_capable);
         assert!(!baseline.storage_capable);
@@ -1369,6 +1370,7 @@ mod tests {
         let renderable = format
             .caps(&[Feature::Rg11b10UfloatRenderable].into_iter().collect())
             .unwrap();
+        assert!(renderable.is_blendable);
         assert!(renderable.renderable);
         assert!(renderable.multisample_capable);
         assert!(!renderable.storage_capable);
@@ -1379,6 +1381,7 @@ mod tests {
         assert!(storage.storage_capable);
         assert!(storage.storage_read_only_capable);
         assert!(!storage.read_write_storage_capable);
+        assert!(!storage.is_blendable);
         assert!(!storage.renderable);
         assert!(!storage.multisample_capable);
     }

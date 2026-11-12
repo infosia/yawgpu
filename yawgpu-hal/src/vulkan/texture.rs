@@ -502,6 +502,8 @@ fn map_sampler_error(error: vk::Result) -> HalError {
                 resource: "sampler",
             }
         }
+        // VK_ERROR_TOO_MANY_OBJECTS reports the sampler object limit, not a
+        // memory allocation failure, so it maps to Internal with other errors.
         _ => texture_error("sampler creation failed"),
     }
 }

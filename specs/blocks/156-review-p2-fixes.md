@@ -1,6 +1,6 @@
 # Block 156 — Whole-code review 2026-11-13: P2 library fixes
 
-Status: **S1 and S2 landed (2026-11-13)**; Phase Review: 0 CRITICAL, 1 MAJOR, 3 MINOR; S3 fixes pending.
+Status: **COMPLETE (2026-11-13)** apart from the Linux GLES hardware run of S3 (owed). Phase Review: 0 CRITICAL, 1 MAJOR (fixed in S3), 3 MINOR (fixed in S3).
 Source: whole-code review at `92e38c7` (`specs/tracking/code-review-2026-11.md`), findings R13, R14, and R11.
 (R10 and R12 went into Block 151; R15, X01, and X02 are Claude-owned test and example
 fixes; R16, GLES, is Block 157.)
@@ -94,3 +94,13 @@ so the deferred error path was removed entirely; `GL_OUT_OF_MEMORY` maps to
 
 R2 (no production caller relied on the empty-submit wait) and R3 (no leaked native
 samplers, error sampler semantics) were confirmed.
+
+S3: `rg11b10ufloat` has a GLES compute encoding (R11G11B10 bit packing in GLSL, checked
+exhaustively over finite channel values; the three generated shader variants pass
+`glslangValidator`), so its lazy clear takes the zero-upload path and its readback the
+compute path; the FBO clear deletes its framebuffer on an attach failure; blendable moved
+into the renderable upgrade; the sampler error drain is capped at 16; the zero upload
+checks `glGetError` after its loop. `yawgpu-core --lib` 737/0; `yawgpu-hal --features gles
+--lib` 273/0 (hardware bodies skip without libEGL); Metal HAL incl. ignored 267/0. The new
+GLES hardware test `submit_copies_rg11b10_clears_and_reads_back_via_compute` is owed to
+the Linux EGL host.

@@ -35,6 +35,7 @@ pub(super) enum TextureToBufferComputeEncoding {
     Rg16Snorm,
     Rgba16Unorm,
     Rgba16Snorm,
+    Rg11b10Ufloat,
     Rgb9e5Ufloat,
     Depth16Unorm,
     Depth24Plus,
@@ -49,6 +50,7 @@ impl TextureToBufferComputeEncoding {
             Self::Rgba8Snorm
             | Self::Rg16Unorm
             | Self::Rg16Snorm
+            | Self::Rg11b10Ufloat
             | Self::Rgb9e5Ufloat
             | Self::Depth24Plus
             | Self::Depth32Float => 4,
@@ -95,6 +97,10 @@ impl TextureToBufferComputeEncoding {
                 "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
                  writeU32(base, packSnorm2x16(value.rg));\n\
                  writeU32(base + 4u, packSnorm2x16(value.ba));"
+            }
+            Self::Rg11b10Ufloat => {
+                "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\
+                 writeU32(base, packRg11b10(value.rgb));"
             }
             Self::Rgb9e5Ufloat => {
                 "vec4 value = texelFetch(u_texture, texelCoord(gid), u_mip);\n\

@@ -3255,7 +3255,12 @@ fn submit_texture_clear(gl: &glow::Context, clear: &HalTextureClear) -> Result<(
 
         let mut result = Ok(());
         for layer in layers {
-            attach_texture_clear_layer(gl, meta, raw_texture, clear.mip_level, layer)?;
+            if let Err(error) =
+                attach_texture_clear_layer(gl, meta, raw_texture, clear.mip_level, layer)
+            {
+                result = Err(error);
+                break;
+            }
             if gl.check_framebuffer_status(glow::DRAW_FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
                 result = Err(HalError::BufferOperationFailed {
                     backend: BACKEND,
@@ -3424,8 +3429,21 @@ fn submit_texture_clear_zero_upload(
                 );
             }
         }
+        let error = gl.get_error();
         gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
         gl.bind_texture(meta.target, None);
+        if error == glow::OUT_OF_MEMORY {
+            return Err(HalError::OutOfMemory {
+                backend: BACKEND,
+                resource: "texture clear zero upload",
+            });
+        }
+        if error != glow::NO_ERROR {
+            return Err(HalError::BufferOperationFailed {
+                backend: BACKEND,
+                message: "GLES texture clear zero upload failed",
+            });
+        }
     }
     Ok(())
 }
@@ -3850,6 +3868,9 @@ fn texture_to_buffer_compute_encoding(
         (crate::HalTextureFormat::Rgba16Snorm, HalTextureAspect::All) => {
             Some(TextureToBufferComputeEncoding::Rgba16Snorm)
         }
+        (crate::HalTextureFormat::Rg11b10Ufloat, HalTextureAspect::All) => {
+            Some(TextureToBufferComputeEncoding::Rg11b10Ufloat)
+        }
         (crate::HalTextureFormat::Rgb9e5Ufloat, HalTextureAspect::All) => {
             Some(TextureToBufferComputeEncoding::Rgb9e5Ufloat)
         }
@@ -4105,10 +4126,9 @@ fn submit_texture_to_buffer_compute(
     }
 }
 
-fn create_texture_to_buffer_compute_program(
-    gl: &glow::Context,
+fn texture_to_buffer_compute_source(
     key: TextureToBufferComputeProgramKey,
-) -> Result<TextureToBufferComputeProgram, HalError> {
+) -> Result<String, HalError> {
     let target = key.target;
     let encoding = key.encoding;
     let sampler_type = match target {
@@ -4151,6 +4171,23 @@ fn create_texture_to_buffer_compute_program(
          uniform uvec3 u_extent;\n\
          layout(std430, binding = 0) buffer Readback {{ coherent uint data[]; }};\n\
          uint packUnorm16(float value) {{ return uint(round(clamp(value, 0.0, 1.0) * 65535.0)); }}\n\
+         // texelFetch returns an already quantized unsigned 11/10-bit float.\n\
+         // All finite values are exact in float32; no rounding is needed.\n\
+         uint packUfloat(float value, uint mantissaBits) {{\n\
+             uint bits = floatBitsToUint(value);\n\
+             uint exponent = (bits >> 23u) & 255u;\n\
+             uint mantissa = bits & 0x7fffffu;\n\
+             if (exponent == 255u) {{\n\
+                 return (31u << mantissaBits) | (mantissa == 0u ? 0u : 1u);\n\
+             }}\n\
+             if (exponent < 113u) {{\n\
+                 return uint(value * float(1u << (14u + mantissaBits)));\n\
+             }}\n\
+             return ((exponent - 112u) << mantissaBits) | (mantissa >> (23u - mantissaBits));\n\
+         }}\n\
+         uint packRg11b10(vec3 value) {{\n\
+             return packUfloat(value.r, 6u) | (packUfloat(value.g, 6u) << 11u) | (packUfloat(value.b, 5u) << 22u);\n\
+         }}\n\
          uint packRgb9e5(vec3 value) {{\n\
              vec3 color = clamp(value, vec3(0.0), vec3(65408.0));\n\
              float maxChannel = max(max(color.r, color.g), color.b);\n\
@@ -4190,7 +4227,14 @@ fn create_texture_to_buffer_compute_program(
         bpp = encoding.bytes_per_pixel(),
         store = encoding.shader_store(),
     );
+    Ok(source)
+}
 
+fn create_texture_to_buffer_compute_program(
+    gl: &glow::Context,
+    key: TextureToBufferComputeProgramKey,
+) -> Result<TextureToBufferComputeProgram, HalError> {
+    let source = texture_to_buffer_compute_source(key)?;
     unsafe {
         let shader = gl.create_shader(glow::COMPUTE_SHADER).map_err(|_| {
             HalError::BufferOperationFailed {
@@ -4538,6 +4582,109 @@ fn u32_from_u64(value: u64, message: &'static str) -> Result<u32, HalError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rg11b10_uses_compute_readback_and_zero_upload_clear() {
+        let encoding = texture_to_buffer_compute_encoding(
+            HalTextureFormat::Rg11b10Ufloat,
+            HalTextureAspect::All,
+        )
+        .expect("baseline rg11b10 must not require a color-renderable framebuffer");
+        assert_eq!(encoding, TextureToBufferComputeEncoding::Rg11b10Ufloat);
+        assert_eq!(encoding.bytes_per_pixel(), 4);
+        for aspect in [HalTextureAspect::DepthOnly, HalTextureAspect::StencilOnly] {
+            assert_eq!(
+                texture_to_buffer_compute_encoding(HalTextureFormat::Rg11b10Ufloat, aspect),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn rg11b10_compute_source_packs_all_texture_targets() {
+        for (target, sampler, coord) in [
+            (glow::TEXTURE_2D, "sampler2D", "ivec2"),
+            (glow::TEXTURE_2D_ARRAY, "sampler2DArray", "ivec3"),
+            (glow::TEXTURE_3D, "sampler3D", "ivec3"),
+        ] {
+            let source = texture_to_buffer_compute_source(TextureToBufferComputeProgramKey {
+                target,
+                encoding: TextureToBufferComputeEncoding::Rg11b10Ufloat,
+            })
+            .unwrap();
+            assert!(source.starts_with("#version 310 es\n"));
+            assert!(source.contains(&format!("uniform {sampler} u_texture;")));
+            assert!(source.contains(&format!("{coord} texelCoord(uvec3 gid)")));
+            assert!(source.contains("texelFetch(u_texture, texelCoord(gid), u_mip)"));
+            assert!(source.contains("uint base = linear * 4u;"));
+            assert!(source.contains("writeU32(base, packRg11b10(value.rgb));"));
+            assert!(source.contains("packUfloat(value.r, 6u)"));
+            assert!(source.contains("packUfloat(value.g, 6u) << 11u"));
+            assert!(source.contains("packUfloat(value.b, 5u) << 22u"));
+        }
+        assert!(
+            texture_to_buffer_compute_source(TextureToBufferComputeProgramKey {
+                target: glow::TEXTURE_CUBE_MAP,
+                encoding: TextureToBufferComputeEncoding::Rg11b10Ufloat,
+            })
+            .is_err()
+        );
+    }
+
+    // CPU equivalent of the GLSL packer, restricted to fetched R11G11B10 values.
+    fn pack_ufloat_reference(value: f32, mantissa_bits: u32) -> u32 {
+        let bits = value.to_bits();
+        let exponent = (bits >> 23) & 255;
+        let mantissa = bits & 0x7fffff;
+        if exponent == 255 {
+            return (31 << mantissa_bits) | u32::from(mantissa != 0);
+        }
+        if exponent < 113 {
+            return (value * (1u32 << (14 + mantissa_bits)) as f32) as u32;
+        }
+        ((exponent - 112) << mantissa_bits) | (mantissa >> (23 - mantissa_bits))
+    }
+
+    fn pack_rg11b10_reference(value: [f32; 3]) -> u32 {
+        pack_ufloat_reference(value[0], 6)
+            | (pack_ufloat_reference(value[1], 6) << 11)
+            | (pack_ufloat_reference(value[2], 5) << 22)
+    }
+
+    #[test]
+    fn rg11b10_packing_preserves_every_finite_channel_and_special_values() {
+        for mantissa_bits in [5, 6] {
+            let scale = 1u32 << mantissa_bits;
+            for encoded in 0..(31 * scale) {
+                let exponent = encoded / scale;
+                let mantissa = encoded % scale;
+                let value = if exponent == 0 {
+                    (mantissa as f32 / scale as f32) * 2.0f32.powi(-14)
+                } else {
+                    (1.0 + mantissa as f32 / scale as f32) * 2.0f32.powi(exponent as i32 - 15)
+                };
+                assert_eq!(pack_ufloat_reference(value, mantissa_bits), encoded);
+            }
+            assert_eq!(pack_ufloat_reference(-0.0, mantissa_bits), 0);
+            assert_eq!(
+                pack_ufloat_reference(f32::INFINITY, mantissa_bits),
+                31 * scale
+            );
+            assert_eq!(
+                pack_ufloat_reference(f32::NAN, mantissa_bits),
+                31 * scale + 1
+            );
+        }
+        assert_eq!(pack_rg11b10_reference([0.0; 3]), 0);
+        assert_eq!(pack_rg11b10_reference([1.0, 0.0, 0.0]), 0x0000_03c0);
+        assert_eq!(pack_rg11b10_reference([0.0, 1.0, 0.0]), 0x001e_0000);
+        assert_eq!(pack_rg11b10_reference([0.0, 0.0, 1.0]), 0x7800_0000);
+        assert_eq!(
+            pack_rg11b10_reference([65024.0, 65024.0, 64512.0]),
+            0xf7fd_ffbf
+        );
+        assert_eq!(pack_rg11b10_reference([f32::INFINITY; 3]), 0xf83e_07c0);
+    }
 
     #[test]
     fn zero_upload_plan_fits_one_upload() {
@@ -6578,6 +6725,11 @@ mod tests {
                         bytes.extend_from_slice(&values[index].to_ne_bytes());
                     }
                 }
+                crate::HalTextureFormat::Rg11b10Ufloat => {
+                    let base = texel as f32 + 1.0;
+                    let packed = pack_rg11b10_reference([base * 0.125, base * 0.1875, base * 0.25]);
+                    bytes.extend_from_slice(&packed.to_ne_bytes());
+                }
                 crate::HalTextureFormat::Rgb9e5Ufloat => {
                     let base = texel as f32 + 1.0;
                     let packed = pack_rgb9e5_reference([base * 0.125, base * 0.1875, base * 0.25]);
@@ -8499,6 +8651,38 @@ mod tests {
     }
 
     #[test]
+    fn submit_copies_rg11b10_clears_and_reads_back_via_compute() {
+        let Some(device) = gles_device_or_skip("GLES rg11b10 clear and compute readback") else {
+            return;
+        };
+        let format = HalTextureFormat::Rg11b10Ufloat;
+        let texture = byte_copy_texture_2d(&device, format, 4, 1);
+        // Zero, minimum subnormals, independent channels, and maximum finite values.
+        let words = [0u32, 1 | (1 << 11) | (1 << 22), 0x7800_03c0, 0xf7fd_ffbf];
+        let expected: Vec<u8> = words.into_iter().flat_map(u32::to_ne_bytes).collect();
+        upload_byte_region(&device, &texture, format, 4, 4, 1, &expected);
+        assert_eq!(
+            read_back_byte_region(&device, &texture, format, 4, 4, 1),
+            expected
+        );
+        device
+            .queue()
+            .submit_copies(&[HalCopy::ClearTexture(HalTextureClear {
+                texture: HalTexture::Gles(texture.clone()),
+                format,
+                aspect: HalTextureAspect::All,
+                mip_level: 0,
+                base_array_layer: 0,
+                array_layer_count: 1,
+            })])
+            .expect("rg11b10 clear must succeed without a renderable framebuffer");
+        assert_eq!(
+            read_back_byte_region(&device, &texture, format, 4, 4, 1),
+            vec![0; 16]
+        );
+    }
+
+    #[test]
     fn submit_copies_r8snorm_reads_back_via_compute_fallback() {
         let Some(device) = gles_device_or_skip("GLES R8Snorm compute T2B fallback test") else {
             return;
@@ -8659,6 +8843,11 @@ mod tests {
             ByteMatrixFormat {
                 format: crate::HalTextureFormat::Rg16Snorm,
                 name: "rg16snorm",
+                bytes_per_pixel: 4,
+            },
+            ByteMatrixFormat {
+                format: crate::HalTextureFormat::Rg11b10Ufloat,
+                name: "rg11b10ufloat",
                 bytes_per_pixel: 4,
             },
             ByteMatrixFormat {

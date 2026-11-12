@@ -90,7 +90,12 @@ fn allocate_sampler(
     device
         .with_current_context(|gl| unsafe {
             // Clear preceding GL error flags so creation errors belong to this sampler.
-            while gl.get_error() != glow::NO_ERROR {}
+            // Bound the drain even if a lost context keeps reporting errors.
+            for _ in 0..16 {
+                if gl.get_error() == glow::NO_ERROR {
+                    break;
+                }
+            }
             let sampler = gl
                 .create_sampler()
                 .map_err(|_| sampler_creation_error(gl.get_error()))?;
