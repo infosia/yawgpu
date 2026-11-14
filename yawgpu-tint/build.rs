@@ -10,6 +10,7 @@
 //! as a pinned submodule and make the Tint build unconditional.
 
 use std::env;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -22,7 +23,8 @@ mod build_probe;
 
 use build_probe::{
     android_abi_for_arch, apple_deployment_target_var, dawn_checkout_usable, dawn_probe_paths,
-    select_apple_deployment_target,
+    native_build_key, native_key_entries, select_apple_deployment_target, shared_native_dir,
+    NativeBuildDefines,
 };
 
 fn main() {
@@ -77,13 +79,39 @@ fn main() {
     let mut cfg = cmake::Config::new("shim");
     cfg.define("YAWGPU_DAWN_DIR", &dawn_dir)
         .build_target("tint_shim");
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
-        configure_android_cmake(&mut cfg);
-    }
-    configure_apple_cmake(&mut cfg);
+    let mut defines = if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
+        configure_android_cmake(&mut cfg)
+    } else {
+        NativeBuildDefines::default()
+    };
+    defines.apple_deployment_target = configure_apple_cmake(&mut cfg);
+    let environment = env::vars_os()
+        .filter_map(|(name, value)| name.into_string().ok().map(|name| (name, value)))
+        .collect();
+    let key = native_build_key(&native_key_entries(&environment, &dawn_dir, &defines));
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is unset"));
+    let native_dir = shared_native_dir(&out_dir, &key)
+        .unwrap_or_else(|| panic!("OUT_DIR is too shallow: {}", out_dir.display()));
+    let lock_path = native_dir.with_extension("lock");
+    let native_lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .unwrap_or_else(|error| {
+            panic!(
+                "Cannot open native build lock {}: {error}",
+                lock_path.display()
+            )
+        });
+    native_lock.lock().unwrap_or_else(|error| {
+        panic!("Cannot lock native build {}: {error}", lock_path.display())
+    });
+    cfg.out_dir(&native_dir);
     let dst = cfg.build();
 
-    // The cmake crate places the configured build tree under `<OUT_DIR>/build`.
+    // The cmake crate places the configured tree under `<native_dir>/build`.
     let build_dir = dst.join("build");
     println!("cargo:rustc-link-search=native={}", build_dir.display());
     println!("cargo:rustc-link-lib=dylib=tint_shim");
@@ -123,23 +151,22 @@ fn main() {
         copy_runtime_shim(&build_dir);
     }
     println!("cargo:rustc-cfg=have_tint");
+    // Keep the exclusive lock through configuration, build, and runtime copies.
+    drop(native_lock);
 }
 
-fn configure_apple_cmake(cfg: &mut cmake::Config) {
-    let Some(variable) = env::var("CARGO_CFG_TARGET_OS")
+fn configure_apple_cmake(cfg: &mut cmake::Config) -> Option<String> {
+    let variable = env::var("CARGO_CFG_TARGET_OS")
         .ok()
         .as_deref()
-        .and_then(apple_deployment_target_var)
-    else {
-        return;
-    };
+        .and_then(apple_deployment_target_var)?;
 
     let env_value = match env::var(variable) {
         Ok(value) => Some(value),
         Err(env::VarError::NotPresent) => None,
         Err(error) => {
             println!("cargo:warning=Cannot read {variable}: {error}; keeping Tint's default deployment target");
-            return;
+            return None;
         }
     };
     let rustc_output = if env_value.is_none() {
@@ -147,7 +174,7 @@ fn configure_apple_cmake(cfg: &mut cmake::Config) {
             Ok(output) => Some(output),
             Err(error) => {
                 println!("cargo:warning=Cannot query rustc's deployment target: {error}; keeping Tint's default deployment target");
-                return;
+                return None;
             }
         }
     } else {
@@ -157,7 +184,7 @@ fn configure_apple_cmake(cfg: &mut cmake::Config) {
         select_apple_deployment_target(variable, env_value.as_deref(), rustc_output.as_deref())
     else {
         println!("cargo:warning=Cannot parse rustc's deployment target for {variable}; keeping Tint's default deployment target");
-        return;
+        return None;
     };
 
     cfg.define("CMAKE_OSX_DEPLOYMENT_TARGET", version);
@@ -166,6 +193,7 @@ fn configure_apple_cmake(cfg: &mut cmake::Config) {
     // not reach cc's deployment-target flag; the spawned CMake and compilers
     // inherit this value too.
     env::set_var(variable, version);
+    Some(version.to_owned())
 }
 
 fn read_rustc_deployment_target() -> Result<String, String> {
@@ -186,8 +214,9 @@ fn read_rustc_deployment_target() -> Result<String, String> {
     String::from_utf8(output.stdout).map_err(|error| error.to_string())
 }
 
-fn configure_android_cmake(cfg: &mut cmake::Config) {
-    if let Some(toolchain) = android_ndk_toolchain_file() {
+fn configure_android_cmake(cfg: &mut cmake::Config) -> NativeBuildDefines {
+    let toolchain = android_ndk_toolchain_file();
+    if let Some(toolchain) = &toolchain {
         cfg.define("CMAKE_TOOLCHAIN_FILE", toolchain);
     } else {
         println!(
@@ -197,11 +226,11 @@ fn configure_android_cmake(cfg: &mut cmake::Config) {
         );
     }
 
-    match env::var("CARGO_CFG_TARGET_ARCH")
+    let abi = env::var("CARGO_CFG_TARGET_ARCH")
         .ok()
         .as_deref()
-        .and_then(android_abi_for_arch)
-    {
+        .and_then(android_abi_for_arch);
+    match abi {
         Some(abi) => {
             cfg.define("ANDROID_ABI", abi);
         }
@@ -215,7 +244,13 @@ fn configure_android_cmake(cfg: &mut cmake::Config) {
     }
 
     let platform = env::var("ANDROID_PLATFORM").unwrap_or_else(|_| "android-24".into());
-    cfg.define("ANDROID_PLATFORM", platform);
+    cfg.define("ANDROID_PLATFORM", &platform);
+    NativeBuildDefines {
+        apple_deployment_target: None,
+        android_toolchain: toolchain,
+        android_abi: abi,
+        android_platform: Some(platform),
+    }
 }
 
 fn android_ndk_toolchain_file() -> Option<PathBuf> {

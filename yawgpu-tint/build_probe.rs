@@ -8,7 +8,112 @@
 //! Nothing here may depend on a build-dependency (`cmake` is not linkable from a
 //! test target) — `std` only.
 
+use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+
+/// Resolved platform defines, also used to select the shared native build tree.
+#[derive(Default)]
+pub(crate) struct NativeBuildDefines {
+    pub apple_deployment_target: Option<String>,
+    pub android_toolchain: Option<PathBuf>,
+    pub android_abi: Option<&'static str>,
+    pub android_platform: Option<String>,
+}
+
+/// Canonical native configuration only; the environment is an explicit input so
+/// tests never need to mutate process-global state. Unset is `name=`, while set
+/// values use OsStr's quoted/escaped representation (including `name=""` for
+/// empty), preserving non-Unicode values and escaping entry separators.
+pub(crate) fn native_key_entries(
+    environment: &BTreeMap<String, OsString>,
+    dawn_dir: &Path,
+    defines: &NativeBuildDefines,
+) -> Vec<String> {
+    let mut entries = Vec::new();
+    let mut push = |name: &str, value: Option<&OsStr>| {
+        entries.push(match value {
+            Some(value) => format!("{name}={value:?}"),
+            None => format!("{name}="),
+        });
+    };
+    for name in ["TARGET", "HOST", "PROFILE", "OPT_LEVEL", "DEBUG"] {
+        push(name, environment.get(name).map(OsString::as_os_str));
+    }
+    for (name, value) in [
+        ("YAWGPU_DAWN_DIR", Some(dawn_dir.as_os_str())),
+        (
+            "CMAKE_OSX_DEPLOYMENT_TARGET",
+            defines.apple_deployment_target.as_deref().map(OsStr::new),
+        ),
+        (
+            "ANDROID_TOOLCHAIN_FILE",
+            defines.android_toolchain.as_deref().map(Path::as_os_str),
+        ),
+        ("ANDROID_ABI", defines.android_abi.map(OsStr::new)),
+        (
+            "ANDROID_PLATFORM",
+            defines.android_platform.as_deref().map(OsStr::new),
+        ),
+    ] {
+        push(name, value);
+    }
+
+    let target = environment
+        .get("TARGET")
+        .map(|value| value.to_string_lossy())
+        .unwrap_or_default();
+    let kind = if environment.get("HOST") == environment.get("TARGET") {
+        "HOST"
+    } else {
+        "TARGET"
+    };
+    for base in [
+        "CC",
+        "CXX",
+        "CFLAGS",
+        "CXXFLAGS",
+        "CMAKE_GENERATOR",
+        "CMAKE_TOOLCHAIN_FILE",
+    ] {
+        // cc normalizes both '-' and '.', whereas cmake normalizes only '-'.
+        let target_u = if base.starts_with("CMAKE_") {
+            target.replace('-', "_")
+        } else {
+            target.replace(['-', '.'], "_")
+        };
+        for name in [
+            base.to_owned(),
+            format!("{base}_{target}"),
+            format!("{base}_{target_u}"),
+            format!("{kind}_{base}"),
+        ] {
+            push(&name, environment.get(&name).map(OsString::as_os_str));
+        }
+    }
+    entries
+}
+
+/// FNV-1a 64 over the ordered entries, each terminated by a newline.
+pub(crate) fn native_build_key(entries: &[String]) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for entry in entries {
+        for byte in entry.bytes().chain(std::iter::once(b'\n')) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    format!("{hash:016x}")
+}
+
+/// OUT_DIR is `<target>/<profile>/build/<pkg>-<hash>/out`.
+pub(crate) fn shared_native_dir(out_dir: &Path, key: &str) -> Option<PathBuf> {
+    let build_root = out_dir.parent()?.parent()?;
+    if build_root.as_os_str().is_empty() {
+        return None;
+    }
+    Some(build_root.join(format!("yawgpu-tint-native-{key}")))
+}
 
 pub(crate) fn android_abi_for_arch(arch: &str) -> Option<&'static str> {
     match arch {
@@ -80,11 +185,142 @@ pub(crate) fn dawn_checkout_usable(root: &Path) -> bool {
 mod tests {
     use super::{
         android_abi_for_arch, apple_deployment_target_var, dawn_checkout_usable, dawn_probe_paths,
-        parse_apple_deployment_target, select_apple_deployment_target,
+        native_build_key, native_key_entries, parse_apple_deployment_target,
+        select_apple_deployment_target, shared_native_dir, NativeBuildDefines,
     };
+    use std::collections::BTreeMap;
+    use std::ffi::OsString;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn native_environment() -> BTreeMap<String, OsString> {
+        [
+            ("TARGET", "aarch64-linux-android"),
+            ("HOST", "x86_64-unknown-linux-gnu"),
+            ("PROFILE", "debug"),
+            ("OPT_LEVEL", "0"),
+            ("DEBUG", "true"),
+            ("CC", "clang"),
+            ("CXX_aarch64-linux-android", "clang++"),
+            ("CFLAGS_aarch64_linux_android", "-O2"),
+            ("TARGET_CXXFLAGS", ""),
+            ("CMAKE_GENERATOR", "Ninja"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), OsString::from(value)))
+        .collect()
+    }
+
+    #[test]
+    fn native_key_entries_have_a_fixed_order_and_resolved_defines() {
+        let defines = NativeBuildDefines {
+            apple_deployment_target: Some("13.0".into()),
+            android_toolchain: Some(PathBuf::from("ndk/android.toolchain.cmake")),
+            android_abi: Some("arm64-v8a"),
+            android_platform: Some("android-24".into()),
+        };
+        let entries = native_key_entries(&native_environment(), Path::new("dawn"), &defines);
+        assert_eq!(
+            entries,
+            [
+                "TARGET=\"aarch64-linux-android\"",
+                "HOST=\"x86_64-unknown-linux-gnu\"",
+                "PROFILE=\"debug\"",
+                "OPT_LEVEL=\"0\"",
+                "DEBUG=\"true\"",
+                "YAWGPU_DAWN_DIR=\"dawn\"",
+                "CMAKE_OSX_DEPLOYMENT_TARGET=\"13.0\"",
+                "ANDROID_TOOLCHAIN_FILE=\"ndk/android.toolchain.cmake\"",
+                "ANDROID_ABI=\"arm64-v8a\"",
+                "ANDROID_PLATFORM=\"android-24\"",
+                "CC=\"clang\"",
+                "CC_aarch64-linux-android=",
+                "CC_aarch64_linux_android=",
+                "TARGET_CC=",
+                "CXX=",
+                "CXX_aarch64-linux-android=\"clang++\"",
+                "CXX_aarch64_linux_android=",
+                "TARGET_CXX=",
+                "CFLAGS=",
+                "CFLAGS_aarch64-linux-android=",
+                "CFLAGS_aarch64_linux_android=\"-O2\"",
+                "TARGET_CFLAGS=",
+                "CXXFLAGS=",
+                "CXXFLAGS_aarch64-linux-android=",
+                "CXXFLAGS_aarch64_linux_android=",
+                "TARGET_CXXFLAGS=\"\"",
+                "CMAKE_GENERATOR=\"Ninja\"",
+                "CMAKE_GENERATOR_aarch64-linux-android=",
+                "CMAKE_GENERATOR_aarch64_linux_android=",
+                "TARGET_CMAKE_GENERATOR=",
+                "CMAKE_TOOLCHAIN_FILE=",
+                "CMAKE_TOOLCHAIN_FILE_aarch64-linux-android=",
+                "CMAKE_TOOLCHAIN_FILE_aarch64_linux_android=",
+                "TARGET_CMAKE_TOOLCHAIN_FILE=",
+            ]
+        );
+        let key = native_build_key(&entries);
+        for index in 0..entries.len() {
+            let mut changed = entries.clone();
+            changed[index].push('x');
+            assert_ne!(native_build_key(&changed), key, "{}", entries[index]);
+        }
+    }
+
+    #[test]
+    fn native_build_key_is_stable() {
+        let entries = ["TARGET=\"aarch64-apple-darwin\"", "CC=", "CFLAGS=\"\""].map(str::to_owned);
+        assert_eq!(native_build_key(&entries), "0c057d85eab97941");
+    }
+
+    #[test]
+    fn native_key_distinguishes_unset_and_empty_environment_values() {
+        let mut environment = native_environment();
+        let defines = NativeBuildDefines::default();
+        let unset = native_key_entries(&environment, Path::new("dawn"), &defines);
+        environment.insert("CXX".into(), OsString::new());
+        let empty = native_key_entries(&environment, Path::new("dawn"), &defines);
+        assert!(unset.iter().any(|entry| entry == "CXX="));
+        assert!(empty.iter().any(|entry| entry == "CXX=\"\""));
+        assert_ne!(native_build_key(&unset), native_build_key(&empty));
+    }
+
+    #[test]
+    fn native_key_uses_host_variants_for_native_builds_and_ignores_cargo_features() {
+        let mut environment = native_environment();
+        environment.insert("HOST".into(), environment["TARGET"].clone());
+        environment.insert("HOST_CC".into(), "native-cc".into());
+        let defines = NativeBuildDefines::default();
+        let entries = native_key_entries(&environment, Path::new("dawn"), &defines);
+        assert!(entries.iter().any(|entry| entry == "HOST_CC=\"native-cc\""));
+        assert!(!entries.iter().any(|entry| entry.starts_with("TARGET_CC=")));
+        environment.insert("CARGO_FEATURE_TILED".into(), "1".into());
+        environment.insert("OUT_DIR".into(), "another-unit/out".into());
+        environment.insert("YAWGPU_DAWN_DIR".into(), "unused-override".into());
+        assert_eq!(
+            native_key_entries(&environment, Path::new("dawn"), &defines),
+            entries
+        );
+    }
+
+    #[test]
+    fn shared_native_dir_uses_out_dir_grandparent() {
+        for profile in ["debug", "release"] {
+            let root = PathBuf::from("target").join(profile).join("build");
+            assert_eq!(
+                shared_native_dir(&root.join("yawgpu-tint-abc/out"), "0123456789abcdef"),
+                Some(root.join("yawgpu-tint-native-0123456789abcdef"))
+            );
+        }
+    }
+
+    #[test]
+    fn shared_native_dir_rejects_shallow_paths_without_panicking() {
+        for path in ["", "out", "pkg/out", "/", "/out"] {
+            assert_eq!(shared_native_dir(Path::new(path), "key"), None, "{path}");
+        }
+    }
 
     /// A unique directory under the system temp dir, removed on drop so a failing
     /// assertion does not leave the tree behind. `build.rs` has no
