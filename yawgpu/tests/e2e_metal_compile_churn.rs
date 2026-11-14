@@ -17,6 +17,15 @@
 //! this test FAILS (A_median ~= B_median) — that failing run is the recorded
 //! baseline. Iteration counts are tunable via `YAWGPU_CHURN_ITERS_A` /
 //! `YAWGPU_CHURN_ITERS_B`.
+//!
+//! This is a performance probe, not a correctness test: the target requires
+//! the `gpu-diagnostics` feature, so routine real-GPU `--ignored` runs never
+//! build or select it. The deterministic cache-hit coverage is the FFI unit
+//! tests `shader_module_cache_hit_skips_core_compile` and
+//! `compute_pipeline_cache_hit_skips_core_compile`. Run:
+//!
+//!   cargo test -p yawgpu --features metal,gpu-diagnostics \
+//!     --test e2e_metal_compile_churn -- --ignored --nocapture
 
 #![cfg(feature = "metal")]
 

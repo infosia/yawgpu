@@ -97,6 +97,27 @@ in `blocks/91-cts-conformance.md` → "Completion report → Verification".
 **Claude** runs the full `cargo test --workspace` on review directly via its
 own Bash (no polling harness — ~25 s), so it remains the backstop.
 
+## Integration test target gating
+
+`yawgpu/Cargo.toml` declares every backend- or feature-only integration test
+target explicitly with `required-features` (automatic discovery stays on). A
+configuration without the feature neither builds nor launches the target, so
+the default Noop build compiles ~36 test binaries instead of ~131.
+
+- A **new** test file whose crate is `#![cfg(feature = "...")]`-gated gets a
+  matching `[[test]]` entry with the same features. Keep the in-file `cfg`
+  (OS conditions are not expressible in `required-features`).
+- `required-features` is a conjunction: a target that supports *either* of
+  two features cannot be expressed that way. Use a dedicated feature instead.
+- **Diagnostics and performance probes** (`e2e_metal_leak`,
+  `e2e_metal_compile_churn`) require the `gpu-diagnostics` feature, so a
+  routine real-GPU correctness run (`--features metal -- --ignored`) neither
+  builds nor selects them. Run them explicitly with
+  `--features metal,gpu-diagnostics --test <target> -- --ignored --nocapture`.
+- A feature clippy check must enable the features it is meant to cover
+  (for example `--features metal,tiled,shader-passthrough,gpu-diagnostics`),
+  or the gated targets are not compiled.
+
 ## Phase Review (mandatory — "Clean Review Then Fix")
 
 Every phase ends with a **mandatory Phase Review** before it can be marked

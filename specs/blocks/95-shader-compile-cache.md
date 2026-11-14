@@ -254,7 +254,8 @@ Existing cache tests (`shader_module_cache_dedups_live_and_reclaims_released`,
 
 - Noop gates: `cargo test --workspace`, clippy `-D warnings`, feature-gated
   HAL/lib runs (`-p yawgpu-hal --features metal --lib`, gles lib build).
-- Real Metal (M2): `yawgpu/tests/e2e_metal_compile_churn.rs` (#[ignore],
+- Real Metal (M2): `yawgpu/tests/e2e_metal_compile_churn.rs` (#[ignore];
+  requires `--features metal,gpu-diagnostics`,
   canary-shaped — Phase A: one module, N identical auto-layout compute
   pipelines created/released in a loop, timed; Phase B: N unique-constant
   variants). Pre-fix baseline recorded; post-fix expectation: Phase A

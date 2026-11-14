@@ -7,13 +7,15 @@
 //!
 //! Run:
 //!   YAWGPU_LEAK_MODE=cmdsubmit YAWGPU_LEAK_ITERS=20000 \
-//!   /usr/bin/time -l cargo test -p yawgpu --features metal \
+//!   /usr/bin/time -l cargo test -p yawgpu --features metal,gpu-diagnostics \
 //!     --test e2e_metal_leak metal_leak_loop -- --ignored --exact --nocapture
 //!
 //! Modes: buffer | texture | cmdsubmit | map | write | maponly | mapfail |
 //!        writetexture | sampler | view | renderpass | bindgroup | drawpass | all
 //!
-//! NOT a regression test — manual diagnostic only.
+//! NOT a regression test — manual diagnostic only. The target requires the
+//! `gpu-diagnostics` feature, so routine real-GPU `--ignored` runs never build
+//! or select it.
 
 #![cfg(any(feature = "metal", feature = "vulkan"))]
 

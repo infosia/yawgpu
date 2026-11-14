@@ -9,6 +9,10 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 
 [features]
 gles = ["yawgpu-core/gles", "yawgpu-hal/gles", "yawgpu-test/gles"]
+# Selects the manual real-GPU diagnostic and performance probe test targets
+# (`e2e_metal_leak`, `e2e_metal_compile_churn`). They are not correctness
+# tests, so a routine `--ignored` real-GPU run must not build or select them.
+gpu-diagnostics = []
 metal = ["yawgpu-hal/metal", "yawgpu-test/metal"]
 shader-passthrough = ["yawgpu-core/shader-passthrough"]
 tiled = ["yawgpu-core/tiled"]
@@ -47,3 +51,483 @@ objc2-metal = { workspace = true }
 [target.'cfg(windows)'.dev-dependencies]
 # Hidden Win32 window for the real-Vulkan surface e2e test (HWND surface source).
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader"] }
+
+# Backend- and feature-only integration test targets. Automatic test discovery
+# stays on; these explicit entries only add `required-features`, so a
+# configuration without the feature neither builds nor launches an empty
+# target. Each crate keeps its own `#![cfg(...)]` (including OS conditions).
+
+[[test]]
+name = "e2e_gles_basic"
+path = "tests/e2e_gles_basic.rs"
+required-features = ["gles"]
+
+[[test]]
+name = "e2e_gles_buffer"
+path = "tests/e2e_gles_buffer.rs"
+required-features = ["gles"]
+
+[[test]]
+name = "e2e_gles_class_audit"
+path = "tests/e2e_gles_class_audit.rs"
+required-features = ["gles"]
+
+[[test]]
+name = "e2e_gles_compute"
+path = "tests/e2e_gles_compute.rs"
+required-features = ["gles"]
+
+[[test]]
+name = "e2e_gles_indirect_dispatch"
+path = "tests/e2e_gles_indirect_dispatch.rs"
+required-features = ["gles"]
+
+[[test]]
+name = "e2e_gles_process_exit"
+path = "tests/e2e_gles_process_exit.rs"
+required-features = ["gles"]
+
+[[test]]
+name = "e2e_gles_render"
+path = "tests/e2e_gles_render.rs"
+required-features = ["gles"]
+
+[[test]]
+name = "e2e_gles_smoke"
+path = "tests/e2e_gles_smoke.rs"
+required-features = ["gles"]
+
+[[test]]
+name = "e2e_gles_texture"
+path = "tests/e2e_gles_texture.rs"
+required-features = ["gles"]
+
+[[test]]
+name = "e2e_metal_buffer_zero_init"
+path = "tests/e2e_metal_buffer_zero_init.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_class_audit"
+path = "tests/e2e_metal_class_audit.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_clip_distances"
+path = "tests/e2e_metal_clip_distances.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_color_target"
+path = "tests/e2e_metal_color_target.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_compile_churn"
+path = "tests/e2e_metal_compile_churn.rs"
+required-features = ["metal", "gpu-diagnostics"]
+
+[[test]]
+name = "e2e_metal_compute_binding_slots"
+path = "tests/e2e_metal_compute_binding_slots.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_cube_views"
+path = "tests/e2e_metal_cube_views.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_dawn_features"
+path = "tests/e2e_metal_dawn_features.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_depth"
+path = "tests/e2e_metal_depth.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_depth_clip_control"
+path = "tests/e2e_metal_depth_clip_control.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_destroy_memory"
+path = "tests/e2e_metal_destroy_memory.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_draw"
+path = "tests/e2e_metal_draw.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_dual_source_blending"
+path = "tests/e2e_metal_dual_source_blending.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_encoder_write_buffer"
+path = "tests/e2e_metal_encoder_write_buffer.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_external_texture"
+path = "tests/e2e_metal_external_texture.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_f114"
+path = "tests/e2e_metal_f114.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_f115"
+path = "tests/e2e_metal_f115.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_f16"
+path = "tests/e2e_metal_f16.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_feature_queries"
+path = "tests/e2e_metal_feature_queries.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_float32_blendable"
+path = "tests/e2e_metal_float32_blendable.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_framebuffer_fetch"
+path = "tests/e2e_metal_framebuffer_fetch.rs"
+required-features = ["metal", "tiled"]
+
+[[test]]
+name = "e2e_metal_indirect_dispatch"
+path = "tests/e2e_metal_indirect_dispatch.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_invariant"
+path = "tests/e2e_metal_invariant.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_lazy_init"
+path = "tests/e2e_metal_lazy_init.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_leak"
+path = "tests/e2e_metal_leak.rs"
+required-features = ["gpu-diagnostics"]
+
+[[test]]
+name = "e2e_metal_math_mode"
+path = "tests/e2e_metal_math_mode.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_oom"
+path = "tests/e2e_metal_oom.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_point"
+path = "tests/e2e_metal_point.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_primitive_index"
+path = "tests/e2e_metal_primitive_index.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_render_bind_groups_at_draw"
+path = "tests/e2e_metal_render_bind_groups_at_draw.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_robust_access"
+path = "tests/e2e_metal_robust_access.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_shader_parity"
+path = "tests/e2e_metal_shader_parity.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_shader_passthrough"
+path = "tests/e2e_metal_shader_passthrough.rs"
+required-features = ["metal", "shader-passthrough"]
+
+[[test]]
+name = "e2e_metal_shader_workarounds"
+path = "tests/e2e_metal_shader_workarounds.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_stencil"
+path = "tests/e2e_metal_stencil.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_subgroup_size_control"
+path = "tests/e2e_metal_subgroup_size_control.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_subgroups"
+path = "tests/e2e_metal_subgroups.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_surface"
+path = "tests/e2e_metal_surface.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_texture_formats_tier2"
+path = "tests/e2e_metal_texture_formats_tier2.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_threading_audit"
+path = "tests/e2e_metal_threading_audit.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_tiled"
+path = "tests/e2e_metal_tiled.rs"
+required-features = ["metal", "tiled"]
+
+[[test]]
+name = "e2e_metal_tiled_external_texture"
+path = "tests/e2e_metal_tiled_external_texture.rs"
+required-features = ["metal", "tiled"]
+
+[[test]]
+name = "e2e_metal_timestamp_query"
+path = "tests/e2e_metal_timestamp_query.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_view_format_copies"
+path = "tests/e2e_metal_view_format_copies.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_work_done_writes"
+path = "tests/e2e_metal_work_done_writes.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_vulkan_adapter_info"
+path = "tests/e2e_vulkan_adapter_info.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_buffer_zero_init"
+path = "tests/e2e_vulkan_buffer_zero_init.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_class_audit"
+path = "tests/e2e_vulkan_class_audit.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_clip_distances"
+path = "tests/e2e_vulkan_clip_distances.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_compute_binding_slots"
+path = "tests/e2e_vulkan_compute_binding_slots.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_cube_views"
+path = "tests/e2e_vulkan_cube_views.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_dawn_features"
+path = "tests/e2e_vulkan_dawn_features.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_depth"
+path = "tests/e2e_vulkan_depth.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_depth_clip_control"
+path = "tests/e2e_vulkan_depth_clip_control.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_destroy_memory"
+path = "tests/e2e_vulkan_destroy_memory.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_dual_source_blending"
+path = "tests/e2e_vulkan_dual_source_blending.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_encoder_write_buffer"
+path = "tests/e2e_vulkan_encoder_write_buffer.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_external_texture"
+path = "tests/e2e_vulkan_external_texture.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_f16"
+path = "tests/e2e_vulkan_f16.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_feature_queries"
+path = "tests/e2e_vulkan_feature_queries.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_float32_blendable"
+path = "tests/e2e_vulkan_float32_blendable.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_framebuffer_fetch"
+path = "tests/e2e_vulkan_framebuffer_fetch.rs"
+required-features = ["vulkan", "tiled"]
+
+[[test]]
+name = "e2e_vulkan_indirect_dispatch"
+path = "tests/e2e_vulkan_indirect_dispatch.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_layouts"
+path = "tests/e2e_vulkan_layouts.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_lazy_init"
+path = "tests/e2e_vulkan_lazy_init.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_limits_parity"
+path = "tests/e2e_vulkan_limits_parity.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_oom"
+path = "tests/e2e_vulkan_oom.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_render"
+path = "tests/e2e_vulkan_render.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_render_bind_groups_at_draw"
+path = "tests/e2e_vulkan_render_bind_groups_at_draw.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_robust_access"
+path = "tests/e2e_vulkan_robust_access.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_shader_parity"
+path = "tests/e2e_vulkan_shader_parity.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_shader_passthrough"
+path = "tests/e2e_vulkan_shader_passthrough.rs"
+required-features = ["vulkan", "shader-passthrough"]
+
+[[test]]
+name = "e2e_vulkan_shader_workarounds"
+path = "tests/e2e_vulkan_shader_workarounds.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_subgroup_size_control"
+path = "tests/e2e_vulkan_subgroup_size_control.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_subgroups"
+path = "tests/e2e_vulkan_subgroups.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_submit_recycling"
+path = "tests/e2e_vulkan_submit_recycling.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_surface"
+path = "tests/e2e_vulkan_surface.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_texture_component_swizzle"
+path = "tests/e2e_vulkan_texture_component_swizzle.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_texture_compression"
+path = "tests/e2e_vulkan_texture_compression.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_texture_formats_tier2"
+path = "tests/e2e_vulkan_texture_formats_tier2.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_threading_audit"
+path = "tests/e2e_vulkan_threading_audit.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_tiled"
+path = "tests/e2e_vulkan_tiled.rs"
+required-features = ["vulkan", "tiled"]
+
+[[test]]
+name = "e2e_vulkan_tiled_external_texture"
+path = "tests/e2e_vulkan_tiled_external_texture.rs"
+required-features = ["vulkan", "tiled"]
+
+[[test]]
+name = "e2e_vulkan_timestamp_query"
+path = "tests/e2e_vulkan_timestamp_query.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_work_done_writes"
+path = "tests/e2e_vulkan_work_done_writes.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "tiled_subpass_ffi"
+path = "tests/tiled_subpass_ffi.rs"
+required-features = ["tiled"]
