@@ -102,7 +102,7 @@ own Bash (no polling harness — ~25 s), so it remains the backstop.
 `yawgpu/Cargo.toml` declares every backend- or feature-only integration test
 target explicitly with `required-features` (automatic discovery stays on). A
 configuration without the feature neither builds nor launches the target, so
-the default Noop build compiles ~36 test binaries instead of ~131.
+the default Noop build compiles ~24 test binaries instead of ~131.
 
 - A **new** test file whose crate is `#![cfg(feature = "...")]`-gated gets a
   matching `[[test]]` entry with the same features. Keep the in-file `cfg`

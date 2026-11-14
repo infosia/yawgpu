@@ -103,6 +103,16 @@ path = "tests/e2e_gles_texture.rs"
 required-features = ["gles"]
 
 [[test]]
+name = "e2e_metal_basic"
+path = "tests/e2e_metal_basic.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_buffer"
+path = "tests/e2e_metal_buffer.rs"
+required-features = ["metal"]
+
+[[test]]
 name = "e2e_metal_buffer_zero_init"
 path = "tests/e2e_metal_buffer_zero_init.rs"
 required-features = ["metal"]
@@ -126,6 +136,11 @@ required-features = ["metal"]
 name = "e2e_metal_compile_churn"
 path = "tests/e2e_metal_compile_churn.rs"
 required-features = ["metal", "gpu-diagnostics"]
+
+[[test]]
+name = "e2e_metal_compute"
+path = "tests/e2e_metal_compute.rs"
+required-features = ["metal"]
 
 [[test]]
 name = "e2e_metal_compute_binding_slots"
@@ -208,6 +223,11 @@ path = "tests/e2e_metal_framebuffer_fetch.rs"
 required-features = ["metal", "tiled"]
 
 [[test]]
+name = "e2e_metal_immediates"
+path = "tests/e2e_metal_immediates.rs"
+required-features = ["metal"]
+
+[[test]]
 name = "e2e_metal_indirect_dispatch"
 path = "tests/e2e_metal_indirect_dispatch.rs"
 required-features = ["metal"]
@@ -248,6 +268,11 @@ path = "tests/e2e_metal_primitive_index.rs"
 required-features = ["metal"]
 
 [[test]]
+name = "e2e_metal_render"
+path = "tests/e2e_metal_render.rs"
+required-features = ["metal"]
+
+[[test]]
 name = "e2e_metal_render_bind_groups_at_draw"
 path = "tests/e2e_metal_render_bind_groups_at_draw.rs"
 required-features = ["metal"]
@@ -273,6 +298,11 @@ path = "tests/e2e_metal_shader_workarounds.rs"
 required-features = ["metal"]
 
 [[test]]
+name = "e2e_metal_smoke"
+path = "tests/e2e_metal_smoke.rs"
+required-features = ["metal"]
+
+[[test]]
 name = "e2e_metal_stencil"
 path = "tests/e2e_metal_stencil.rs"
 required-features = ["metal"]
@@ -290,6 +320,11 @@ required-features = ["metal"]
 [[test]]
 name = "e2e_metal_surface"
 path = "tests/e2e_metal_surface.rs"
+required-features = ["metal"]
+
+[[test]]
+name = "e2e_metal_texture"
+path = "tests/e2e_metal_texture.rs"
 required-features = ["metal"]
 
 [[test]]
@@ -333,6 +368,16 @@ path = "tests/e2e_vulkan_adapter_info.rs"
 required-features = ["vulkan"]
 
 [[test]]
+name = "e2e_vulkan_basic"
+path = "tests/e2e_vulkan_basic.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_buffer"
+path = "tests/e2e_vulkan_buffer.rs"
+required-features = ["vulkan"]
+
+[[test]]
 name = "e2e_vulkan_buffer_zero_init"
 path = "tests/e2e_vulkan_buffer_zero_init.rs"
 required-features = ["vulkan"]
@@ -345,6 +390,11 @@ required-features = ["vulkan"]
 [[test]]
 name = "e2e_vulkan_clip_distances"
 path = "tests/e2e_vulkan_clip_distances.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_compute"
+path = "tests/e2e_vulkan_compute.rs"
 required-features = ["vulkan"]
 
 [[test]]
@@ -411,6 +461,11 @@ required-features = ["vulkan"]
 name = "e2e_vulkan_framebuffer_fetch"
 path = "tests/e2e_vulkan_framebuffer_fetch.rs"
 required-features = ["vulkan", "tiled"]
+
+[[test]]
+name = "e2e_vulkan_immediates"
+path = "tests/e2e_vulkan_immediates.rs"
+required-features = ["vulkan"]
 
 [[test]]
 name = "e2e_vulkan_indirect_dispatch"
@@ -485,6 +540,11 @@ required-features = ["vulkan"]
 [[test]]
 name = "e2e_vulkan_surface"
 path = "tests/e2e_vulkan_surface.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_texture"
+path = "tests/e2e_vulkan_texture.rs"
 required-features = ["vulkan"]
 
 [[test]]

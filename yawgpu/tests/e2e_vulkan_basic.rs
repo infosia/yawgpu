@@ -72,28 +72,6 @@ fn vulkan_request_device_get_queue_and_empty_submit() {
     }
 }
 
-#[test]
-#[ignore = "manual real-backend test"]
-fn default_instance_still_selects_noop() {
-    unsafe {
-        let instance = yawgpu::wgpuCreateInstance(std::ptr::null());
-        assert!(!instance.is_null());
-        let adapter = request_adapter(instance);
-
-        let mut info = zeroed_adapter_info();
-        assert_eq!(
-            yawgpu::wgpuAdapterGetInfo(adapter, &mut info),
-            native::WGPUStatus_Success
-        );
-        assert_eq!(info.backendType, native::WGPUBackendType_Null);
-        assert!(!string_view_to_string(info.device).is_empty());
-        yawgpu::wgpuAdapterInfoFreeMembers(info);
-
-        yawgpu::wgpuAdapterRelease(adapter);
-        yawgpu::wgpuInstanceRelease(instance);
-    }
-}
-
 #[cfg(feature = "vulkan")]
 unsafe fn create_vulkan_instance() -> native::WGPUInstance {
     let mut backend = YaWGPUInstanceBackendSelect {

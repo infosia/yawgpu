@@ -76,6 +76,42 @@ fn noop_adapter_device_queue_round_trip() {
     }
 }
 
+/// A default instance (no backend-select chain) must keep selecting the Noop
+/// adapter even when a real backend feature (`metal`, `vulkan`, `gles`) is
+/// compiled in.
+#[test]
+fn default_instance_selects_noop_adapter() {
+    unsafe {
+        let instance = yawgpu::wgpuCreateInstance(std::ptr::null());
+        assert!(!instance.is_null());
+
+        let mut adapter: native::WGPUAdapter = std::ptr::null();
+        let adapter_callback_info = native::WGPURequestAdapterCallbackInfo {
+            nextInChain: std::ptr::null_mut(),
+            mode: native::WGPUCallbackMode_AllowProcessEvents,
+            callback: Some(request_adapter_callback),
+            userdata1: (&mut adapter as *mut native::WGPUAdapter).cast(),
+            userdata2: std::ptr::null_mut(),
+        };
+        let future =
+            yawgpu::wgpuInstanceRequestAdapter(instance, std::ptr::null(), adapter_callback_info);
+        wait(instance, future);
+        assert!(!adapter.is_null());
+
+        let mut info: native::WGPUAdapterInfo = std::mem::zeroed();
+        assert_eq!(
+            yawgpu::wgpuAdapterGetInfo(adapter, &mut info),
+            native::WGPUStatus_Success
+        );
+        assert_eq!(info.backendType, native::WGPUBackendType_Null);
+        assert!(!info.device.data.is_null() && info.device.length > 0);
+        yawgpu::wgpuAdapterInfoFreeMembers(info);
+
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
 #[test]
 fn assert_device_error_catches_injected_error() {
     let test = ValidationTest::new();
