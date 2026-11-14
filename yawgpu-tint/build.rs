@@ -68,7 +68,9 @@ fn main() {
         );
         println!(
             "cargo:warning=A stub decision cached by a build that ran before that \
-             setup completed is cleared with `cargo clean -p yawgpu-tint`."
+             setup completed is cleared with `cargo clean -p yawgpu-tint`. \
+             `cargo clean -p yawgpu-tint` does not remove the shared native trees; \
+             remove them with `rm -rf target/*/build/yawgpu-tint-native-*`."
         );
         return;
     };

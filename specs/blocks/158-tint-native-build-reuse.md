@@ -1,6 +1,6 @@
 # Block 158 — One Tint native build per configuration, shared across Cargo features and check/build
 
-Status: **S1 COMPLETE (2026-11-14)**; S2 (Phase Review MINORs) open.
+Status: **COMPLETE (2026-11-14)**. Phase Review: 0 CRITICAL, 0 MAJOR, 4 MINOR (m1, m2, m4 fixed in S2; m3 documented).
 Source: gate latency audit (2026-11-14, item P1 "Reuse native Tint builds across
 feature combinations").
 
@@ -111,6 +111,12 @@ clippy, `yawgpu --features tiled` tests (6.9 s, no Tint rebuild) and
 incrementally in that tree (7.4 s). `cargo test --workspace` 1492/0 in debug and
 release (one release tree); workspace clippy clean; real-Metal `e2e_metal_compute`,
 `e2e_metal_render`, `e2e_metal_shader_parity` pass (real Tint, no stub).
+
+S2 (2026-11-14, M2): `cargo test -p yawgpu-tint` 129 + 21 build-probe tests pass;
+clippy default and `tiled` clean. The new key format produced one new tree, which the
+sandboxed agent build, `clippy --features metal,tiled` (3.2 s, no Tint rebuild) and an
+unsandboxed real-Metal run all reused. `cargo test --workspace` 1495/0; workspace
+clippy clean; `e2e_metal_compute` and `e2e_metal_tiled` pass on real Metal.
 
 ## Phase Review (2026-11-14, fresh-context reviewer over the S1 diff)
 

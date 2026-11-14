@@ -23,19 +23,22 @@ pub(crate) struct NativeBuildDefines {
 
 /// Canonical native configuration only; the environment is an explicit input so
 /// tests never need to mutate process-global state. Unset is `name=`, while set
-/// values use OsStr's quoted/escaped representation (including `name=""` for
-/// empty), preserving non-Unicode values and escaping entry separators.
+/// values use `name=<byte length>:<bytes>` from `OsStr::as_encoded_bytes`,
+/// preserving non-Unicode values and distinguishing empty values from unset.
 pub(crate) fn native_key_entries(
     environment: &BTreeMap<String, OsString>,
     dawn_dir: &Path,
     defines: &NativeBuildDefines,
-) -> Vec<String> {
+) -> Vec<Vec<u8>> {
     let mut entries = Vec::new();
     let mut push = |name: &str, value: Option<&OsStr>| {
-        entries.push(match value {
-            Some(value) => format!("{name}={value:?}"),
-            None => format!("{name}="),
-        });
+        let mut entry = format!("{name}=").into_bytes();
+        if let Some(value) = value {
+            let bytes = value.as_encoded_bytes();
+            entry.extend_from_slice(format!("{}:", bytes.len()).as_bytes());
+            entry.extend_from_slice(bytes);
+        }
+        entries.push(entry);
     };
     for name in ["TARGET", "HOST", "PROFILE", "OPT_LEVEL", "DEBUG"] {
         push(name, environment.get(name).map(OsString::as_os_str));
@@ -73,11 +76,14 @@ pub(crate) fn native_key_entries(
         "CXX",
         "CFLAGS",
         "CXXFLAGS",
+        "SDKROOT",
+        "CROSS_COMPILE",
+        "CMAKE",
         "CMAKE_GENERATOR",
         "CMAKE_TOOLCHAIN_FILE",
     ] {
         // cc normalizes both '-' and '.', whereas cmake normalizes only '-'.
-        let target_u = if base.starts_with("CMAKE_") {
+        let target_u = if base == "CMAKE" || base.starts_with("CMAKE_") {
             target.replace('-', "_")
         } else {
             target.replace(['-', '.'], "_")
@@ -95,10 +101,10 @@ pub(crate) fn native_key_entries(
 }
 
 /// FNV-1a 64 over the ordered entries, each terminated by a newline.
-pub(crate) fn native_build_key(entries: &[String]) -> String {
+pub(crate) fn native_build_key(entries: &[Vec<u8>]) -> String {
     let mut hash = 0xcbf29ce484222325_u64;
     for entry in entries {
-        for byte in entry.bytes().chain(std::iter::once(b'\n')) {
+        for byte in entry.iter().copied().chain(std::iter::once(b'\n')) {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x100000001b3);
         }
@@ -224,33 +230,45 @@ mod tests {
         assert_eq!(
             entries,
             [
-                "TARGET=\"aarch64-linux-android\"",
-                "HOST=\"x86_64-unknown-linux-gnu\"",
-                "PROFILE=\"debug\"",
-                "OPT_LEVEL=\"0\"",
-                "DEBUG=\"true\"",
-                "YAWGPU_DAWN_DIR=\"dawn\"",
-                "CMAKE_OSX_DEPLOYMENT_TARGET=\"13.0\"",
-                "ANDROID_TOOLCHAIN_FILE=\"ndk/android.toolchain.cmake\"",
-                "ANDROID_ABI=\"arm64-v8a\"",
-                "ANDROID_PLATFORM=\"android-24\"",
-                "CC=\"clang\"",
+                "TARGET=21:aarch64-linux-android",
+                "HOST=24:x86_64-unknown-linux-gnu",
+                "PROFILE=5:debug",
+                "OPT_LEVEL=1:0",
+                "DEBUG=4:true",
+                "YAWGPU_DAWN_DIR=4:dawn",
+                "CMAKE_OSX_DEPLOYMENT_TARGET=4:13.0",
+                "ANDROID_TOOLCHAIN_FILE=27:ndk/android.toolchain.cmake",
+                "ANDROID_ABI=9:arm64-v8a",
+                "ANDROID_PLATFORM=10:android-24",
+                "CC=5:clang",
                 "CC_aarch64-linux-android=",
                 "CC_aarch64_linux_android=",
                 "TARGET_CC=",
                 "CXX=",
-                "CXX_aarch64-linux-android=\"clang++\"",
+                "CXX_aarch64-linux-android=7:clang++",
                 "CXX_aarch64_linux_android=",
                 "TARGET_CXX=",
                 "CFLAGS=",
                 "CFLAGS_aarch64-linux-android=",
-                "CFLAGS_aarch64_linux_android=\"-O2\"",
+                "CFLAGS_aarch64_linux_android=3:-O2",
                 "TARGET_CFLAGS=",
                 "CXXFLAGS=",
                 "CXXFLAGS_aarch64-linux-android=",
                 "CXXFLAGS_aarch64_linux_android=",
-                "TARGET_CXXFLAGS=\"\"",
-                "CMAKE_GENERATOR=\"Ninja\"",
+                "TARGET_CXXFLAGS=0:",
+                "SDKROOT=",
+                "SDKROOT_aarch64-linux-android=",
+                "SDKROOT_aarch64_linux_android=",
+                "TARGET_SDKROOT=",
+                "CROSS_COMPILE=",
+                "CROSS_COMPILE_aarch64-linux-android=",
+                "CROSS_COMPILE_aarch64_linux_android=",
+                "TARGET_CROSS_COMPILE=",
+                "CMAKE=",
+                "CMAKE_aarch64-linux-android=",
+                "CMAKE_aarch64_linux_android=",
+                "TARGET_CMAKE=",
+                "CMAKE_GENERATOR=5:Ninja",
                 "CMAKE_GENERATOR_aarch64-linux-android=",
                 "CMAKE_GENERATOR_aarch64_linux_android=",
                 "TARGET_CMAKE_GENERATOR=",
@@ -259,19 +277,21 @@ mod tests {
                 "CMAKE_TOOLCHAIN_FILE_aarch64_linux_android=",
                 "TARGET_CMAKE_TOOLCHAIN_FILE=",
             ]
+            .map(|entry| entry.as_bytes().to_vec())
         );
         let key = native_build_key(&entries);
         for index in 0..entries.len() {
             let mut changed = entries.clone();
-            changed[index].push('x');
-            assert_ne!(native_build_key(&changed), key, "{}", entries[index]);
+            changed[index].push(b'x');
+            assert_ne!(native_build_key(&changed), key, "{:?}", entries[index]);
         }
     }
 
     #[test]
     fn native_build_key_is_stable() {
-        let entries = ["TARGET=\"aarch64-apple-darwin\"", "CC=", "CFLAGS=\"\""].map(str::to_owned);
-        assert_eq!(native_build_key(&entries), "0c057d85eab97941");
+        let entries = ["TARGET=20:aarch64-apple-darwin", "CC=", "CFLAGS=0:"]
+            .map(|entry| entry.as_bytes().to_vec());
+        assert_eq!(native_build_key(&entries), "b09b7d9657cf0fa5");
     }
 
     #[test]
@@ -281,9 +301,88 @@ mod tests {
         let unset = native_key_entries(&environment, Path::new("dawn"), &defines);
         environment.insert("CXX".into(), OsString::new());
         let empty = native_key_entries(&environment, Path::new("dawn"), &defines);
-        assert!(unset.iter().any(|entry| entry == "CXX="));
-        assert!(empty.iter().any(|entry| entry == "CXX=\"\""));
+        assert!(unset.iter().any(|entry| entry == b"CXX="));
+        assert!(empty.iter().any(|entry| entry == b"CXX=0:"));
         assert_ne!(native_build_key(&unset), native_build_key(&empty));
+    }
+
+    #[test]
+    fn native_key_encodes_byte_lengths_and_preserves_special_characters() {
+        let mut environment = native_environment();
+        environment.insert("CFLAGS".into(), "é\n\"\\:".into());
+        let entries = native_key_entries(
+            &environment,
+            Path::new("dawn"),
+            &NativeBuildDefines::default(),
+        );
+        assert!(entries
+            .iter()
+            .any(|entry| entry == b"CFLAGS=6:\xc3\xa9\n\"\\:"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_key_preserves_non_unicode_environment_values() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let mut environment = native_environment();
+        environment.insert("CC".into(), OsString::from_vec(b"clang-\xff".to_vec()));
+        let defines = NativeBuildDefines::default();
+        let entries = native_key_entries(&environment, Path::new("dawn"), &defines);
+        assert!(entries.iter().any(|entry| entry == b"CC=7:clang-\xff"));
+
+        environment.insert("CC".into(), "clang-\u{fffd}".into());
+        let lossy = native_key_entries(&environment, Path::new("dawn"), &defines);
+        assert_ne!(native_build_key(&entries), native_build_key(&lossy));
+    }
+
+    #[test]
+    fn native_key_target_variants_follow_cc_and_cmake_normalization() {
+        let mut environment = native_environment();
+        environment.insert("TARGET".into(), "thumbv8m.main-none-eabi".into());
+        let defines = NativeBuildDefines::default();
+        for (bases, normalized, excluded) in [
+            (
+                &[
+                    "CC",
+                    "CXX",
+                    "CFLAGS",
+                    "CXXFLAGS",
+                    "SDKROOT",
+                    "CROSS_COMPILE",
+                ][..],
+                "thumbv8m_main_none_eabi",
+                "thumbv8m.main_none_eabi",
+            ),
+            (
+                &["CMAKE", "CMAKE_GENERATOR", "CMAKE_TOOLCHAIN_FILE"][..],
+                "thumbv8m.main_none_eabi",
+                "thumbv8m_main_none_eabi",
+            ),
+        ] {
+            for base in bases {
+                let names = [
+                    base.to_string(),
+                    format!("{base}_thumbv8m.main-none-eabi"),
+                    format!("{base}_{normalized}"),
+                    format!("TARGET_{base}"),
+                ];
+                for name in &names {
+                    environment.insert(name.clone(), "value".into());
+                }
+                let excluded_name = format!("{base}_{excluded}");
+                environment.insert(excluded_name.clone(), "ignored".into());
+                let entries = native_key_entries(&environment, Path::new("dawn"), &defines);
+                for name in names {
+                    let expected = format!("{name}=5:value").into_bytes();
+                    assert!(entries.contains(&expected), "missing {name}");
+                }
+                let excluded_prefix = format!("{excluded_name}=");
+                assert!(!entries
+                    .iter()
+                    .any(|entry| entry.starts_with(excluded_prefix.as_bytes())));
+            }
+        }
     }
 
     #[test]
@@ -293,8 +392,8 @@ mod tests {
         environment.insert("HOST_CC".into(), "native-cc".into());
         let defines = NativeBuildDefines::default();
         let entries = native_key_entries(&environment, Path::new("dawn"), &defines);
-        assert!(entries.iter().any(|entry| entry == "HOST_CC=\"native-cc\""));
-        assert!(!entries.iter().any(|entry| entry.starts_with("TARGET_CC=")));
+        assert!(entries.iter().any(|entry| entry == b"HOST_CC=9:native-cc"));
+        assert!(!entries.iter().any(|entry| entry.starts_with(b"TARGET_CC=")));
         environment.insert("CARGO_FEATURE_TILED".into(), "1".into());
         environment.insert("OUT_DIR".into(), "another-unit/out".into());
         environment.insert("YAWGPU_DAWN_DIR".into(), "unused-override".into());
