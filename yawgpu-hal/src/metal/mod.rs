@@ -626,6 +626,7 @@ impl MetalAdapter {
             shader_workarounds,
             supports_relaxed_math,
             timestamp_resources: timestamp_resources.clone(),
+            counter_sample_pool: counter_sample_pool::CounterSamplePool::default(),
             device: self.device.clone(),
             allocations: AtomicU64::new(0),
             queue: MetalQueue {
@@ -791,6 +792,7 @@ pub(super) fn metal_device_supports_counter_sampling(
 }
 
 mod buffer;
+mod counter_sample_pool;
 mod device;
 mod encode;
 mod format;

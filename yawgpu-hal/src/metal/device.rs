@@ -10,6 +10,8 @@ pub struct MetalDevice {
     pub(super) queue: MetalQueue,
     /// Cached sampling capabilities and the lazily allocated mock blit buffer.
     pub(super) timestamp_resources: Arc<MetalTimestampResources>,
+    /// Pool backing timestamp query sets created on this device.
+    pub(super) counter_sample_pool: counter_sample_pool::CounterSamplePool,
 }
 
 impl std::fmt::Debug for MetalDevice {
@@ -113,7 +115,7 @@ impl MetalDevice {
         {
             return Err(buffer_error("Metal device has no timestamp sampling mode"));
         }
-        let query_set = MetalQuerySet::new(&self.device, kind, count)?;
+        let query_set = MetalQuerySet::new(self, kind, count)?;
         self.allocations.fetch_add(1, Ordering::Relaxed);
         Ok(query_set)
     }

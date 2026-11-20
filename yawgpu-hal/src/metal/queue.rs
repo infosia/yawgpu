@@ -349,7 +349,7 @@ impl MetalQueue {
                         if write.query_index >= query_set.count() {
                             return Err(buffer_error("timestamp query index exceeds query count"));
                         }
-                        let index = to_ns(u64::from(write.query_index))?;
+                        let index = query_set.sample_index(write.query_index)?;
                         let resources = &self.timestamp_resources;
                         match timestamp_sampling_mode(
                             resources.counter_sampling_at_stage_boundary,
@@ -1023,6 +1023,79 @@ mod tests {
         let [t0, t1] = resolve_timestamp_ticks(&[1]);
         assert_eq!(t0, 0);
         assert!(t1 > 0);
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    fn metal_resolve_timestamp_query_set_uses_its_nonzero_base_index() {
+        let device = metal_device();
+        let first = device
+            .create_query_set(HalQueryKind::Timestamp, 2)
+            .expect("first set");
+        let second = device
+            .create_query_set(HalQueryKind::Timestamp, 2)
+            .expect("second set");
+        assert!(std::ptr::eq(
+            first.sample_buffer().expect("first sample buffer"),
+            second.sample_buffer().expect("second sample buffer"),
+        ));
+        assert_eq!(second.sample_index(0).expect("second base index"), 2);
+
+        let readback = device
+            .create_buffer(32, HalBufferUsage::default())
+            .expect("readback");
+        readback.write(0, &[0xff; 32]).expect("seed readback");
+        let busy = device
+            .create_buffer(1024 * 1024, HalBufferUsage::default())
+            .expect("busy buffer");
+        let first = HalQuerySet::Metal(first);
+        let second = HalQuerySet::Metal(second);
+        // Write the same logical index in both sets before resolving either one.
+        // If both encoding paths forgot the base, the two ticks would be equal.
+        let mut copies = vec![
+            HalCopy::WriteTimestamp(crate::HalWriteTimestamp {
+                query_set: first.clone(),
+                query_index: 1,
+            }),
+            HalCopy::BufferClear(HalBufferClear {
+                buffer: HalBuffer::Metal(busy),
+                offset: 0,
+                size: 1024 * 1024,
+            }),
+            HalCopy::WriteTimestamp(crate::HalWriteTimestamp {
+                query_set: second.clone(),
+                query_index: 1,
+            }),
+        ];
+        for (query_set, destination_offset) in [(first, 0), (second, 16)] {
+            copies.push(HalCopy::ResolveQuerySet(HalResolveQuerySet {
+                query_set,
+                first_query: 0,
+                query_count: 2,
+                destination: HalBuffer::Metal(readback.clone()),
+                destination_offset,
+                written_queries: vec![1],
+            }));
+        }
+        device
+            .queue()
+            .submit_copies(&copies)
+            .expect("submit timestamps");
+        drop(copies);
+        device.queue().wait_idle().expect("wait for timestamps");
+
+        let bytes = readback.read(0, 32).expect("read ticks");
+        let ([first_unwritten, first, second_unwritten, second], []) = bytes.as_chunks::<8>()
+        else {
+            panic!("expected four timestamp values");
+        };
+        let first = u64::from_ne_bytes(*first);
+        let second = u64::from_ne_bytes(*second);
+        assert_eq!(*first_unwritten, [0; 8]);
+        assert!(first > 0);
+        assert_eq!(*second_unwritten, [0; 8]);
+        assert!(second > first);
+        assert_ne!(second, u64::MAX, "Metal returned MTLCounterErrorValue");
     }
 
     #[test]

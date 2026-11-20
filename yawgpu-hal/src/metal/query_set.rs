@@ -1,3 +1,4 @@
+use super::counter_sample_pool::CounterSampleAllocation;
 use super::*;
 
 /// Stores Metal query-set resources.
@@ -7,20 +8,10 @@ pub struct MetalQuerySet {
     count: u32,
 }
 
-// SAFETY: Metal query resources support thread-safe retain/release and command
-// encoding. Storage and count are immutable after construction; private sample
-// memory is accessed only by ordered GPU commands, never mapped by the CPU.
-unsafe impl Send for MetalQuerySet {}
-unsafe impl Sync for MetalQuerySet {}
-
 #[derive(Clone)]
 enum QueryStorage {
-    Occlusion {
-        buffer: MetalBuffer,
-    },
-    Timestamp {
-        sample_buffer: Retained<ProtocolObject<dyn objc2_metal::MTLCounterSampleBuffer>>,
-    },
+    Occlusion { buffer: MetalBuffer },
+    Timestamp(Arc<CounterSampleAllocation>),
 }
 
 impl std::fmt::Debug for MetalQuerySet {
@@ -35,28 +26,14 @@ impl MetalQuerySet {
     /// Creates a new Metal query set backed by visibility results or timestamp counter samples.
     #[must_use = "query set creation can fail"]
     pub(super) fn new(
-        device: &ProtocolObject<dyn MTLDevice>,
+        device: &MetalDevice,
         kind: HalQueryKind,
         count: u32,
     ) -> Result<Self, HalError> {
         if kind == HalQueryKind::Timestamp {
-            let counter_set = metal_timestamp_counter_set(device)
-                .ok_or_else(|| buffer_error("Metal device has no timestamp counter set"))?;
-            let descriptor = objc2_metal::MTLCounterSampleBufferDescriptor::new();
-            descriptor.setCounterSet(Some(&counter_set));
-            // SAFETY: Allocate at least one sample, with a representable sample count.
-            unsafe {
-                descriptor.setSampleCount(to_ns(u64::from(count.max(1)))?);
-            }
-            descriptor.setStorageMode(MTLStorageMode::Private);
-            let sample_buffer = device
-                .newCounterSampleBufferWithDescriptor_error(&descriptor)
-                .map_err(|_| HalError::OutOfMemory {
-                    backend: BACKEND,
-                    resource: "timestamp counter sample buffer",
-                })?;
+            let allocation = device.counter_sample_pool.allocate(&device.device, count)?;
             return Ok(Self {
-                storage: QueryStorage::Timestamp { sample_buffer },
+                storage: QueryStorage::Timestamp(Arc::new(allocation)),
                 count,
             });
         }
@@ -65,6 +42,7 @@ impl MetalQuerySet {
             .ok_or_else(|| buffer_error("query-set buffer size overflows"))?
             .max(8);
         let buffer = device
+            .device
             .newBufferWithLength_options(to_ns(size)?, MTLResourceOptions::StorageModePrivate)
             .ok_or(HalError::OutOfMemory {
                 backend: BACKEND,
@@ -92,7 +70,7 @@ impl MetalQuerySet {
     pub(super) fn buffer(&self) -> Result<&ProtocolObject<dyn MTLBufferTrait>, HalError> {
         match &self.storage {
             QueryStorage::Occlusion { buffer } => buffer.inner(),
-            QueryStorage::Timestamp { .. } => {
+            QueryStorage::Timestamp(_) => {
                 Err(buffer_error("timestamp query set has no visibility buffer"))
             }
         }
@@ -103,14 +81,27 @@ impl MetalQuerySet {
         &self,
     ) -> Option<&ProtocolObject<dyn objc2_metal::MTLCounterSampleBuffer>> {
         match &self.storage {
-            QueryStorage::Timestamp { sample_buffer } => Some(sample_buffer),
+            QueryStorage::Timestamp(allocation) => allocation.sample_buffer(),
             QueryStorage::Occlusion { .. } => None,
         }
+    }
+
+    /// Translates a validated query index to its timestamp sample buffer index.
+    pub(super) fn sample_index(&self, query_index: u32) -> Result<usize, HalError> {
+        let QueryStorage::Timestamp(allocation) = &self.storage else {
+            return Err(buffer_error("query set is not a timestamp set"));
+        };
+        allocation
+            .base_index()
+            .checked_add(to_ns(u64::from(query_index))?)
+            .ok_or_else(|| buffer_error("timestamp sample index overflows"))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use objc2_metal::MTLCounterSampleBuffer;
+
     use super::super::test_helpers::*;
     use crate::HalQueryKind;
 
@@ -127,6 +118,70 @@ mod tests {
             assert!(set.sample_buffer().is_some());
             assert!(set.buffer().is_err());
         }
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    fn metal_timestamp_pool_supports_64_live_query_sets() {
+        let device = metal_device();
+        let sets: Vec<_> = (0..64)
+            .map(|_| {
+                device
+                    .create_query_set(HalQueryKind::Timestamp, 2)
+                    .expect("timestamps")
+            })
+            .collect();
+        let buffer = sets[0].sample_buffer().expect("sample buffer");
+        assert_eq!(buffer.sampleCount(), 4096);
+        for (index, set) in sets.iter().enumerate() {
+            assert!(std::ptr::eq(
+                set.sample_buffer().expect("sample buffer"),
+                buffer
+            ));
+            assert_eq!(set.sample_index(0).expect("base index"), index * 2);
+            assert_eq!(set.sample_index(1).expect("second index"), index * 2 + 1);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    fn metal_timestamp_pool_reuses_slots_after_the_last_clone_drops() {
+        let device = metal_device();
+        let create_set = || {
+            device
+                .create_query_set(HalQueryKind::Timestamp, 2)
+                .expect("timestamps")
+        };
+        let first = create_set();
+        let second = create_set();
+        let clone = first.clone();
+        drop(first);
+        let third = create_set();
+        assert_eq!(third.sample_index(0).expect("third base index"), 4);
+
+        drop(clone);
+        let reused = create_set();
+        assert!(std::ptr::eq(
+            reused.sample_buffer().expect("sample buffer"),
+            second.sample_buffer().expect("sample buffer"),
+        ));
+        assert_eq!(reused.sample_index(0).expect("reused base index"), 0);
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    fn metal_timestamp_allocation_outlives_its_device() {
+        let query_set = metal_device()
+            .create_query_set(HalQueryKind::Timestamp, 2)
+            .expect("timestamps");
+        assert_eq!(
+            query_set
+                .sample_buffer()
+                .expect("sample buffer")
+                .sampleCount(),
+            4096
+        );
+        drop(query_set);
     }
 
     #[test]

@@ -392,7 +392,7 @@ pub(super) fn encode_resolve_query_set(
             if let Some(sample_buffer) = query_set.sample_buffer() {
                 blit.resolveCounters_inRange_destinationBuffer_destinationOffset(
                     sample_buffer,
-                    NSRange::new(to_ns(u64::from(query_index))?, 1),
+                    NSRange::new(query_set.sample_index(query_index)?, 1),
                     destination_buffer,
                     to_ns(destination_offset)?,
                 );
