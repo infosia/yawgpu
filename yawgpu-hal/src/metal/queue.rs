@@ -548,21 +548,10 @@ impl MetalQueue {
                         }
                     }
                     HalCopy::RenderPassCommandStream(pass) => {
-                        let descriptor =
-                            render_pass_command_stream_descriptor(pass, stage_boundary_sampling)?;
-                        let encoder = command_buffer
-                            .renderCommandEncoderWithDescriptor(&descriptor)
-                            .ok_or_else(|| {
-                                queue_submission_error(
-                                    "render command encoder creation returned nil",
-                                )
-                            })?;
-                        let result = encode_render_pass_command_stream(&encoder, pass);
-                        encoder.endEncoding();
-                        encode_empty_occlusion_query_fills(
+                        encode_render_pass_command_stream(
                             &command_buffer,
-                            pass.occlusion_query_set.as_ref(),
-                            result?,
+                            pass,
+                            stage_boundary_sampling,
                         )?;
                     }
                     #[cfg(feature = "tiled")]
@@ -957,11 +946,12 @@ mod tests {
         assert!(next_timestamp_resolution_value(&mut exhausted, true).is_err());
     }
 
-    #[test]
-    #[ignore = "manual real Metal backend test"]
-    fn metal_queue_empty_occlusion_query_clears_previous_result() {
-        use HalRenderPassCommand::*;
-
+    fn occlusion_query_test_passes(
+        query_count: u32,
+    ) -> (
+        crate::HalRenderPipeline,
+        impl Fn(Vec<HalRenderPassCommand>) -> Vec<u64>,
+    ) {
         let device = metal_device();
         let texture = device
             .create_texture(&texture_descriptor())
@@ -988,12 +978,13 @@ fragment float4 fs_main() { return float4(1, 0, 0, 1); }
             .expect("render pipeline");
         let query_set = HalQuerySet::Metal(
             device
-                .create_query_set(HalQueryKind::Occlusion, 2)
+                .create_query_set(HalQueryKind::Occlusion, query_count)
                 .expect("occlusion query set"),
         );
+        let readback_size = u64::from(query_count) * 8;
         let readback = device
             .create_buffer(
-                16,
+                readback_size,
                 HalBufferUsage {
                     query_resolve: true,
                     map_read: true,
@@ -1001,7 +992,7 @@ fragment float4 fs_main() { return float4(1, 0, 0, 1); }
                 },
             )
             .expect("query readback");
-        let submit_and_resolve = |commands| {
+        let submit_and_resolve = move |commands| {
             let submit = device
                 .queue()
                 .submit_copies(&[
@@ -1027,17 +1018,31 @@ fragment float4 fs_main() { return float4(1, 0, 0, 1); }
                     HalCopy::ResolveQuerySet(HalResolveQuerySet {
                         query_set: query_set.clone(),
                         first_query: 0,
-                        query_count: 2,
+                        query_count,
                         destination: HalBuffer::Metal(readback.clone()),
                         destination_offset: 0,
-                        written_queries: vec![0, 1],
+                        written_queries: (0..query_count).collect(),
                     }),
                 ])
                 .expect("submit pass and resolve");
             device.queue().wait_for_submission(submit).expect("wait");
-            readback.read(0, 16).expect("read query results")
+            let bytes = readback.read(0, readback_size).expect("read query results");
+            let (results, remainder) = bytes.as_chunks::<8>();
+            assert!(remainder.is_empty());
+            results.iter().copied().map(u64::from_le_bytes).collect()
         };
+        (
+            crate::HalRenderPipeline::Metal(pipeline),
+            submit_and_resolve,
+        )
+    }
 
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    fn metal_queue_empty_occlusion_query_clears_previous_result() {
+        use HalRenderPassCommand::*;
+
+        let (pipeline, submit_and_resolve) = occlusion_query_test_passes(2);
         let draw = Draw {
             vertex_count: 3,
             instance_count: 1,
@@ -1045,7 +1050,7 @@ fragment float4 fs_main() { return float4(1, 0, 0, 1); }
             first_instance: 0,
         };
         let before = submit_and_resolve(vec![
-            SetPipeline(crate::HalRenderPipeline::Metal(pipeline)),
+            SetPipeline(pipeline),
             BeginOcclusionQuery { index: 0 },
             draw.clone(),
             EndOcclusionQuery,
@@ -1053,15 +1058,47 @@ fragment float4 fs_main() { return float4(1, 0, 0, 1); }
             draw,
             EndOcclusionQuery,
         ]);
-        assert_ne!(&before[..8], &[0; 8]);
-        assert_ne!(&before[8..], &[0; 8]);
+        assert_ne!(before[0], 0);
+        assert_ne!(before[1], 0);
 
-        // Query 0 is the empty one: on Apple GPUs a pass writes zero to every visibility
-        // slot below its highest used index, so an empty query above an unused slot would
-        // also clear that slot.
         let after = submit_and_resolve(vec![BeginOcclusionQuery { index: 0 }, EndOcclusionQuery]);
-        assert_eq!(&after[..8], &[0; 8]);
-        assert_eq!(&after[8..], &before[8..]);
+        assert_eq!(after, [0, before[1]]);
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    fn metal_queue_occlusion_pass_preserves_unused_query_slots() {
+        use HalRenderPassCommand::*;
+
+        let (pipeline, submit_and_resolve) = occlusion_query_test_passes(3);
+        let draw = Draw {
+            vertex_count: 3,
+            instance_count: 1,
+            first_vertex: 0,
+            first_instance: 0,
+        };
+        let mut first_pass = vec![SetPipeline(pipeline.clone())];
+        for index in 0..3 {
+            first_pass.extend([
+                BeginOcclusionQuery { index },
+                draw.clone(),
+                EndOcclusionQuery,
+            ]);
+        }
+        let first = submit_and_resolve(first_pass);
+        assert!(first.iter().all(|&result| result != 0), "{first:?}");
+
+        let second = submit_and_resolve(vec![
+            SetPipeline(pipeline),
+            BeginOcclusionQuery { index: 2 },
+            draw,
+            EndOcclusionQuery,
+        ]);
+        assert_eq!(second[..2], first[..2]);
+        assert_ne!(second[2], 0);
+
+        let third = submit_and_resolve(vec![BeginOcclusionQuery { index: 1 }, EndOcclusionQuery]);
+        assert_eq!(third, [second[0], 0, second[2]]);
     }
 
     fn check_pass_timestamps_after_blits(

@@ -104,3 +104,11 @@ and re-allocation after release. CTS `timestampQuery:many_query_sets` passes for
 
 Both are tracked as a follow-up block (pass `timestampWrites` through Metal pass
 descriptors). The exit-time Rust panic reported with F-170 did not reproduce.
+
+## Known limits
+
+- First-fit over 4096-sample buffers never compacts: a pattern of releases that leaves
+  only holes smaller than later requests creates a new sample buffer per request and can
+  reach the 32-buffer limit with most slots free. CTS shapes do not trigger it.
+- The 32-buffer limit is per process while the pool is per device, so several devices
+  share it.

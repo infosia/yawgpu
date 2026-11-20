@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use objc2_metal::{
     MTLComputePassDescriptor, MTLCounterDontSample, MTLCounterSampleBuffer, MTLDispatchType,
@@ -1185,15 +1185,12 @@ fn bound_buffer_size(bound: &HalBoundBuffer) -> Result<u64, HalError> {
     }
 }
 
-pub(super) fn render_pass_command_stream_descriptor(
+fn render_pass_command_stream_descriptor(
     pass: &HalRenderPassCommandStream,
     stage_boundary_sampling: bool,
 ) -> Result<Retained<MTLRenderPassDescriptor>, HalError> {
-    let descriptor = render_pass_descriptor_parts(
-        &pass.color_targets,
-        pass.depth_stencil_attachment.as_ref(),
-        pass.occlusion_query_set.as_ref(),
-    )?;
+    let descriptor =
+        render_pass_descriptor_parts(&pass.color_targets, pass.depth_stencil_attachment.as_ref())?;
     if let Some(writes) = pass
         .timestamp_writes
         .as_ref()
@@ -1222,7 +1219,6 @@ pub(super) fn render_pass_command_stream_descriptor(
 fn render_pass_descriptor_parts(
     color_targets: &[Option<crate::HalRenderColorTarget>],
     depth_stencil_attachment: Option<&crate::HalRenderDepthStencilAttachment>,
-    occlusion_query_set: Option<&HalQuerySet>,
 ) -> Result<Retained<MTLRenderPassDescriptor>, HalError> {
     let descriptor = MTLRenderPassDescriptor::renderPassDescriptor();
     for (index, color_target) in color_targets.iter().enumerate() {
@@ -1255,13 +1251,6 @@ fn render_pass_descriptor_parts(
             stencil_attachment.setStoreAction(mtl_store_action(depth_stencil.stencil_store));
             stencil_attachment.setClearStencil(depth_stencil.stencil_clear_value);
         }
-    }
-    match occlusion_query_set {
-        Some(HalQuerySet::Metal(query_set)) => {
-            descriptor.setVisibilityResultBuffer(Some(query_set.buffer()?));
-        }
-        Some(_) => return Err(buffer_error("occlusion query set is not Metal-backed")),
-        None => {}
     }
     Ok(descriptor)
 }
@@ -1367,6 +1356,7 @@ fn mtl_store_action(store: bool) -> MTLStoreAction {
 pub(super) fn subpass_render_pass_descriptor(
     pass: &HalSubpassRenderPassCommand,
 ) -> Result<Retained<MTLRenderPassDescriptor>, HalError> {
+    // HalSubpassRenderPassCommand has no occlusion query set.
     let descriptor = MTLRenderPassDescriptor::renderPassDescriptor();
     if pass.layout.subpasses.is_empty() {
         return Err(texture_error(
@@ -1491,66 +1481,137 @@ fn subpass_attachment_texture(
     }
 }
 
-/// Encodes the render pass and returns the draw-free occlusion indices to clear.
-pub(super) fn encode_render_pass_command_stream(
-    encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
-    pass: &HalRenderPassCommandStream,
-) -> Result<BTreeSet<u32>, HalError> {
-    let mut state = MetalRenderStreamState::default();
-    encode_metal_render_commands(encoder, &pass.commands, &mut state)?;
-    Ok(if pass.occlusion_query_set.is_some() {
-        empty_occlusion_queries(&pass.commands)
-    } else {
-        BTreeSet::new()
-    })
+const OCCLUSION_RESULT_SIZE: usize = 8;
+
+/// Scratch slot and copy-back action for one query index in a render pass.
+struct OcclusionQuerySlot {
+    scratch_index: usize,
+    /// None until a begin/end pair completes. A draw-free pair requires a zero fill.
+    completed_with_draw: Option<bool>,
 }
 
-/// Clears draw-free occlusion results after the pass's render encoder has ended.
-pub(super) fn encode_empty_occlusion_query_fills(
+/// Encodes the render pass and writes its completed occlusion results back to the query set.
+pub(super) fn encode_render_pass_command_stream(
     command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
-    query_set: Option<&HalQuerySet>,
-    empty: BTreeSet<u32>,
+    pass: &HalRenderPassCommandStream,
+    stage_boundary_sampling: bool,
 ) -> Result<(), HalError> {
-    let (Some(HalQuerySet::Metal(query_set)), Some(&last_index)) = (query_set, empty.last()) else {
-        return Ok(());
+    let descriptor = render_pass_command_stream_descriptor(pass, stage_boundary_sampling)?;
+    let mut slots = BTreeMap::new();
+    let occlusion_buffers = match &pass.occlusion_query_set {
+        Some(HalQuerySet::Metal(query_set)) => {
+            let destination = query_set.buffer()?;
+            slots = occlusion_query_slots(&pass.commands);
+            if let Some((&last_index, _)) = slots.last_key_value() {
+                if last_index >= query_set.count() {
+                    return Err(buffer_error("occlusion query index exceeds query count"));
+                }
+                let size = slots
+                    .len()
+                    .max(1)
+                    .checked_mul(OCCLUSION_RESULT_SIZE)
+                    .ok_or_else(|| buffer_error("occlusion scratch buffer size overflows"))?;
+                // Metal can overwrite every slot up to the highest offset used in a pass.
+                // The queue creates this command buffer with commandBuffer (retained
+                // references), so it keeps the scratch alive until GPU completion.
+                let scratch = command_buffer
+                    .device()
+                    .newBufferWithLength_options(size, MTLResourceOptions::StorageModePrivate)
+                    .ok_or(HalError::OutOfMemory {
+                        backend: BACKEND,
+                        resource: "occlusion scratch visibility buffer",
+                    })?;
+                descriptor.setVisibilityResultBuffer(Some(&scratch));
+                Some((scratch, destination))
+            } else {
+                None
+            }
+        }
+        Some(_) => return Err(buffer_error("occlusion query set is not Metal-backed")),
+        None => None,
     };
-    if last_index >= query_set.count() {
-        return Err(buffer_error(
-            "empty occlusion query index exceeds query count",
-        ));
+    let encoder = command_buffer
+        .renderCommandEncoderWithDescriptor(&descriptor)
+        .ok_or_else(|| HalError::QueueSubmissionFailed {
+            backend: BACKEND,
+            message: "render command encoder creation returned nil".to_owned(),
+        })?;
+    let mut state = MetalRenderStreamState::default();
+    let result = encode_metal_render_commands(&encoder, &pass.commands, &mut state, &slots);
+    encoder.endEncoding();
+    result?;
+    if let Some((scratch, destination)) = occlusion_buffers {
+        encode_occlusion_query_results(command_buffer, &scratch, destination, &slots)?;
     }
-    let buffer = query_set.buffer()?;
+    Ok(())
+}
+
+/// Copies drawn results and zero-fills draw-free results after the render encoder ends.
+fn encode_occlusion_query_results(
+    command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+    scratch: &ProtocolObject<dyn MTLBufferTrait>,
+    destination: &ProtocolObject<dyn MTLBufferTrait>,
+    slots: &BTreeMap<u32, OcclusionQuerySlot>,
+) -> Result<(), HalError> {
     let blit =
         command_buffer
             .blitCommandEncoder()
             .ok_or_else(|| HalError::QueueSubmissionFailed {
                 backend: BACKEND,
-                message: "occlusion query clear blit encoder creation returned nil".to_owned(),
+                message: "occlusion query result blit encoder creation returned nil".to_owned(),
             })?;
-    let result = empty.into_iter().try_for_each(|index| {
-        blit.fillBuffer_range_value(buffer, NSRange::new(to_ns(u64::from(index) * 8)?, 8), 0);
+    let result = slots.iter().try_for_each(|(&index, slot)| {
+        let Some(did_draw) = slot.completed_with_draw else {
+            return Ok(());
+        };
+        let destination_offset = to_ns(u64::from(index) * OCCLUSION_RESULT_SIZE as u64)?;
+        if did_draw {
+            // SAFETY: Scratch slots fit the allocated buffer and each query index
+            // is within the destination set's bounds.
+            unsafe {
+                blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                    scratch,
+                    slot.scratch_index * OCCLUSION_RESULT_SIZE,
+                    destination,
+                    destination_offset,
+                    OCCLUSION_RESULT_SIZE,
+                );
+            }
+        } else {
+            blit.fillBuffer_range_value(
+                destination,
+                NSRange::new(destination_offset, OCCLUSION_RESULT_SIZE),
+                0,
+            );
+        }
         Ok(())
     });
     blit.endEncoding();
     result
 }
 
-/// Derives the visibility slots that must be cleared if Metal leaves stale results.
-fn empty_occlusion_queries(commands: &[HalRenderPassCommand]) -> BTreeSet<u32> {
+/// Assigns dense slots in first-begin order and records which completed queries drew.
+fn occlusion_query_slots(commands: &[HalRenderPassCommand]) -> BTreeMap<u32, OcclusionQuerySlot> {
     let mut active = None;
-    let mut empty = BTreeSet::new();
+    let mut slots = BTreeMap::new();
     for command in commands {
         match command {
-            HalRenderPassCommand::BeginOcclusionQuery { index } => active = Some((*index, false)),
-            HalRenderPassCommand::EndOcclusionQuery => match active.take() {
-                Some((index, false)) => {
-                    empty.insert(index);
+            HalRenderPassCommand::BeginOcclusionQuery { index } => {
+                let scratch_index = slots.len();
+                slots.entry(*index).or_insert(OcclusionQuerySlot {
+                    scratch_index,
+                    completed_with_draw: None,
+                });
+                active = Some((*index, false));
+            }
+            HalRenderPassCommand::EndOcclusionQuery => {
+                let Some((index, did_draw)) = active.take() else {
+                    continue;
+                };
+                if let Some(slot) = slots.get_mut(&index) {
+                    slot.completed_with_draw = Some(did_draw);
                 }
-                Some((index, true)) => {
-                    empty.remove(&index);
-                }
-                None => {}
-            },
+            }
             _ => {
                 if let Some((_, did_draw)) = &mut active {
                     *did_draw = *did_draw || render_command_draws(command);
@@ -1558,7 +1619,7 @@ fn empty_occlusion_queries(commands: &[HalRenderPassCommand]) -> BTreeSet<u32> {
             }
         }
     }
-    empty
+    slots
 }
 
 /// Checks whether a command encodes a draw, including through bundle replay.
@@ -1595,6 +1656,7 @@ fn encode_metal_render_commands(
     encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
     commands: &[HalRenderPassCommand],
     state: &mut MetalRenderStreamState,
+    occlusion_slots: &BTreeMap<u32, OcclusionQuerySlot>,
 ) -> Result<(), HalError> {
     if state.immediate_data.is_empty() {
         state.immediate_data.resize(64, 0);
@@ -1712,9 +1774,12 @@ fn encode_metal_render_commands(
                 destination.copy_from_slice(data);
             }
             HalRenderPassCommand::BeginOcclusionQuery { index } => {
+                let slot = occlusion_slots.get(index).ok_or_else(|| {
+                    buffer_error("occlusion query has no scratch slot in this command stream")
+                })?;
                 encoder.setVisibilityResultMode_offset(
                     MTLVisibilityResultMode::Counting,
-                    to_ns(u64::from(*index) * 8)?,
+                    slot.scratch_index * OCCLUSION_RESULT_SIZE,
                 );
             }
             HalRenderPassCommand::EndOcclusionQuery => {
@@ -1773,7 +1838,8 @@ fn encode_metal_render_commands(
                 )?;
             }
             HalRenderPassCommand::ExecuteRenderBundle(bundle) => {
-                encode_metal_render_commands(encoder, &bundle.commands, state)?;
+                // Validated bundles can draw inside an active query but cannot begin one.
+                encode_metal_render_commands(encoder, &bundle.commands, state, &BTreeMap::new())?;
                 state.pipeline = None;
                 state.bind_buffers.clear();
                 state.bind_textures.clear();
@@ -2469,32 +2535,30 @@ mod tests {
     }
 
     #[test]
-    fn empty_occlusion_queries_only_include_completed_draw_free_pairs() {
+    fn occlusion_query_scratch_slots_follow_first_begin_order() {
         use HalRenderPassCommand::*;
 
-        let non_draw_bundle = crate::HalRenderBundle {
-            commands: vec![SetStencilReference(1)],
-        };
         let commands = [
             BeginOcclusionQuery { index: 5 },
-            ExecuteRenderBundle(non_draw_bundle),
             EndOcclusionQuery,
-            Draw {
-                vertex_count: 3,
-                instance_count: 1,
-                first_vertex: 0,
-                first_instance: 0,
-            },
             BeginOcclusionQuery { index: 1 },
+            EndOcclusionQuery,
+            BeginOcclusionQuery { index: 5 },
             EndOcclusionQuery,
             BeginOcclusionQuery { index: 3 },
         ];
-        assert_eq!(empty_occlusion_queries(&commands), BTreeSet::from([1, 5]));
-        assert!(empty_occlusion_queries(&[]).is_empty());
+        let slots = occlusion_query_slots(&commands);
+        let indices: Vec<_> = slots
+            .iter()
+            .map(|(&index, slot)| (index, slot.scratch_index))
+            .collect();
+        assert_eq!(indices, [(1, 1), (3, 2), (5, 0)]);
+        assert_eq!(slots[&3].completed_with_draw, None);
+        assert!(occlusion_query_slots(&[SetStencilReference(1)]).is_empty());
     }
 
     #[test]
-    fn empty_occlusion_queries_exclude_each_draw_kind_in_passes_and_bundles() {
+    fn occlusion_query_plan_copies_draws_and_zero_fills_draw_free_queries() {
         use HalRenderPassCommand::*;
 
         let buffer = crate::noop::NoopDevice::new()
@@ -2528,16 +2592,27 @@ mod tests {
                 commands: vec![SetStencilReference(1), draw.clone()],
             });
             let commands = [
-                BeginOcclusionQuery { index: 0 },
-                draw,
+                BeginOcclusionQuery { index: 5 },
+                draw.clone(),
                 EndOcclusionQuery,
+                draw,
                 BeginOcclusionQuery { index: 1 },
+                ExecuteRenderBundle(crate::HalRenderBundle {
+                    commands: vec![SetStencilReference(1)],
+                }),
+                EndOcclusionQuery,
+                BeginOcclusionQuery { index: 7 },
                 bundle,
                 EndOcclusionQuery,
-                BeginOcclusionQuery { index: 2 },
-                EndOcclusionQuery,
             ];
-            assert_eq!(empty_occlusion_queries(&commands), BTreeSet::from([2]));
+            let writes: Vec<_> = occlusion_query_slots(&commands)
+                .into_iter()
+                .map(|(index, slot)| (index, slot.scratch_index, slot.completed_with_draw))
+                .collect();
+            assert_eq!(
+                writes,
+                [(1, 1, Some(false)), (5, 0, Some(true)), (7, 2, Some(true))]
+            );
         }
     }
 

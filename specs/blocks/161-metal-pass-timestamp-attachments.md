@@ -123,3 +123,23 @@ sample through the descriptor; empty compute passes use R6.
 `e2e_metal_timestamp_query::metal_pass_timestamp_writes_with_only_an_end_index_leave_the_other_slot_zero`
 no longer requires the render pass's end stamp to follow the compute pass's: the two
 passes share no resource and the GPU overlapped them (compute end 15 ms after render end).
+
+## Phase Review (2026-11-20, fresh-context reviewer over `01324f0..f2695f8`, Blocks 159–161)
+
+0 CRITICAL, 1 MAJOR, 3 MINOR.
+- M1: an empty timestamped compute pass with only an end index encodes a mock blit with
+  `start = DontSample, end = end` — the end-of-encoder-after-blit shape Block 102 measured
+  as fatal on the M2; R6 was measured only with both indices. Fix in S3.
+- m1 (Block 159 S2): Dawn does not count a draw with `instanceCount == 0` (or
+  `indexCount == 0` for indexed draws) as a draw for the empty-query fill; yawgpu does. Fix
+  in S3.
+- m2 (Block 160): pool fragmentation / per-process limit — recorded under Block 160
+  "Known limits".
+- m3: block statuses — updated when the phase closes.
+
+S3 (Metal HAL): for an empty pass, sample with start-of-encoder only when one index is
+absent (`[end, DontSample]` for end-only, `[begin, DontSample]` for begin-only; keep
+`[begin, end]` for both, as measured); add begin-only and end-only empty-pass cases after a
+copy and after a clear to the real-device test. In `render_command_draws`, a direct or
+indexed draw with `instance_count == 0`, or an indexed draw with `index_count == 0`, is not
+a draw (bundle replay included); add unit-test cases.

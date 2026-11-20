@@ -200,9 +200,7 @@ mod tests {
     #[ignore = "manual real Metal backend test"]
     #[cfg(feature = "metal")]
     fn metal_query_set_count_zero_still_provides_a_buffer() {
-        // A zero-count occlusion set can never have an in-range query, but it may
-        // still be attached as a render pass `occlusionQuerySet`; its visibility
-        // buffer must stay valid so a normal draw in that pass does not fail at submit.
+        // Even a zero-count occlusion set provides a backing buffer to the HAL.
         let query_set = metal_device()
             .create_query_set(HalQueryKind::Occlusion, 0)
             .expect("zero-count occlusion query set should allocate");
