@@ -164,8 +164,10 @@ pub(crate) enum TextureCopyCommand {
 /// A timestamp written at this point in the command stream.
 #[derive(Debug, Clone)]
 pub(crate) struct WriteTimestampCommand {
-    pub(crate) query_set: Arc<QuerySet>,
+    pub(crate) query_set: QuerySet,
     pub(crate) query_index: u32,
+    /// Whether the write came from a pass's timestamp writes.
+    pub(crate) pass_boundary: bool,
 }
 
 /// Enumerates command execution values.
@@ -186,6 +188,8 @@ pub(crate) enum CommandExecution {
     WriteTimestamp(WriteTimestampCommand),
     /// Compute pass variant.
     ComputePass(ComputePassCommand),
+    /// A timestamped compute pass, including all of its dispatches.
+    ComputePassCommandStream(ComputePassCommandStream),
     /// Render pass variant.
     RenderPass(RenderPassCommand),
     #[cfg(feature = "tiled")]
@@ -205,6 +209,15 @@ pub(crate) struct ComputePassCommand {
     /// pipeline's actual budget is its pipeline layout's `immediate_size`
     /// bytes of this prefix (Block 93).
     pub(crate) immediate_data: Vec<u8>,
+}
+
+/// Stores a timestamped compute pass as a single execution unit.
+#[derive(Debug, Clone)]
+pub(crate) struct ComputePassCommandStream {
+    /// Validated timestamps specified by the pass descriptor.
+    pub(crate) timestamp_writes: PassTimestampWrites,
+    /// Dispatch commands in recording order.
+    pub(crate) dispatches: Vec<ComputePassCommand>,
 }
 
 /// Enumerates compute dispatch execution values.
@@ -231,6 +244,8 @@ pub(crate) struct RenderPassCommand {
     pub(crate) depth_stencil_attachment: Option<RenderPassDepthStencilExecution>,
     pub(crate) attachment_textures: Vec<Texture>,
     pub(crate) occlusion_query_set: Option<QuerySet>,
+    /// Timestamp writes specified by the pass descriptor.
+    pub(crate) timestamp_writes: Option<PassTimestampWrites>,
     pub(crate) written_occlusion_queries: BTreeSet<u32>,
     pub(crate) commands: Vec<RenderCommand>,
 }
@@ -409,7 +424,7 @@ impl CommandEncoder {
         descriptor: &RenderPassDescriptor,
     ) -> (RenderPassEncoder, Option<String>) {
         let (token, immediate_error) = self.begin_pass(PassKind::Render);
-        let mut end_timestamp = None;
+        let mut timestamp_writes = None;
         let attachment_signature =
             render_pass_attachment_signature(descriptor, &self.inner.features, self.inner.limits)
                 .ok();
@@ -421,8 +436,8 @@ impl CommandEncoder {
             } else {
                 self.record_referenced_textures(render_pass_attachment_textures(descriptor));
                 self.record_referenced_query_sets(render_pass_query_sets(descriptor));
-                end_timestamp =
-                    self.record_pass_timestamp_begin(descriptor.timestamp_writes.as_ref());
+                timestamp_writes = descriptor.timestamp_writes.clone();
+                self.record_pass_timestamp_begin(timestamp_writes.as_ref());
             }
         }
         (
@@ -432,7 +447,7 @@ impl CommandEncoder {
                         self.clone(),
                         token,
                         PassEncoderInit {
-                            end_timestamp,
+                            timestamp_writes,
                             attachment_signature,
                             render_extent: render_pass_extent(descriptor),
                             attachment_textures: render_pass_attachment_textures(descriptor),
@@ -557,13 +572,16 @@ impl CommandEncoder {
         timestamp_writes: Option<PassTimestampWrites>,
     ) -> (ComputePassEncoder, Option<String>) {
         let (token, immediate_error) = self.begin_pass(PassKind::Compute);
-        let end_timestamp = if immediate_error.is_none() {
+        let timestamp_writes = if immediate_error.is_none() {
             match timestamp_writes
                 .as_ref()
                 .map(validate_compute_pass_timestamp_writes)
                 .transpose()
             {
-                Ok(_) => self.record_pass_timestamp_begin(timestamp_writes.as_ref()),
+                Ok(_) => {
+                    self.record_pass_timestamp_begin(timestamp_writes.as_ref());
+                    timestamp_writes
+                }
                 Err(message) => {
                     self.record_first_error(message);
                     None
@@ -578,7 +596,7 @@ impl CommandEncoder {
                     self.clone(),
                     token,
                     PassEncoderInit {
-                        end_timestamp,
+                        timestamp_writes,
                         attachment_signature: None,
                         render_extent: None,
                         attachment_textures: Vec::new(),
@@ -593,32 +611,26 @@ impl CommandEncoder {
         )
     }
 
-    fn record_pass_timestamp_begin(
-        &self,
-        writes: Option<&PassTimestampWrites>,
-    ) -> Option<WriteTimestampCommand> {
-        let writes = writes?;
-        self.record_referenced_query_set(writes.query_set.clone());
-        let query_set = Arc::new(writes.query_set.clone());
-        if let Some(query_index) = writes.beginning_index {
-            self.record_pass_timestamp(WriteTimestampCommand {
-                query_set: query_set.clone(),
-                query_index,
-            });
+    fn record_pass_timestamp_begin(&self, writes: Option<&PassTimestampWrites>) {
+        if let Some(writes) = writes {
+            self.record_referenced_query_set(writes.query_set.clone());
+            self.record_pass_timestamp(&writes.query_set, writes.beginning_index);
         }
-        writes.end_index.map(|query_index| WriteTimestampCommand {
-            query_set,
-            query_index,
-        })
     }
 
     /// Appends a timestamp at an already validated pass boundary.
-    pub(crate) fn record_pass_timestamp(&self, command: WriteTimestampCommand) {
-        self.inner
-            .state
-            .lock()
-            .command_ops
-            .push(CommandExecution::WriteTimestamp(command));
+    pub(crate) fn record_pass_timestamp(&self, query_set: &QuerySet, index: Option<u32>) {
+        if let Some(query_index) = index {
+            self.inner
+                .state
+                .lock()
+                .command_ops
+                .push(CommandExecution::WriteTimestamp(WriteTimestampCommand {
+                    query_set: query_set.clone(),
+                    query_index,
+                    pass_boundary: true,
+                }));
+        }
     }
 
     /// Begins a pass, locking the encoder until the pass ends.
@@ -745,8 +757,9 @@ impl CommandEncoder {
         self.record_buffer_command(
             Vec::new(),
             Some(CommandExecution::WriteTimestamp(WriteTimestampCommand {
-                query_set: query_set.clone(),
+                query_set: (*query_set).clone(),
                 query_index,
+                pass_boundary: false,
             })),
             || {
                 validate_timestamp_query_set(&query_set, "write timestamp")?;
@@ -1282,13 +1295,22 @@ impl CommandEncoder {
             .extend(query_sets);
     }
 
-    /// Appends a finished compute-pass command to the encoder's command list.
+    /// Appends a compute dispatch to the encoder's command list.
     pub(crate) fn record_compute_pass(&self, command: ComputePassCommand) {
         self.inner
             .state
             .lock()
             .command_ops
             .push(CommandExecution::ComputePass(command));
+    }
+
+    /// Appends a finished timestamped compute pass to the encoder's command list.
+    pub(crate) fn record_compute_pass_stream(&self, command: ComputePassCommandStream) {
+        self.inner
+            .state
+            .lock()
+            .command_ops
+            .push(CommandExecution::ComputePassCommandStream(command));
     }
 
     /// Appends a finished render-pass command to the encoder's command list.
@@ -2779,7 +2801,7 @@ mod tests {
         let (buffer, error) = encoder.finish();
         assert_eq!(error, None);
         assert!(
-            matches!(buffer.command_ops(), [CommandExecution::WriteTimestamp(b), CommandExecution::ComputePass(_), CommandExecution::WriteTimestamp(e)] if b.query_index == 1 && e.query_index == 2)
+            matches!(buffer.command_ops(), [CommandExecution::WriteTimestamp(b), CommandExecution::ComputePassCommandStream(pass), CommandExecution::WriteTimestamp(e)] if b.query_index == 1 && e.query_index == 2 && pass.dispatches.len() == 1)
         );
     }
 

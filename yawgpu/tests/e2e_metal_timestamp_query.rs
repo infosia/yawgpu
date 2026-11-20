@@ -115,12 +115,10 @@ fn metal_pass_timestamp_writes_with_only_an_end_index_leave_the_other_slot_zero(
         assert!(stamps[1] > 0, "compute end stamp: {stamps:?}");
         assert_eq!(stamps[2], 0, "unwritten render begin slot: {stamps:?}");
         assert!(stamps[3] > 0, "render end stamp: {stamps:?}");
+        // The passes share no resource, so the GPU may overlap them: the two end
+        // stamps have no required order, only a plausible distance.
         assert!(
-            stamps[3] >= stamps[1],
-            "render pass ends after the compute pass: {stamps:?}"
-        );
-        assert!(
-            stamps[3] - stamps[1] < ONE_SECOND_NS,
+            stamps[3].abs_diff(stamps[1]) < ONE_SECOND_NS,
             "plausible nanoseconds: {stamps:?}"
         );
         session.assert_no_errors();

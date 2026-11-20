@@ -141,17 +141,19 @@ impl GlesQueue {
                             submit_texture_to_buffer(self.inner.as_ref(), gl, copy)?;
                         }
                         HalCopy::TextureToTexture(copy) => submit_texture_to_texture(gl, copy)?,
-                        HalCopy::ComputePass(pass) => {
-                            submit_compute_pass(
-                                gl,
-                                pass,
-                                placeholder_sampler,
-                                TextureViewCaps {
-                                    supports_texture_view,
-                                    supports_cube_map_array,
-                                    texture_view,
-                                },
-                            )?;
+                        HalCopy::ComputePass(_) | HalCopy::ComputePassCommandStream(_) => {
+                            for dispatch in copy.compute_dispatches() {
+                                submit_compute_pass(
+                                    gl,
+                                    dispatch,
+                                    placeholder_sampler,
+                                    TextureViewCaps {
+                                        supports_texture_view,
+                                        supports_cube_map_array,
+                                        texture_view,
+                                    },
+                                )?;
+                            }
                         }
                         HalCopy::RenderPassCommandStream(pass) => {
                             let render_caps = RenderDrawCaps {
@@ -10702,6 +10704,7 @@ mod tests {
             framebuffer_fetch_color_slots: Vec::new(),
             depth_stencil_attachment: None,
             occlusion_query_set: None,
+            timestamp_writes: None,
             commands: Vec::new(),
         }
     }

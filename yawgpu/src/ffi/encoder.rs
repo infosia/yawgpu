@@ -823,7 +823,7 @@ mod tests {
                 panic!("expected Noop")
             };
             assert!(
-                matches!(hal.submitted_copies().as_slice(), [yawgpu_hal::HalCopy::WriteTimestamp(b), yawgpu_hal::HalCopy::ComputePass(_), yawgpu_hal::HalCopy::WriteTimestamp(e)] if b.query_index == 0 && e.query_index == 1)
+                matches!(hal.submitted_copies().as_slice(), [yawgpu_hal::HalCopy::WriteTimestamp(b), yawgpu_hal::HalCopy::ComputePassCommandStream(pass), yawgpu_hal::HalCopy::WriteTimestamp(e)] if b.query_index == 0 && e.query_index == 1 && pass.dispatches.len() == 1)
             );
             wgpuComputePassEncoderRelease(pass);
             wgpuCommandBufferRelease(command);

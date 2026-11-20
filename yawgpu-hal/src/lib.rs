@@ -50,9 +50,10 @@ pub use shader_workarounds::HalShaderWorkarounds;
 pub use command::{
     HalBoundBuffer, HalBoundExternalTexture, HalBoundIndexBuffer, HalBoundIndirectBuffer,
     HalBoundSampler, HalBoundTexture, HalBufferBindingKind, HalBufferClear, HalBufferCopy,
-    HalBufferTextureCopy, HalBufferTextureLayout, HalComputeDispatch, HalComputePass, HalCopy,
-    HalDescriptorBinding, HalDescriptorBindingKind, HalDraw, HalIndexFormat, HalRenderBundle,
-    HalRenderColorTarget, HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPassCommand,
+    HalBufferTextureCopy, HalBufferTextureLayout, HalComputeDispatch, HalComputePass,
+    HalComputePassCommandStream, HalCopy, HalDescriptorBinding, HalDescriptorBindingKind, HalDraw,
+    HalIndexFormat, HalPassTimestampWrites, HalRenderBundle, HalRenderColorTarget,
+    HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPassCommand,
     HalRenderPassCommandStream, HalResolveQuerySet, HalScissorRect, HalStorageTextureAccess,
     HalTextureAspect, HalTextureClear, HalTextureCopy, HalTextureViewDimension, HalViewport,
     HalWriteTimestamp,
@@ -1577,6 +1578,7 @@ mod tests {
         queue.submit_copies(&[HalCopy::WriteTimestamp(HalWriteTimestamp {
             query_set: set,
             query_index: 3,
+            pass_boundary: false,
         })])?;
         #[allow(irrefutable_let_patterns)]
         let HalQueue::Noop(queue) = queue
@@ -2297,6 +2299,7 @@ mod tests {
                     stencil_read_only: true,
                 }),
                 occlusion_query_set: None,
+                timestamp_writes: None,
                 commands: Vec::new(),
             },
         )])?;

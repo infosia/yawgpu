@@ -94,14 +94,17 @@ impl ComputePassEncoder {
             if let Some(invocations) = pipeline.linear_index_invocations() {
                 validate_linear_index_range(invocations, x, y, z)?;
             }
-            self.inner.parent.record_compute_pass(ComputePassCommand {
-                pipeline,
-                bind_groups: state.bind_groups.clone(),
-                dispatch: ComputeDispatch::Direct {
-                    workgroups: (x, y, z),
+            self.inner.record_compute_dispatch(
+                state,
+                ComputePassCommand {
+                    pipeline,
+                    bind_groups: state.bind_groups.clone(),
+                    dispatch: ComputeDispatch::Direct {
+                        workgroups: (x, y, z),
+                    },
+                    immediate_data: state.immediate_data.clone(),
                 },
-                immediate_data: state.immediate_data.clone(),
-            });
+            );
             Ok(())
         })
     }
@@ -148,16 +151,19 @@ impl ComputePassEncoder {
             self.inner
                 .parent
                 .record_referenced_buffer(Arc::clone(&validated_buffer));
-            self.inner.parent.record_compute_pass(validation);
-            self.inner.parent.record_compute_pass(ComputePassCommand {
-                pipeline,
-                bind_groups: state.bind_groups.clone(),
-                dispatch: ComputeDispatch::Indirect {
-                    buffer: validated_buffer,
-                    offset: 0,
+            self.inner.record_compute_dispatch(state, validation);
+            self.inner.record_compute_dispatch(
+                state,
+                ComputePassCommand {
+                    pipeline,
+                    bind_groups: state.bind_groups.clone(),
+                    dispatch: ComputeDispatch::Indirect {
+                        buffer: validated_buffer,
+                        offset: 0,
+                    },
+                    immediate_data: state.immediate_data.clone(),
                 },
-                immediate_data: state.immediate_data.clone(),
-            });
+            );
             Ok(())
         })
     }

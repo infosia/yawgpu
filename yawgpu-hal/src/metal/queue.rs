@@ -1,3 +1,5 @@
+use objc2_metal::{MTLBlitPassDescriptor, MTLCounterDontSample, MTLCounterSampleBuffer};
+
 use super::*;
 
 /// Stores metal queue data used by validation and backend submission.
@@ -186,6 +188,7 @@ fn is_coalescable_blit(copy: &HalCopy) -> bool {
         | HalCopy::WriteTimestamp(_)
         | HalCopy::ResolveQuerySet(_)
         | HalCopy::ComputePass(_)
+        | HalCopy::ComputePassCommandStream(_)
         | HalCopy::RenderPassCommandStream(_) => false,
         #[cfg(feature = "tiled")]
         HalCopy::SubpassRenderPass(_) => false,
@@ -277,6 +280,57 @@ impl MetalQueue {
         self.wait_for_submission(last_issued)
     }
 
+    /// Samples the requested encoder boundaries around a one-byte mock blit.
+    fn encode_timestamp_mock_blit(
+        &self,
+        command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+        sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer>,
+        [start, end]: [usize; 2],
+    ) -> Result<(), HalError> {
+        let mock_blit = &self.timestamp_resources.mock_blit;
+        // Submission encoding may race; OnceLock retains the winning allocation.
+        if mock_blit.get().is_none() {
+            let mock = self
+                .inner
+                .device()
+                .newBufferWithLength_options(1, MTLResourceOptions::StorageModePrivate)
+                .ok_or(HalError::OutOfMemory {
+                    backend: BACKEND,
+                    resource: "timestamp mock blit buffer",
+                })?;
+            let _ = mock_blit.set(MetalBuffer {
+                inner: Some(mock),
+                mapped_ptr: None,
+                size: 1,
+            });
+        }
+        let mock = mock_blit
+            .get()
+            .ok_or_else(|| buffer_error("timestamp mock blit buffer is unavailable"))?
+            .inner()?;
+        let descriptor = MTLBlitPassDescriptor::new();
+        // SAFETY: Blit descriptors provide attachment slot zero.
+        let attachment = unsafe {
+            descriptor
+                .sampleBufferAttachments()
+                .objectAtIndexedSubscript(0)
+        };
+        attachment.setSampleBuffer(Some(sample_buffer));
+        // SAFETY: Both callers supply validated sample indices or MTLCounterDontSample.
+        unsafe {
+            attachment.setStartOfEncoderSampleIndex(start);
+            attachment.setEndOfEncoderSampleIndex(end);
+        }
+        let blit = command_buffer
+            .blitCommandEncoderWithDescriptor(&descriptor)
+            .ok_or_else(|| {
+                queue_submission_error("timestamp blit encoder creation returned nil")
+            })?;
+        blit.fillBuffer_range_value(mock, NSRange::new(0, 1), 0);
+        blit.endEncoding();
+        Ok(())
+    }
+
     /// Signals and waits on this submission's event between encoders.
     /// Apple8+ needs Dawn's timestamp-generation/resolve workaround.
     fn serialize_timestamp_resolution(
@@ -313,7 +367,14 @@ impl MetalQueue {
             let mut serialize_event = None;
             let mut serialize_value = 0;
             let mut blit = CoalescedBlitEncoder::default();
+            let stage_boundary_sampling =
+                self.timestamp_resources.counter_sampling_at_stage_boundary;
             for copy in copies {
+                if stage_boundary_sampling
+                    && matches!(copy, HalCopy::WriteTimestamp(write) if write.pass_boundary)
+                {
+                    continue;
+                }
                 if !is_coalescable_blit(copy) {
                     blit.end();
                 }
@@ -356,67 +417,14 @@ impl MetalQueue {
                             resources.counter_sampling_at_command_boundary,
                         ) {
                             Some(TimestampSamplingMode::StageBoundary) => {
-                                // Submission encoding may race; OnceLock retains the winning allocation.
-                                if resources.mock_blit.get().is_none() {
-                                    let mock = self
-                                        .inner
-                                        .device()
-                                        .newBufferWithLength_options(
-                                            1,
-                                            MTLResourceOptions::StorageModePrivate,
-                                        )
-                                        .ok_or(HalError::OutOfMemory {
-                                            backend: BACKEND,
-                                            resource: "timestamp mock blit buffer",
-                                        })?;
-                                    let _ = resources.mock_blit.set(MetalBuffer {
-                                        inner: Some(mock),
-                                        mapped_ptr: None,
-                                        size: 1,
-                                    });
-                                }
-                                let mock = resources
-                                    .mock_blit
-                                    .get()
-                                    .ok_or_else(|| {
-                                        buffer_error("timestamp mock blit buffer is unavailable")
-                                    })?
-                                    .inner()?;
-                                let descriptor = objc2_metal::MTLBlitPassDescriptor::new();
-                                // SAFETY: Blit descriptors provide attachment slot zero.
-                                let attachment = unsafe {
-                                    descriptor
-                                        .sampleBufferAttachments()
-                                        .objectAtIndexedSubscript(0)
-                                };
-                                attachment.setSampleBuffer(Some(sample_buffer));
-                                // Sample at the START of this mock encoder, not the end.
-                                // Dawn samples `endOfEncoderSampleIndex`, but on Apple8
-                                // (M2, macOS 26) a blit pass whose end-of-encoder sample is
-                                // requested right after another blit encoder (a buffer copy
-                                // or clear) fails the whole command buffer with
-                                // kIOGPUCommandBufferCallbackErrorOutOfMemory; measured
-                                // 2026-09-22 across every ordering (Block 102 S2 review).
-                                // Start-of-encoder sampling on the same descriptor works in
-                                // every ordering, and since the encoder is a 1-byte mock
-                                // fill the two points are the same instant for the caller.
-                                // SAFETY: The start index was checked against the sample
-                                // count; the end index explicitly disables sampling.
-                                unsafe {
-                                    attachment.setStartOfEncoderSampleIndex(index);
-                                    attachment.setEndOfEncoderSampleIndex(
-                                        objc2_metal::MTLCounterDontSample,
-                                    );
-                                }
-                                let blit = command_buffer
-                                    .blitCommandEncoderWithDescriptor(&descriptor)
-                                    .ok_or_else(|| {
-                                        queue_submission_error(
-                                            "timestamp blit encoder creation returned nil",
-                                        )
-                                    })?;
-                                blit.fillBuffer_range_value(mock, NSRange::new(0, 1), 0);
-                                blit.endEncoding();
+                                // Use the start index for standalone writes. An end-only
+                                // mock blit after a copy or clear fails the command buffer
+                                // on the M2 (Block 102 S2 review).
+                                self.encode_timestamp_mock_blit(
+                                    &command_buffer,
+                                    sample_buffer,
+                                    [index, MTLCounterDontSample],
+                                )?;
                             }
                             Some(TimestampSamplingMode::CommandBoundary) => {
                                 let blit =
@@ -492,16 +500,56 @@ impl MetalQueue {
                             copy,
                         )?;
                     }
-                    HalCopy::ComputePass(pass) => {
-                        let encoder = command_buffer.computeCommandEncoder().ok_or_else(|| {
-                            queue_submission_error("compute command encoder creation returned nil")
-                        })?;
-                        let result = encode_compute_pass(&encoder, pass);
-                        encoder.endEncoding();
-                        result?;
+                    HalCopy::ComputePass(_) | HalCopy::ComputePassCommandStream(_) => {
+                        let writes = match copy {
+                            HalCopy::ComputePassCommandStream(pass) if stage_boundary_sampling => {
+                                pass.timestamp_writes.as_ref()
+                            }
+                            _ => None,
+                        };
+                        let dispatches = copy.compute_dispatches();
+                        if let Some(writes) = writes {
+                            if dispatches.is_empty() {
+                                // A compute encoder without dispatches takes no samples
+                                // on the M2. A mock blit samples both bounds (Block 161 R6).
+                                let (sample_buffer, indices) = pass_timestamp_samples(writes)?;
+                                self.encode_timestamp_mock_blit(
+                                    &command_buffer,
+                                    sample_buffer,
+                                    indices.encoder_boundaries(),
+                                )?;
+                                continue;
+                            }
+                            let descriptor = compute_pass_timestamp_descriptor(writes)?;
+                            let encoder = command_buffer
+                                .computeCommandEncoderWithDescriptor(&descriptor)
+                                .ok_or_else(|| {
+                                    queue_submission_error(
+                                        "compute command encoder creation returned nil",
+                                    )
+                                })?;
+                            let result = dispatches
+                                .iter()
+                                .try_for_each(|dispatch| encode_compute_pass(&encoder, dispatch));
+                            encoder.endEncoding();
+                            result?;
+                        } else {
+                            for dispatch in dispatches {
+                                let encoder =
+                                    command_buffer.computeCommandEncoder().ok_or_else(|| {
+                                        queue_submission_error(
+                                            "compute command encoder creation returned nil",
+                                        )
+                                    })?;
+                                let result = encode_compute_pass(&encoder, dispatch);
+                                encoder.endEncoding();
+                                result?;
+                            }
+                        }
                     }
                     HalCopy::RenderPassCommandStream(pass) => {
-                        let descriptor = render_pass_command_stream_descriptor(pass)?;
+                        let descriptor =
+                            render_pass_command_stream_descriptor(pass, stage_boundary_sampling)?;
                         let encoder = command_buffer
                             .renderCommandEncoderWithDescriptor(&descriptor)
                             .ok_or_else(|| {
@@ -577,7 +625,7 @@ fn next_timestamp_resolution_value(
 mod tests {
     use super::super::test_helpers::*;
     use super::*;
-    use crate::HalBufferCopy;
+    use crate::{HalBufferCopy, HalComputePassCommandStream, HalPassTimestampWrites};
 
     #[test]
     fn coalescable_blit_kinds_define_maximal_runs_without_gpu() {
@@ -647,6 +695,7 @@ mod tests {
             HalCopy::WriteTimestamp(crate::HalWriteTimestamp {
                 query_set: query_set.clone(),
                 query_index: 0,
+                pass_boundary: false,
             }),
             HalCopy::ResolveQuerySet(HalResolveQuerySet {
                 query_set,
@@ -667,6 +716,7 @@ mod tests {
                     workgroups: (1, 1, 1),
                 },
             }),
+            HalCopy::ComputePassCommandStream(HalComputePassCommandStream::default()),
             HalCopy::RenderPassCommandStream(HalRenderPassCommandStream::default()),
             #[cfg(feature = "tiled")]
             HalCopy::SubpassRenderPass(crate::HalSubpassRenderPassCommand {
@@ -1014,6 +1064,187 @@ fragment float4 fs_main() { return float4(1, 0, 0, 1); }
         assert_eq!(&after[8..], &before[8..]);
     }
 
+    fn check_pass_timestamps_after_blits(
+        device: &MetalDevice,
+        pass_count: usize,
+        pass: impl Fn(usize, HalPassTimestampWrites) -> HalCopy,
+    ) {
+        assert!(
+            device
+                .queue()
+                .timestamp_resources
+                .counter_sampling_at_stage_boundary
+        );
+        let query_count = u32::try_from(2 * pass_count).expect("two queries per pass");
+        let readback_size = u64::from(query_count) * 8;
+        // Use distinct samples for the copy and clear cases so prior writes cannot mask a failure.
+        let query_set = HalQuerySet::Metal(
+            device
+                .create_query_set(HalQueryKind::Timestamp, 2 * query_count)
+                .expect("timestamp query set"),
+        );
+        let source = HalBuffer::Metal(
+            device
+                .create_buffer(
+                    256,
+                    HalBufferUsage {
+                        copy_src: true,
+                        ..Default::default()
+                    },
+                )
+                .expect("copy source"),
+        );
+        let destination = HalBuffer::Metal(
+            device
+                .create_buffer(
+                    256,
+                    HalBufferUsage {
+                        copy_dst: true,
+                        ..Default::default()
+                    },
+                )
+                .expect("blit destination"),
+        );
+        for (first_query, blit_name, blit) in [
+            (
+                0,
+                "copy",
+                HalCopy::Buffer(HalBufferCopy {
+                    source,
+                    source_offset: 0,
+                    destination: destination.clone(),
+                    destination_offset: 0,
+                    size: 256,
+                }),
+            ),
+            (
+                query_count,
+                "clear",
+                HalCopy::BufferClear(HalBufferClear {
+                    buffer: destination,
+                    offset: 0,
+                    size: 256,
+                }),
+            ),
+        ] {
+            let readback = device
+                .create_buffer(
+                    readback_size,
+                    HalBufferUsage {
+                        map_read: true,
+                        query_resolve: true,
+                        ..Default::default()
+                    },
+                )
+                .expect("timestamp readback");
+            let boundary = |query_index| {
+                HalCopy::WriteTimestamp(crate::HalWriteTimestamp {
+                    query_set: query_set.clone(),
+                    query_index,
+                    pass_boundary: true,
+                })
+            };
+            let queries = first_query..first_query + query_count;
+            let mut copies = Vec::new();
+            for (pass_index, begin) in queries.clone().step_by(2).enumerate() {
+                // Put a blit immediately before the first dispatching and first empty pass.
+                if pass_index < 2 {
+                    copies.push(blit.clone());
+                }
+                let end = begin + 1;
+                copies.push(boundary(begin));
+                copies.push(pass(
+                    pass_index,
+                    HalPassTimestampWrites::new(query_set.clone(), Some(begin), Some(end)),
+                ));
+                copies.push(boundary(end));
+            }
+            copies.push(HalCopy::ResolveQuerySet(HalResolveQuerySet {
+                query_set: query_set.clone(),
+                first_query,
+                query_count,
+                destination: HalBuffer::Metal(readback.clone()),
+                destination_offset: 0,
+                written_queries: queries.collect(),
+            }));
+            let submission = device
+                .queue()
+                .submit_copies(&copies)
+                .expect("submit blits, timestamped passes and resolve");
+            device
+                .queue()
+                .wait_for_submission(submission)
+                .expect("wait for timestamps");
+            let bytes = readback.read(0, readback_size).expect("read timestamps");
+            let (pairs, remainder) = bytes.as_chunks::<16>();
+            assert!(remainder.is_empty());
+            for (pass_index, pair) in pairs.iter().enumerate() {
+                let begin = u64::from_ne_bytes(pair[..8].try_into().unwrap());
+                let end = u64::from_ne_bytes(pair[8..].try_into().unwrap());
+                assert!(
+                    0 < begin && begin <= end,
+                    "pass {pass_index} in {blit_name} case: begin={begin}, end={end}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    fn metal_compute_pass_samples_timestamps_after_copy_and_clear() {
+        let device = metal_device();
+        let pipeline = device
+            .create_compute_pipeline(compute_msl(), "main0", (1, 1, 1), &[])
+            .expect("compute pipeline");
+        let dispatch = HalComputePass {
+            pipeline: crate::HalComputePipeline::Metal(pipeline),
+            bind_buffers: Vec::new(),
+            bind_textures: Vec::new(),
+            bind_samplers: Vec::new(),
+            bind_external_textures: Vec::new(),
+            immediate_data: Vec::new(),
+            dispatch: HalComputeDispatch::Direct {
+                workgroups: (1, 1, 1),
+            },
+        };
+        let dispatch_counts = [1, 0, 1, 0, 2];
+        check_pass_timestamps_after_blits(&device, dispatch_counts.len(), |index, writes| {
+            HalCopy::ComputePassCommandStream(HalComputePassCommandStream {
+                timestamp_writes: Some(writes),
+                dispatches: vec![dispatch.clone(); dispatch_counts[index]],
+            })
+        });
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    fn metal_render_pass_samples_timestamps_after_copy_and_clear() {
+        let device = metal_device();
+        let texture = device
+            .create_texture(&texture_descriptor())
+            .expect("color attachment");
+        check_pass_timestamps_after_blits(&device, 1, |_, writes| {
+            HalCopy::RenderPassCommandStream(HalRenderPassCommandStream {
+                color_targets: vec![Some(crate::HalRenderColorTarget {
+                    texture: HalTexture::Metal(texture.clone()),
+                    view_format: HalTextureFormat::Rgba8Unorm,
+                    resolve_target: None,
+                    resolve_view_format: None,
+                    mip_level: 0,
+                    array_layer: 0,
+                    depth_slice: 0,
+                    resolve_mip_level: 0,
+                    resolve_array_layer: 0,
+                    load_op: HalRenderLoadOp::Clear,
+                    store: true,
+                    clear_color: [0.0; 4],
+                })],
+                timestamp_writes: Some(writes),
+                ..Default::default()
+            })
+        });
+    }
+
     #[must_use]
     fn resolve_timestamp_ticks(written: &[u32]) -> [u64; 2] {
         let device = metal_device();
@@ -1068,6 +1299,7 @@ fragment float4 fs_main() { return float4(1, 0, 0, 1); }
             copies.push(HalCopy::WriteTimestamp(crate::HalWriteTimestamp {
                 query_set: query_set.clone(),
                 query_index: index,
+                pass_boundary: false,
             }));
             copies.push(HalCopy::BufferClear(HalBufferClear {
                 buffer: busy.clone(),
@@ -1167,6 +1399,7 @@ fragment float4 fs_main() { return float4(1, 0, 0, 1); }
             HalCopy::WriteTimestamp(crate::HalWriteTimestamp {
                 query_set: first.clone(),
                 query_index: 1,
+                pass_boundary: false,
             }),
             HalCopy::BufferClear(HalBufferClear {
                 buffer: HalBuffer::Metal(busy),
@@ -1176,6 +1409,7 @@ fragment float4 fs_main() { return float4(1, 0, 0, 1); }
             HalCopy::WriteTimestamp(crate::HalWriteTimestamp {
                 query_set: second.clone(),
                 query_index: 1,
+                pass_boundary: false,
             }),
         ];
         for (query_set, destination_offset) in [(first, 0), (second, 16)] {
@@ -1221,7 +1455,8 @@ fragment float4 fs_main() { return float4(1, 0, 0, 1); }
                 .queue()
                 .submit_copies(&[HalCopy::WriteTimestamp(crate::HalWriteTimestamp {
                     query_set,
-                    query_index: index
+                    query_index: index,
+                    pass_boundary: false,
                 })])
                 .is_err());
         }

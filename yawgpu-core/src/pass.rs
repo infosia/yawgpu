@@ -38,7 +38,9 @@ pub(crate) struct PassEncoderInner {
 /// Tracks the lifecycle state for pass encoder.
 #[derive(Debug)]
 pub(crate) struct PassEncoderState {
-    pub(crate) end_timestamp: Option<WriteTimestampCommand>,
+    /// Validated timestamps to write at the pass boundaries.
+    pub(crate) timestamp_writes: Option<PassTimestampWrites>,
+    compute_dispatches: Vec<ComputePassCommand>,
     pub(crate) ended: bool,
     pub(crate) debug_group_depth: u32,
     pub(crate) render_pipeline: Option<Arc<RenderPipeline>>,
@@ -104,7 +106,8 @@ const _: () = assert!(MAX_IMMEDIATE_DATA_BYTES / 4 <= ImmediateWrittenMask::BITS
 /// Groups pass encoder creation metadata.
 #[derive(Debug)]
 pub(crate) struct PassEncoderInit {
-    pub(crate) end_timestamp: Option<WriteTimestampCommand>,
+    /// Validated timestamps to write at the pass boundaries.
+    pub(crate) timestamp_writes: Option<PassTimestampWrites>,
     pub(crate) attachment_signature: Option<AttachmentSignature>,
     pub(crate) render_extent: Option<Extent3d>,
     pub(crate) attachment_textures: Vec<Texture>,
@@ -118,7 +121,8 @@ impl PassEncoderState {
     /// Creates a new instance.
     pub(crate) fn new(limits: Limits, init: PassEncoderInit) -> Self {
         Self {
-            end_timestamp: init.end_timestamp,
+            timestamp_writes: init.timestamp_writes,
+            compute_dispatches: Vec::new(),
             ended: false,
             debug_group_depth: 0,
             render_pipeline: None,
@@ -195,7 +199,6 @@ impl PassEncoderState {
     /// The usage scope is replaced as a unit so its identity index and owning
     /// histories are released together, preserving the index's invariant.
     fn clear_ended_resources(&mut self) {
-        self.end_timestamp = None;
         self.render_pipeline = None;
         self.compute_pipeline = None;
         self.bind_groups.clear();
@@ -467,6 +470,19 @@ pub(crate) struct BoundIndexBuffer {
 }
 
 impl PassEncoderInner {
+    /// Keeps dispatches of a timestamped pass together for descriptor sampling.
+    pub(crate) fn record_compute_dispatch(
+        &self,
+        state: &mut PassEncoderState,
+        command: ComputePassCommand,
+    ) {
+        if state.timestamp_writes.is_some() {
+            state.compute_dispatches.push(command);
+        } else {
+            self.parent.record_compute_pass(command);
+        }
+    }
+
     /// Creates a new instance.
     pub(crate) fn new(parent: CommandEncoder, token: PassToken, init: PassEncoderInit) -> Self {
         let limits = parent.inner.limits;
@@ -496,6 +512,7 @@ impl PassEncoderInner {
         let unbalanced_debug_groups = state.debug_group_depth != 0;
         let open_occlusion_query = state.open_occlusion_query.is_some();
         let draw_count_exceeded = state.draw_count > state.max_draw_count;
+        let timestamp_writes = state.timestamp_writes.take();
         let render_pass_command = if !state.render_color_attachments.is_empty()
             || state.render_depth_stencil_attachment.is_some()
         {
@@ -512,15 +529,14 @@ impl PassEncoderInner {
                 depth_stencil_attachment: state.render_depth_stencil_attachment.clone(),
                 attachment_textures: state.attachment_textures.clone(),
                 occlusion_query_set: state.occlusion_query_set.clone(),
+                timestamp_writes: timestamp_writes.clone(),
                 written_occlusion_queries,
                 commands: std::mem::take(&mut state.render_commands),
             })
         } else {
             None
         };
-        // The end-of-pass timestamp write (Block 102) is taken out before the
-        // state is cleared so it is recorded after the pass's own command.
-        let end_timestamp = state.end_timestamp.take();
+        let compute_dispatches = std::mem::take(&mut state.compute_dispatches);
         // The pass has ended: it will never validate or record another command,
         // so it must stop pinning what it bound while encoding (Block 50, D1).
         // Reached only after `ended = true`; the early returns above leave the
@@ -531,8 +547,16 @@ impl PassEncoderInner {
         if let Some(command) = render_pass_command {
             self.parent.record_render_pass(command);
         }
-        if let Some(command) = end_timestamp {
-            self.parent.record_pass_timestamp(command);
+        if let Some(writes) = timestamp_writes {
+            if self.token.kind == PassKind::Compute {
+                self.parent
+                    .record_compute_pass_stream(ComputePassCommandStream {
+                        timestamp_writes: writes.clone(),
+                        dispatches: compute_dispatches,
+                    });
+            }
+            self.parent
+                .record_pass_timestamp(&writes.query_set, writes.end_index);
         }
         self.parent.end_pass(self.token);
         if unbalanced_debug_groups {
@@ -2454,7 +2478,7 @@ mod tests {
         PassEncoderState::new(
             device.limits(),
             PassEncoderInit {
-                end_timestamp: None,
+                timestamp_writes: None,
                 attachment_signature: None,
                 render_extent: None,
                 attachment_textures: Vec::new(),
@@ -3922,7 +3946,7 @@ mod tests {
         let mut state = PassEncoderState::new(
             limits,
             PassEncoderInit {
-                end_timestamp: None,
+                timestamp_writes: None,
                 attachment_signature: None,
                 render_extent: None,
                 attachment_textures: Vec::new(),

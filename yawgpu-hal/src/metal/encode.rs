@@ -1,11 +1,15 @@
 use std::collections::BTreeSet;
 
+use objc2_metal::{
+    MTLComputePassDescriptor, MTLCounterDontSample, MTLCounterSampleBuffer, MTLDispatchType,
+};
+
 use super::*;
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
 use crate::{
-    HalBoundIndexBuffer, HalBoundIndirectBuffer, HalComponentSwizzle, HalScissorRect,
-    HalTextureAspect, HalTextureComponentSwizzle, HalTextureDimension, HalTextureViewDimension,
-    HalViewport,
+    HalBoundIndexBuffer, HalBoundIndirectBuffer, HalComponentSwizzle, HalPassTimestampWrites,
+    HalScissorRect, HalTextureAspect, HalTextureComponentSwizzle, HalTextureDimension,
+    HalTextureViewDimension, HalViewport,
 };
 
 /// Records encode into the command stream.
@@ -800,7 +804,89 @@ fn layer_buffer_offset(
     to_ns(offset)
 }
 
-/// Records encode into the command stream.
+/// Sample-buffer indices for a pass's optional timestamp writes.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct PassTimestampSampleIndices {
+    beginning: usize,
+    end: usize,
+}
+
+impl PassTimestampSampleIndices {
+    fn new(
+        writes: &HalPassTimestampWrites,
+        sample_index: impl Fn(u32) -> Result<usize, HalError>,
+    ) -> Result<Self, HalError> {
+        let index = |index: Option<u32>| index.map_or(Ok(MTLCounterDontSample), &sample_index);
+        Ok(Self {
+            beginning: index(writes.beginning_index)?,
+            end: index(writes.end_index)?,
+        })
+    }
+
+    /// Returns the start and end sample indices for compute and blit descriptors.
+    pub(super) fn encoder_boundaries(&self) -> [usize; 2] {
+        [self.beginning, self.end]
+    }
+
+    fn render_stages(&self) -> [usize; 4] {
+        [
+            self.beginning,
+            MTLCounterDontSample,
+            MTLCounterDontSample,
+            self.end,
+        ]
+    }
+}
+
+/// Gets the pass's Metal sample buffer and validates its timestamp indices.
+pub(super) fn pass_timestamp_samples(
+    writes: &HalPassTimestampWrites,
+) -> Result<
+    (
+        &ProtocolObject<dyn MTLCounterSampleBuffer>,
+        PassTimestampSampleIndices,
+    ),
+    HalError,
+> {
+    let HalQuerySet::Metal(query_set) = &writes.query_set else {
+        return Err(buffer_error("query set is not Metal-backed"));
+    };
+    let sample_buffer = query_set
+        .sample_buffer()
+        .ok_or_else(|| buffer_error("query set is not a timestamp set"))?;
+    let indices = PassTimestampSampleIndices::new(writes, |index| {
+        if index >= query_set.count() {
+            return Err(buffer_error("timestamp query index exceeds query count"));
+        }
+        query_set.sample_index(index)
+    })?;
+    Ok((sample_buffer, indices))
+}
+
+/// Creates a serial compute pass descriptor with its timestamp sample attachment.
+pub(super) fn compute_pass_timestamp_descriptor(
+    writes: &HalPassTimestampWrites,
+) -> Result<Retained<MTLComputePassDescriptor>, HalError> {
+    let (buffer, indices) = pass_timestamp_samples(writes)?;
+    let descriptor = MTLComputePassDescriptor::computePassDescriptor();
+    descriptor.setDispatchType(MTLDispatchType::Serial);
+    // SAFETY: Compute pass descriptors provide attachment slot zero.
+    let attachment = unsafe {
+        descriptor
+            .sampleBufferAttachments()
+            .objectAtIndexedSubscript(0)
+    };
+    attachment.setSampleBuffer(Some(buffer));
+    let [start, end] = indices.encoder_boundaries();
+    // SAFETY: Each index is within the query set's sample range or disables sampling.
+    unsafe {
+        attachment.setStartOfEncoderSampleIndex(start);
+        attachment.setEndOfEncoderSampleIndex(end);
+    }
+    Ok(descriptor)
+}
+
+/// Records one compute dispatch and its state.
 pub(super) fn encode_compute_pass(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     pass: &HalComputePass,
@@ -1101,12 +1187,36 @@ fn bound_buffer_size(bound: &HalBoundBuffer) -> Result<u64, HalError> {
 
 pub(super) fn render_pass_command_stream_descriptor(
     pass: &HalRenderPassCommandStream,
+    stage_boundary_sampling: bool,
 ) -> Result<Retained<MTLRenderPassDescriptor>, HalError> {
-    render_pass_descriptor_parts(
+    let descriptor = render_pass_descriptor_parts(
         &pass.color_targets,
         pass.depth_stencil_attachment.as_ref(),
         pass.occlusion_query_set.as_ref(),
-    )
+    )?;
+    if let Some(writes) = pass
+        .timestamp_writes
+        .as_ref()
+        .filter(|_| stage_boundary_sampling)
+    {
+        let (buffer, indices) = pass_timestamp_samples(writes)?;
+        // SAFETY: Render pass descriptors provide attachment slot zero.
+        let attachment = unsafe {
+            descriptor
+                .sampleBufferAttachments()
+                .objectAtIndexedSubscript(0)
+        };
+        attachment.setSampleBuffer(Some(buffer));
+        let [start_vertex, end_vertex, start_fragment, end_fragment] = indices.render_stages();
+        // SAFETY: Each index is within the query set's sample range or disables sampling.
+        unsafe {
+            attachment.setStartOfVertexSampleIndex(start_vertex);
+            attachment.setEndOfVertexSampleIndex(end_vertex);
+            attachment.setStartOfFragmentSampleIndex(start_fragment);
+            attachment.setEndOfFragmentSampleIndex(end_fragment);
+        }
+    }
+    Ok(descriptor)
 }
 
 fn render_pass_descriptor_parts(
@@ -2339,6 +2449,26 @@ mod tests {
     };
 
     #[test]
+    fn pass_timestamp_descriptor_indices_use_the_pool_offset_and_disable_absent_samples() {
+        let skip = MTLCounterDontSample;
+        for (beginning, end, expected) in [
+            (Some(1), None, [33, skip]),
+            (None, Some(3), [skip, 35]),
+            (Some(1), Some(3), [33, 35]),
+        ] {
+            let writes =
+                HalPassTimestampWrites::new(HalQuerySet::Noop { count: 4 }, beginning, end);
+            let indices =
+                PassTimestampSampleIndices::new(&writes, |index| Ok(32 + index as usize)).unwrap();
+            assert_eq!(indices.encoder_boundaries(), expected, "compute and blit");
+            assert_eq!(
+                indices.render_stages(),
+                [expected[0], skip, skip, expected[1]]
+            );
+        }
+    }
+
+    #[test]
     fn empty_occlusion_queries_only_include_completed_draw_free_pairs() {
         use HalRenderPassCommand::*;
 
@@ -2981,7 +3111,7 @@ mod tests {
                 color_targets: vec![Some(target)],
                 ..Default::default()
             };
-            let result = render_pass_command_stream_descriptor(&pass).unwrap();
+            let result = render_pass_command_stream_descriptor(&pass, false).unwrap();
             let color = unsafe { result.colorAttachments().objectAtIndexedSubscript(0) };
             assert_eq!(
                 color.texture().unwrap().pixelFormat(),

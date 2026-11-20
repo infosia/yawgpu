@@ -161,6 +161,36 @@ pub struct HalWriteTimestamp {
     pub query_set: HalQuerySet,
     /// Destination query index.
     pub query_index: u32,
+    /// Whether this write is also described by the adjacent pass command.
+    pub pass_boundary: bool,
+}
+
+/// Describes the raw timestamps to sample at the boundaries of a pass.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct HalPassTimestampWrites {
+    /// Destination timestamp query set.
+    pub query_set: HalQuerySet,
+    /// Query index to sample at the beginning of the pass.
+    pub beginning_index: Option<u32>,
+    /// Query index to sample at the end of the pass.
+    pub end_index: Option<u32>,
+}
+
+impl HalPassTimestampWrites {
+    /// Specifies the query set and optional indices for the pass boundaries.
+    #[must_use]
+    pub fn new(
+        query_set: HalQuerySet,
+        beginning_index: Option<u32>,
+        end_index: Option<u32>,
+    ) -> Self {
+        Self {
+            query_set,
+            beginning_index,
+            end_index,
+        }
+    }
 }
 
 /// Enumerates HAL copy values.
@@ -184,8 +214,10 @@ pub enum HalCopy {
     ResolveQuerySet(HalResolveQuerySet),
     /// Timestamp write.
     WriteTimestamp(HalWriteTimestamp),
-    /// Compute pass variant.
+    /// A standalone compute dispatch.
     ComputePass(HalComputePass),
+    /// A compute pass with all dispatches available for encoding together.
+    ComputePassCommandStream(HalComputePassCommandStream),
     /// Render pass command-stream variant.
     RenderPassCommandStream(HalRenderPassCommandStream),
     #[cfg(feature = "tiled")]
@@ -193,7 +225,19 @@ pub enum HalCopy {
     SubpassRenderPass(HalSubpassRenderPassCommand),
 }
 
-/// Wraps  for the selected backend.
+impl HalCopy {
+    /// Returns the dispatches carried by a standalone or grouped compute command.
+    #[cfg(any(feature = "metal", feature = "vulkan", feature = "gles"))]
+    pub(crate) fn compute_dispatches(&self) -> &[HalComputePass] {
+        match self {
+            Self::ComputePass(dispatch) => std::slice::from_ref(dispatch),
+            Self::ComputePassCommandStream(pass) => &pass.dispatches,
+            _ => &[],
+        }
+    }
+}
+
+/// Stores one compute dispatch and its bound state.
 #[derive(Debug, Clone)]
 pub struct HalComputePass {
     /// Pipeline.
@@ -218,6 +262,16 @@ pub struct HalComputePass {
     pub immediate_data: Vec<u8>,
     /// Dispatch command.
     pub dispatch: HalComputeDispatch,
+}
+
+/// Stores an ordered compute pass, including passes with zero dispatches.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct HalComputePassCommandStream {
+    /// Optional timestamp writes specified by the pass descriptor.
+    pub timestamp_writes: Option<HalPassTimestampWrites>,
+    /// Compute dispatches in execution order.
+    pub dispatches: Vec<HalComputePass>,
 }
 
 /// Enumerates HAL compute dispatch execution values.
@@ -441,6 +495,8 @@ pub struct HalRenderPassCommandStream {
     pub depth_stencil_attachment: Option<HalRenderDepthStencilAttachment>,
     /// Optional occlusion query set available to commands in this render pass.
     pub occlusion_query_set: Option<HalQuerySet>,
+    /// Optional timestamp writes specified by the pass descriptor.
+    pub timestamp_writes: Option<HalPassTimestampWrites>,
     /// Commands executed in order inside the render pass.
     pub commands: Vec<HalRenderPassCommand>,
 }
@@ -1087,6 +1143,17 @@ mod tests {
         noop, HalBufferUsage, HalTextureDescriptor, HalTextureDimension, HalTextureFormat,
         HalTextureUsage,
     };
+
+    #[test]
+    fn pass_timestamp_writes_preserve_the_query_set_and_optional_indices() {
+        for (beginning, end) in [(Some(1), None), (None, Some(2)), (Some(1), Some(2))] {
+            let writes =
+                HalPassTimestampWrites::new(HalQuerySet::Noop { count: 3 }, beginning, end);
+            assert!(matches!(writes.query_set, HalQuerySet::Noop { count: 3 }));
+            assert_eq!(writes.beginning_index, beginning);
+            assert_eq!(writes.end_index, end);
+        }
+    }
 
     fn depth_texture() -> HalTexture {
         let device = noop::NoopDevice::new();

@@ -6,8 +6,9 @@ use yawgpu_hal::{
     HalBoundBuffer, HalBoundExternalTexture, HalBoundIndexBuffer, HalBoundIndirectBuffer,
     HalBoundSampler, HalBoundTexture, HalBuffer, HalBufferClear, HalBufferCopy,
     HalBufferTextureCopy, HalBufferTextureLayout, HalBufferUsage, HalComputeDispatch,
-    HalComputePass, HalCopy, HalDevice, HalIndexFormat, HalQueue, HalRenderBundle,
-    HalRenderColorTarget, HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPassCommand,
+    HalComputePass, HalComputePassCommandStream, HalCopy, HalDevice, HalIndexFormat,
+    HalPassTimestampWrites, HalQueue, HalRenderBundle, HalRenderColorTarget,
+    HalRenderDepthStencilAttachment, HalRenderLoadOp, HalRenderPassCommand,
     HalRenderPassCommandStream, HalResolveQuerySet, HalScissorRect, HalStorageTextureAccess,
     HalTextureAspect, HalTextureClear, HalTextureComponentSwizzle, HalTextureCopy,
     HalTextureViewDimension, HalViewport, SubmissionIndex,
@@ -1163,7 +1164,8 @@ fn command_buffer_referenced_textures(command_buffer: &CommandBuffer) -> Vec<Tex
             | CommandExecution::BufferWrite(_)
             | CommandExecution::WriteTimestamp(_)
             | CommandExecution::ResolveQuerySet(_)
-            | CommandExecution::ComputePass(_) => {}
+            | CommandExecution::ComputePass(_)
+            | CommandExecution::ComputePassCommandStream(_) => {}
         }
     }
     textures
@@ -1436,6 +1438,7 @@ fn append_hal_command_execution(
                 copies.push(HalCopy::WriteTimestamp(yawgpu_hal::HalWriteTimestamp {
                     query_set,
                     query_index: write.query_index,
+                    pass_boundary: write.pass_boundary,
                 }));
                 query_availability.record(&write.query_set, [write.query_index]);
             }
@@ -1461,11 +1464,27 @@ fn append_hal_command_execution(
         }
         CommandExecution::ComputePass(pass) => {
             append_bound_texture_init_clears(copies, &pass.bind_groups, overlay);
-            if let Some(copy) = hal_compute_pass_execution(pass) {
-                copies.push(copy);
+            if let Some(dispatch) = hal_compute_pass_execution(pass) {
+                copies.push(HalCopy::ComputePass(dispatch));
             } else {
                 staging.error = Some(DeviceError::internal("compute pass lowering failed"));
             }
+        }
+        CommandExecution::ComputePassCommandStream(pass) => {
+            let mut stream = HalComputePassCommandStream::default();
+            stream.timestamp_writes = hal_pass_timestamp_writes(&pass.timestamp_writes);
+            for dispatch in &pass.dispatches {
+                let Some(lowered) = hal_compute_pass_execution(dispatch) else {
+                    staging.error = Some(DeviceError::internal("compute pass lowering failed"));
+                    return;
+                };
+                // Initialize each subresource before its first use. A clear
+                // emitted here only touches a subresource that no earlier
+                // dispatch used, so it can run before the compute encoder.
+                append_bound_texture_init_clears(copies, &dispatch.bind_groups, overlay);
+                stream.dispatches.push(lowered);
+            }
+            copies.push(HalCopy::ComputePassCommandStream(stream));
         }
         CommandExecution::RenderPass(pass) => {
             append_render_stream_bound_texture_init_clears(copies, &pass.commands, overlay);
@@ -2403,14 +2422,14 @@ fn extent_is_empty(extent: Extent3d) -> bool {
 }
 
 /// Returns HAL compute pass execution.
-pub(crate) fn hal_compute_pass_execution(pass: &ComputePassCommand) -> Option<HalCopy> {
+fn hal_compute_pass_execution(pass: &ComputePassCommand) -> Option<HalComputePass> {
     let pipeline = pass.pipeline.hal()?;
     let bindings = hal_bind_resources(
         pass.pipeline.bind_group_layouts(),
         pass.pipeline.metal_bindings(),
         &pass.bind_groups,
     )?;
-    Some(HalCopy::ComputePass(HalComputePass {
+    Some(HalComputePass {
         pipeline,
         bind_buffers: bindings.buffers,
         bind_textures: bindings.textures,
@@ -2418,7 +2437,15 @@ pub(crate) fn hal_compute_pass_execution(pass: &ComputePassCommand) -> Option<Ha
         bind_external_textures: bindings.external_textures,
         immediate_data: pass.immediate_data.clone(),
         dispatch: hal_compute_dispatch(&pass.dispatch)?,
-    }))
+    })
+}
+
+fn hal_pass_timestamp_writes(writes: &PassTimestampWrites) -> Option<HalPassTimestampWrites> {
+    Some(HalPassTimestampWrites::new(
+        writes.query_set.hal()?,
+        writes.beginning_index,
+        writes.end_index,
+    ))
 }
 
 fn hal_compute_dispatch(dispatch: &ComputeDispatch) -> Option<HalComputeDispatch> {
@@ -2451,6 +2478,10 @@ pub(crate) fn hal_render_pass_execution(
         Some(query_set) => Some(query_set.hal()?),
         None => None,
     };
+    stream.timestamp_writes = pass
+        .timestamp_writes
+        .as_ref()
+        .and_then(hal_pass_timestamp_writes);
     stream.commands = commands;
     Some(HalCopy::RenderPassCommandStream(stream))
 }
@@ -3563,7 +3594,87 @@ mod tests {
     #[test]
     fn submit_lowers_write_timestamp_to_hal_copy() {
         let copies = timestamp_submission(&[1]);
-        assert!(matches!(copies.first(), Some(HalCopy::WriteTimestamp(w)) if w.query_index == 1));
+        assert!(
+            matches!(copies.first(), Some(HalCopy::WriteTimestamp(w)) if w.query_index == 1 && !w.pass_boundary)
+        );
+    }
+
+    #[test]
+    fn submit_lowers_pass_timestamp_writes_and_marks_boundary_copies() {
+        for indices in [(Some(1), None), (None, Some(2)), (Some(1), Some(2))] {
+            for compute_dispatch_count in [None, Some(0), Some(2)] {
+                let device = noop_adapter()
+                    .create_device(None, &[Feature::TimestampQuery], "", "")
+                    .unwrap();
+                let set = query_set(&device, QueryType::Timestamp, 6);
+                let writes = PassTimestampWrites {
+                    query_set: (*set).clone(),
+                    beginning_index: indices.0,
+                    end_index: indices.1,
+                };
+                let encoder = device.create_command_encoder();
+                if let Some(count) = compute_dispatch_count {
+                    let (pass, error) = encoder.begin_compute_pass(Some(writes));
+                    assert_eq!(error, None);
+                    if count > 0 {
+                        assert_eq!(pass.set_pipeline(noop_compute_pipeline(&device)), None);
+                        for dispatch in 1..=count {
+                            assert_eq!(
+                                pass.dispatch_workgroups(dispatch, 1, 1, device.limits()),
+                                None
+                            );
+                        }
+                    }
+                    assert_eq!(pass.end(), None);
+                } else {
+                    let mut descriptor =
+                        noop_render_pass_descriptor(noop_render_attachment(&device), None);
+                    descriptor.timestamp_writes = Some(writes);
+                    let (pass, error) = encoder.begin_render_pass(&descriptor);
+                    assert_eq!(error, None);
+                    assert_eq!(pass.end(), None);
+                }
+                let queue = device.queue();
+                assert_eq!(queue.submit(&[finish_query_commands(&encoder)]), None);
+                let copies = submitted_copies(&queue);
+                let (before, rest) = copies.split_at(usize::from(indices.0.is_some()));
+                let (pass, after) = rest.split_first().expect("pass command");
+                let writes = match (pass, compute_dispatch_count) {
+                    (HalCopy::ComputePassCommandStream(pass), Some(count)) => {
+                        assert_eq!(pass.dispatches.len(), count as usize);
+                        for (index, dispatch) in pass.dispatches.iter().enumerate() {
+                            assert!(
+                                matches!(dispatch.dispatch, HalComputeDispatch::Direct { workgroups: (x, 1, 1) } if x as usize == index + 1)
+                            );
+                        }
+                        &pass.timestamp_writes
+                    }
+                    (HalCopy::RenderPassCommandStream(pass), None) => &pass.timestamp_writes,
+                    _ => panic!("unexpected pass command"),
+                }
+                .as_ref()
+                .expect("pass timestamp writes");
+                assert_eq!((writes.beginning_index, writes.end_index), indices);
+                assert!(matches!(
+                    writes.query_set,
+                    yawgpu_hal::HalQuerySet::Noop { count: 6 }
+                ));
+                for (boundary, index) in [(before, indices.0), (after, indices.1)] {
+                    match (boundary, index) {
+                        ([], None) => {}
+                        ([HalCopy::WriteTimestamp(write)], Some(index)) => {
+                            assert_eq!(write.query_index, index);
+                            assert!(write.pass_boundary);
+                            assert!(matches!(
+                                write.query_set,
+                                yawgpu_hal::HalQuerySet::Noop { count: 6 }
+                            ));
+                        }
+                        _ => panic!("unexpected boundary timestamp copies"),
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -5345,6 +5456,7 @@ fn fs() -> @location(0) vec4<f32> {
             depth_stencil_attachment: None,
             attachment_textures: Vec::new(),
             occlusion_query_set: None,
+            timestamp_writes: None,
             written_occlusion_queries: BTreeSet::new(),
             commands,
         };
@@ -8832,6 +8944,7 @@ fn fs() -> @location(0) vec4<f32> {
             }),
             attachment_textures: vec![(*texture).clone()],
             occlusion_query_set: None,
+            timestamp_writes: None,
             written_occlusion_queries: BTreeSet::new(),
             commands: Vec::new(),
         };

@@ -125,17 +125,26 @@ pub(super) fn record_and_submit_copies(
                         &mut temporary_resources,
                     )?;
                 }
-                HalCopy::ComputePass(pass) => {
-                    let temps = encode_compute_pass(
-                        &mut layouts,
-                        &queue.device.device,
-                        command_buffer,
-                        pass,
-                    )?;
-                    if let Some(pool) = temps.descriptor_pool {
-                        descriptor_pools.push(pool);
+                HalCopy::ComputePass(_) | HalCopy::ComputePassCommandStream(_) => {
+                    for dispatch in copy.compute_dispatches() {
+                        if compute_writes_buffer(dispatch) {
+                            record_memory_barrier(
+                                &queue.device.device,
+                                command_buffer,
+                                buffer_read_to_write_scopes(),
+                            );
+                        }
+                        let temps = encode_compute_pass(
+                            &mut layouts,
+                            &queue.device.device,
+                            command_buffer,
+                            dispatch,
+                        )?;
+                        if let Some(pool) = temps.descriptor_pool {
+                            descriptor_pools.push(pool);
+                        }
+                        image_views.extend(temps.image_views);
                     }
-                    image_views.extend(temps.image_views);
                 }
                 HalCopy::RenderPassCommandStream(pass) => {
                     let temps = encode_render_pass_command_stream(
@@ -596,22 +605,24 @@ fn retain_copy_resources(copy: &HalCopy, retained: &mut RetainedResources) {
             retain_hal_texture(&copy.source, retained);
             retain_hal_texture(&copy.destination, retained);
         }
-        HalCopy::ComputePass(pass) => {
-            retain_hal_compute_pipeline(&pass.pipeline, retained);
-            for bound in &pass.bind_buffers {
-                retain_hal_buffer(&bound.buffer, retained);
-            }
-            for bound in &pass.bind_textures {
-                retain_hal_texture(&bound.texture, retained);
-            }
-            for bound in &pass.bind_samplers {
-                retain_hal_sampler(&bound.sampler, retained);
-            }
-            for bound in &pass.bind_external_textures {
-                retain_hal_external_texture(bound, retained);
-            }
-            if let HalComputeDispatch::Indirect { buffer } = &pass.dispatch {
-                retain_hal_buffer(&buffer.buffer, retained);
+        HalCopy::ComputePass(_) | HalCopy::ComputePassCommandStream(_) => {
+            for dispatch in copy.compute_dispatches() {
+                retain_hal_compute_pipeline(&dispatch.pipeline, retained);
+                for bound in &dispatch.bind_buffers {
+                    retain_hal_buffer(&bound.buffer, retained);
+                }
+                for bound in &dispatch.bind_textures {
+                    retain_hal_texture(&bound.texture, retained);
+                }
+                for bound in &dispatch.bind_samplers {
+                    retain_hal_sampler(&bound.sampler, retained);
+                }
+                for bound in &dispatch.bind_external_textures {
+                    retain_hal_external_texture(bound, retained);
+                }
+                if let HalComputeDispatch::Indirect { buffer } = &dispatch.dispatch {
+                    retain_hal_buffer(&buffer.buffer, retained);
+                }
             }
         }
         HalCopy::RenderPassCommandStream(pass) => {
@@ -2002,17 +2013,6 @@ fn command_writes_buffer(command: &HalCopy) -> bool {
         | HalCopy::BufferClear(_)
         | HalCopy::TextureToBuffer(_)
         | HalCopy::ResolveQuerySet(_) => true,
-        HalCopy::ComputePass(pass) => {
-            let crate::HalComputePipeline::Vulkan(pipeline) = &pass.pipeline else {
-                return false;
-            };
-            writable_storage_is_bound(
-                &pipeline.inner.writable_storage_buffer_bindings,
-                pass.bind_buffers
-                    .iter()
-                    .map(|buffer| (buffer.group, buffer.binding)),
-            )
-        }
         HalCopy::RenderPassCommandStream(pass) => render_stream_needs_shader_write_barrier(
             &pass.commands,
             &render_writable_buffer_bindings,
@@ -2027,10 +2027,25 @@ fn command_writes_buffer(command: &HalCopy) -> bool {
             )
         }),
         HalCopy::ClearTexture(_)
+        | HalCopy::ComputePass(_)
+        | HalCopy::ComputePassCommandStream(_)
         | HalCopy::WriteTimestamp(_)
         | HalCopy::BufferToTexture(_)
         | HalCopy::TextureToTexture(_) => false,
     }
+}
+
+fn compute_writes_buffer(dispatch: &HalComputePass) -> bool {
+    let crate::HalComputePipeline::Vulkan(pipeline) = &dispatch.pipeline else {
+        return false;
+    };
+    writable_storage_is_bound(
+        &pipeline.inner.writable_storage_buffer_bindings,
+        dispatch
+            .bind_buffers
+            .iter()
+            .map(|buffer| (buffer.group, buffer.binding)),
+    )
 }
 
 fn render_writable_buffer_bindings(pipeline: &crate::HalRenderPipeline) -> Vec<(u32, u32)> {
@@ -5420,6 +5435,7 @@ mod tests {
                 framebuffer_fetch_color_slots: Vec::new(),
                 depth_stencil_attachment: None,
                 occlusion_query_set: None,
+                timestamp_writes: None,
                 commands: Vec::new(),
             }
         )));
@@ -6925,6 +6941,7 @@ mod tests {
             framebuffer_fetch_color_slots: Vec::new(),
             depth_stencil_attachment: None,
             occlusion_query_set: None,
+            timestamp_writes: None,
             commands: vec![
                 HalRenderPassCommand::SetBindGroup {
                     index: 0,
@@ -7149,6 +7166,7 @@ mod tests {
                 HalCopy::WriteTimestamp(HalWriteTimestamp {
                     query_set: HalQuerySet::Vulkan(query_set.clone()),
                     query_index: 0,
+                    pass_boundary: false,
                 }),
                 // Keep the GPU busy so the two stamps cannot collapse onto the
                 // same tick.
@@ -7160,6 +7178,7 @@ mod tests {
                 HalCopy::WriteTimestamp(HalWriteTimestamp {
                     query_set: HalQuerySet::Vulkan(query_set.clone()),
                     query_index: 1,
+                    pass_boundary: false,
                 }),
                 HalCopy::ResolveQuerySet(HalResolveQuerySet {
                     query_set: HalQuerySet::Vulkan(query_set),
@@ -7214,6 +7233,7 @@ mod tests {
                 HalCopy::WriteTimestamp(HalWriteTimestamp {
                     query_set: HalQuerySet::Vulkan(query_set.clone()),
                     query_index: 1,
+                    pass_boundary: false,
                 }),
                 HalCopy::ResolveQuerySet(HalResolveQuerySet {
                     query_set: HalQuerySet::Vulkan(query_set),
@@ -7254,6 +7274,7 @@ mod tests {
         let retained = collect_retained_resources(&[HalCopy::WriteTimestamp(HalWriteTimestamp {
             query_set: HalQuerySet::Vulkan(query_set),
             query_index: 0,
+            pass_boundary: false,
         })]);
 
         assert_eq!(
@@ -8596,6 +8617,7 @@ mod tests {
                 stencil_read_only: false,
             }),
             occlusion_query_set: None,
+            timestamp_writes: None,
             commands: Vec::new(),
         });
         let depth_copy = HalCopy::TextureToBuffer(clear_test_copy(
@@ -8716,6 +8738,7 @@ mod tests {
                 framebuffer_fetch_color_slots: Vec::new(),
                 depth_stencil_attachment: None,
                 occlusion_query_set: None,
+                timestamp_writes: None,
                 commands: Vec::new(),
             })
         };

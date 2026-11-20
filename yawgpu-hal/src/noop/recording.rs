@@ -1,5 +1,5 @@
 use super::NoopBufferStorage;
-use crate::{HalBuffer, HalComputeDispatch, HalCopy, HalRenderPassCommand};
+use crate::{HalBuffer, HalComputeDispatch, HalComputePass, HalCopy, HalRenderPassCommand};
 
 fn release_buffer_storage(buffer: &mut HalBuffer) {
     #[allow(irrefutable_let_patterns)]
@@ -20,15 +20,10 @@ pub(super) fn release_copy_storage(copy: &mut HalCopy) {
             release_buffer_storage(&mut copy.buffer);
         }
         HalCopy::ResolveQuerySet(resolve) => release_buffer_storage(&mut resolve.destination),
-        HalCopy::ComputePass(pass) => {
-            for bound in &mut pass.bind_buffers {
-                release_buffer_storage(&mut bound.buffer);
-            }
-            for bound in &mut pass.bind_external_textures {
-                release_buffer_storage(&mut bound.params);
-            }
-            if let HalComputeDispatch::Indirect { buffer } = &mut pass.dispatch {
-                release_buffer_storage(&mut buffer.buffer);
+        HalCopy::ComputePass(pass) => release_compute_storage(pass),
+        HalCopy::ComputePassCommandStream(pass) => {
+            for dispatch in &mut pass.dispatches {
+                release_compute_storage(dispatch);
             }
         }
         HalCopy::RenderPassCommandStream(pass) => release_render_storage(&mut pass.commands),
@@ -45,6 +40,18 @@ pub(super) fn release_copy_storage(copy: &mut HalCopy) {
         }
         // Noop textures and query sets contain only value metadata.
         HalCopy::ClearTexture(_) | HalCopy::TextureToTexture(_) | HalCopy::WriteTimestamp(_) => {}
+    }
+}
+
+fn release_compute_storage(dispatch: &mut HalComputePass) {
+    for bound in &mut dispatch.bind_buffers {
+        release_buffer_storage(&mut bound.buffer);
+    }
+    for bound in &mut dispatch.bind_external_textures {
+        release_buffer_storage(&mut bound.params);
+    }
+    if let HalComputeDispatch::Indirect { buffer } = &mut dispatch.dispatch {
+        release_buffer_storage(&mut buffer.buffer);
     }
 }
 

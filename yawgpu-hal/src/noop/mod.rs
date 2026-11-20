@@ -976,6 +976,7 @@ mod tests {
                 stencil_read_only: true,
             }),
             occlusion_query_set: Some(HalQuerySet::Noop { count: 4 }),
+            timestamp_writes: None,
             commands: vec![
                 HalRenderPassCommand::SetPipeline(HalRenderPipeline::Noop),
                 HalRenderPassCommand::SetBindGroup {
