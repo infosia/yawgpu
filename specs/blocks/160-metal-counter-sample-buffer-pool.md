@@ -1,6 +1,6 @@
 # Block 160 — Metal timestamp query sets suballocate pooled counter sample buffers
 
-Status: **IN PROGRESS (2026-11-20)**.
+Status: **COMPLETE (2026-11-20)**. Phase Review (with Blocks 160–161): 0 CRITICAL; findings in Block 161.
 Source: webgpu-native-cts finding **F-170**
 (`webgpu:api,operation,command_buffer,queries,timestampQuery:many_query_sets:numQuerySets={64,256,65536}`
 fails in both stages on Metal with `HAL out of memory: metal: timestamp counter sample

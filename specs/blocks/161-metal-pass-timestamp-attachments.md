@@ -1,6 +1,6 @@
 # Block 161 — Metal samples pass `timestampWrites` through the pass descriptor
 
-Status: **COMPLETE pending Phase Review (2026-11-20)**.
+Status: **COMPLETE (2026-11-20)**. Phase Review: 0 CRITICAL, 1 MAJOR (M1, fixed in S3), 3 MINOR (m1 fixed in S3; m2 recorded in Block 160; m3 these statuses).
 Source: webgpu-native-cts finding **F-170**, remainder after Block 160:
 `timestampQuery:many_query_sets:numQuerySets=65536` (both stages).
 
@@ -147,3 +147,14 @@ a draw (bundle replay included); add unit-test cases.
 S3 (2026-11-20, M2): `yawgpu-hal --features metal` lib tests including every ignored
 real-device test 287/287; the empty-pass test now covers begin-only and end-only passes
 directly after a copy and after a clear. Clippy (default, metal) and fmt clean.
+
+## CTS record (Metal, M2)
+
+Full `webgpu:*` sweep at `f2695f8` (Blocks 159–161; `--workers 6`, yawgpu expectations):
+pass 2,158,770 / skip 151,157 / fail 259 / crash 0 / xfail 2,595 / xpass 15, against
+2,158,758 / 265 at `01324f0`. Remaining fails: F-167 (256) and F-159 (2), both shared
+with Dawn, and `many_query_sets:numQuerySets=65536;stage="render"` (device lost, as Dawn's
+F-169). F-171 and the other five F-170 cases pass. xpasses are F-160 `atomicStoreMax`
+(flaky, shared with Dawn) and `index_buffer_format_dirtying`, unrelated to these blocks.
+At `c00009b` (adds Block 162): `queries,*` (operation and validation) plus
+`render_pass,*` operation: 5,737 pass / 2 skip / 1 fail (the same render case).

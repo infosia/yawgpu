@@ -1,6 +1,6 @@
 # Block 159 — Query availability persists across submits
 
-Status: **IN PROGRESS (2026-11-20)**.
+Status: **COMPLETE (2026-11-20)**. Phase Review (with Blocks 160–161): 0 CRITICAL; findings in Block 161.
 Source: webgpu-native-cts finding **F-171**
 (`webgpu:api,operation,command_buffer,queries,occlusionQuery:occlusion_query,multi_resolve:*`
 fails on Metal and MoltenVK with `result(2): queryIndex: 1, passed: false, expected: true`;
