@@ -75,6 +75,8 @@ pub(crate) struct QuerySetInner {
     pub(crate) count: u32,
     pub(crate) hal: Mutex<Option<HalQuerySet>>,
     pub(crate) state: Mutex<QuerySetState>,
+    /// Queries written by successful submits, retained across resolves.
+    availability: Mutex<QueryAvailability>,
 }
 
 /// Tracks the lifecycle state for query set.
@@ -84,6 +86,36 @@ pub(crate) struct QuerySetState {
     pub(crate) is_destroyed: bool,
 }
 
+/// A bit per query index, rounded up to whole words.
+#[derive(Debug)]
+pub(crate) struct QueryAvailability(Box<[u64]>);
+
+impl QueryAvailability {
+    /// Allocates an empty set of available indices.
+    pub(crate) fn new(count: u32) -> Self {
+        Self(vec![0; count.div_ceil(u64::BITS) as usize].into_boxed_slice())
+    }
+
+    /// Marks an index available.
+    pub(crate) fn insert(&mut self, index: u32) {
+        if let Some(word) = self.0.get_mut((index / u64::BITS) as usize) {
+            *word |= 1 << (index % u64::BITS);
+        }
+    }
+
+    fn contains(&self, index: u32) -> bool {
+        self.0
+            .get((index / u64::BITS) as usize)
+            .is_some_and(|word| word & (1 << (index % u64::BITS)) != 0)
+    }
+
+    fn merge(&mut self, other: &Self) {
+        for (word, writes) in self.0.iter_mut().zip(other.0.iter()) {
+            *word |= writes;
+        }
+    }
+}
+
 impl QuerySet {
     /// Creates a new instance.
     pub(crate) fn new(
@@ -91,6 +123,8 @@ impl QuerySet {
         is_error: bool,
         hal: Option<HalQuerySet>,
     ) -> Self {
+        // Error descriptors can have counts above the validated limit.
+        let availability = QueryAvailability::new(if hal.is_some() { descriptor.count } else { 0 });
         Self {
             inner: Arc::new(QuerySetInner {
                 label: Mutex::new(descriptor.label),
@@ -101,6 +135,7 @@ impl QuerySet {
                     is_error,
                     is_destroyed: false,
                 }),
+                availability: Mutex::new(availability),
             }),
         }
     }
@@ -120,6 +155,27 @@ impl QuerySet {
     /// Returns the HAL query set.
     pub(crate) fn hal(&self) -> Option<HalQuerySet> {
         self.inner.hal.lock().clone()
+    }
+
+    /// Lists available indices in the resolve range, including earlier writes in this submit.
+    pub(crate) fn available_queries(
+        &self,
+        first_query: u32,
+        query_count: u32,
+        pending: Option<&QueryAvailability>,
+    ) -> Vec<u32> {
+        let committed = self.inner.availability.lock();
+        let end_query = first_query.saturating_add(query_count).min(self.count());
+        (first_query..end_query)
+            .filter(|&index| {
+                committed.contains(index) || pending.is_some_and(|writes| writes.contains(index))
+            })
+            .collect()
+    }
+
+    /// Marks writes from a successful submit available for future resolves.
+    pub(crate) fn commit_availability(&self, writes: &QueryAvailability) {
+        self.inner.availability.lock().merge(writes);
     }
 
     /// Sets label on this object or encoder.

@@ -215,6 +215,44 @@ fn vulkan_two_sets_resolved_into_one_buffer_at_different_offsets_do_not_clobber(
     }
 }
 
+/// Block 159 (F-171): a stamp written in one submit stays available to a
+/// resolve in a later submit.
+#[test]
+#[ignore = "manual real-backend test"]
+fn vulkan_stamp_written_in_one_submit_resolves_in_a_later_submit() {
+    if real_backend_skip_reason(BACKEND).is_some() {
+        return;
+    }
+    unsafe {
+        let session = Session::new();
+        if session.device.is_null() {
+            eprintln!("skipping: timestamp-query is not advertised on this adapter");
+            return;
+        }
+        let set = session.create_timestamp_set(2);
+        let readback = session.create_resolve_buffer(16);
+
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(session.device, std::ptr::null());
+        yawgpu::wgpuCommandEncoderWriteTimestamp(encoder, set, 1);
+        session.submit(encoder);
+
+        let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(session.device, std::ptr::null());
+        yawgpu::wgpuCommandEncoderResolveQuerySet(encoder, set, 0, 2, readback, 0);
+        session.submit(encoder);
+
+        let values = session.read_u64s(readback, 0, 2);
+        assert!(
+            values[0] == 0 && values[1] > 0,
+            "slot 1 written in the earlier submit, slot 0 never: {values:?}"
+        );
+        session.assert_no_errors();
+
+        yawgpu::wgpuBufferRelease(readback);
+        yawgpu::wgpuQuerySetRelease(set);
+        session.release();
+    }
+}
+
 // --- session / helpers -------------------------------------------------------
 
 struct Session {

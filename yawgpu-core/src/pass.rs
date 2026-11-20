@@ -499,12 +499,20 @@ impl PassEncoderInner {
         let render_pass_command = if !state.render_color_attachments.is_empty()
             || state.render_depth_stencil_attachment.is_some()
         {
+            // Every completed begin/end pair writes a result, including queries
+            // that enclosed no draws. Pass validation rejects any open pair.
+            let mut written_occlusion_queries =
+                std::mem::take(&mut state.written_occlusion_queries);
+            written_occlusion_queries.append(&mut state.used_occlusion_queries);
+            if let Some(index) = state.open_occlusion_query {
+                written_occlusion_queries.remove(&index);
+            }
             Some(RenderPassCommand {
                 color_attachments: state.render_color_attachments.clone(),
                 depth_stencil_attachment: state.render_depth_stencil_attachment.clone(),
                 attachment_textures: state.attachment_textures.clone(),
                 occlusion_query_set: state.occlusion_query_set.clone(),
-                written_occlusion_queries: state.written_occlusion_queries.clone(),
+                written_occlusion_queries,
                 commands: std::mem::take(&mut state.render_commands),
             })
         } else {

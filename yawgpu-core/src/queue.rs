@@ -27,6 +27,7 @@ use crate::copy::*;
 use crate::error::*;
 use crate::extent::*;
 use crate::pass::*;
+use crate::query_set::{QueryAvailability, QuerySet};
 use crate::render_pipeline::*;
 #[cfg(feature = "tiled")]
 use crate::subpass::*;
@@ -886,12 +887,16 @@ impl Queue {
             } else {
                 self.submit_copies(&copies)
             };
-            return self.finish_pending_submission(chunks, init_overlay, result);
+            return self.finish_pending_submission(
+                chunks,
+                init_overlay,
+                QueryAvailabilityOverlay::default(),
+                result,
+            );
         }
-        let all_ops: Vec<_> = command_buffers
+        let command_ops = command_buffers
             .iter()
-            .flat_map(|command_buffer| command_buffer.command_ops().iter())
-            .collect();
+            .flat_map(|command_buffer| command_buffer.command_ops());
 
         // Block 100 R3 chunk-retirement invariant. The pending-write batch is
         // held locked for the whole lowering walk: the queued writes issued
@@ -924,22 +929,15 @@ impl Queue {
         } else {
             queued_init_overlay.clone()
         };
-        for (op_index, op) in all_ops.iter().enumerate() {
-            let prefix = if matches!(op, CommandExecution::ResolveQuerySet(resolve) if resolve.query_set.kind() == crate::QueryType::Timestamp)
-            {
-                let mut start = 0;
-                for buffer in command_buffers {
-                    let end = start + buffer.command_ops().len();
-                    if op_index < end {
-                        break;
-                    }
-                    start = end;
-                }
-                &all_ops[start..=op_index]
-            } else {
-                &all_ops[..=op_index]
-            };
-            append_hal_command_execution(&mut copies, op, prefix, &mut staging, &mut init_overlay);
+        let mut query_availability = QueryAvailabilityOverlay::default();
+        for op in command_ops {
+            append_hal_command_execution(
+                &mut copies,
+                op,
+                &mut query_availability,
+                &mut staging,
+                &mut init_overlay,
+            );
             if staging.error.is_some() {
                 break;
             }
@@ -974,7 +972,12 @@ impl Queue {
                 self.inner.pending_writes.lock().retire(latest, chunks);
             } else {
                 let result = self.submit_copies(&copies);
-                let _ = self.finish_pending_submission(chunks, queued_init_overlay, result);
+                let _ = self.finish_pending_submission(
+                    chunks,
+                    queued_init_overlay,
+                    QueryAvailabilityOverlay::default(),
+                    result,
+                );
             }
             return Some(error);
         }
@@ -988,7 +991,8 @@ impl Queue {
         if let Some(hook) = &test_hook {
             hook.pause("submitted");
         }
-        let error = self.finish_pending_submission(chunks, init_overlay, result);
+        let error =
+            self.finish_pending_submission(chunks, init_overlay, query_availability, result);
         #[cfg(test)]
         if let Some(hook) = &test_hook {
             hook.pause("committed");
@@ -1031,7 +1035,12 @@ impl Queue {
             return None;
         }
         let result = self.submit_copies(&copies);
-        self.finish_pending_submission(chunks, init_overlay, result)
+        self.finish_pending_submission(
+            chunks,
+            init_overlay,
+            QueryAvailabilityOverlay::default(),
+            result,
+        )
     }
 
     fn submit_copies(&self, copies: &[HalCopy]) -> Result<SubmissionIndex, yawgpu_hal::HalError> {
@@ -1053,12 +1062,14 @@ impl Queue {
         &self,
         chunks: Vec<StagingChunk>,
         init_overlay: InitOverlay,
+        query_availability: QueryAvailabilityOverlay,
         result: Result<SubmissionIndex, yawgpu_hal::HalError>,
     ) -> Option<DeviceError> {
         match result {
             Ok(submission_index) => {
                 // These copies are now on the GPU timeline (Block 104 R5).
                 init_overlay.commit();
+                query_availability.commit();
                 self.record_submission(submission_index);
                 self.inner
                     .pending_writes
@@ -1309,10 +1320,51 @@ impl InitOverlay {
     }
 }
 
+/// Tracks writes to each query set as the submit walk reaches them.
+#[derive(Default)]
+struct QueryAvailabilityOverlay {
+    /// Each entry owns its query set so the backing address remains its identity.
+    writes: HashMap<usize, (QuerySet, QueryAvailability)>,
+}
+
+impl QueryAvailabilityOverlay {
+    /// Records queries written by the command that just lowered.
+    fn record(&mut self, query_set: &QuerySet, indices: impl IntoIterator<Item = u32>) {
+        let mut indices = indices.into_iter().peekable();
+        if indices.peek().is_none() {
+            return;
+        }
+        let (_, writes) = self
+            .writes
+            .entry(Arc::as_ptr(&query_set.inner) as usize)
+            .or_insert_with(|| (query_set.clone(), QueryAvailability::new(query_set.count())));
+        for index in indices {
+            writes.insert(index);
+        }
+    }
+
+    /// Returns the union of committed queries and earlier writes in this submit.
+    fn resolve(&self, resolve: &ResolveQuerySetCommand) -> Vec<u32> {
+        let query_set = &resolve.query_set;
+        let pending = self
+            .writes
+            .get(&(Arc::as_ptr(&query_set.inner) as usize))
+            .map(|(_, writes)| writes);
+        query_set.available_queries(resolve.first_query, resolve.query_count, pending)
+    }
+
+    /// Makes the writes available to subsequent submits after the HAL accepts them.
+    fn commit(self) {
+        for (query_set, writes) in self.writes.into_values() {
+            query_set.commit_availability(&writes);
+        }
+    }
+}
+
 fn append_hal_command_execution(
     copies: &mut Vec<HalCopy>,
     op: &CommandExecution,
-    command_ops: &[&CommandExecution],
+    query_availability: &mut QueryAvailabilityOverlay,
     staging: &mut BufferWriteStaging<'_>,
     overlay: &mut InitOverlay,
 ) {
@@ -1385,6 +1437,7 @@ fn append_hal_command_execution(
                     query_set,
                     query_index: write.query_index,
                 }));
+                query_availability.record(&write.query_set, [write.query_index]);
             }
         }
         CommandExecution::ResolveQuerySet(resolve) => {
@@ -1398,26 +1451,7 @@ fn append_hal_command_execution(
                 query_set,
                 first_query: resolve.first_query,
                 query_count: resolve.query_count,
-                written_queries: if resolve.query_set.kind() == crate::QueryType::Timestamp {
-                    command_ops
-                        .iter()
-                        .filter_map(|op| match op {
-                            CommandExecution::WriteTimestamp(write)
-                                if write.query_set.same(&resolve.query_set)
-                                    && (resolve.first_query
-                                        ..resolve.first_query + resolve.query_count)
-                                        .contains(&write.query_index) =>
-                            {
-                                Some(write.query_index)
-                            }
-                            _ => None,
-                        })
-                        .collect::<BTreeSet<_>>()
-                        .into_iter()
-                        .collect()
-                } else {
-                    resolve_written_occlusion_queries(resolve, command_ops)
-                },
+                written_queries: query_availability.resolve(resolve),
                 destination,
                 destination_offset: resolve.destination_offset,
             }));
@@ -1455,6 +1489,10 @@ fn append_hal_command_execution(
                     );
                 }
                 copies.push(copy);
+                if let Some(query_set) = &pass.occlusion_query_set {
+                    query_availability
+                        .record(query_set, pass.written_occlusion_queries.iter().copied());
+                }
             } else {
                 staging.error = Some(DeviceError::internal("render pass lowering failed"));
             }
@@ -1500,35 +1538,6 @@ fn append_hal_command_execution(
             }
         }
     }
-}
-
-fn resolve_written_occlusion_queries(
-    resolve: &ResolveQuerySetCommand,
-    command_ops: &[&CommandExecution],
-) -> Vec<u32> {
-    let Some(end_query) = resolve.first_query.checked_add(resolve.query_count) else {
-        return Vec::new();
-    };
-    command_ops
-        .iter()
-        .filter_map(|op| {
-            let CommandExecution::RenderPass(pass) = *op else {
-                return None;
-            };
-            let Some(query_set) = &pass.occlusion_query_set else {
-                return None;
-            };
-            if !query_set.same(&resolve.query_set) {
-                return None;
-            }
-            Some(&pass.written_occlusion_queries)
-        })
-        .flatten()
-        .copied()
-        .filter(|&query_index| resolve.first_query <= query_index && query_index < end_query)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
 }
 
 /// Lowers a validated tiled pass, preserving its attachment views and draw bindings.
@@ -3135,13 +3144,6 @@ mod tests {
     }
 
     fn hal_command_execution(op: &CommandExecution) -> Option<HalCopy> {
-        hal_command_execution_with_ops(op, &[op])
-    }
-
-    fn hal_command_execution_with_ops(
-        op: &CommandExecution,
-        command_ops: &[&CommandExecution],
-    ) -> Option<HalCopy> {
         let mut copies = Vec::new();
         let mut batch = PendingWriteBatch::default();
         let mut staging = BufferWriteStaging {
@@ -3149,7 +3151,13 @@ mod tests {
             error: None,
         };
         let mut overlay = InitOverlay::default();
-        append_hal_command_execution(&mut copies, op, command_ops, &mut staging, &mut overlay);
+        append_hal_command_execution(
+            &mut copies,
+            op,
+            &mut QueryAvailabilityOverlay::default(),
+            &mut staging,
+            &mut overlay,
+        );
         overlay.commit();
         copies.into_iter().next()
     }
@@ -3315,7 +3323,7 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_resolve_ignores_writes_in_other_command_buffers_and_query_sets() {
+    fn timestamp_resolve_includes_earlier_command_buffers_and_isolates_query_sets() {
         let device = noop_adapter()
             .create_device(None, &[crate::Feature::TimestampQuery], "", "")
             .unwrap();
@@ -3342,16 +3350,178 @@ mod tests {
         let (first, error) = encoder.finish();
         assert_eq!(error, None);
         let encoder = device.create_command_encoder();
-        assert_eq!(encoder.write_timestamp(other, 3), None);
-        assert_eq!(encoder.resolve_query_set(set, 0, 4, destination, 0), None);
+        assert_eq!(encoder.write_timestamp(other.clone(), 3), None);
+        assert_eq!(
+            encoder.resolve_query_set(set, 0, 4, destination.clone(), 0),
+            None
+        );
+        assert_eq!(encoder.resolve_query_set(other, 0, 4, destination, 0), None);
         let (second, error) = encoder.finish();
         assert_eq!(error, None);
         let queue = device.queue();
         assert_eq!(queue.submit(&[Arc::new(first), Arc::new(second)]), None);
-        let HalQueue::Noop(queue) = queue.hal() else {
-            panic!("expected Noop")
-        };
-        assert!(queue.submitted_copies().iter().any(|op| matches!(op, HalCopy::ResolveQuerySet(resolve) if resolve.written_queries.is_empty())));
+        assert_eq!(submitted_query_resolves(&queue), [vec![1], vec![3]]);
+    }
+
+    #[test]
+    fn timestamp_resolve_includes_encoder_and_pass_writes_from_an_earlier_submit() {
+        let device = noop_adapter()
+            .create_device(None, &[Feature::TimestampQuery], "", "")
+            .unwrap();
+        let set = query_set(&device, QueryType::Timestamp, 6);
+        let encoder = device.create_command_encoder();
+        assert_eq!(encoder.write_timestamp(set.clone(), 5), None);
+        let mut descriptor = noop_render_pass_descriptor(noop_render_attachment(&device), None);
+        descriptor.timestamp_writes = Some(PassTimestampWrites {
+            query_set: (*set).clone(),
+            beginning_index: Some(4),
+            end_index: Some(1),
+        });
+        let (render, error) = encoder.begin_render_pass(&descriptor);
+        assert_eq!(error, None);
+        assert_eq!(render.end(), None);
+        let (compute, error) = encoder.begin_compute_pass(Some(PassTimestampWrites {
+            query_set: (*set).clone(),
+            beginning_index: Some(2),
+            end_index: Some(0),
+        }));
+        assert_eq!(error, None);
+        assert_eq!(compute.end(), None);
+        let queue = device.queue();
+        assert_eq!(queue.submit(&[finish_query_commands(&encoder)]), None);
+
+        let encoder = device.create_command_encoder();
+        let destination = query_resolve_destination(&device, 6);
+        // Rewrite a previously available index to exercise the union of both sources.
+        assert_eq!(encoder.write_timestamp(set.clone(), 2), None);
+        assert_eq!(
+            encoder.resolve_query_set(set.clone(), 1, 4, destination.clone(), 0),
+            None
+        );
+        assert_eq!(encoder.resolve_query_set(set, 0, 6, destination, 0), None);
+        assert_eq!(queue.submit(&[finish_query_commands(&encoder)]), None);
+        assert_eq!(
+            submitted_query_resolves(&queue),
+            [vec![1, 2, 4], vec![0, 1, 2, 4, 5]]
+        );
+    }
+
+    #[test]
+    fn rejected_submit_does_not_make_query_writes_available() {
+        for failure in ["validation", "lowering", "HAL"] {
+            let device = noop_adapter()
+                .create_device(None, &[Feature::TimestampQuery], "", "")
+                .unwrap();
+            let set = query_set(&device, QueryType::Timestamp, 2);
+            let queue = device.queue();
+            let encoder = device.create_command_encoder();
+            assert_eq!(encoder.write_timestamp(set.clone(), 0), None);
+            assert_eq!(queue.submit(&[finish_query_commands(&encoder)]), None);
+
+            let encoder = device.create_command_encoder();
+            assert_eq!(encoder.write_timestamp(set.clone(), 1), None);
+            let destination = query_resolve_destination(&device, 2);
+            let expected_error = match failure {
+                "validation" => {
+                    let destroyed = query_resolve_destination(&device, 2);
+                    assert_eq!(
+                        encoder.resolve_query_set(set.clone(), 0, 2, destroyed.clone(), 0),
+                        None
+                    );
+                    destroyed.destroy();
+                    DeviceError::validation("queue submit cannot use a destroyed buffer")
+                }
+                "lowering" => {
+                    let mut pipeline = noop_compute_pipeline(&device);
+                    Arc::get_mut(&mut Arc::get_mut(&mut pipeline).unwrap().inner)
+                        .unwrap()
+                        .hal = None;
+                    let (pass, error) = encoder.begin_compute_pass(None);
+                    assert_eq!(error, None);
+                    assert_eq!(pass.set_pipeline(pipeline), None);
+                    assert_eq!(pass.dispatch_workgroups(1, 1, 1, device.limits()), None);
+                    assert_eq!(pass.end(), None);
+                    DeviceError::internal("compute pass lowering failed")
+                }
+                _ => {
+                    *queue.inner.fail_next_pending_submit.lock() = true;
+                    DeviceError::internal(
+                        yawgpu_hal::HalError::QueueSubmissionFailed {
+                            backend: "Noop",
+                            message: "injected pending submit failure".to_owned(),
+                        }
+                        .to_string(),
+                    )
+                }
+            };
+            assert_eq!(
+                queue.submit(&[finish_query_commands(&encoder)]),
+                Some(expected_error),
+                "{failure}"
+            );
+
+            let encoder = device.create_command_encoder();
+            assert_eq!(encoder.resolve_query_set(set, 0, 2, destination, 0), None);
+            assert_eq!(queue.submit(&[finish_query_commands(&encoder)]), None);
+            assert_eq!(submitted_query_resolves(&queue), [vec![0]], "{failure}");
+        }
+    }
+
+    #[test]
+    fn resolve_of_error_query_set_without_hal_is_skipped() {
+        let device = noop_device();
+        // Public recording rejects error sets. Exercise the defensive lowering path directly.
+        let error_set = Arc::new(QuerySet::new(
+            QuerySetDescriptor {
+                label: String::new(),
+                kind: QueryType::Occlusion,
+                count: 1,
+            },
+            true,
+            None,
+        ));
+        let op = CommandExecution::ResolveQuerySet(ResolveQuerySetCommand {
+            query_set: error_set,
+            first_query: 0,
+            query_count: 1,
+            destination: query_resolve_destination(&device, 1),
+            destination_offset: 0,
+        });
+        assert!(hal_command_execution(&op).is_none());
+    }
+
+    fn query_set(device: &Device, kind: QueryType, count: u32) -> Arc<QuerySet> {
+        let (set, error) = device.create_query_set(QuerySetDescriptor {
+            label: String::new(),
+            kind,
+            count,
+        });
+        assert_eq!(error, None);
+        Arc::new(set)
+    }
+
+    fn query_resolve_destination(device: &Device, count: u32) -> Arc<Buffer> {
+        Arc::new(device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::QUERY_RESOLVE,
+            size: u64::from(count) * 8,
+            mapped_at_creation: false,
+        }))
+    }
+
+    fn finish_query_commands(encoder: &CommandEncoder) -> Arc<CommandBuffer> {
+        let (commands, error) = encoder.finish();
+        assert_eq!(error, None);
+        Arc::new(commands)
+    }
+
+    fn submitted_query_resolves(queue: &Queue) -> Vec<Vec<u32>> {
+        submitted_copies(queue)
+            .into_iter()
+            .filter_map(|copy| match copy {
+                HalCopy::ResolveQuerySet(resolve) => Some(resolve.written_queries),
+                _ => None,
+            })
+            .collect()
     }
 
     fn timestamp_submission(indices: &[u32]) -> Vec<HalCopy> {
@@ -5563,7 +5733,7 @@ fn fs() -> @location(0) vec4<f32> {
     }
 
     #[test]
-    fn empty_occlusion_query_resolve_records_no_written_queries() {
+    fn empty_occlusion_query_resolve_records_the_completed_query() {
         let device = noop_device();
         let view = noop_render_attachment(&device);
         let (query_set, error) = device.create_query_set(QuerySetDescriptor {
@@ -5597,7 +5767,7 @@ fn fs() -> @location(0) vec4<f32> {
             command_buffer.command_ops(),
             [CommandExecution::RenderPass(pass), CommandExecution::ResolveQuerySet(resolve)]
                 if pass.occlusion_query_set.as_ref().is_some_and(|set| set.same(&query_set))
-                    && pass.written_occlusion_queries.is_empty()
+                    && pass.written_occlusion_queries.contains(&0)
                     && !pass.commands.iter().any(|command| matches!(command, RenderCommand::Draw(_)))
                     && resolve.query_set.same(&query_set)
                     && resolve.destination.same(&destination)
@@ -5615,7 +5785,65 @@ fn fs() -> @location(0) vec4<f32> {
             HalCopy::ResolveQuerySet(resolve) => Some(resolve.written_queries),
             _ => None,
         });
-        assert_eq!(written_queries, Some(Vec::new()));
+        assert_eq!(written_queries, Some(vec![0]));
+    }
+
+    #[test]
+    fn occlusion_queries_stay_available_across_submits_when_a_later_pass_writes_none() {
+        let device = noop_device();
+        let set = query_set(&device, QueryType::Occlusion, 8);
+        let descriptor =
+            noop_render_pass_descriptor(noop_render_attachment(&device), Some((*set).clone()));
+        let encoder = device.create_command_encoder();
+        let (pass, error) = encoder.begin_render_pass(&descriptor);
+        assert_eq!(error, None);
+        assert_eq!(pass.set_pipeline(noop_render_pipeline(&device)), None);
+        for index in [7, 5, 3, 1] {
+            assert_eq!(pass.begin_occlusion_query(index), None);
+            assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+            assert_eq!(pass.end_occlusion_query(), None);
+        }
+        assert_eq!(pass.end(), None);
+        let queue = device.queue();
+        assert_eq!(queue.submit(&[finish_query_commands(&encoder)]), None);
+
+        let encoder = device.create_command_encoder();
+        let (pass, error) = encoder.begin_render_pass(&descriptor);
+        assert_eq!(error, None);
+        assert_eq!(pass.end(), None);
+        assert_eq!(
+            encoder.resolve_query_set(set, 0, 8, query_resolve_destination(&device, 8), 0),
+            None
+        );
+        assert_eq!(queue.submit(&[finish_query_commands(&encoder)]), None);
+        assert_eq!(submitted_query_resolves(&queue), [vec![1, 3, 5, 7]]);
+    }
+
+    #[test]
+    fn occlusion_resolves_only_include_the_pass_after_it_has_run() {
+        let device = noop_device();
+        let set = query_set(&device, QueryType::Occlusion, 2);
+        let destination = query_resolve_destination(&device, 2);
+        let encoder = device.create_command_encoder();
+        assert_eq!(
+            encoder.resolve_query_set(set.clone(), 0, 2, destination.clone(), 0),
+            None
+        );
+        let (pass, error) = encoder.begin_render_pass(&noop_render_pass_descriptor(
+            noop_render_attachment(&device),
+            Some((*set).clone()),
+        ));
+        assert_eq!(error, None);
+        assert_eq!(pass.set_pipeline(noop_render_pipeline(&device)), None);
+        assert_eq!(pass.begin_occlusion_query(1), None);
+        assert_eq!(pass.draw(3, 1, 0, 0, device.limits()), None);
+        assert_eq!(pass.end_occlusion_query(), None);
+        assert_eq!(pass.end(), None);
+        assert_eq!(encoder.resolve_query_set(set, 0, 2, destination, 0), None);
+
+        let queue = device.queue();
+        assert_eq!(queue.submit(&[finish_query_commands(&encoder)]), None);
+        assert_eq!(submitted_query_resolves(&queue), [vec![], vec![1]]);
     }
 
     #[test]
@@ -8460,7 +8688,13 @@ fn fs() -> @location(0) vec4<f32> {
             error: None,
         };
         let mut overlay = InitOverlay::default();
-        append_hal_command_execution(&mut copies, op, &[op], &mut staging, &mut overlay);
+        append_hal_command_execution(
+            &mut copies,
+            op,
+            &mut QueryAvailabilityOverlay::default(),
+            &mut staging,
+            &mut overlay,
+        );
         overlay.commit();
         copies
     }

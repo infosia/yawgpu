@@ -166,14 +166,10 @@ Metal, Vulkan (and any future backend) share it.
 - Submit lowering: `WriteTimestamp` → `HalCopy::WriteTimestamp` (error
   set / destroyed set already rejected at submit by the existing
   referenced-query-set checks). `ResolveQuerySet` on a timestamp set →
-  `HalCopy::ResolveQuerySet` with `written_queries` = indices of every
-  `WriteTimestamp` on that set earlier in the same command buffer
-  (mirror of `resolve_written_occlusion_queries`), **followed by** the
+  `HalCopy::ResolveQuerySet` with `written_queries` = the set's available
+  indices at that point (Block 159), **followed by** the
   conversion pass (R5). A timestamp set with no HAL object (error set)
   keeps the current skip.
-- The written-in-an-earlier-submission limitation is the same one the
-  occlusion path has today; record it in the block's "Known
-  limitations" (not fixed here).
 
 ### R5 — Conversion pass (core, Tint-compiled)
 
@@ -275,9 +271,6 @@ unadvertised; a `Timestamp` HAL kind on GLES returns `HalError`).
 
 ## Known limitations (documented, not fixed here)
 
-- A query written in an earlier submission and resolved in a later one
-  resolves to 0 (same as occlusion today: availability is tracked per
-  command buffer, not on the query set).
 - Metal timestamp period is a single calibration at adapter creation,
   not Dawn's running Kalman estimate.
 - `ChromiumExperimentalTimestampQueryInsidePasses` (in-pass
