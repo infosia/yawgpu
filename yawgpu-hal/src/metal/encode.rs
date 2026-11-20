@@ -1494,6 +1494,7 @@ fn subpass_attachment_texture(
 const OCCLUSION_RESULT_SIZE: usize = 8;
 
 /// Scratch slot and copy-back action for one query index in a render pass.
+/// Validation forbids repeated begins for an index. If repeated, the first slot is kept and the last pair's draw state wins.
 struct OcclusionQuerySlot {
     scratch_index: usize,
     /// None until a begin/end pair completes. A draw-free pair requires a zero fill.
@@ -1922,8 +1923,6 @@ pub(super) fn encode_subpass_render_pass(
             scissor_rect: draw.scissor_rect,
             blend_constant: [0.0, 0.0, 0.0, 0.0],
             stencil_reference: 0,
-            // The tiled pass has no occlusion query set or begin/end commands.
-            occlusion_query_index: None,
             draw: draw.draw,
             // The tiled subpass vendor extension has no `SetImmediates`
             // surface (the subpass encoder records no immediates scratch),
@@ -1956,7 +1955,6 @@ struct RenderEncodeState<'a> {
     scissor_rect: Option<HalScissorRect>,
     blend_constant: [f32; 4],
     stencil_reference: u32,
-    occlusion_query_index: Option<u32>,
     draw: HalDraw,
     /// The pass's immediates scratch snapshot for this draw (Block 94).
     immediate_data: &'a [u8],
@@ -2007,14 +2005,8 @@ fn encode_render_state(
         state.blend_constant[3],
     );
     encoder.setStencilReferenceValue(state.stencil_reference);
-    if let Some(query_index) = state.occlusion_query_index {
-        encoder.setVisibilityResultMode_offset(
-            MTLVisibilityResultMode::Counting,
-            to_ns(u64::from(query_index) * 8)?,
-        );
-    } else {
-        encoder.setVisibilityResultMode_offset(MTLVisibilityResultMode::Disabled, 0);
-    }
+    // The tiled pass has no occlusion query set or begin/end commands.
+    encoder.setVisibilityResultMode_offset(MTLVisibilityResultMode::Disabled, 0);
     for binding in state.bind_buffers {
         encode_render_bind_buffer(encoder, binding)?;
     }

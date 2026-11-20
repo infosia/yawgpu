@@ -1,6 +1,6 @@
 # Block 162 — Metal render passes write occlusion results through a per-pass scratch buffer
 
-Status: **COMPLETE pending Phase Review (2026-11-20)**.
+Status: **COMPLETE (2026-11-20)**. Phase Review: 0 CRITICAL, 0 MAJOR, 4 MINOR (m2, m3 fixed in S2; m1 recorded; m4 this status).
 Source: measured while verifying Block 159 S2 (see that block's verification record).
 No CTS case covers it; Dawn attaches the query set's visibility buffer the same way and
 is expected to share the defect.
@@ -77,3 +77,20 @@ real-device test 287/287, among them `metal_queue_occlusion_pass_preserves_unuse
 (three-query set; a pass using only query 2, then a draw-free pass using only query 1, leave
 the other slots intact) and the Block 159 S2 regression. Clippy (default, metal, metal+tiled)
 and fmt clean.
+
+## Phase Review (2026-11-20, fresh-context reviewer over `f2695f8..3b7116d`, Block 162 + Block 161 S3)
+
+0 CRITICAL, 0 MAJOR, 4 MINOR.
+- m1: every render pass that begins an occlusion query allocates its scratch `MTLBuffer`
+  (Dawn allocates nothing). Known performance cost; not changed. Revisit with a
+  per-command-buffer suballocation if profiling shows it.
+- m2: the tiled subpass path still carries `occlusion_query_index` with the old
+  `index * 8` offset into the set's buffer, although it is always `None`. Fix in S2: remove
+  the field and always encode `MTLVisibilityResultModeDisabled` there.
+- m3: `OcclusionQuerySlot` does not say that a repeated begin of an index (forbidden by
+  validation) keeps its first slot and the last pair's draw state. Fix in S2: a one-line
+  comment.
+- m4: status — updated when the phase closes.
+
+S2 (2026-11-20, M2): m2 and m3. Metal HAL lib tests pass; clippy (metal, metal+tiled) and
+fmt clean; `e2e_metal_tiled` passes on real Metal.
