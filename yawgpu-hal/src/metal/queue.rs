@@ -511,7 +511,11 @@ impl MetalQueue {
                             })?;
                         let result = encode_render_pass_command_stream(&encoder, pass);
                         encoder.endEncoding();
-                        result?;
+                        encode_empty_occlusion_query_fills(
+                            &command_buffer,
+                            pass.occlusion_query_set.as_ref(),
+                            result?,
+                        )?;
                     }
                     #[cfg(feature = "tiled")]
                     HalCopy::SubpassRenderPass(pass) => {
@@ -901,6 +905,113 @@ mod tests {
         }
         let mut exhausted = u64::MAX;
         assert!(next_timestamp_resolution_value(&mut exhausted, true).is_err());
+    }
+
+    #[test]
+    #[ignore = "manual real Metal backend test"]
+    fn metal_queue_empty_occlusion_query_clears_previous_result() {
+        use HalRenderPassCommand::*;
+
+        let device = metal_device();
+        let texture = device
+            .create_texture(&texture_descriptor())
+            .expect("color attachment");
+        let pipeline = device
+            .create_render_pipeline(
+                HalShaderSource::Msl(
+                    r#"
+#include <metal_stdlib>
+using namespace metal;
+vertex float4 vs_main(uint id [[vertex_id]]) {
+    const float2 positions[] = {float2(-1, -1), float2(3, -1), float2(-1, 3)};
+    return float4(positions[id], 0, 1);
+}
+fragment float4 fs_main() { return float4(1, 0, 0, 1); }
+"#
+                    .to_owned(),
+                ),
+                "vs_main",
+                Some("fs_main"),
+                &render_descriptor(),
+                &[],
+            )
+            .expect("render pipeline");
+        let query_set = HalQuerySet::Metal(
+            device
+                .create_query_set(HalQueryKind::Occlusion, 2)
+                .expect("occlusion query set"),
+        );
+        let readback = device
+            .create_buffer(
+                16,
+                HalBufferUsage {
+                    query_resolve: true,
+                    map_read: true,
+                    ..Default::default()
+                },
+            )
+            .expect("query readback");
+        let submit_and_resolve = |commands| {
+            let submit = device
+                .queue()
+                .submit_copies(&[
+                    HalCopy::RenderPassCommandStream(HalRenderPassCommandStream {
+                        color_targets: vec![Some(crate::HalRenderColorTarget {
+                            texture: HalTexture::Metal(texture.clone()),
+                            view_format: HalTextureFormat::Rgba8Unorm,
+                            resolve_target: None,
+                            resolve_view_format: None,
+                            mip_level: 0,
+                            array_layer: 0,
+                            depth_slice: 0,
+                            resolve_mip_level: 0,
+                            resolve_array_layer: 0,
+                            load_op: HalRenderLoadOp::Clear,
+                            store: true,
+                            clear_color: [0.0; 4],
+                        })],
+                        occlusion_query_set: Some(query_set.clone()),
+                        commands,
+                        ..Default::default()
+                    }),
+                    HalCopy::ResolveQuerySet(HalResolveQuerySet {
+                        query_set: query_set.clone(),
+                        first_query: 0,
+                        query_count: 2,
+                        destination: HalBuffer::Metal(readback.clone()),
+                        destination_offset: 0,
+                        written_queries: vec![0, 1],
+                    }),
+                ])
+                .expect("submit pass and resolve");
+            device.queue().wait_for_submission(submit).expect("wait");
+            readback.read(0, 16).expect("read query results")
+        };
+
+        let draw = Draw {
+            vertex_count: 3,
+            instance_count: 1,
+            first_vertex: 0,
+            first_instance: 0,
+        };
+        let before = submit_and_resolve(vec![
+            SetPipeline(crate::HalRenderPipeline::Metal(pipeline)),
+            BeginOcclusionQuery { index: 0 },
+            draw.clone(),
+            EndOcclusionQuery,
+            BeginOcclusionQuery { index: 1 },
+            draw,
+            EndOcclusionQuery,
+        ]);
+        assert_ne!(&before[..8], &[0; 8]);
+        assert_ne!(&before[8..], &[0; 8]);
+
+        // Query 0 is the empty one: on Apple GPUs a pass writes zero to every visibility
+        // slot below its highest used index, so an empty query above an unused slot would
+        // also clear that slot.
+        let after = submit_and_resolve(vec![BeginOcclusionQuery { index: 0 }, EndOcclusionQuery]);
+        assert_eq!(&after[..8], &[0; 8]);
+        assert_eq!(&after[8..], &before[8..]);
     }
 
     #[must_use]

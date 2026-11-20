@@ -87,6 +87,26 @@ Tests:
   its writes available for a later submit;
 - two different query sets do not share availability.
 
+S2: Metal zero-fills draw-free occlusion queries (Dawn toggle
+`MetalFillEmptyOcclusionQueriesWithZero`, crbug.com/dawn/1707, enabled by default on
+every Apple GPU in `PhysicalDeviceMTL.mm`; implementation in `CommandBufferMTL.mm`,
+`EmptyOcclusionQueries`). S1 makes every completed begin/end pair available, but Apple
+GPUs may leave the previous result in the visibility buffer when a query encloses no
+draw. The M2 used for S1 verification wrote zero (CTS `occlusion_query,empty` passes), so
+this is parity with Dawn for other Apple GPUs, not a fix for an observed M2 failure.
+- R7. While encoding a render pass, the Metal HAL records each occlusion query index
+  whose begin/end pair enclosed no draw command (`Draw`, `DrawIndexed`, `DrawIndirect`,
+  `DrawIndexedIndirect`, or an executed bundle containing any draw; mirror what Dawn
+  counts). After the pass's render encoder ends, it encodes one blit
+  `fillBuffer:range:value:0` of 8 bytes at `index * 8` of the set's visibility buffer per
+  such index, before any later command of the submission. Apply the same rule to every
+  Metal render-pass encoding path that honours `occlusion_query_set` (check the tiled
+  subpass path too).
+- Tests: a GPU-free helper that derives the empty-query list from a command stream
+  (non-ignored), and an `#[ignore = "manual real Metal backend test"]` test that writes a
+  non-zero result with draws, then runs a draw-free begin/end on the same index in a
+  later submission and resolves `0`.
+
 ## Verification
 
 - Agent gates (redirect output to a file; report exit codes):
@@ -104,3 +124,15 @@ Metal: `e2e_metal_timestamp_query` 6/6, including
 Khronos validation layer: `e2e_vulkan_timestamp_query` 5/5, no VUIDs. CTS
 `webgpu:api,operation,command_buffer,queries,*` on Metal: every `occlusionQuery` case
 passes (244), including `multi_resolve` (F-171), `empty` and `reuse:noop="after"`.
+
+S2 (2026-11-20, M2): `yawgpu-hal --features metal` occlusion tests 5/5 including the
+real-device `metal_queue_empty_occlusion_query_clears_previous_result`; clippy and fmt
+clean; CTS `occlusionQuery:*` on Metal 244/244.
+
+Measured while verifying S2 (M2, two-query set, both slots first written with draws):
+a later pass that begins only query 1 (with a draw) leaves query 1 correct but
+**writes 0 to query 0**, which that pass never used; a pass that begins only query 0
+leaves query 1 intact, and a pass without occlusion queries leaves both intact. The
+Apple GPU writes every visibility slot below the pass's highest used offset. Dawn
+attaches the query set's visibility buffer to the pass the same way. No CTS case covers
+it. Tracked separately (not part of this block).

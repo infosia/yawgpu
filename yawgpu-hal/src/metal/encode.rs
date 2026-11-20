@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use super::*;
 use crate::format::{format_has_depth_aspect, format_has_stencil_aspect};
 use crate::{
@@ -1379,12 +1381,88 @@ fn subpass_attachment_texture(
     }
 }
 
+/// Encodes the render pass and returns the draw-free occlusion indices to clear.
 pub(super) fn encode_render_pass_command_stream(
     encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
     pass: &HalRenderPassCommandStream,
-) -> Result<(), HalError> {
+) -> Result<BTreeSet<u32>, HalError> {
     let mut state = MetalRenderStreamState::default();
-    encode_metal_render_commands(encoder, &pass.commands, &mut state)
+    encode_metal_render_commands(encoder, &pass.commands, &mut state)?;
+    Ok(if pass.occlusion_query_set.is_some() {
+        empty_occlusion_queries(&pass.commands)
+    } else {
+        BTreeSet::new()
+    })
+}
+
+/// Clears draw-free occlusion results after the pass's render encoder has ended.
+pub(super) fn encode_empty_occlusion_query_fills(
+    command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+    query_set: Option<&HalQuerySet>,
+    empty: BTreeSet<u32>,
+) -> Result<(), HalError> {
+    let (Some(HalQuerySet::Metal(query_set)), Some(&last_index)) = (query_set, empty.last()) else {
+        return Ok(());
+    };
+    if last_index >= query_set.count() {
+        return Err(buffer_error(
+            "empty occlusion query index exceeds query count",
+        ));
+    }
+    let buffer = query_set.buffer()?;
+    let blit =
+        command_buffer
+            .blitCommandEncoder()
+            .ok_or_else(|| HalError::QueueSubmissionFailed {
+                backend: BACKEND,
+                message: "occlusion query clear blit encoder creation returned nil".to_owned(),
+            })?;
+    let result = empty.into_iter().try_for_each(|index| {
+        blit.fillBuffer_range_value(buffer, NSRange::new(to_ns(u64::from(index) * 8)?, 8), 0);
+        Ok(())
+    });
+    blit.endEncoding();
+    result
+}
+
+/// Derives the visibility slots that must be cleared if Metal leaves stale results.
+fn empty_occlusion_queries(commands: &[HalRenderPassCommand]) -> BTreeSet<u32> {
+    let mut active = None;
+    let mut empty = BTreeSet::new();
+    for command in commands {
+        match command {
+            HalRenderPassCommand::BeginOcclusionQuery { index } => active = Some((*index, false)),
+            HalRenderPassCommand::EndOcclusionQuery => match active.take() {
+                Some((index, false)) => {
+                    empty.insert(index);
+                }
+                Some((index, true)) => {
+                    empty.remove(&index);
+                }
+                None => {}
+            },
+            _ => {
+                if let Some((_, did_draw)) = &mut active {
+                    *did_draw = *did_draw || render_command_draws(command);
+                }
+            }
+        }
+    }
+    empty
+}
+
+/// Checks whether a command encodes a draw, including through bundle replay.
+fn render_command_draws(command: &HalRenderPassCommand) -> bool {
+    match command {
+        HalRenderPassCommand::Draw { .. }
+        | HalRenderPassCommand::DrawIndexed { .. }
+        | HalRenderPassCommand::DrawIndirect { .. }
+        | HalRenderPassCommand::DrawIndexedIndirect { .. } => true,
+        HalRenderPassCommand::ExecuteRenderBundle(bundle) => {
+            bundle.commands.iter().any(render_command_draws)
+        }
+        _ => false,
+    }
 }
 
 #[derive(Default)]
@@ -1654,6 +1732,7 @@ pub(super) fn encode_subpass_render_pass(
             scissor_rect: draw.scissor_rect,
             blend_constant: [0.0, 0.0, 0.0, 0.0],
             stencil_reference: 0,
+            // The tiled pass has no occlusion query set or begin/end commands.
             occlusion_query_index: None,
             draw: draw.draw,
             // The tiled subpass vendor extension has no `SetImmediates`
@@ -2258,6 +2337,79 @@ mod tests {
         HalSubpassAttachmentLayout, HalSubpassColorAttachment, HalSubpassInputAttachment,
         HalSubpassLayout, HalSubpassPassLayout, HalSubpassRenderPassCommand,
     };
+
+    #[test]
+    fn empty_occlusion_queries_only_include_completed_draw_free_pairs() {
+        use HalRenderPassCommand::*;
+
+        let non_draw_bundle = crate::HalRenderBundle {
+            commands: vec![SetStencilReference(1)],
+        };
+        let commands = [
+            BeginOcclusionQuery { index: 5 },
+            ExecuteRenderBundle(non_draw_bundle),
+            EndOcclusionQuery,
+            Draw {
+                vertex_count: 3,
+                instance_count: 1,
+                first_vertex: 0,
+                first_instance: 0,
+            },
+            BeginOcclusionQuery { index: 1 },
+            EndOcclusionQuery,
+            BeginOcclusionQuery { index: 3 },
+        ];
+        assert_eq!(empty_occlusion_queries(&commands), BTreeSet::from([1, 5]));
+        assert!(empty_occlusion_queries(&[]).is_empty());
+    }
+
+    #[test]
+    fn empty_occlusion_queries_exclude_each_draw_kind_in_passes_and_bundles() {
+        use HalRenderPassCommand::*;
+
+        let buffer = crate::noop::NoopDevice::new()
+            .create_buffer(32, HalBufferUsage::default())
+            .unwrap();
+        let indirect_buffer = HalBoundIndirectBuffer {
+            buffer: HalBuffer::Noop(buffer),
+            offset: 0,
+        };
+        let draws = [
+            Draw {
+                vertex_count: 3,
+                instance_count: 1,
+                first_vertex: 0,
+                first_instance: 0,
+            },
+            DrawIndexed {
+                index_count: 3,
+                instance_count: 1,
+                first_index: 0,
+                base_vertex: 0,
+                first_instance: 0,
+            },
+            DrawIndirect {
+                indirect_buffer: indirect_buffer.clone(),
+            },
+            DrawIndexedIndirect { indirect_buffer },
+        ];
+        for draw in draws {
+            let bundle = ExecuteRenderBundle(crate::HalRenderBundle {
+                commands: vec![SetStencilReference(1), draw.clone()],
+            });
+            let commands = [
+                BeginOcclusionQuery { index: 0 },
+                draw,
+                EndOcclusionQuery,
+                BeginOcclusionQuery { index: 1 },
+                bundle,
+                EndOcclusionQuery,
+                BeginOcclusionQuery { index: 2 },
+                EndOcclusionQuery,
+            ];
+            assert_eq!(empty_occlusion_queries(&commands), BTreeSet::from([2]));
+        }
+    }
 
     #[cfg(feature = "tiled")]
     #[test]
