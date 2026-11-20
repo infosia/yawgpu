@@ -823,9 +823,19 @@ impl PassTimestampSampleIndices {
         })
     }
 
-    /// Returns the start and end sample indices for compute and blit descriptors.
-    pub(super) fn encoder_boundaries(&self) -> [usize; 2] {
+    /// Returns the start and end sample indices for compute descriptors.
+    fn encoder_boundaries(&self) -> [usize; 2] {
         [self.beginning, self.end]
+    }
+
+    /// Maps a lone sample to the start of the mock blit for an empty compute pass.
+    pub(super) fn mock_blit_boundaries(&self) -> [usize; 2] {
+        if self.beginning == MTLCounterDontSample {
+            // An end-only blit after a copy or clear fails on the M2 (Block 102).
+            [self.end, MTLCounterDontSample]
+        } else {
+            self.encoder_boundaries()
+        }
     }
 
     fn render_stages(&self) -> [usize; 4] {
@@ -1622,12 +1632,16 @@ fn occlusion_query_slots(commands: &[HalRenderPassCommand]) -> BTreeMap<u32, Occ
     slots
 }
 
-/// Checks whether a command encodes a draw, including through bundle replay.
+/// Checks whether a command counts as an occlusion query draw, including bundle replay.
 fn render_command_draws(command: &HalRenderPassCommand) -> bool {
     match command {
-        HalRenderPassCommand::Draw { .. }
-        | HalRenderPassCommand::DrawIndexed { .. }
-        | HalRenderPassCommand::DrawIndirect { .. }
+        HalRenderPassCommand::Draw { instance_count, .. } => *instance_count != 0,
+        HalRenderPassCommand::DrawIndexed {
+            index_count,
+            instance_count,
+            ..
+        } => *index_count != 0 && *instance_count != 0,
+        HalRenderPassCommand::DrawIndirect { .. }
         | HalRenderPassCommand::DrawIndexedIndirect { .. } => true,
         HalRenderPassCommand::ExecuteRenderBundle(bundle) => {
             bundle.commands.iter().any(render_command_draws)
@@ -2517,19 +2531,20 @@ mod tests {
     #[test]
     fn pass_timestamp_descriptor_indices_use_the_pool_offset_and_disable_absent_samples() {
         let skip = MTLCounterDontSample;
-        for (beginning, end, expected) in [
-            (Some(1), None, [33, skip]),
-            (None, Some(3), [skip, 35]),
-            (Some(1), Some(3), [33, 35]),
+        for (beginning, end, compute, mock_blit) in [
+            (Some(1), None, [33, skip], [33, skip]),
+            (None, Some(3), [skip, 35], [35, skip]),
+            (Some(1), Some(3), [33, 35], [33, 35]),
         ] {
             let writes =
                 HalPassTimestampWrites::new(HalQuerySet::Noop { count: 4 }, beginning, end);
             let indices =
                 PassTimestampSampleIndices::new(&writes, |index| Ok(32 + index as usize)).unwrap();
-            assert_eq!(indices.encoder_boundaries(), expected, "compute and blit");
+            assert_eq!(indices.encoder_boundaries(), compute);
+            assert_eq!(indices.mock_blit_boundaries(), mock_blit);
             assert_eq!(
                 indices.render_stages(),
-                [expected[0], skip, skip, expected[1]]
+                [compute[0], skip, skip, compute[1]]
             );
         }
     }
@@ -2568,26 +2583,34 @@ mod tests {
             buffer: HalBuffer::Noop(buffer),
             offset: 0,
         };
-        let draws = [
-            Draw {
-                vertex_count: 3,
-                instance_count: 1,
-                first_vertex: 0,
-                first_instance: 0,
-            },
-            DrawIndexed {
-                index_count: 3,
-                instance_count: 1,
-                first_index: 0,
-                base_vertex: 0,
-                first_instance: 0,
-            },
-            DrawIndirect {
-                indirect_buffer: indirect_buffer.clone(),
-            },
-            DrawIndexedIndirect { indirect_buffer },
+        let draw = |instance_count| Draw {
+            vertex_count: 3,
+            instance_count,
+            first_vertex: 0,
+            first_instance: 0,
+        };
+        let draw_indexed = |index_count, instance_count| DrawIndexed {
+            index_count,
+            instance_count,
+            first_index: 0,
+            base_vertex: 0,
+            first_instance: 0,
+        };
+        let cases = [
+            (draw(1), true),
+            (draw(0), false),
+            (draw_indexed(3, 1), true),
+            (draw_indexed(3, 0), false),
+            (draw_indexed(0, 1), false),
+            (
+                DrawIndirect {
+                    indirect_buffer: indirect_buffer.clone(),
+                },
+                true,
+            ),
+            (DrawIndexedIndirect { indirect_buffer }, true),
         ];
-        for draw in draws {
+        for (draw, did_draw) in &cases {
             let bundle = ExecuteRenderBundle(crate::HalRenderBundle {
                 commands: vec![SetStencilReference(1), draw.clone()],
             });
@@ -2595,7 +2618,7 @@ mod tests {
                 BeginOcclusionQuery { index: 5 },
                 draw.clone(),
                 EndOcclusionQuery,
-                draw,
+                draw.clone(),
                 BeginOcclusionQuery { index: 1 },
                 ExecuteRenderBundle(crate::HalRenderBundle {
                     commands: vec![SetStencilReference(1)],
@@ -2611,7 +2634,12 @@ mod tests {
                 .collect();
             assert_eq!(
                 writes,
-                [(1, 1, Some(false)), (5, 0, Some(true)), (7, 2, Some(true))]
+                [
+                    (1, 1, Some(false)),
+                    (5, 0, Some(*did_draw)),
+                    (7, 2, Some(*did_draw)),
+                ],
+                "{draw:?}"
             );
         }
     }

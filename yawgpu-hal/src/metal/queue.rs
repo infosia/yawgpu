@@ -511,12 +511,12 @@ impl MetalQueue {
                         if let Some(writes) = writes {
                             if dispatches.is_empty() {
                                 // A compute encoder without dispatches takes no samples
-                                // on the M2. A mock blit samples both bounds (Block 161 R6).
+                                // on the M2. A mock blit samples the pass (Block 161 R6).
                                 let (sample_buffer, indices) = pass_timestamp_samples(writes)?;
                                 self.encode_timestamp_mock_blit(
                                     &command_buffer,
                                     sample_buffer,
-                                    indices.encoder_boundaries(),
+                                    indices.mock_blit_boundaries(),
                                 )?;
                                 continue;
                             }
@@ -1103,7 +1103,7 @@ fragment float4 fs_main() { return float4(1, 0, 0, 1); }
 
     fn check_pass_timestamps_after_blits(
         device: &MetalDevice,
-        pass_count: usize,
+        pass_boundaries: &[[bool; 2]],
         pass: impl Fn(usize, HalPassTimestampWrites) -> HalCopy,
     ) {
         assert!(
@@ -1112,7 +1112,7 @@ fragment float4 fs_main() { return float4(1, 0, 0, 1); }
                 .timestamp_resources
                 .counter_sampling_at_stage_boundary
         );
-        let query_count = u32::try_from(2 * pass_count).expect("two queries per pass");
+        let query_count = u32::try_from(2 * pass_boundaries.len()).expect("two queries per pass");
         let readback_size = u64::from(query_count) * 8;
         // Use distinct samples for the copy and clear cases so prior writes cannot mask a failure.
         let query_set = HalQuerySet::Metal(
@@ -1181,20 +1181,33 @@ fragment float4 fs_main() { return float4(1, 0, 0, 1); }
                     pass_boundary: true,
                 })
             };
-            let queries = first_query..first_query + query_count;
+            let first_slots = (first_query..first_query + query_count).step_by(2);
             let mut copies = Vec::new();
-            for (pass_index, begin) in queries.clone().step_by(2).enumerate() {
-                // Put a blit immediately before the first dispatching and first empty pass.
-                if pass_index < 2 {
+            let mut written_queries = Vec::new();
+            for (pass_index, (begin, &[write_begin, write_end])) in
+                first_slots.zip(pass_boundaries).enumerate()
+            {
+                // Precede the first two passes and each single-boundary pass with a blit.
+                if pass_index < 2 || !write_begin || !write_end {
                     copies.push(blit.clone());
                 }
                 let end = begin + 1;
-                copies.push(boundary(begin));
+                if write_begin {
+                    copies.push(boundary(begin));
+                    written_queries.push(begin);
+                }
                 copies.push(pass(
                     pass_index,
-                    HalPassTimestampWrites::new(query_set.clone(), Some(begin), Some(end)),
+                    HalPassTimestampWrites::new(
+                        query_set.clone(),
+                        write_begin.then_some(begin),
+                        write_end.then_some(end),
+                    ),
                 ));
-                copies.push(boundary(end));
+                if write_end {
+                    copies.push(boundary(end));
+                    written_queries.push(end);
+                }
             }
             copies.push(HalCopy::ResolveQuerySet(HalResolveQuerySet {
                 query_set: query_set.clone(),
@@ -1202,7 +1215,7 @@ fragment float4 fs_main() { return float4(1, 0, 0, 1); }
                 query_count,
                 destination: HalBuffer::Metal(readback.clone()),
                 destination_offset: 0,
-                written_queries: queries.collect(),
+                written_queries,
             }));
             let submission = device
                 .queue()
@@ -1215,13 +1228,22 @@ fragment float4 fs_main() { return float4(1, 0, 0, 1); }
             let bytes = readback.read(0, readback_size).expect("read timestamps");
             let (pairs, remainder) = bytes.as_chunks::<16>();
             assert!(remainder.is_empty());
+            assert_eq!(pairs.len(), pass_boundaries.len());
             for (pass_index, pair) in pairs.iter().enumerate() {
                 let begin = u64::from_ne_bytes(pair[..8].try_into().unwrap());
                 let end = u64::from_ne_bytes(pair[8..].try_into().unwrap());
-                assert!(
-                    0 < begin && begin <= end,
+                let [write_begin, write_end] = pass_boundaries[pass_index];
+                assert_eq!(
+                    [begin > 0, end > 0],
+                    [write_begin, write_end],
                     "pass {pass_index} in {blit_name} case: begin={begin}, end={end}"
                 );
+                if write_begin && write_end {
+                    assert!(
+                        begin <= end,
+                        "pass {pass_index} in {blit_name} case: begin={begin}, end={end}"
+                    );
+                }
             }
         }
     }
@@ -1244,8 +1266,10 @@ fragment float4 fs_main() { return float4(1, 0, 0, 1); }
                 workgroups: (1, 1, 1),
             },
         };
-        let dispatch_counts = [1, 0, 1, 0, 2];
-        check_pass_timestamps_after_blits(&device, dispatch_counts.len(), |index, writes| {
+        let dispatch_counts = [1, 0, 1, 0, 2, 0, 0];
+        let both = [true, true];
+        let pass_boundaries = [both, both, both, both, both, [true, false], [false, true]];
+        check_pass_timestamps_after_blits(&device, &pass_boundaries, |index, writes| {
             HalCopy::ComputePassCommandStream(HalComputePassCommandStream {
                 timestamp_writes: Some(writes),
                 dispatches: vec![dispatch.clone(); dispatch_counts[index]],
@@ -1260,7 +1284,7 @@ fragment float4 fs_main() { return float4(1, 0, 0, 1); }
         let texture = device
             .create_texture(&texture_descriptor())
             .expect("color attachment");
-        check_pass_timestamps_after_blits(&device, 1, |_, writes| {
+        check_pass_timestamps_after_blits(&device, &[[true, true]], |_, writes| {
             HalCopy::RenderPassCommandStream(HalRenderPassCommandStream {
                 color_targets: vec![Some(crate::HalRenderColorTarget {
                     texture: HalTexture::Metal(texture.clone()),

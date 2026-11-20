@@ -143,3 +143,7 @@ absent (`[end, DontSample]` for end-only, `[begin, DontSample]` for begin-only; 
 copy and after a clear to the real-device test. In `render_command_draws`, a direct or
 indexed draw with `instance_count == 0`, or an indexed draw with `index_count == 0`, is not
 a draw (bundle replay included); add unit-test cases.
+
+S3 (2026-11-20, M2): `yawgpu-hal --features metal` lib tests including every ignored
+real-device test 287/287; the empty-pass test now covers begin-only and end-only passes
+directly after a copy and after a clear. Clippy (default, metal) and fmt clean.
