@@ -387,3 +387,17 @@ Re-verification after the fixes: `cargo test --workspace` 1093/0, clippy default
 - No Gen9 host is available, so A21 waits for a real report. Its prerequisites were
   surveyed and recorded under "Decided, not backlog": Vulkan has the device id, Metal does
   not (IOKit lookup missing), and the Tint shim lacks the polyfill option.
+
+### 2026-11-22 — Linux native Vulkan and GLES at `e4a55b1`
+
+- Host: Linux, NVIDIA RTX 5060 Ti, driver 615.71.09, Dawn pin `843d53377`. Both backends
+  were confirmed from the run output (Vulkan `backendType=6` on the NVIDIA device; GLES
+  hardware EGL device 0). Vulkan ran without the Khronos layer. The CTS was not run.
+- Gate: `cargo test --workspace` 1,504/0; `cargo clippy --workspace --all-targets -- -D
+  warnings` clean (default features only).
+- Vulkan (`vulkan,tiled,shader-passthrough`, `-- --ignored --test-threads=1` over the
+  `yawgpu` crate): 166/0. This is the first Linux native Vulkan run of Blocks 120-162.
+- GLES (`gles`, same form): 36/0. `yawgpu-hal --features gles --lib` 289/0, ignored 2/0.
+- The Linux GLES runs owed by Block 156 S3
+  (`submit_copies_rg11b10_clears_and_reads_back_via_compute`) and Block 157 (the
+  `e2e_gles_*` lazy-init suites) are closed.
