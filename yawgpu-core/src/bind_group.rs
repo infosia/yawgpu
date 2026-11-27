@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use crate::adapter::Feature;
 use crate::bind_group_layout::*;
 use crate::buffer::*;
 use crate::device::*;
@@ -509,7 +510,33 @@ pub(crate) fn validate_bind_group_texture(
         ));
     }
 
-    None
+    if device.has_feature(Feature::CoreFeaturesAndLimits) {
+        return None;
+    }
+    validate_compatibility_binding_dimension(texture_view, &texture)
+        .or_else(|| validate_compatibility_array_layers(texture_view, &texture))
+}
+
+fn validate_compatibility_binding_dimension(
+    view: &TextureView,
+    texture: &Texture,
+) -> Option<String> {
+    let expected = texture.binding_view_dimension()?;
+    let actual = view.dimension();
+    (actual != expected).then(|| format!(
+        "view dimension {actual:?} must match textureBindingViewDimension {expected:?} in compatibility mode"
+    ))
+}
+
+fn validate_compatibility_array_layers(view: &TextureView, texture: &Texture) -> Option<String> {
+    let layers = texture
+        .dimension()
+        .array_layer_count(texture.size().depth_or_array_layers);
+    let base = view.base_array_layer();
+    let count = view.array_layer_count();
+    (base != 0 || count != layers).then(|| format!(
+        "texture binding must use all array layers in compatibility mode (baseArrayLayer {base}, arrayLayerCount {count}, texture layers {layers})"
+    ))
 }
 
 /// Returns the sample type a texture view exposes for `aspect`, following the
@@ -583,7 +610,12 @@ pub(crate) fn validate_bind_group_storage_texture(
         return Some("storage texture bindings require a single mip level".to_owned());
     }
 
-    None
+    if device.has_feature(Feature::CoreFeaturesAndLimits) {
+        return None;
+    }
+    let texture = texture_view.texture();
+    validate_compatibility_array_layers(texture_view, &texture)
+        .or_else(|| validate_compatibility_binding_dimension(texture_view, &texture))
 }
 
 impl Device {
@@ -628,6 +660,177 @@ mod tests {
         limits: Limits,
     ) -> Option<String> {
         validate_bind_group_entry_with_usage(device, entry, kind, limits, false)
+    }
+
+    fn check_texture_bindings(level: FeatureLevel) {
+        use TextureViewDimension::{Cube, D2Array, D2, D3};
+
+        let device = Arc::new(
+            Instance::new_noop().enumerate_adapters_with_feature_level(level)[0]
+                .create_device(None, &[], "", "")
+                .unwrap(),
+        );
+        let compat = level == FeatureLevel::Compatibility;
+        assert_eq!(!device.has_feature(Feature::CoreFeaturesAndLimits), compat);
+        let mut desc = texture_descriptor_4x4();
+        desc.size.depth_or_array_layers = 6;
+        desc.usage = TextureUsage::TEXTURE_BINDING | TextureUsage::STORAGE_BINDING;
+        let cube =
+            device.create_texture_with_binding_view_dimension(desc.clone(), Some(Cube), None);
+        let array = device.create_texture(desc.clone());
+        let declared_array =
+            device.create_texture_with_binding_view_dimension(desc.clone(), Some(D2Array), None);
+        assert_eq!(cube.binding_view_dimension(), compat.then_some(Cube));
+        assert_eq!(array.binding_view_dimension(), compat.then_some(D2Array));
+
+        let sampled = |view_dimension, sample_type| BindingLayoutKind::Texture {
+            sample_type,
+            view_dimension,
+            multisampled: false,
+        };
+        let storage = |view_dimension, format| BindingLayoutKind::StorageTexture {
+            access: StorageTextureAccess::WriteOnly,
+            format,
+            view_dimension,
+        };
+        let check = |texture: &Texture, dimension, base, count, kind, expected: Option<&str>| {
+            let (view, error) = texture.create_view(TextureViewDescriptor {
+                dimension: Some(dimension),
+                base_array_layer: base,
+                array_layer_count: Some(count),
+                format: None,
+                base_mip_level: 0,
+                mip_level_count: None,
+                aspect: None,
+                usage: None,
+                swizzle: None,
+            });
+            assert_eq!(error, None);
+            let layout = device.create_bind_group_layout(BindGroupLayoutDescriptor {
+                entries: vec![BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: crate::shader::SHADER_STAGE_COMPUTE,
+                    binding_array_size: 0,
+                    kind: Some(kind),
+                }],
+                error: None,
+            });
+            assert!(!layout.is_error());
+            let group = device.create_bind_group(
+                Arc::new(layout),
+                vec![BindGroupEntry {
+                    binding: 0,
+                    resource: BindGroupResource::TextureView {
+                        texture_view: Arc::new(view),
+                        device: device.clone(),
+                    },
+                }],
+            );
+            assert_eq!(
+                group.is_error(),
+                expected.is_some(),
+                "{level:?} {kind:?} {group:?}"
+            );
+            if let Some(fragment) = expected {
+                let message = group.error_message().unwrap();
+                assert!(
+                    message.contains(fragment),
+                    "expected {fragment:?} in {message:?}"
+                );
+            }
+        };
+        let dimension_error = compat.then_some("textureBindingViewDimension");
+        let layer_error = compat.then_some("all array layers");
+        let float = TextureSampleType::Float;
+        let format = rgba8_unorm();
+        check(&cube, Cube, 0, 6, sampled(Cube, float), None);
+        check(
+            &cube,
+            D2Array,
+            0,
+            6,
+            sampled(D2Array, float),
+            dimension_error,
+        );
+        check(&array, D2Array, 0, 6, sampled(D2Array, float), None);
+        check(&array, Cube, 0, 6, sampled(Cube, float), dimension_error);
+        check(&array, D2Array, 1, 2, sampled(D2Array, float), layer_error);
+        check(
+            &declared_array,
+            D2Array,
+            0,
+            6,
+            storage(D2Array, format),
+            None,
+        );
+        check(&declared_array, D2, 0, 1, storage(D2, format), layer_error);
+        check(
+            &cube,
+            D2Array,
+            0,
+            6,
+            storage(D2Array, format),
+            dimension_error,
+        );
+
+        // Both compatibility rules fail. Each validator reports its first rule.
+        check(
+            &cube,
+            D2Array,
+            0,
+            2,
+            sampled(D2Array, float),
+            dimension_error,
+        );
+        check(&cube, D2Array, 0, 2, storage(D2Array, format), layer_error);
+        check(
+            &cube,
+            D2Array,
+            0,
+            2,
+            sampled(D2, float),
+            Some("dimension must match the layout"),
+        );
+        check(
+            &cube,
+            D2Array,
+            0,
+            2,
+            sampled(D2Array, TextureSampleType::Uint),
+            Some("sample type"),
+        );
+        check(
+            &cube,
+            D2Array,
+            0,
+            2,
+            storage(D2, format),
+            Some("dimension must match the layout"),
+        );
+        check(
+            &cube,
+            D2Array,
+            0,
+            2,
+            storage(D2Array, TextureFormat::from_raw(TextureFormat::R32_UINT)),
+            Some("format must match the layout"),
+        );
+
+        // A volume has one array layer, regardless of its depth.
+        desc.dimension = TextureDimension::D3;
+        let volume = device.create_texture(desc);
+        check(&volume, D3, 0, 1, sampled(D3, float), None);
+        check(&volume, D3, 0, 1, storage(D3, format), None);
+    }
+
+    #[test]
+    fn compatibility_texture_bindings_check_dimension_layers_and_precedence() {
+        check_texture_bindings(FeatureLevel::Compatibility);
+    }
+
+    #[test]
+    fn core_texture_bindings_accept_alternate_dimensions_and_partial_layers() {
+        check_texture_bindings(FeatureLevel::Core);
     }
 
     #[test]

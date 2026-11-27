@@ -21,6 +21,7 @@ use crate::render_pipeline::*;
 use crate::sampler::*;
 use crate::shader::*;
 use crate::texture::*;
+use crate::texture_view::TextureViewDimension;
 
 /// Stores device data used by validation and backend submission.
 #[derive(Debug, Clone)]
@@ -466,11 +467,29 @@ impl Device {
         descriptor: TextureDescriptor,
         error: Option<String>,
     ) -> Texture {
+        self.create_texture_with_binding_view_dimension(descriptor, None, error)
+    }
+
+    /// Creates a texture with an optional compatibility binding view dimension,
+    /// preserving an earlier descriptor conversion error.
+    #[must_use]
+    pub fn create_texture_with_binding_view_dimension(
+        &self,
+        descriptor: TextureDescriptor,
+        binding_view_dimension: Option<TextureViewDimension>,
+        error: Option<String>,
+    ) -> Texture {
         if self.is_lost() {
             return Texture::new(descriptor, None, true, self.features());
         }
+        let binding_view_dimension =
+            binding_view_dimension.filter(|_| !self.has_feature(Feature::CoreFeaturesAndLimits));
         let error = error.or_else(|| {
-            validate_texture_descriptor(&descriptor, self.limits(), &self.inner.features)
+            binding_view_dimension
+                .and_then(|dimension| validate_binding_view_dimension(&descriptor, dimension))
+                .or_else(|| {
+                    validate_texture_descriptor(&descriptor, self.limits(), &self.inner.features)
+                })
                 .map(str::to_owned)
         });
         let is_error = error.is_some();
@@ -494,7 +513,13 @@ impl Device {
             }
         };
 
-        Texture::new(descriptor, hal, is_error, self.features())
+        Texture::new_with_binding_view_dimension(
+            descriptor,
+            hal,
+            is_error,
+            self.features(),
+            binding_view_dimension,
+        )
     }
 
     fn dispatch_hal_allocation_error(&self, error: HalError) {

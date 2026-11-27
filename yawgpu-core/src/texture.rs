@@ -5,6 +5,7 @@ use yawgpu_hal::{
     HalTexture, HalTextureDescriptor, HalTextureDimension, HalTextureFormat, HalTextureUsage,
 };
 
+use crate::adapter::Feature;
 use crate::copy::*;
 use crate::device::FeatureSet;
 use crate::extent::*;
@@ -80,6 +81,25 @@ pub enum TextureDimension {
     D3,
 }
 
+impl TextureDimension {
+    fn default_view_dimension(self, depth_or_array_layers: u32) -> TextureViewDimension {
+        match self {
+            Self::D1 => TextureViewDimension::D1,
+            Self::D2 if depth_or_array_layers == 1 => TextureViewDimension::D2,
+            Self::D2 => TextureViewDimension::D2Array,
+            Self::D3 => TextureViewDimension::D3,
+        }
+    }
+
+    /// Returns the number of array layers, counting a 3D volume as one layer.
+    pub(crate) fn array_layer_count(self, depth_or_array_layers: u32) -> u32 {
+        match self {
+            Self::D2 => depth_or_array_layers,
+            Self::D1 | Self::D3 => 1,
+        }
+    }
+}
+
 /// Describes texture descriptor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextureDescriptor {
@@ -111,6 +131,7 @@ pub(crate) struct TextureInner {
     pub(crate) hal: Mutex<Option<HalTexture>>,
     pub(crate) usage: TextureUsage,
     pub(crate) dimension: TextureDimension,
+    binding_view_dimension: Option<TextureViewDimension>,
     pub(crate) size: Extent3d,
     pub(crate) format: TextureFormat,
     pub(crate) format_caps: Option<FormatCaps>,
@@ -258,7 +279,28 @@ impl Texture {
         is_error: bool,
         features: FeatureSet,
     ) -> Self {
+        Self::new_with_binding_view_dimension(descriptor, hal, is_error, features, None)
+    }
+
+    /// Stores the validated binding dimension or its compatibility default.
+    pub(crate) fn new_with_binding_view_dimension(
+        descriptor: TextureDescriptor,
+        hal: Option<HalTexture>,
+        is_error: bool,
+        features: FeatureSet,
+        binding_view_dimension: Option<TextureViewDimension>,
+    ) -> Self {
         let init_enabled = !is_error && texture_lazy_init_eligible(descriptor.usage);
+        let binding_view_dimension =
+            if is_error || features.contains(&Feature::CoreFeaturesAndLimits) {
+                None
+            } else {
+                Some(binding_view_dimension.unwrap_or_else(|| {
+                    descriptor
+                        .dimension
+                        .default_view_dimension(descriptor.size.depth_or_array_layers)
+                }))
+            };
         let format_caps = descriptor.format.caps(&features);
         let init_aspects = InitAspects::from_caps(format_caps);
         Self {
@@ -266,6 +308,7 @@ impl Texture {
                 hal: Mutex::new(hal),
                 usage: descriptor.usage,
                 dimension: descriptor.dimension,
+                binding_view_dimension,
                 size: descriptor.size,
                 format: descriptor.format,
                 format_caps,
@@ -288,10 +331,17 @@ impl Texture {
         }
     }
 
-    /// Constructs this object from the backend HAL object.
+    /// Wraps a HAL texture using the owning device's enabled features.
     #[must_use]
-    pub fn from_hal(descriptor: TextureDescriptor, hal: HalTexture) -> Self {
-        Self::new(descriptor, Some(hal), false, FeatureSet::new())
+    pub fn from_hal(descriptor: TextureDescriptor, hal: HalTexture, features: FeatureSet) -> Self {
+        Self::new(descriptor, Some(hal), false, features)
+    }
+
+    /// Returns the resolved compatibility binding view dimension, or `None` for
+    /// an error texture or a device with `CoreFeaturesAndLimits`.
+    #[must_use]
+    pub fn binding_view_dimension(&self) -> Option<TextureViewDimension> {
+        self.inner.binding_view_dimension
     }
 
     /// Returns the usage.
@@ -525,16 +575,10 @@ impl Texture {
         let mip_level_count = descriptor
             .mip_level_count
             .unwrap_or_else(|| self.mip_level_count().saturating_sub(base_mip_level));
-        let dimension = descriptor
-            .dimension
-            .unwrap_or_else(|| match self.dimension() {
-                TextureDimension::D1 => TextureViewDimension::D1,
-                TextureDimension::D3 => TextureViewDimension::D3,
-                TextureDimension::D2 if self.size().depth_or_array_layers == 1 => {
-                    TextureViewDimension::D2
-                }
-                TextureDimension::D2 => TextureViewDimension::D2Array,
-            });
+        let dimension = descriptor.dimension.unwrap_or_else(|| {
+            self.dimension()
+                .default_view_dimension(self.size().depth_or_array_layers)
+        });
         let array_layer_count = descriptor
             .array_layer_count
             .unwrap_or_else(|| match dimension {
@@ -587,10 +631,7 @@ impl TextureInitState {
         aspects: InitAspects,
         enabled: bool,
     ) -> Self {
-        let array_layer_count = match dimension {
-            TextureDimension::D2 => depth_or_array_layers,
-            TextureDimension::D1 | TextureDimension::D3 => 1,
-        };
+        let array_layer_count = dimension.array_layer_count(depth_or_array_layers);
         let len = if enabled {
             usize::try_from(mip_level_count)
                 .ok()
@@ -656,6 +697,28 @@ impl TextureInitState {
 /// (Metal Memoryless rejects blits).
 fn texture_lazy_init_eligible(usage: TextureUsage) -> bool {
     !usage.contains(TextureUsage::TRANSIENT_ATTACHMENT)
+}
+
+/// Validates an explicit compatibility binding dimension before the texture descriptor.
+pub(crate) fn validate_binding_view_dimension(
+    descriptor: &TextureDescriptor,
+    dimension: TextureViewDimension,
+) -> Option<&'static str> {
+    let compatible = match (descriptor.dimension, dimension) {
+        (TextureDimension::D1, TextureViewDimension::D1)
+        | (TextureDimension::D2, TextureViewDimension::D2Array)
+        | (TextureDimension::D3, TextureViewDimension::D3) => true,
+        (TextureDimension::D2, TextureViewDimension::D2) => {
+            descriptor.size.depth_or_array_layers == 1
+        }
+        (TextureDimension::D2, TextureViewDimension::Cube) => {
+            descriptor.size.depth_or_array_layers == 6
+        }
+        _ => false,
+    };
+    (!compatible).then_some(
+        "textureBindingViewDimension is incompatible with texture dimension or layer count",
+    )
 }
 
 /// Validates texture descriptor and returns a descriptive error on failure.
@@ -2238,6 +2301,27 @@ mod tests {
     }
 
     #[test]
+    fn compatibility_error_texture_has_no_binding_view_dimension() {
+        let device = Instance::new_noop()
+            .enumerate_adapters_with_feature_level(FeatureLevel::Compatibility)[0]
+            .create_device(None, &[], "", "")
+            .unwrap();
+        let desc = texture_descriptor_4x4();
+        device.push_error_scope(ErrorFilter::Validation);
+        let texture = device.create_texture_with_binding_view_dimension(
+            desc,
+            Some(TextureViewDimension::Cube),
+            None,
+        );
+        assert!(texture.is_error());
+        assert_eq!(texture.binding_view_dimension(), None);
+        assert_eq!(
+            device.pop_error_scope().unwrap().unwrap().message,
+            "textureBindingViewDimension is incompatible with texture dimension or layer count"
+        );
+    }
+
+    #[test]
     fn texture_from_hal_and_descriptor_accessors_round_trip() {
         let descriptor = texture_descriptor_4x4();
         let hal_descriptor = hal_texture_descriptor(&descriptor);
@@ -2247,10 +2331,21 @@ mod tests {
             hal_device
                 .create_texture(&hal_descriptor)
                 .expect("Noop texture allocation should succeed"),
+            FeatureSet::new(),
         );
 
         assert_eq!(texture.usage(), descriptor.usage);
         assert_eq!(texture.dimension(), descriptor.dimension);
+        assert_eq!(
+            texture.binding_view_dimension(),
+            Some(TextureViewDimension::D2)
+        );
+        let core_texture = Texture::from_hal(
+            descriptor.clone(),
+            hal_device.create_texture(&hal_descriptor).unwrap(),
+            FeatureSet::from([Feature::CoreFeaturesAndLimits]),
+        );
+        assert_eq!(core_texture.binding_view_dimension(), None);
         assert_eq!(texture.size(), descriptor.size);
         assert_eq!(texture.format(), descriptor.format);
         assert_eq!(texture.mip_level_count(), descriptor.mip_level_count);
@@ -2290,6 +2385,7 @@ mod tests {
             hal_device
                 .create_texture(&hal_texture_descriptor(&rgba_descriptor))
                 .expect("Noop texture allocation should succeed"),
+            FeatureSet::new(),
         );
         assert_eq!(
             from_hal.format_caps(),

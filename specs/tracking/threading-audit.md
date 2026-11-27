@@ -54,3 +54,35 @@ it (CI was Noop-default only; the per-backend review gates omitted `tiled`). Acc
 removed inner `sample_count`, Metal `draw_primitives`→inline). Gate gap closed: CI now compile-gates the
 Noop-buildable tiled code (`.github/workflows/ci.yml`); backend-tiled gates added to the review workflow
 (see memory `feedback-run-feature-gated-hal-tests`).
+
+## Propagation audit 2026-11
+
+Whole-tree audit at `b772306` (pinned Dawn `843d53377e` as reference) for values that reach
+a getter but miss validation, reach a pipeline layout but miss the draw, or are overwritten
+between binding and use. "Reproduced" = observed through the public C API on Noop;
+"source-confirmed" = the missing operation was located; "suspected" = a runtime
+consequence or the support contract is unconfirmed.
+
+| ID | Evidence | Finding | Disposition |
+|---|---|---|---|
+| 01 | Reproduced | Subpass encoder accepts transient attachments with Load or Store; the regular pass rejects them | Block 163 |
+| 02 | Reproduced | Subpass encoder accepts a non-identity swizzled primary attachment view | Block 163 |
+| 03 | Source-confirmed | Vulkan subpass draws never push the immediates block (viewport depth range) the pipeline layout and shader declare | Block 164 |
+| 04 | Reproduced | Compatibility device accepts a binding whose view dimension differs from the texture's `textureBindingViewDimension` | Block 165 |
+| 05 | Reproduced | `timedWaitAnyMaxCount` is advertised as 64 but neither negotiated at instance creation nor enforced by `wgpuInstanceWaitAny` | Block 166 |
+| 06 | Reproduced | `compatibleSurface` does not constrain adapter selection | Block 166 |
+| 07 | Reproduced | A subpass input may name a producer subpass that does not write its source attachment | Block 163 |
+| 08 | Suspected | GLES: two sampled views of one texture differing only in mip range bind the same GL texture name, so each bind's `BASE_LEVEL`/`MAX_LEVEL` overwrites the other's within one draw or dispatch (`gles/queue.rs` `requires_texture_view_for`) | OPEN — needs a core-mode two-view probe on a native GLES host |
+| 09 | Suspected | Vulkan/Tint: one multisampled input binding sets a module-wide Tint option, changing SPIR-V generation for every input attachment (`pipeline_has_multisampled_input_attachment`) | OPEN — probe single-kind vs mixed inputs at pipeline creation; belongs with the SPIR-V MSAA input-attachment slice |
+| 10 | Reproduced | A `WGPURequestAdapterWebXROptions` request succeeds; native Dawn declines it | Block 166 |
+| 11 | Suspected | Surface configuration accepts the Display-P3 / extended tone-mapping chain; the HAL configuration carries neither | Block 167 (rejected explicitly, as Dawn does) |
+| 12 | Suspected | `powerPreference` never participates in adapter selection | Block 166 (Dawn `SortAdapters` ranking) |
+
+Blocks 163–167 are complete (2026-11-28; gates and Phase Review in each block spec). Runs
+owed: Block 164 on native Vulkan; Block 166 R5/R6 on a multi-adapter host. 08 and 09 stay
+open.
+
+Review rule going forward: for a changed descriptor field or command, record the function
+that consumes it and the one test that fails if it reverts to its default; when the same
+operation has regular, bundle, subpass, compute or backend-specific implementations, list
+the siblings and how each is checked.

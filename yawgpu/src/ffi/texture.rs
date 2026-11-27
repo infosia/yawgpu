@@ -105,23 +105,13 @@ pub unsafe extern "C" fn wgpuTextureGetTextureBindingViewDimension(
     texture: native::WGPUTexture,
 ) -> native::WGPUTextureViewDimension {
     let texture = borrow_handle(texture, "WGPUTexture");
-    if texture.core.is_error()
-        || texture
-            .device
-            .has_feature(core::Feature::CoreFeaturesAndLimits)
-    {
-        return native::WGPUTextureViewDimension_Undefined;
-    }
-    if texture.binding_view_dimension != native::WGPUTextureViewDimension_Undefined {
-        return texture.binding_view_dimension;
-    }
-    match texture.core.dimension() {
-        core::TextureDimension::D1 => native::WGPUTextureViewDimension_1D,
-        core::TextureDimension::D2 if texture.core.size().depth_or_array_layers == 1 => {
-            native::WGPUTextureViewDimension_2D
-        }
-        core::TextureDimension::D2 => native::WGPUTextureViewDimension_2DArray,
-        core::TextureDimension::D3 => native::WGPUTextureViewDimension_3D,
+    match texture.core.binding_view_dimension() {
+        Some(core::TextureViewDimension::D1) => native::WGPUTextureViewDimension_1D,
+        Some(core::TextureViewDimension::D2) => native::WGPUTextureViewDimension_2D,
+        Some(core::TextureViewDimension::D2Array) => native::WGPUTextureViewDimension_2DArray,
+        Some(core::TextureViewDimension::Cube) => native::WGPUTextureViewDimension_Cube,
+        Some(core::TextureViewDimension::CubeArray) => native::WGPUTextureViewDimension_CubeArray,
+        Some(core::TextureViewDimension::D3) => native::WGPUTextureViewDimension_3D,
         _ => native::WGPUTextureViewDimension_Undefined,
     }
 }

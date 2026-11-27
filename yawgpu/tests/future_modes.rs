@@ -121,7 +121,7 @@ fn wait_any_poll_zero_count_and_null_futures_statuses() {
         let future = request_adapter(instance, native::WGPUCallbackMode_WaitAnyOnly, &mut state);
 
         let zero_count_status = yawgpu::wgpuInstanceWaitAny(instance, 0, std::ptr::null_mut(), 0);
-        assert_eq!(zero_count_status, native::WGPUWaitStatus_TimedOut);
+        assert_eq!(zero_count_status, native::WGPUWaitStatus_Success);
 
         let null_futures_status = yawgpu::wgpuInstanceWaitAny(instance, 1, std::ptr::null_mut(), 0);
         assert_eq!(null_futures_status, native::WGPUWaitStatus_Error);

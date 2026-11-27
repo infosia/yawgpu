@@ -6,7 +6,7 @@ const SUPPORTED_INSTANCE_FEATURES: &[native::WGPUInstanceFeatureName] = &[
     native::WGPUInstanceFeatureName_ShaderSourceSPIRV,
 ];
 
-// Advertised for native parity; FutureRegistry::wait_any does not enforce it today.
+/// Default and supported maximum number of futures in a timed wait.
 pub(crate) const TIMED_WAIT_ANY_MAX_COUNT: usize = 64;
 
 #[cfg(any(feature = "metal", feature = "vulkan", feature = "gles"))]
@@ -14,20 +14,14 @@ fn finish_real_instance(
     hal_instance: HalInstance,
     prefix: &str,
     backend: &str,
-    timed_wait_any_enabled: bool,
-    shader_source_spirv_enabled: bool,
-) -> Option<Arc<WGPUInstanceImpl>> {
+) -> Option<core::Instance> {
     if hal_instance.enumerate_adapters().is_empty() {
         eprintln!(
             "{prefix}: {backend} requested but enumerate_adapters returned no adapters; returning NULL instance"
         );
         return None;
     }
-    Some(WGPUInstanceImpl::from_core(
-        core::Instance::from_hal(hal_instance),
-        timed_wait_any_enabled,
-        shader_source_spirv_enabled,
-    ))
+    Some(core::Instance::from_hal(hal_instance))
 }
 
 /// Creates a new WebGPU instance.
@@ -51,7 +45,8 @@ fn finish_real_instance(
 /// # Safety
 ///
 /// `descriptor`, when non-null, must point to a valid `WGPUInstanceDescriptor`.
-/// Returns the new instance handle, or NULL when an IB3 strict failure occurs.
+/// Returns NULL for unsupported required limits, a missing required-feature
+/// array, or an unavailable requested backend.
 #[no_mangle]
 pub unsafe extern "C" fn wgpuCreateInstance(
     descriptor: *const native::WGPUInstanceDescriptor,
@@ -60,15 +55,20 @@ pub unsafe extern "C" fn wgpuCreateInstance(
         if descriptor.requiredFeatureCount > 0 && descriptor.requiredFeatures.is_null() {
             return std::ptr::null();
         }
+        if descriptor
+            .requiredLimits
+            .as_ref()
+            .is_some_and(|limits| limits.timedWaitAnyMaxCount > TIMED_WAIT_ANY_MAX_COUNT)
+        {
+            return std::ptr::null();
+        }
     }
     let timed_wait_any_enabled = instance_has_timed_wait_any(descriptor);
     let shader_source_spirv_enabled = instance_has_shader_source_spirv(descriptor);
     let selection = instance_backend_selection(descriptor);
     let instance = match selection {
         // IB1 (no chain) and IB2 (chain == NOOP) / IB4 (chain == unknown).
-        None | Some(InstanceBackendSelection::Noop) => {
-            WGPUInstanceImpl::new_noop(timed_wait_any_enabled, shader_source_spirv_enabled)
-        }
+        None | Some(InstanceBackendSelection::Noop) => core::Instance::new_noop(),
         Some(InstanceBackendSelection::Metal) => {
             #[cfg(feature = "metal")]
             {
@@ -78,8 +78,6 @@ pub unsafe extern "C" fn wgpuCreateInstance(
                             yawgpu_hal::HalInstance::Metal(instance),
                             "yawgpu-metal",
                             "YAWGPU_INSTANCE_BACKEND_METAL",
-                            timed_wait_any_enabled,
-                            shader_source_spirv_enabled,
                         ) else {
                             return std::ptr::null();
                         };
@@ -95,7 +93,6 @@ pub unsafe extern "C" fn wgpuCreateInstance(
             }
             #[cfg(not(feature = "metal"))]
             {
-                let _ = timed_wait_any_enabled;
                 eprintln!(
                     "yawgpu-metal: YAWGPU_INSTANCE_BACKEND_METAL requested but yawgpu was built without feature=metal; returning NULL instance"
                 );
@@ -111,8 +108,6 @@ pub unsafe extern "C" fn wgpuCreateInstance(
                             yawgpu_hal::HalInstance::Vulkan(instance),
                             "yawgpu-vulkan",
                             "YAWGPU_INSTANCE_BACKEND_VULKAN",
-                            timed_wait_any_enabled,
-                            shader_source_spirv_enabled,
                         ) else {
                             return std::ptr::null();
                         };
@@ -128,7 +123,6 @@ pub unsafe extern "C" fn wgpuCreateInstance(
             }
             #[cfg(not(feature = "vulkan"))]
             {
-                let _ = timed_wait_any_enabled;
                 eprintln!(
                     "yawgpu-vulkan: YAWGPU_INSTANCE_BACKEND_VULKAN requested but yawgpu was built without feature=vulkan; returning NULL instance"
                 );
@@ -145,8 +139,6 @@ pub unsafe extern "C" fn wgpuCreateInstance(
                             yawgpu_hal::HalInstance::Gles(instance),
                             "yawgpu-gles",
                             "YAWGPU_INSTANCE_BACKEND_GLES",
-                            timed_wait_any_enabled,
-                            shader_source_spirv_enabled,
                         ) else {
                             return std::ptr::null();
                         };
@@ -162,7 +154,6 @@ pub unsafe extern "C" fn wgpuCreateInstance(
             }
             #[cfg(not(feature = "gles"))]
             {
-                let _ = timed_wait_any_enabled;
                 eprintln!(
                     "yawgpu-gles: YAWGPU_INSTANCE_BACKEND_GLES requested but yawgpu was built without feature=gles; returning NULL instance"
                 );
@@ -170,7 +161,13 @@ pub unsafe extern "C" fn wgpuCreateInstance(
             }
         }
     };
-    arc_to_handle(instance)
+    // Every supported request receives the better default maximum.
+    arc_to_handle(WGPUInstanceImpl::from_core(
+        instance,
+        timed_wait_any_enabled,
+        TIMED_WAIT_ANY_MAX_COUNT,
+        shader_source_spirv_enabled,
+    ))
 }
 
 /// Gets the instance features supported by this library.
@@ -204,6 +201,9 @@ pub unsafe extern "C" fn wgpuGetInstanceLimits(
     let Some(limits) = limits.as_mut() else {
         return native::WGPUStatus_Error;
     };
+    if !limits.nextInChain.is_null() {
+        return native::WGPUStatus_Error;
+    }
     limits.timedWaitAnyMaxCount = TIMED_WAIT_ANY_MAX_COUNT;
     native::WGPUStatus_Success
 }
@@ -366,7 +366,10 @@ pub unsafe extern "C" fn wgpuInstanceCreateSurface(
     descriptor: *const native::WGPUSurfaceDescriptor,
 ) -> native::WGPUSurface {
     let instance = clone_handle(instance, "WGPUInstance");
-    let (label, is_error, hal) = if let Some(descriptor) = descriptor.as_ref() {
+    let descriptor = descriptor.as_ref();
+    let label = descriptor.and_then(|desc| label_from_string_view(desc.label));
+    let descriptor = descriptor.filter(|desc| !has_surface_color_management(desc.nextInChain));
+    let (is_error, hal) = if let Some(descriptor) = descriptor {
         let layer = find_metal_layer_source(descriptor.nextInChain);
         let mut real_surface_creation_failed =
             layer.is_some() && is_real_hal_instance(instance.core.hal());
@@ -408,12 +411,11 @@ pub unsafe extern "C" fn wgpuInstanceCreateSurface(
         let surface_source_is_unsupported = !has_supported_surface_source(descriptor.nextInChain);
         real_surface_creation_failed = real_surface_creation_failed && hal.is_none();
         (
-            label_from_string_view(descriptor.label),
             surface_source_is_unsupported || real_surface_creation_failed,
             hal,
         )
     } else {
-        (None, true, None)
+        (true, None)
     };
     arc_to_handle(Arc::new(WGPUSurfaceImpl {
         label: Mutex::new(label),
@@ -435,11 +437,9 @@ pub unsafe extern "C" fn wgpuInstanceCreateSurface(
 
 /// Requests an adapter from an instance.
 ///
-/// When the instance exposes no adapters (a legitimate spec-level outcome on
-/// real backends — e.g. GLES display loss), or when no adapter matches the
-/// requested backend type, the callback is delivered with
-/// `WGPURequestAdapterStatus_Unavailable` and a null adapter; this never
-/// panics.
+/// The callback receives the highest-ranked eligible adapter. A WebXR request
+/// or an empty selection completes with `WGPURequestAdapterStatus_Unavailable`
+/// and a null adapter.
 ///
 /// # Safety
 ///
@@ -456,22 +456,27 @@ pub unsafe extern "C" fn wgpuInstanceRequestAdapter(
         return native::WGPUFuture { id: 0 };
     }
     let instance = clone_handle(instance_handle, "WGPUInstance");
+    let options = options.as_ref();
     let mut options_error = None;
     let feature_level = options
-        .as_ref()
         .map(|options| map_feature_level(options.featureLevel, &mut options_error))
         .unwrap_or(core::FeatureLevel::Core);
-    let requested_backend_type = options
-        .as_ref()
-        .map(|options| options.backendType)
-        .unwrap_or(native::WGPUBackendType_Undefined);
-    let invalid_feature_level = options_error.is_some();
-    let force_fallback = options
-        .as_ref()
-        .is_some_and(|options| options.forceFallbackAdapter != 0);
-    let result = if invalid_feature_level {
-        Err("invalid featureLevel".to_owned())
+    let webxr = options.is_some_and(|options| {
+        find_in_chain::<native::WGPURequestAdapterWebXROptions>(
+            options.nextInChain,
+            native::WGPUSType_RequestAdapterWebXROptions,
+        )
+        .is_some()
+    });
+    let mut error_status = native::WGPURequestAdapterStatus_Unavailable;
+    let result = if webxr {
+        Err("RequestAdapterWebXROptions unsupported".to_owned())
+    } else if let Some(error) = options_error {
+        error_status = native::WGPURequestAdapterStatus_Error;
+        Err(error)
     } else {
+        let surface = options.and_then(|options| options.compatibleSurface.as_ref());
+        let force_fallback = options.is_some_and(|options| options.forceFallbackAdapter != 0);
         select_request_adapter(
             instance
                 .core
@@ -479,8 +484,15 @@ pub unsafe extern "C" fn wgpuInstanceRequestAdapter(
                 .into_iter()
                 .filter(|adapter| !force_fallback || adapter.hal().is_fallback())
                 .collect(),
-            requested_backend_type,
-            |adapter| backend_type_from_hal(adapter.backend()),
+            options.map_or(native::WGPUBackendType_Undefined, |options| {
+                options.backendType
+            }),
+            options.map_or(native::WGPUPowerPreference_Undefined, |options| {
+                options.powerPreference
+            }),
+            core::Adapter::backend,
+            |adapter| surface.is_none_or(|surface| adapter_supports_surface(adapter, surface)),
+            |adapter| adapter.info().adapter_type,
         )
     }
     .map(|adapter| {
@@ -492,11 +504,7 @@ pub unsafe extern "C" fn wgpuInstanceRequestAdapter(
     });
 
     instance.register_callback(PendingCallback::RequestAdapter {
-        error_status: if invalid_feature_level {
-            native::WGPURequestAdapterStatus_Error
-        } else {
-            native::WGPURequestAdapterStatus_Unavailable
-        },
+        error_status,
         mode: callback_info.mode,
         callback: callback_info.callback,
         result,
@@ -505,39 +513,61 @@ pub unsafe extern "C" fn wgpuInstanceRequestAdapter(
     })
 }
 
-/// Selects the adapter delivered by `wgpuInstanceRequestAdapter` from an
-/// instance's enumeration.
-///
-/// Returns the first adapter whose mapped backend matches
-/// `requested_backend_type`. An undefined request preserves the original
-/// first-adapter behavior. An empty enumeration or a request with no matching
-/// adapter returns the failure message delivered with
-/// `WGPURequestAdapterStatus_Unavailable` and a null adapter.
-fn select_request_adapter(
-    adapters: Vec<core::Adapter>,
+/// Filters the enumeration by backend and presentation support before ranking it.
+fn select_request_adapter<T>(
+    mut adapters: Vec<T>,
     requested_backend_type: native::WGPUBackendType,
-    mut adapter_backend_type: impl FnMut(&core::Adapter) -> native::WGPUBackendType,
-) -> Result<core::Adapter, String> {
-    let mut adapters = adapters.into_iter();
-    let first_adapter = adapters
-        .next()
+    preference: native::WGPUPowerPreference,
+    backend: impl Fn(&T) -> yawgpu_hal::HalBackend,
+    supports_surface: impl FnMut(&T) -> bool,
+    adapter_type: impl Fn(&T) -> yawgpu_hal::HalAdapterType,
+) -> Result<T, String> {
+    let instance_backend = adapters
+        .first()
+        .map(&backend)
         .ok_or_else(|| String::from("no adapters available"))?;
-    let instance_backend = first_adapter.backend();
-
-    if requested_backend_type == native::WGPUBackendType_Undefined
-        || adapter_backend_type(&first_adapter) == requested_backend_type
-    {
-        return Ok(first_adapter);
-    }
-
-    adapters
-        .find(|adapter| adapter_backend_type(adapter) == requested_backend_type)
-        .ok_or_else(|| {
-            format!(
+    if requested_backend_type != native::WGPUBackendType_Undefined {
+        adapters
+            .retain(|adapter| backend_type_from_hal(backend(adapter)) == requested_backend_type);
+        if adapters.is_empty() {
+            return Err(format!(
                 "no adapter with backendType {} (instance backend: {instance_backend:?})",
                 backend_type_name(requested_backend_type)
-            )
-        })
+            ));
+        }
+    }
+    adapters.retain(supports_surface);
+    sort_adapters_by_preference(&mut adapters, preference, adapter_type);
+    adapters
+        .into_iter()
+        .next()
+        .ok_or_else(|| "no adapter supports the requested surface".to_owned())
+}
+
+fn adapter_supports_surface(adapter: &core::Adapter, surface: &WGPUSurfaceImpl) -> bool {
+    !surface.is_error && surface::query_surface_capabilities(surface, adapter.hal()).is_ok()
+}
+
+fn adapter_type_rank(
+    kind: yawgpu_hal::HalAdapterType,
+    preference: native::WGPUPowerPreference,
+) -> u8 {
+    use yawgpu_hal::HalAdapterType::{Cpu, Discrete, Integrated};
+    match (kind, preference) {
+        (Discrete, native::WGPUPowerPreference_HighPerformance)
+        | (Integrated, native::WGPUPowerPreference_LowPower) => 0,
+        (Discrete | Integrated, _) => 1,
+        (Cpu, _) => 2,
+        _ => 3,
+    }
+}
+
+fn sort_adapters_by_preference<T>(
+    adapters: &mut [T],
+    preference: native::WGPUPowerPreference,
+    adapter_type: impl Fn(&T) -> yawgpu_hal::HalAdapterType,
+) {
+    adapters.sort_by_cached_key(|adapter| adapter_type_rank(adapter_type(adapter), preference));
 }
 
 /// Returns the unprefixed `webgpu.h` constant name for a backend type.
@@ -600,11 +630,14 @@ pub unsafe extern "C" fn wgpuInstanceWaitAny(
     if future_count > 0 && futures.is_null() {
         return native::WGPUWaitStatus_Error;
     }
-    if future_count == 0 {
-        return native::WGPUWaitStatus_TimedOut;
-    }
     if timeout_ns > 0 && !instance.timed_wait_any_enabled {
         return native::WGPUWaitStatus_Error;
+    }
+    if timeout_ns > 0 && future_count > instance.timed_wait_any_max_count {
+        return native::WGPUWaitStatus_Error;
+    }
+    if future_count == 0 {
+        return native::WGPUWaitStatus_Success;
     }
 
     let wait_infos = std::slice::from_raw_parts_mut(futures, future_count);
@@ -682,7 +715,12 @@ mod tests {
     #[test]
     fn wait_any_pending_future_times_out_with_bounded_delay() {
         use std::time::{Duration, Instant};
-        let instance = WGPUInstanceImpl::new_noop(true, false);
+        let instance = WGPUInstanceImpl::from_core(
+            core::Instance::new_noop(),
+            true,
+            TIMED_WAIT_ANY_MAX_COUNT,
+            false,
+        );
         let future = instance
             .core
             .future_registry()
@@ -769,6 +807,194 @@ mod tests {
     }
 
     #[test]
+    fn create_instance_negotiates_required_timed_wait_count() {
+        unsafe {
+            for required in [None, Some(0), Some(1), Some(64), Some(65)] {
+                let limits = required.map(|count| native::WGPUInstanceLimits {
+                    nextInChain: std::ptr::null_mut(),
+                    timedWaitAnyMaxCount: count,
+                });
+                let descriptor = native::WGPUInstanceDescriptor {
+                    requiredLimits: limits.as_ref().map_or(std::ptr::null(), std::ptr::from_ref),
+                    ..std::mem::zeroed()
+                };
+                let instance = wgpuCreateInstance(&descriptor);
+                assert_eq!(instance.is_null(), required == Some(65));
+                if let Some(instance_impl) = instance.as_ref() {
+                    assert_eq!(instance_impl.timed_wait_any_max_count, 64);
+                    wgpuInstanceRelease(instance);
+                }
+            }
+        }
+    }
+
+    fn ready_waits<const N: usize>(instance: &WGPUInstanceImpl) -> [native::WGPUFutureWaitInfo; N] {
+        let registry = instance.core.future_registry();
+        std::array::from_fn(|_| {
+            let id = registry.register(core::FutureCallbackMode::WaitAnyOnly);
+            registry.complete(id);
+            native::WGPUFutureWaitInfo {
+                future: native::WGPUFuture { id: id.get() },
+                completed: 0,
+            }
+        })
+    }
+
+    #[test]
+    fn wait_any_limits_only_positive_timeouts() {
+        unsafe {
+            let feature = native::WGPUInstanceFeatureName_TimedWaitAny;
+            let descriptor = native::WGPUInstanceDescriptor {
+                requiredFeatureCount: 1,
+                requiredFeatures: &feature,
+                ..std::mem::zeroed()
+            };
+            let instance = wgpuCreateInstance(&descriptor);
+            assert_eq!(
+                wgpuInstanceWaitAny(instance, 0, std::ptr::null_mut(), 1),
+                native::WGPUWaitStatus_Success
+            );
+            let mut waits = ready_waits::<65>(borrow_handle(instance, "WGPUInstance"));
+            assert_eq!(
+                wgpuInstanceWaitAny(instance, 65, waits.as_mut_ptr(), 1),
+                native::WGPUWaitStatus_Error
+            );
+            assert!(waits.iter().all(|info| info.completed == 0));
+            assert_eq!(
+                wgpuInstanceWaitAny(instance, 64, waits.as_mut_ptr(), 1),
+                native::WGPUWaitStatus_Success
+            );
+            assert!(waits[..64].iter().all(|info| info.completed != 0));
+            assert_eq!(
+                wgpuInstanceWaitAny(instance, 65, waits.as_mut_ptr(), 0),
+                native::WGPUWaitStatus_Success
+            );
+            assert!(waits.iter().all(|info| info.completed != 0));
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    #[test]
+    fn wait_any_reads_the_limit_stored_on_the_instance() {
+        unsafe {
+            let instance = WGPUInstanceImpl::from_core(core::Instance::new_noop(), true, 1, false);
+            let mut waits = ready_waits::<2>(&instance);
+            let handle = arc_to_handle(instance);
+            assert_eq!(
+                wgpuInstanceWaitAny(handle, waits.len(), waits.as_mut_ptr(), 1),
+                native::WGPUWaitStatus_Error
+            );
+            wgpuInstanceRelease(handle);
+        }
+    }
+
+    #[test]
+    fn get_instance_limits_rejects_chained_output() {
+        unsafe {
+            let mut chain = std::mem::zeroed();
+            let mut limits = native::WGPUInstanceLimits {
+                nextInChain: &mut chain,
+                timedWaitAnyMaxCount: 7,
+            };
+            assert_eq!(wgpuGetInstanceLimits(&mut limits), native::WGPUStatus_Error);
+            assert_eq!(limits.timedWaitAnyMaxCount, 7);
+        }
+    }
+
+    #[test]
+    fn request_adapter_declines_webxr_anywhere_in_chain() {
+        unsafe {
+            let instance = wgpuCreateInstance(std::ptr::null());
+            let mut options = request_adapter_options(native::WGPUBackendType_Null);
+            let state = request_adapter(instance, &options);
+            assert_eq!(state.status, native::WGPURequestAdapterStatus_Success);
+            assert!(!state.adapter.is_null());
+            wgpuAdapterRelease(state.adapter);
+            for xr_compatible in [0, 1] {
+                let mut xr = native::WGPURequestAdapterWebXROptions {
+                    chain: native::WGPUChainedStruct {
+                        next: std::ptr::null_mut(),
+                        sType: native::WGPUSType_RequestAdapterWebXROptions,
+                    },
+                    xrCompatible: xr_compatible,
+                };
+                let mut head = native::WGPUChainedStruct {
+                    next: &mut xr.chain,
+                    sType: native::WGPUSType_Force32,
+                };
+                options.nextInChain = &mut head;
+                let state = request_adapter(instance, &options);
+                assert_eq!(state.status, native::WGPURequestAdapterStatus_Unavailable);
+                assert!(state.adapter.is_null());
+            }
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    #[test]
+    fn request_adapter_filters_by_surface_capabilities() {
+        unsafe {
+            let instance = wgpuCreateInstance(std::ptr::null());
+            let error_surface = wgpuInstanceCreateSurface(instance, std::ptr::null());
+            let valid_surface = super::super::tests::create_noop_surface(instance);
+            let adapter = noop_adapters(1).pop().unwrap();
+            let mut options = request_adapter_options(native::WGPUBackendType_Null);
+            options.powerPreference = native::WGPUPowerPreference_HighPerformance;
+            for (surface, supported) in [(error_surface, false), (valid_surface, true)] {
+                assert!(!surface.is_null());
+                assert_eq!(adapter_supports_surface(&adapter, &*surface), supported);
+                options.compatibleSurface = surface;
+                let state = request_adapter(instance, &options);
+                if supported {
+                    assert_eq!(state.status, native::WGPURequestAdapterStatus_Success);
+                    assert!(!state.adapter.is_null());
+                    let mut caps = std::mem::zeroed();
+                    assert_eq!(
+                        wgpuSurfaceGetCapabilities(surface, state.adapter, &mut caps),
+                        native::WGPUStatus_Success
+                    );
+                    wgpuSurfaceCapabilitiesFreeMembers(caps);
+                    wgpuAdapterRelease(state.adapter);
+                } else {
+                    assert_eq!(state.status, native::WGPURequestAdapterStatus_Unavailable);
+                    assert!(state.adapter.is_null());
+                }
+                wgpuSurfaceRelease(surface);
+            }
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    #[test]
+    fn power_preference_ranks_gpu_types_and_preserves_ties() {
+        use yawgpu_hal::HalAdapterType::{Cpu, Discrete, Integrated, Unknown};
+        for (preference, discrete_rank, integrated_rank) in [
+            (native::WGPUPowerPreference_HighPerformance, 0, 1),
+            (native::WGPUPowerPreference_LowPower, 1, 0),
+            (native::WGPUPowerPreference_Undefined, 1, 1),
+            (0xCAFE, 1, 1),
+        ] {
+            assert_eq!(adapter_type_rank(Discrete, preference), discrete_rank);
+            assert_eq!(adapter_type_rank(Integrated, preference), integrated_rank);
+            assert_eq!(adapter_type_rank(Cpu, preference), 2);
+            assert_eq!(adapter_type_rank(Unknown, preference), 3);
+            for (first, second) in [(Discrete, Integrated), (Integrated, Discrete)] {
+                let mut adapters = [(Unknown, 0), (first, 1), (Cpu, 2), (second, 3), (first, 4)];
+                sort_adapters_by_preference(&mut adapters, preference, |&(kind, _)| kind);
+                let expected = match preference {
+                    native::WGPUPowerPreference_HighPerformance if first == Integrated => {
+                        [3, 1, 4, 2, 0]
+                    }
+                    native::WGPUPowerPreference_LowPower if first == Discrete => [3, 1, 4, 2, 0],
+                    native::WGPUPowerPreference_Undefined | 0xCAFE => [1, 3, 4, 2, 0],
+                    _ => [1, 4, 3, 2, 0],
+                };
+                assert_eq!(adapters.map(|(_, index)| index), expected);
+            }
+        }
+    }
+
+    #[test]
     fn wgpu_instance_get_wgsl_language_features_reports_canonical_set() {
         unsafe {
             let instance = wgpuCreateInstance(std::ptr::null());
@@ -850,38 +1076,31 @@ mod tests {
     }
 
     #[test]
-    fn select_request_adapter_returns_first_matching_adapter() {
-        let adapters = noop_adapters(2);
-
-        let result = select_request_adapter(adapters, native::WGPUBackendType_Null, |adapter| {
-            backend_type_from_hal(adapter.backend())
-        });
-
-        assert_eq!(
-            result.map(|adapter| adapter.backend()),
-            Ok(yawgpu_hal::HalBackend::Noop)
+    fn select_request_adapter_filters_before_ranking_and_returns_first_tie() {
+        use yawgpu_hal::HalAdapterType::{Discrete, Integrated};
+        use yawgpu_hal::HalBackend::{Noop, Vulkan};
+        let candidates = vec![
+            (Vulkan, true, Discrete, 0),
+            (Noop, false, Discrete, 1),
+            (Noop, true, Integrated, 2),
+            (Noop, true, Discrete, 3),
+            (Noop, true, Discrete, 4),
+        ];
+        let result = select_request_adapter(
+            candidates,
+            native::WGPUBackendType_Null,
+            native::WGPUPowerPreference_HighPerformance,
+            |candidate| candidate.0,
+            |&(backend, supported, _, _)| {
+                assert_eq!(backend, Noop);
+                supported
+            },
+            |&(_, supported, kind, _)| {
+                assert!(supported);
+                kind
+            },
         );
-    }
-
-    #[test]
-    fn select_request_adapter_returns_second_matching_adapter() {
-        let adapters = noop_adapters(2);
-        let mut mapped_count = 0;
-
-        let result = select_request_adapter(adapters, native::WGPUBackendType_Null, |adapter| {
-            mapped_count += 1;
-            if mapped_count == 1 {
-                native::WGPUBackendType_Vulkan
-            } else {
-                backend_type_from_hal(adapter.backend())
-            }
-        });
-
-        assert_eq!(mapped_count, 2);
-        assert_eq!(
-            result.map(|adapter| adapter.backend()),
-            Ok(yawgpu_hal::HalBackend::Noop)
-        );
+        assert_eq!(result, Ok((Noop, true, Discrete, 3)));
     }
 
     #[test]
@@ -889,7 +1108,10 @@ mod tests {
         let result = select_request_adapter(
             noop_adapters(2),
             native::WGPUBackendType_Vulkan,
-            |adapter| backend_type_from_hal(adapter.backend()),
+            native::WGPUPowerPreference_Undefined,
+            core::Adapter::backend,
+            |_| true,
+            |adapter| adapter.info().adapter_type,
         );
 
         assert_eq!(
@@ -900,9 +1122,14 @@ mod tests {
 
     #[test]
     fn select_request_adapter_reports_unavailable_message_on_empty_enumeration() {
-        let result = select_request_adapter(Vec::new(), native::WGPUBackendType_Null, |adapter| {
-            backend_type_from_hal(adapter.backend())
-        });
+        let result = select_request_adapter(
+            Vec::new(),
+            native::WGPUBackendType_Null,
+            native::WGPUPowerPreference_Undefined,
+            core::Adapter::backend,
+            |_| true,
+            |adapter| adapter.info().adapter_type,
+        );
 
         assert_eq!(result.err().as_deref(), Some("no adapters available"));
     }

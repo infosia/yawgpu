@@ -349,11 +349,14 @@ pub unsafe extern "C" fn wgpuSurfaceGetCurrentTexture(
                     view_formats,
                 };
                 let texture = Arc::new(WGPUTextureImpl {
-                    core: Arc::new(core::Texture::from_hal(descriptor, hal_texture)),
+                    core: Arc::new(core::Texture::from_hal(
+                        descriptor,
+                        hal_texture,
+                        device.features(),
+                    )),
                     device,
                     instance: Arc::clone(&surface._instance),
                     label: Mutex::new(None),
-                    binding_view_dimension: native::WGPUTextureViewDimension_Undefined,
                 });
                 *current_texture = Some(Arc::clone(&texture));
                 surface_texture.texture = arc_to_handle(texture);
@@ -475,7 +478,8 @@ pub unsafe extern "C" fn wgpuSurfaceAddRef(surface: native::WGPUSurface) {
     add_ref_handle(surface, "WGPUSurface");
 }
 
-fn query_surface_capabilities(
+/// Queries presentation capabilities for this surface and HAL adapter pair.
+pub(super) fn query_surface_capabilities(
     surface: &WGPUSurfaceImpl,
     adapter: &yawgpu_hal::HalAdapter,
 ) -> Result<yawgpu_hal::HalSurfaceCapabilities, yawgpu_hal::HalError> {
@@ -532,8 +536,8 @@ fn fill_surface_capabilities(
 #[cfg(test)]
 mod tests {
     use super::super::tests::{
-        assert_borrowed_dispatch_owns_device, create_noop_surface, noop_chain, noop_surface_caps,
-        release_handles, valid_surface_config,
+        assert_borrowed_dispatch_owns_device, compatibility_noop_chain, create_noop_surface,
+        noop_chain, noop_surface_caps, release_handles, valid_surface_config,
     };
     use super::*;
     use yawgpu_hal::{HalCompositeAlphaMode as A, HalSurfaceCapabilities};
@@ -580,6 +584,69 @@ mod tests {
             });
             wgpuAdapterRelease(adapter);
             wgpuInstanceRelease(instance);
+        }
+    }
+
+    #[test]
+    fn surface_configure_rejects_surface_color_management() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            let surface = create_noop_surface(instance);
+            let surface_impl = borrow_handle(surface, "WGPUSurface");
+            *surface_impl.hal.lock().unwrap() = Some(HalSurface::Noop);
+            let core_device = &borrow_handle(device, "WGPUDevice").core;
+            let mut config = valid_surface_config(device);
+            let original_width = config.width;
+
+            TEST_HAL_SURFACE_CONFIG.take();
+            core_device.push_error_scope(core::ErrorFilter::Validation);
+            wgpuSurfaceConfigure(surface, &config);
+            assert!(core_device.pop_error_scope().unwrap().is_none());
+            let hal_config = TEST_HAL_SURFACE_CONFIG.take().unwrap();
+            assert_eq!(hal_config.width, original_width);
+
+            config.width += 1;
+            for (color_space, tone_mapping_mode) in [
+                (
+                    native::WGPUPredefinedColorSpace_SRGB,
+                    native::WGPUToneMappingMode_Standard,
+                ),
+                (
+                    native::WGPUPredefinedColorSpace_DisplayP3,
+                    native::WGPUToneMappingMode_Extended,
+                ),
+            ] {
+                let mut color_management = native::WGPUSurfaceColorManagement {
+                    chain: native::WGPUChainedStruct {
+                        next: std::ptr::null_mut(),
+                        sType: native::WGPUSType_SurfaceColorManagement,
+                    },
+                    colorSpace: color_space,
+                    toneMappingMode: tone_mapping_mode,
+                };
+                let mut prefix = native::WGPUChainedStruct {
+                    next: &mut color_management.chain,
+                    sType: native::WGPUSType_Force32,
+                };
+                config.nextInChain = if color_space == native::WGPUPredefinedColorSpace_SRGB {
+                    &mut color_management.chain
+                } else {
+                    &mut prefix
+                };
+                core_device.push_error_scope(core::ErrorFilter::Validation);
+                wgpuSurfaceConfigure(surface, &config);
+                let error = core_device
+                    .pop_error_scope()
+                    .unwrap()
+                    .expect("color management must fail");
+                assert_eq!(error.kind, core::ErrorKind::Validation);
+                assert_eq!(error.message, "surface color management is not supported");
+                assert!(TEST_HAL_SURFACE_CONFIG.take().is_none());
+                let configured = surface_impl.configured.lock().unwrap();
+                assert_eq!(configured.as_ref().unwrap().width, original_width);
+            }
+            wgpuSurfaceRelease(surface);
+            release_handles(instance, adapter, device);
         }
     }
 
@@ -883,6 +950,36 @@ mod tests {
         }));
         wgpuSurfaceConfigure(surface, &config);
         (surface, config)
+    }
+
+    #[test]
+    fn current_texture_binding_view_dimension_matches_device_feature_level() {
+        unsafe {
+            for (handles, expected) in [
+                (noop_chain(), native::WGPUTextureViewDimension_Undefined),
+                (
+                    compatibility_noop_chain(),
+                    native::WGPUTextureViewDimension_2D,
+                ),
+            ] {
+                let (instance, adapter, device) = handles;
+                let (surface, _) = configured_surface_with_acquisition(instance, device);
+                let mut current = std::mem::zeroed();
+                wgpuSurfaceGetCurrentTexture(surface, &mut current);
+                assert_eq!(
+                    current.status,
+                    native::WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal
+                );
+                assert!(!current.texture.is_null());
+                assert_eq!(
+                    wgpuTextureGetTextureBindingViewDimension(current.texture),
+                    expected
+                );
+                wgpuTextureRelease(current.texture);
+                wgpuSurfaceRelease(surface);
+                release_handles(instance, adapter, device);
+            }
+        }
     }
 
     unsafe fn assert_acquired_texture_expires(end: AcquisitionEnd) {

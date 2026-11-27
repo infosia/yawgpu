@@ -660,22 +660,18 @@ mod tests {
     #![allow(non_snake_case)]
 
     use super::*;
-    use std::collections::BTreeMap;
 
     fn device_impl() -> Arc<WGPUDeviceImpl> {
         device_impl_with_features(&[])
     }
 
     fn device_impl_with_features(features: &[core::Feature]) -> Arc<WGPUDeviceImpl> {
-        let instance = Arc::new(WGPUInstanceImpl {
-            core: Arc::new(core::Instance::new_noop()),
-            timed_wait_any_enabled: false,
-            #[cfg(feature = "shader-passthrough")]
-            shader_source_spirv_enabled: false,
-            pending_callbacks: Mutex::new(BTreeMap::new()),
-            external_refs: std::sync::atomic::AtomicUsize::new(1),
-            in_use_refs: std::sync::atomic::AtomicUsize::new(1),
-        });
+        let instance = WGPUInstanceImpl::from_core(
+            core::Instance::new_noop(),
+            false,
+            instance::TIMED_WAIT_ANY_MAX_COUNT,
+            false,
+        );
         let adapter = instance
             .core
             .enumerate_adapters()

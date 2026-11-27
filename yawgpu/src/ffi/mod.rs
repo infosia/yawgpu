@@ -258,6 +258,8 @@ pub struct WGPUInstanceImpl {
     pub(crate) in_use_refs: std::sync::atomic::AtomicUsize,
     pub(crate) core: Arc<core::Instance>,
     pub(crate) timed_wait_any_enabled: bool,
+    /// Maximum number of futures accepted by a positive-timeout wait.
+    pub(crate) timed_wait_any_max_count: usize,
     /// Whether the instance required the SPIR-V shader source feature.
     #[cfg(feature = "shader-passthrough")]
     pub(crate) shader_source_spirv_enabled: bool,
@@ -277,7 +279,6 @@ pub struct WGPUTextureImpl {
     pub(crate) device: Arc<core::Device>,
     pub(crate) instance: Arc<WGPUInstanceImpl>,
     pub(crate) label: Mutex<Option<String>>,
-    pub(crate) binding_view_dimension: native::WGPUTextureViewDimension,
 }
 
 /// Owns the core object and retained handles for the WGPU TextureView handle.
@@ -632,17 +633,10 @@ impl_test_label_accessor!(
 );
 
 impl WGPUInstanceImpl {
-    fn new_noop(timed_wait_any_enabled: bool, shader_source_spirv_enabled: bool) -> Arc<Self> {
-        Self::from_core(
-            core::Instance::new_noop(),
-            timed_wait_any_enabled,
-            shader_source_spirv_enabled,
-        )
-    }
-
     fn from_core(
         core: core::Instance,
         timed_wait_any_enabled: bool,
+        timed_wait_any_max_count: usize,
         shader_source_spirv_enabled: bool,
     ) -> Arc<Self> {
         #[cfg(not(feature = "shader-passthrough"))]
@@ -650,6 +644,7 @@ impl WGPUInstanceImpl {
         Arc::new(Self {
             core: Arc::new(core),
             timed_wait_any_enabled,
+            timed_wait_any_max_count,
             #[cfg(feature = "shader-passthrough")]
             shader_source_spirv_enabled,
             pending_callbacks: Mutex::new(BTreeMap::new()),
@@ -1507,6 +1502,14 @@ fn is_supported_surface_source(s_type: native::WGPUSType) -> bool {
     )
 }
 
+unsafe fn has_surface_color_management(chain: *const native::WGPUChainedStruct) -> bool {
+    find_in_chain::<native::WGPUSurfaceColorManagement>(
+        chain,
+        native::WGPUSType_SurfaceColorManagement,
+    )
+    .is_some()
+}
+
 unsafe fn has_supported_surface_source(mut chain: *const native::WGPUChainedStruct) -> bool {
     while let Some(link) = chain.as_ref() {
         if is_supported_surface_source(link.sType) {
@@ -1691,6 +1694,9 @@ unsafe fn surface_configuration_error(
     config: &native::WGPUSurfaceConfiguration,
     caps: &yawgpu_hal::HalSurfaceCapabilities,
 ) -> Option<&'static str> {
+    if has_surface_color_management(config.nextInChain) {
+        return Some("surface color management is not supported");
+    }
     if device.core.is_lost() {
         return Some("surface configuration device is lost");
     }
@@ -6919,6 +6925,35 @@ mod tests {
         (instance, adapter, device)
     }
 
+    /// Creates Noop handles for a compatibility-level device.
+    pub(super) unsafe fn compatibility_noop_chain() -> (
+        native::WGPUInstance,
+        native::WGPUAdapter,
+        native::WGPUDevice,
+    ) {
+        let instance = make_noop_instance();
+        let options = native::WGPURequestAdapterOptions {
+            featureLevel: native::WGPUFeatureLevel_Compatibility,
+            ..std::mem::zeroed()
+        };
+        let mut state = RequestAdapterState::default();
+        wgpuInstanceRequestAdapter(
+            instance,
+            &options,
+            native::WGPURequestAdapterCallbackInfo {
+                mode: native::WGPUCallbackMode_AllowProcessEvents,
+                callback: Some(request_adapter_callback),
+                userdata1: (&mut state as *mut RequestAdapterState).cast(),
+                ..std::mem::zeroed()
+            },
+        );
+        wgpuInstanceProcessEvents(instance);
+        let adapter = state.adapter;
+        assert!(!adapter.is_null());
+        let device = request_noop_device(instance, adapter);
+        (instance, adapter, device)
+    }
+
     #[cfg(feature = "shader-passthrough")]
     unsafe fn spirv_noop_chain() -> (
         native::WGPUInstance,
@@ -8692,9 +8727,8 @@ mod tests {
     #[test]
     fn wgpuGetInstanceLimits_reports_timed_wait_any_max_count() {
         unsafe {
-            let sentinel = 0xCAFEusize as *mut native::WGPUChainedStruct;
             let mut limits = native::WGPUInstanceLimits {
-                nextInChain: sentinel,
+                nextInChain: std::ptr::null_mut(),
                 timedWaitAnyMaxCount: 0,
             };
 
@@ -8702,7 +8736,7 @@ mod tests {
                 wgpuGetInstanceLimits(&mut limits),
                 native::WGPUStatus_Success
             );
-            assert_eq!(limits.nextInChain, sentinel);
+            assert!(limits.nextInChain.is_null());
             assert_eq!(
                 limits.timedWaitAnyMaxCount,
                 instance::TIMED_WAIT_ANY_MAX_COUNT
@@ -8929,6 +8963,37 @@ mod tests {
     }
 
     #[test]
+    fn wgpuInstanceCreateSurface_rejects_surface_color_management() {
+        unsafe {
+            let instance = make_noop_instance();
+            let mut color_management = native::WGPUSurfaceColorManagement {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: native::WGPUSType_SurfaceColorManagement,
+                },
+                colorSpace: native::WGPUPredefinedColorSpace_SRGB,
+                toneMappingMode: native::WGPUToneMappingMode_Standard,
+            };
+            let mut source = native::WGPUSurfaceSourceMetalLayer {
+                chain: native::WGPUChainedStruct {
+                    next: &mut color_management.chain,
+                    sType: native::WGPUSType_SurfaceSourceMetalLayer,
+                },
+                layer: std::ptr::dangling_mut(),
+            };
+            let descriptor = native::WGPUSurfaceDescriptor {
+                nextInChain: &mut source.chain,
+                label: empty_string_view(),
+            };
+            let surface = wgpuInstanceCreateSurface(instance, &descriptor);
+            assert!(borrow_handle(surface, "WGPUSurface").is_error);
+
+            wgpuSurfaceRelease(surface);
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    #[test]
     fn wgpuInstanceCreateSurface_accepts_noop_windows_hwnd_source() {
         unsafe {
             let instance = make_noop_instance();
@@ -8991,13 +9056,17 @@ mod tests {
     }
 
     #[test]
-    fn wgpuInstanceWaitAny_empty_list_returns_timed_out_and_null_list_errors() {
+    fn wgpuInstanceWaitAny_empty_poll_succeeds_and_invalid_waits_error() {
         unsafe {
             let instance = make_noop_instance();
 
             assert_eq!(
                 wgpuInstanceWaitAny(instance, 0, std::ptr::null_mut(), 0),
-                native::WGPUWaitStatus_TimedOut
+                native::WGPUWaitStatus_Success
+            );
+            assert_eq!(
+                wgpuInstanceWaitAny(instance, 0, std::ptr::null_mut(), 1),
+                native::WGPUWaitStatus_Error
             );
             assert_eq!(
                 wgpuInstanceWaitAny(instance, 1, std::ptr::null_mut(), 0),
@@ -13384,38 +13453,41 @@ mod tests {
     #[test]
     fn audit_e12_compatibility_binding_dimension_defaults_and_validation() {
         unsafe {
-            let instance = make_noop_instance();
-            let options = native::WGPURequestAdapterOptions {
-                featureLevel: native::WGPUFeatureLevel_Compatibility,
-                ..std::mem::zeroed()
-            };
-            let mut state = RequestAdapterState::default();
-            wgpuInstanceRequestAdapter(
-                instance,
-                &options,
-                native::WGPURequestAdapterCallbackInfo {
-                    mode: native::WGPUCallbackMode_AllowProcessEvents,
-                    callback: Some(request_adapter_callback),
-                    userdata1: (&mut state as *mut RequestAdapterState).cast(),
-                    ..std::mem::zeroed()
-                },
-            );
-            wgpuInstanceProcessEvents(instance);
-            let adapter = state.adapter;
-            assert!(!adapter.is_null());
-            let device = request_noop_device(instance, adapter);
+            let (instance, adapter, device) = compatibility_noop_chain();
             assert!(!borrow_handle(device, "WGPUDevice")
                 .core
                 .has_feature(core::Feature::CoreFeaturesAndLimits));
+            for (dimension, depth, expected) in [
+                (
+                    native::WGPUTextureDimension_1D,
+                    1,
+                    native::WGPUTextureViewDimension_1D,
+                ),
+                (
+                    native::WGPUTextureDimension_Undefined,
+                    1,
+                    native::WGPUTextureViewDimension_2D,
+                ),
+                (
+                    native::WGPUTextureDimension_3D,
+                    2,
+                    native::WGPUTextureViewDimension_3D,
+                ),
+                (
+                    native::WGPUTextureDimension_2D,
+                    2,
+                    native::WGPUTextureViewDimension_2DArray,
+                ),
+            ] {
+                let mut desc = texture_descriptor(native::WGPUTextureUsage_TextureBinding, 4);
+                desc.dimension = dimension;
+                desc.size.depthOrArrayLayers = depth;
+                let texture = wgpuDeviceCreateTexture(device, &desc);
+                assert_eq!(wgpuTextureGetTextureBindingViewDimension(texture), expected);
+                wgpuTextureRelease(texture);
+            }
             let mut desc = texture_descriptor(native::WGPUTextureUsage_TextureBinding, 4);
             desc.size.depthOrArrayLayers = 2;
-            let texture = wgpuDeviceCreateTexture(device, &desc);
-            assert!(!borrow_handle(texture, "WGPUTexture").core.is_error());
-            assert_eq!(
-                wgpuTextureGetTextureBindingViewDimension(texture),
-                native::WGPUTextureViewDimension_2DArray
-            );
-            wgpuTextureRelease(texture);
             let mut binding = native::WGPUTextureBindingViewDimension {
                 chain: native::WGPUChainedStruct {
                     next: std::ptr::null_mut(),
@@ -13432,18 +13504,76 @@ mod tests {
                 device,
                 "textureBindingViewDimension is incompatible",
             );
+            assert_eq!(
+                wgpuTextureGetTextureBindingViewDimension(texture),
+                native::WGPUTextureViewDimension_Undefined
+            );
+            wgpuTextureRelease(texture);
+            binding.textureBindingViewDimension = 0xCAFE;
+            desc.nextInChain = &mut binding.chain;
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let texture = wgpuDeviceCreateTexture(device, &desc);
+            assert_validation_error_contains(instance, device, "invalid texture view dimension");
+            assert_eq!(
+                wgpuTextureGetTextureBindingViewDimension(texture),
+                native::WGPUTextureViewDimension_Undefined
+            );
             wgpuTextureRelease(texture);
             binding.textureBindingViewDimension = native::WGPUTextureViewDimension_Cube;
             desc.nextInChain = &mut binding.chain;
-            desc.size.depthOrArrayLayers = 6;
+            desc.size = extent(4, 4, 6);
             let texture = wgpuDeviceCreateTexture(device, &desc);
             assert!(!borrow_handle(texture, "WGPUTexture").core.is_error());
             assert_eq!(
                 wgpuTextureGetTextureBindingViewDimension(texture),
                 native::WGPUTextureViewDimension_Cube
             );
+            assert_compatibility_cube_rejects_array_binding(instance, device, texture);
             wgpuTextureRelease(texture);
             release_handles(instance, adapter, device);
         }
+    }
+
+    unsafe fn assert_compatibility_cube_rejects_array_binding(
+        instance: native::WGPUInstance,
+        device: native::WGPUDevice,
+        texture: native::WGPUTexture,
+    ) {
+        let dimension = native::WGPUTextureViewDimension_2DArray;
+        let view_desc = native::WGPUTextureViewDescriptor {
+            dimension,
+            ..texture_view_descriptor_with_format(native::WGPUTextureFormat_Undefined)
+        };
+        let view = wgpuTextureCreateView(texture, &view_desc);
+        let layout_entry = native::WGPUBindGroupLayoutEntry {
+            visibility: native::WGPUShaderStage_Fragment,
+            texture: native::WGPUTextureBindingLayout {
+                sampleType: native::WGPUTextureSampleType_Float,
+                viewDimension: dimension,
+                ..std::mem::zeroed()
+            },
+            ..std::mem::zeroed()
+        };
+        let layout_desc = native::WGPUBindGroupLayoutDescriptor {
+            entryCount: 1,
+            entries: &layout_entry,
+            ..bind_group_layout_descriptor()
+        };
+        let layout = wgpuDeviceCreateBindGroupLayout(device, &layout_desc);
+        let entry = native::WGPUBindGroupEntry {
+            textureView: view,
+            ..std::mem::zeroed()
+        };
+        let desc = native::WGPUBindGroupDescriptor {
+            entryCount: 1,
+            entries: &entry,
+            ..bind_group_descriptor(layout)
+        };
+        wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+        let group = wgpuDeviceCreateBindGroup(device, &desc);
+        assert_validation_error_contains(instance, device, "textureBindingViewDimension");
+        wgpuBindGroupRelease(group);
+        wgpuBindGroupLayoutRelease(layout);
+        wgpuTextureViewRelease(view);
     }
 }

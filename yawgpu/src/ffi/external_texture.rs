@@ -156,18 +156,14 @@ mod tests {
     use crate::{
         YaWGPUExtent2D, YaWGPUOrigin2D, YAWGPU_EXTERNAL_TEXTURE_ROTATION_ROTATE_0_DEGREES,
     };
-    use std::collections::BTreeMap;
 
     fn instance_impl() -> Arc<WGPUInstanceImpl> {
-        Arc::new(WGPUInstanceImpl {
-            core: Arc::new(core::Instance::new_noop()),
-            timed_wait_any_enabled: false,
-            #[cfg(feature = "shader-passthrough")]
-            shader_source_spirv_enabled: false,
-            pending_callbacks: Mutex::new(BTreeMap::new()),
-            external_refs: std::sync::atomic::AtomicUsize::new(1),
-            in_use_refs: std::sync::atomic::AtomicUsize::new(1),
-        })
+        WGPUInstanceImpl::from_core(
+            core::Instance::new_noop(),
+            false,
+            instance::TIMED_WAIT_ANY_MAX_COUNT,
+            false,
+        )
     }
 
     fn device_impl() -> Arc<WGPUDeviceImpl> {

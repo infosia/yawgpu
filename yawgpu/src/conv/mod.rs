@@ -169,6 +169,7 @@ mod tests {
         Arc::new(WGPUInstanceImpl {
             core: Arc::new(core::Instance::new_noop()),
             timed_wait_any_enabled: false,
+            timed_wait_any_max_count: crate::ffi::instance::TIMED_WAIT_ANY_MAX_COUNT,
             #[cfg(feature = "shader-passthrough")]
             shader_source_spirv_enabled: false,
             pending_callbacks: Mutex::new(BTreeMap::new()),
@@ -302,7 +303,6 @@ mod tests {
             device: Arc::clone(&device.core),
             instance: Arc::clone(&device.instance),
             label: Mutex::new(None),
-            binding_view_dimension: native::WGPUTextureViewDimension_Undefined,
         }))
     }
 

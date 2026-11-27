@@ -218,13 +218,16 @@ pub unsafe extern "C" fn wgpuDeviceCreateTexture(
     let mapped = map_texture_descriptor(descriptor, &mut error);
     let binding_view_dimension =
         texture_binding_view_dimension(descriptor, &device.core, &mut error);
-    let texture = device.core.create_texture_with_error(mapped, error);
+    let texture = device.core.create_texture_with_binding_view_dimension(
+        mapped,
+        binding_view_dimension,
+        error,
+    );
     arc_to_handle(Arc::new(WGPUTextureImpl {
         core: Arc::new(texture),
         device: Arc::clone(&device.core),
         instance: Arc::clone(&device.instance),
         label: Mutex::new(label_from_string_view(descriptor.label)),
-        binding_view_dimension,
     }))
 }
 
@@ -232,54 +235,15 @@ unsafe fn texture_binding_view_dimension(
     descriptor: &native::WGPUTextureDescriptor,
     device: &core::Device,
     error: &mut Option<String>,
-) -> native::WGPUTextureViewDimension {
+) -> Option<core::TextureViewDimension> {
     if device.has_feature(core::Feature::CoreFeaturesAndLimits) {
-        return native::WGPUTextureViewDimension_Undefined;
+        return None;
     }
-    let dimension = find_in_chain::<native::WGPUTextureBindingViewDimension>(
+    let binding = find_in_chain::<native::WGPUTextureBindingViewDimension>(
         descriptor.nextInChain,
         native::WGPUSType_TextureBindingViewDimension,
-    )
-    .map_or(native::WGPUTextureViewDimension_Undefined, |binding| {
-        binding.textureBindingViewDimension
-    });
-    let _ = crate::conv::map_texture_view_dimension(dimension, error);
-    let dimension = if dimension == native::WGPUTextureViewDimension_Undefined {
-        match descriptor.dimension {
-            native::WGPUTextureDimension_1D => native::WGPUTextureViewDimension_1D,
-            native::WGPUTextureDimension_3D => native::WGPUTextureViewDimension_3D,
-            _ if descriptor.size.depthOrArrayLayers == 1 => native::WGPUTextureViewDimension_2D,
-            _ => native::WGPUTextureViewDimension_2DArray,
-        }
-    } else {
-        dimension
-    };
-    let compatible = match dimension {
-        native::WGPUTextureViewDimension_1D => {
-            descriptor.dimension == native::WGPUTextureDimension_1D
-        }
-        native::WGPUTextureViewDimension_3D => {
-            descriptor.dimension == native::WGPUTextureDimension_3D
-        }
-        native::WGPUTextureViewDimension_2D
-        | native::WGPUTextureViewDimension_2DArray
-        | native::WGPUTextureViewDimension_Cube => matches!(
-            descriptor.dimension,
-            native::WGPUTextureDimension_Undefined | native::WGPUTextureDimension_2D
-        ),
-        _ => false,
-    };
-    let incompatible_layers = (dimension == native::WGPUTextureViewDimension_2D
-        && descriptor.size.depthOrArrayLayers != 1)
-        || (dimension == native::WGPUTextureViewDimension_Cube
-            && descriptor.size.depthOrArrayLayers != 6);
-    if (!compatible || incompatible_layers) && error.is_none() {
-        *error = Some(
-            "textureBindingViewDimension is incompatible with texture dimension or layer count"
-                .to_owned(),
-        );
-    }
-    dimension
+    )?;
+    crate::conv::map_texture_view_dimension(binding.textureBindingViewDimension, error)
 }
 
 /// Creates a sampler on a device.
