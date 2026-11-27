@@ -2700,6 +2700,15 @@ fn encode_subpass_draw(
             vk::PipelineBindPoint::GRAPHICS,
             compatible_pipeline,
         );
+        if let Some(block) = subpass_immediates_block(pipeline.inner.immediates, draw.viewport) {
+            device.cmd_push_constants(
+                command_buffer,
+                pipeline.inner.pipeline_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                &block,
+            );
+        }
         let viewport = draw.viewport.map_or(
             vk::Viewport {
                 x: 0.0,
@@ -4270,14 +4279,43 @@ fn vulkan_render_immediates_block(
     immediates: super::pipeline::VulkanImmediates,
     state: &VulkanRenderStreamState<'_>,
 ) -> Vec<u8> {
-    crate::immediates::compose_immediates_block(
+    compose_vulkan_render_immediates(
+        immediates,
         &state.immediate_data,
+        [state.viewport.min_depth, state.viewport.max_depth],
+    )
+}
+
+/// Subpass draws have no user immediate data, so their reserved prefix stays zero.
+#[cfg(feature = "tiled")]
+fn subpass_immediates_block(
+    immediates: Option<super::pipeline::VulkanImmediates>,
+    viewport: Option<crate::HalViewport>,
+) -> Option<Vec<u8>> {
+    let immediates = immediates?;
+    let depth_range = viewport.map_or([0.0, 1.0], |v| [v.min_depth, v.max_depth]);
+    Some(compose_vulkan_render_immediates(
+        immediates,
+        &[],
+        depth_range,
+    ))
+}
+
+/// Packs user bytes and the optional viewport depth range into the push constant
+/// block described by the pipeline's immediates layout.
+fn compose_vulkan_render_immediates(
+    immediates: super::pipeline::VulkanImmediates,
+    user_data: &[u8],
+    depth_range: [f32; 2],
+) -> Vec<u8> {
+    crate::immediates::compose_immediates_block(
+        user_data,
         immediates
             .depth_range_offset
             .unwrap_or(immediates.block_size),
         immediates.block_size,
         immediates.depth_range_offset,
-        [state.viewport.min_depth, state.viewport.max_depth],
+        depth_range,
     )
 }
 
@@ -5318,6 +5356,49 @@ mod tests {
         HalSubpassDependency, HalSubpassDepthStencilAttachment, HalSubpassInputAttachment,
         HalSubpassLayout, HalSubpassPassLayout,
     };
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn subpass_immediates_follow_each_viewport_with_a_zero_user_prefix() {
+        let mut descriptor = crate::vulkan::test_helpers::render_descriptor();
+        descriptor.needs_frag_depth_range_push_constant = true;
+        let viewport = |min_depth, max_depth| crate::HalViewport {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            min_depth,
+            max_depth,
+        };
+        for user_size in [0, 16] {
+            descriptor.user_immediate_size = user_size;
+            let immediates = super::super::pipeline::vulkan_render_immediates(&descriptor);
+            for (viewport, [min, max]) in [
+                (Some(viewport(0.1, 0.25)), [0.1_f32, 0.25_f32]),
+                (Some(viewport(0.5, 0.75)), [0.5, 0.75]),
+                (None, [0.0, 1.0]),
+            ] {
+                let mut expected = vec![0; user_size as usize];
+                expected.extend(min.to_ne_bytes());
+                expected.extend(max.to_ne_bytes());
+                assert_eq!(
+                    subpass_immediates_block(immediates, viewport),
+                    Some(expected)
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn subpass_immediates_without_a_depth_range_follow_the_pipeline_layout() {
+        let mut descriptor = crate::vulkan::test_helpers::render_descriptor();
+        for (user_size, expected) in [(0, None), (16, Some(vec![0; 16]))] {
+            descriptor.user_immediate_size = user_size;
+            let immediates = super::super::pipeline::vulkan_render_immediates(&descriptor);
+            assert_eq!(subpass_immediates_block(immediates, None), expected);
+        }
+    }
 
     #[test]
     fn vulkan_frag_depth_clamp_draw_bytes_follow_viewport_changes() {

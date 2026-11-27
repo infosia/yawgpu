@@ -1297,3 +1297,282 @@ fn distinct_pixels(pixels: &[u8]) -> Vec<[u8; 4]> {
     }
     seen
 }
+
+const FRAG_DEPTH_SHADER: &str = r#"
+struct Out {
+  @location(0) color: vec4<f32>,
+  @builtin(frag_depth) depth: f32,
+}
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  var p = array<vec2<f32>, 3>(vec2(-1.0, -3.0), vec2(-1.0, 1.0), vec2(3.0, 1.0));
+  return vec4<f32>(p[i], 0.0, 1.0);
+}
+
+@fragment
+fn fs() -> Out {
+  var out: Out;
+  out.color = vec4<f32>(1.0, 0.0, 0.0, 1.0);
+  out.depth = 1.0;
+  return out;
+}
+"#;
+
+/// A subpass draw clamps `frag_depth` to its own viewport depth range: the
+/// shader writes 1.0, so the stored depth is each viewport's `maxDepth`. The
+/// same two draws in a regular render pass are the control.
+#[test]
+#[ignore = "requires a real Vulkan device"]
+fn vulkan_tiled_frag_depth_clamps_to_draw_viewport() {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
+        eprintln!("skipping: no real Vulkan device");
+        return;
+    }
+
+    unsafe {
+        let instance = create_vulkan_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = std::sync::Arc::clone(&errors);
+        yawgpu::testing_set_uncaptured_error_callback(
+            device,
+            Some(move |error| captured.lock().expect("lock").push(format!("{error:?}"))),
+        );
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+
+        let regular = run_frag_depth_viewports(instance, device, queue, false);
+        let tiled = run_frag_depth_viewports(instance, device, queue, true);
+
+        assert!(
+            errors.lock().expect("lock").is_empty(),
+            "device errors: {:?}",
+            errors.lock().expect("lock")
+        );
+        for (name, depths) in [("regular", regular), ("tiled", tiled)] {
+            assert!(
+                (depths[0] - 0.25).abs() < 1e-4 && (depths[1] - 0.75).abs() < 1e-4,
+                "{name} pass depth = {depths:?}, expected [0.25, 0.75]"
+            );
+        }
+
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+/// Draws the `frag_depth = 1.0` triangle into the left half with viewport
+/// depth range [0, 0.25] and into the right half with [0, 0.75], in a fresh
+/// command buffer, and returns the stored depth at the centre of each half.
+unsafe fn run_frag_depth_viewports(
+    instance: native::WGPUInstance,
+    device: native::WGPUDevice,
+    queue: native::WGPUQueue,
+    tiled: bool,
+) -> [f32; 2] {
+    let shader = create_wgsl_module(device, FRAG_DEPTH_SHADER);
+    let target = native::WGPUColorTargetState {
+        nextInChain: std::ptr::null_mut(),
+        format: native::WGPUTextureFormat_RGBA8Unorm,
+        blend: std::ptr::null(),
+        writeMask: native::WGPUColorWriteMask_All,
+    };
+    let fragment = native::WGPUFragmentState {
+        nextInChain: std::ptr::null_mut(),
+        module: shader,
+        entryPoint: string_view("fs"),
+        constantCount: 0,
+        constants: std::ptr::null(),
+        targetCount: 1,
+        targets: &target,
+    };
+    let mut depth_state: native::WGPUDepthStencilState = std::mem::zeroed();
+    depth_state.format = native::WGPUTextureFormat_Depth32Float;
+    depth_state.depthWriteEnabled = native::WGPUOptionalBool_True;
+    depth_state.depthCompare = native::WGPUCompareFunction_Always;
+    depth_state.stencilReadMask = 0xFFFF_FFFF;
+    depth_state.stencilWriteMask = 0xFFFF_FFFF;
+    let base = native::WGPURenderPipelineDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout: std::ptr::null(),
+        vertex: native::WGPUVertexState {
+            nextInChain: std::ptr::null_mut(),
+            module: shader,
+            entryPoint: string_view("vs"),
+            constantCount: 0,
+            constants: std::ptr::null(),
+            bufferCount: 0,
+            buffers: std::ptr::null(),
+        },
+        primitive: primitive_state(),
+        depthStencil: &depth_state,
+        multisample: multisample_state(),
+        fragment: &fragment,
+    };
+
+    let color = create_texture(device, native::WGPUTextureUsage_RenderAttachment);
+    let depth_descriptor = native::WGPUTextureDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        usage: native::WGPUTextureUsage_RenderAttachment | native::WGPUTextureUsage_CopySrc,
+        dimension: native::WGPUTextureDimension_2D,
+        size: texture_extent(),
+        format: native::WGPUTextureFormat_Depth32Float,
+        mipLevelCount: 1,
+        sampleCount: 1,
+        viewFormatCount: 0,
+        viewFormats: std::ptr::null(),
+    };
+    let depth = yawgpu::wgpuDeviceCreateTexture(device, &depth_descriptor);
+    assert!(!depth.is_null());
+    let color_view = yawgpu::wgpuTextureCreateView(color, std::ptr::null());
+    let depth_view = yawgpu::wgpuTextureCreateView(depth, std::ptr::null());
+    let readback = create_buffer(
+        device,
+        READBACK_SIZE,
+        native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+    );
+    let half = WIDTH as f32 / 2.0;
+    let height = HEIGHT as f32;
+
+    let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+    if tiled {
+        let colors = [YaWGPUAttachmentLayout {
+            format: native::WGPUTextureFormat_RGBA8Unorm,
+            sampleCount: 1,
+        }];
+        let depth_layout = YaWGPUAttachmentLayout {
+            format: native::WGPUTextureFormat_Depth32Float,
+            sampleCount: 1,
+        };
+        let subpass_colors = [0u32];
+        let subpass = YaWGPUSubpassLayout {
+            colorAttachmentIndices: subpass_colors.as_ptr(),
+            colorAttachmentIndexCount: subpass_colors.len(),
+            usesDepthStencil: 1,
+            inputAttachments: std::ptr::null(),
+            inputAttachmentCount: 0,
+        };
+        let layout_descriptor = YaWGPUSubpassPassLayoutDescriptor {
+            nextInChain: std::ptr::null(),
+            label: empty_string_view(),
+            colorAttachments: colors.as_ptr(),
+            colorAttachmentCount: colors.len(),
+            depthStencilAttachment: &depth_layout,
+            subpasses: &subpass,
+            subpassCount: 1,
+            dependencies: std::ptr::null(),
+            dependencyCount: 0,
+        };
+        let layout = yawgpu::yawgpuDeviceCreateSubpassPassLayout(device, &layout_descriptor);
+        assert!(!layout.is_null());
+        let pipeline_descriptor = YaWGPUSubpassRenderPipelineDescriptor {
+            nextInChain: std::ptr::null(),
+            base,
+            passLayout: layout,
+            subpassIndex: 0,
+        };
+        let pipeline =
+            yawgpu::yawgpuDeviceCreateSubpassRenderPipeline(device, &pipeline_descriptor);
+        assert!(
+            !pipeline.is_null(),
+            "subpass frag_depth pipeline creation failed"
+        );
+
+        let attachments = [subpass_color_attachment(color_view)];
+        let depth_attachment = yawgpu::YaWGPUSubpassDepthStencilAttachment {
+            view: depth_view,
+            depthLoadOp: native::WGPULoadOp_Clear,
+            depthStoreOp: native::WGPUStoreOp_Store,
+            depthClearValue: 0.0,
+            stencilLoadOp: native::WGPULoadOp_Undefined,
+            stencilStoreOp: native::WGPUStoreOp_Undefined,
+            stencilClearValue: 0,
+        };
+        let pass_descriptor = YaWGPUSubpassRenderPassDescriptor {
+            nextInChain: std::ptr::null(),
+            label: empty_string_view(),
+            passLayout: layout,
+            extent: texture_extent(),
+            colorAttachments: attachments.as_ptr(),
+            colorAttachmentCount: attachments.len(),
+            depthStencilAttachment: &depth_attachment,
+        };
+        let pass = yawgpu::yawgpuCommandEncoderBeginSubpassRenderPass(encoder, &pass_descriptor);
+        assert!(!pass.is_null());
+        yawgpu::yawgpuSubpassRenderPassEncoderSetPipeline(pass, pipeline);
+        yawgpu::yawgpuSubpassRenderPassEncoderSetViewport(pass, 0.0, 0.0, half, height, 0.0, 0.25);
+        yawgpu::yawgpuSubpassRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+        yawgpu::yawgpuSubpassRenderPassEncoderSetViewport(pass, half, 0.0, half, height, 0.0, 0.75);
+        yawgpu::yawgpuSubpassRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+        yawgpu::yawgpuSubpassRenderPassEncoderEnd(pass);
+        yawgpu::yawgpuSubpassRenderPassEncoderRelease(pass);
+        yawgpu::wgpuRenderPipelineRelease(pipeline);
+        yawgpu::yawgpuSubpassPassLayoutRelease(layout);
+    } else {
+        let pipeline = yawgpu::wgpuDeviceCreateRenderPipeline(device, &base);
+        assert!(
+            !pipeline.is_null(),
+            "regular frag_depth pipeline creation failed"
+        );
+        let mut color_attachment: native::WGPURenderPassColorAttachment = std::mem::zeroed();
+        color_attachment.view = color_view;
+        color_attachment.depthSlice = u32::MAX;
+        color_attachment.loadOp = native::WGPULoadOp_Clear;
+        color_attachment.storeOp = native::WGPUStoreOp_Store;
+        let mut depth_attachment: native::WGPURenderPassDepthStencilAttachment = std::mem::zeroed();
+        depth_attachment.view = depth_view;
+        depth_attachment.depthLoadOp = native::WGPULoadOp_Clear;
+        depth_attachment.depthStoreOp = native::WGPUStoreOp_Store;
+        depth_attachment.depthClearValue = 0.0;
+        let mut pass_descriptor: native::WGPURenderPassDescriptor = std::mem::zeroed();
+        pass_descriptor.colorAttachmentCount = 1;
+        pass_descriptor.colorAttachments = &color_attachment;
+        pass_descriptor.depthStencilAttachment = &depth_attachment;
+        let pass = yawgpu::wgpuCommandEncoderBeginRenderPass(encoder, &pass_descriptor);
+        assert!(!pass.is_null());
+        yawgpu::wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+        yawgpu::wgpuRenderPassEncoderSetViewport(pass, 0.0, 0.0, half, height, 0.0, 0.25);
+        yawgpu::wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+        yawgpu::wgpuRenderPassEncoderSetViewport(pass, half, 0.0, half, height, 0.0, 0.75);
+        yawgpu::wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+        yawgpu::wgpuRenderPassEncoderEnd(pass);
+        yawgpu::wgpuRenderPassEncoderRelease(pass);
+        yawgpu::wgpuRenderPipelineRelease(pipeline);
+    }
+
+    let mut source = texture_copy_info(depth);
+    source.aspect = native::WGPUTextureAspect_DepthOnly;
+    yawgpu::wgpuCommandEncoderCopyTextureToBuffer(
+        encoder,
+        &source,
+        &buffer_copy_info(readback),
+        &texture_extent(),
+    );
+    let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+    yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+    yawgpu::wgpuCommandBufferRelease(command_buffer);
+    yawgpu::wgpuCommandEncoderRelease(encoder);
+
+    let bytes = read_buffer(instance, readback, 0, READBACK_SIZE);
+    let depth_at = |x: usize| {
+        let offset = (HEIGHT as usize / 2) * BYTES_PER_ROW as usize + x * 4;
+        f32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("four bytes"))
+    };
+    let depths = [
+        depth_at(WIDTH as usize / 4),
+        depth_at(3 * WIDTH as usize / 4),
+    ];
+
+    yawgpu::wgpuBufferRelease(readback);
+    yawgpu::wgpuTextureViewRelease(depth_view);
+    yawgpu::wgpuTextureViewRelease(color_view);
+    yawgpu::wgpuTextureRelease(depth);
+    yawgpu::wgpuTextureRelease(color);
+    yawgpu::wgpuShaderModuleRelease(shader);
+    depths
+}
