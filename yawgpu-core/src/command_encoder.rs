@@ -1825,6 +1825,35 @@ pub(crate) fn render_pass_extent(descriptor: &RenderPassDescriptor) -> Option<Ex
         })
 }
 
+/// Requires clear and discard for each present aspect of a transient attachment.
+pub(crate) fn validate_transient_attachment_ops(
+    view: &TextureView,
+    aspect: InitAspect,
+    load_op: LoadOp,
+    store_op: StoreOp,
+    pass_label: &str,
+) -> Result<(), String> {
+    if !view.usage().contains(TextureUsage::TRANSIENT_ATTACHMENT) {
+        return Ok(());
+    }
+    let (aspect_name, load_name, store_name) = match aspect {
+        InitAspect::Color => ("color", "loadOp", "storeOp"),
+        InitAspect::Depth => ("depth", "depthLoadOp", "depthStoreOp"),
+        InitAspect::Stencil => ("stencil", "stencilLoadOp", "stencilStoreOp"),
+    };
+    if load_op != LoadOp::Clear {
+        return Err(format!(
+            "{pass_label} transient {aspect_name} attachment {load_name} must be clear"
+        ));
+    }
+    if store_op != StoreOp::Discard {
+        return Err(format!(
+            "{pass_label} transient {aspect_name} attachment {store_name} must be discard"
+        ));
+    }
+    Ok(())
+}
+
 /// Validates color attachment and returns a descriptive error on failure.
 pub(crate) fn validate_color_attachment(
     attachment: &RenderPassColorAttachment,
@@ -1849,20 +1878,13 @@ pub(crate) fn validate_color_attachment(
     if attachment.store_op == StoreOp::Undefined {
         return Err("render pass color attachment storeOp must be set".to_owned());
     }
-    if attachment
-        .view
-        .usage()
-        .contains(TextureUsage::TRANSIENT_ATTACHMENT)
-    {
-        if attachment.load_op != LoadOp::Clear {
-            return Err("render pass transient color attachment loadOp must be clear".to_owned());
-        }
-        if attachment.store_op != StoreOp::Discard {
-            return Err(
-                "render pass transient color attachment storeOp must be discard".to_owned(),
-            );
-        }
-    }
+    validate_transient_attachment_ops(
+        &attachment.view,
+        InitAspect::Color,
+        attachment.load_op,
+        attachment.store_op,
+        "render pass",
+    )?;
     if attachment.load_op == LoadOp::Clear
         && ![
             attachment.clear_value.r,
@@ -1990,23 +2012,13 @@ pub(crate) fn validate_depth_stencil_attachment(
         } else if attachment.depth_store_op == StoreOp::Undefined {
             return Err("render pass depth storeOp must be set".to_owned());
         }
-        if attachment
-            .view
-            .usage()
-            .contains(TextureUsage::TRANSIENT_ATTACHMENT)
-        {
-            if attachment.depth_load_op != LoadOp::Clear {
-                return Err(
-                    "render pass transient depth attachment depthLoadOp must be clear".to_owned(),
-                );
-            }
-            if attachment.depth_store_op != StoreOp::Discard {
-                return Err(
-                    "render pass transient depth attachment depthStoreOp must be discard"
-                        .to_owned(),
-                );
-            }
-        }
+        validate_transient_attachment_ops(
+            &attachment.view,
+            InitAspect::Depth,
+            attachment.depth_load_op,
+            attachment.depth_store_op,
+            "render pass",
+        )?;
         if attachment.depth_load_op == LoadOp::Clear
             && (!attachment.depth_clear_value.is_finite()
                 || !(0.0..=1.0).contains(&attachment.depth_clear_value))
@@ -2035,30 +2047,32 @@ pub(crate) fn validate_depth_stencil_attachment(
         } else if attachment.stencil_store_op == StoreOp::Undefined {
             return Err("render pass stencil storeOp must be set".to_owned());
         }
-        if attachment
-            .view
-            .usage()
-            .contains(TextureUsage::TRANSIENT_ATTACHMENT)
-        {
-            if attachment.stencil_load_op != LoadOp::Clear {
-                return Err(
-                    "render pass transient stencil attachment stencilLoadOp must be clear"
-                        .to_owned(),
-                );
-            }
-            if attachment.stencil_store_op != StoreOp::Discard {
-                return Err(
-                    "render pass transient stencil attachment stencilStoreOp must be discard"
-                        .to_owned(),
-                );
-            }
-        }
+        validate_transient_attachment_ops(
+            &attachment.view,
+            InitAspect::Stencil,
+            attachment.stencil_load_op,
+            attachment.stencil_store_op,
+            "render pass",
+        )?;
     } else if attachment.stencil_load_op != LoadOp::Undefined
         || attachment.stencil_store_op != StoreOp::Undefined
     {
         return Err(
             "render pass non-stencil attachment must not set stencil load/store ops".to_owned(),
         );
+    }
+    Ok(())
+}
+
+/// Requires an identity component swizzle on a render attachment view.
+pub(crate) fn validate_attachment_view_swizzle(
+    view: &TextureView,
+    label: &str,
+) -> Result<(), String> {
+    if !view.swizzle().is_identity() {
+        return Err(format!(
+            "{label} must not use a component-swizzled texture view"
+        ));
     }
     Ok(())
 }
@@ -2073,11 +2087,7 @@ pub(crate) fn validate_render_attachment_common(
     if view.is_error() {
         return Err(format!("{label} view must not be an error view"));
     }
-    if !view.swizzle().is_identity() {
-        return Err(format!(
-            "{label} must not use a component-swizzled texture view"
-        ));
-    }
+    validate_attachment_view_swizzle(view, label)?;
     if view.dimension() != TextureViewDimension::D3 && view.array_layer_count() != 1 {
         return Err(format!("{label} view arrayLayerCount must be one"));
     }

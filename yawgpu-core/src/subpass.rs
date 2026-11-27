@@ -29,7 +29,7 @@ use crate::pass::*;
 #[cfg(feature = "tiled")]
 use crate::render_pipeline::*;
 #[cfg(feature = "tiled")]
-use crate::texture::{hal_texture_format, TextureDimension, TextureUsage};
+use crate::texture::{hal_texture_format, InitAspect, TextureDimension, TextureUsage};
 #[cfg(feature = "tiled")]
 use crate::texture_view::{TextureView, TextureViewDimension};
 
@@ -995,14 +995,26 @@ fn validate_subpass_pass_layout_descriptor_with_caps(
                     "subpass input sourceSubpass must refer to a prior subpass".to_owned(),
                 );
             }
-            if input.source_attachment == DEPTH_STENCIL_ATTACHMENT_INDEX {
+            let producer = &descriptor.subpasses[input.source_subpass as usize];
+            let writes_source = if input.source_attachment == DEPTH_STENCIL_ATTACHMENT_INDEX {
                 if descriptor.depth_stencil_attachment.is_none() {
                     return Some(
                         "subpass input depth source requires a depth-stencil attachment".to_owned(),
                     );
                 }
-            } else if input.source_attachment as usize >= descriptor.color_attachments.len() {
-                return Some("subpass input sourceAttachment is out of range".to_owned());
+                producer.uses_depth_stencil
+            } else {
+                if input.source_attachment as usize >= descriptor.color_attachments.len() {
+                    return Some("subpass input sourceAttachment is out of range".to_owned());
+                }
+                producer
+                    .color_attachment_indices
+                    .contains(&input.source_attachment)
+            };
+            if !writes_source {
+                return Some(
+                    "subpass input sourceSubpass must write the sourceAttachment".to_owned(),
+                );
             }
         }
     }
@@ -1128,6 +1140,13 @@ fn validate_subpass_color_attachment(
     if attachment.store_op == StoreOp::Undefined {
         return Err("subpass render pass color attachment storeOp must be set".to_owned());
     }
+    validate_transient_attachment_ops(
+        view,
+        InitAspect::Color,
+        attachment.load_op,
+        attachment.store_op,
+        "subpass render pass",
+    )?;
     if attachment.load_op == LoadOp::Clear
         && ![
             attachment.clear_value.r,
@@ -1190,6 +1209,13 @@ fn validate_subpass_depth_stencil_attachment(
         if attachment.depth_store_op == StoreOp::Undefined {
             return Err("subpass render pass depth storeOp must be set".to_owned());
         }
+        validate_transient_attachment_ops(
+            view,
+            InitAspect::Depth,
+            attachment.depth_load_op,
+            attachment.depth_store_op,
+            "subpass render pass",
+        )?;
         if attachment.depth_load_op == LoadOp::Clear
             && (!attachment.depth_clear_value.is_finite()
                 || !(0.0..=1.0).contains(&attachment.depth_clear_value))
@@ -1212,6 +1238,13 @@ fn validate_subpass_depth_stencil_attachment(
         if attachment.stencil_store_op == StoreOp::Undefined {
             return Err("subpass render pass stencil storeOp must be set".to_owned());
         }
+        validate_transient_attachment_ops(
+            view,
+            InitAspect::Stencil,
+            attachment.stencil_load_op,
+            attachment.stencil_store_op,
+            "subpass render pass",
+        )?;
     } else if attachment.stencil_load_op != LoadOp::Undefined
         || attachment.stencil_store_op != StoreOp::Undefined
     {
@@ -1232,6 +1265,7 @@ fn validate_subpass_attachment_view(
     if view.is_error() {
         return Err(format!("{label} view must not be an error view"));
     }
+    validate_attachment_view_swizzle(view, label)?;
     if view.dimension() != TextureViewDimension::D2 {
         return Err(format!("{label} view dimension must be 2D"));
     }
@@ -1291,7 +1325,8 @@ impl Device {
 mod tests {
     use super::*;
     use crate::test_helpers::{
-        noop_device, render_pipeline_descriptor, render_shader_module, rgba8_unorm,
+        noop_adapter, noop_device, noop_render_pass_descriptor, render_pipeline_descriptor,
+        render_shader_module, rgba8_unorm, texture_descriptor_4x4,
     };
     use crate::*;
 
@@ -1359,18 +1394,19 @@ mod tests {
     }
 
     fn render_attachment_view(device: &Device) -> Arc<TextureView> {
+        attachment_view(device, rgba8_unorm(), TextureUsage::RENDER_ATTACHMENT, None)
+    }
+
+    fn attachment_view(
+        device: &Device,
+        format: TextureFormat,
+        usage: TextureUsage,
+        swizzle: Option<TextureComponentSwizzle>,
+    ) -> Arc<TextureView> {
         let texture = device.create_texture(TextureDescriptor {
-            usage: TextureUsage::RENDER_ATTACHMENT,
-            dimension: TextureDimension::D2,
-            size: Extent3d {
-                width: 4,
-                height: 4,
-                depth_or_array_layers: 1,
-            },
-            format: rgba8_unorm(),
-            mip_level_count: 1,
-            sample_count: 1,
-            view_formats: Vec::new(),
+            format,
+            usage,
+            ..texture_descriptor_4x4()
         });
         let (view, error) = texture.create_view(TextureViewDescriptor {
             format: None,
@@ -1381,7 +1417,7 @@ mod tests {
             array_layer_count: None,
             aspect: None,
             usage: None,
-            swizzle: None,
+            swizzle,
         });
         assert_eq!(error, None);
         Arc::new(view)
@@ -1434,6 +1470,220 @@ mod tests {
                 error: None,
             }),
         )
+    }
+
+    fn assert_color_attachment_parity(
+        device: &Device,
+        view: &Arc<TextureView>,
+        load_op: LoadOp,
+        store_op: StoreOp,
+        expected_error: Option<&str>,
+    ) {
+        let mut regular = noop_render_pass_descriptor(view.clone(), None);
+        let color = regular.color_attachments[0].as_mut().unwrap();
+        color.load_op = load_op;
+        color.store_op = store_op;
+        let binding = SubpassColorAttachmentBinding {
+            resource: SubpassAttachmentResource::Persistent {
+                view: view.clone(),
+                resolve_target: None,
+            },
+            load_op,
+            store_op,
+            clear_value: color.clear_value,
+        };
+        assert_eq!(
+            validate_render_pass_descriptor(&regular, &device.features(), device.limits()).err(),
+            expected_error.map(|message| format!("render pass {message}"))
+        );
+        assert_eq!(
+            validate_subpass_color_attachment(
+                &binding,
+                Some(&attachment_layout()),
+                view.render_extent(),
+                &device.features(),
+            )
+            .err(),
+            expected_error.map(|message| format!("subpass render pass {message}"))
+        );
+    }
+
+    fn assert_depth_stencil_attachment_parity(
+        device: &Device,
+        view: &Arc<TextureView>,
+        (depth_load_op, depth_store_op): (LoadOp, StoreOp),
+        (stencil_load_op, stencil_store_op): (LoadOp, StoreOp),
+        expected_error: Option<&str>,
+    ) {
+        let regular = RenderPassDescriptor {
+            max_color_attachments: device.limits().max_color_attachments,
+            color_attachments: Vec::new(),
+            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                view: view.clone(),
+                depth_load_op,
+                depth_store_op,
+                depth_clear_value: 0.5,
+                depth_read_only: false,
+                stencil_load_op,
+                stencil_store_op,
+                stencil_clear_value: 0,
+                stencil_read_only: false,
+            }),
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            max_draw_count: 50_000_000,
+        };
+        let binding = SubpassDepthStencilAttachmentBinding {
+            resource: SubpassAttachmentResource::Persistent {
+                view: view.clone(),
+                resolve_target: None,
+            },
+            depth_load_op,
+            depth_store_op,
+            depth_clear_value: 0.5,
+            stencil_load_op,
+            stencil_store_op,
+            stencil_clear_value: 0,
+        };
+        let layout = AttachmentLayout {
+            format: view.format(),
+            sample_count: 1,
+        };
+        assert_eq!(
+            validate_render_pass_descriptor(&regular, &device.features(), device.limits()).err(),
+            expected_error.map(|message| format!("render pass {message}"))
+        );
+        assert_eq!(
+            validate_subpass_depth_stencil_attachment(
+                &binding,
+                Some(&layout),
+                view.render_extent(),
+                &device.features(),
+            )
+            .err(),
+            expected_error.map(|message| format!("subpass render pass {message}"))
+        );
+    }
+
+    #[test]
+    fn transient_color_attachment_ops_match_regular_pass() {
+        let device = noop_device();
+        let view = attachment_view(
+            &device,
+            rgba8_unorm(),
+            TextureUsage::RENDER_ATTACHMENT | TextureUsage::TRANSIENT_ATTACHMENT,
+            None,
+        );
+        assert_color_attachment_parity(&device, &view, LoadOp::Clear, StoreOp::Discard, None);
+        assert_color_attachment_parity(
+            &device,
+            &view,
+            LoadOp::Load,
+            StoreOp::Discard,
+            Some("transient color attachment loadOp must be clear"),
+        );
+        assert_color_attachment_parity(
+            &device,
+            &view,
+            LoadOp::Clear,
+            StoreOp::Store,
+            Some("transient color attachment storeOp must be discard"),
+        );
+    }
+
+    #[test]
+    fn transient_depth_stencil_attachment_ops_match_regular_pass() {
+        let device = noop_device();
+        let valid = (LoadOp::Clear, StoreOp::Discard);
+        let absent = (LoadOp::Undefined, StoreOp::Undefined);
+        let load = (LoadOp::Load, StoreOp::Discard);
+        let store = (LoadOp::Clear, StoreOp::Store);
+        for (format, depth, stencil) in [
+            (TextureFormat::DEPTH24_PLUS_STENCIL8, valid, valid),
+            (TextureFormat::DEPTH24_PLUS, valid, absent),
+            (TextureFormat::STENCIL8, absent, valid),
+        ] {
+            let view = attachment_view(
+                &device,
+                TextureFormat::from_raw(format),
+                TextureUsage::RENDER_ATTACHMENT | TextureUsage::TRANSIENT_ATTACHMENT,
+                None,
+            );
+            assert_depth_stencil_attachment_parity(&device, &view, depth, stencil, None);
+            if depth != absent {
+                for (ops, error) in [
+                    (load, "transient depth attachment depthLoadOp must be clear"),
+                    (
+                        store,
+                        "transient depth attachment depthStoreOp must be discard",
+                    ),
+                ] {
+                    assert_depth_stencil_attachment_parity(
+                        &device,
+                        &view,
+                        ops,
+                        stencil,
+                        Some(error),
+                    );
+                }
+            }
+            if stencil != absent {
+                for (ops, error) in [
+                    (
+                        load,
+                        "transient stencil attachment stencilLoadOp must be clear",
+                    ),
+                    (
+                        store,
+                        "transient stencil attachment stencilStoreOp must be discard",
+                    ),
+                ] {
+                    assert_depth_stencil_attachment_parity(&device, &view, depth, ops, Some(error));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn attachment_view_swizzles_match_regular_pass() {
+        let device = noop_adapter()
+            .create_device(None, &[Feature::TextureComponentSwizzle], "", "")
+            .unwrap();
+        let identity = TextureComponentSwizzle::default();
+        let swizzled = TextureComponentSwizzle {
+            r: ComponentSwizzle::G,
+            ..identity
+        };
+        for (swizzle, color_error, depth_error) in [
+            (identity, None, None),
+            (
+                swizzled,
+                Some("color attachment must not use a component-swizzled texture view"),
+                Some("depth-stencil attachment must not use a component-swizzled texture view"),
+            ),
+        ] {
+            let color = attachment_view(
+                &device,
+                rgba8_unorm(),
+                TextureUsage::RENDER_ATTACHMENT,
+                Some(swizzle),
+            );
+            assert_color_attachment_parity(
+                &device,
+                &color,
+                LoadOp::Clear,
+                StoreOp::Store,
+                color_error,
+            );
+            let depth_stencil = attachment_view(
+                &device,
+                TextureFormat::from_raw(TextureFormat::DEPTH24_PLUS_STENCIL8),
+                TextureUsage::RENDER_ATTACHMENT,
+                Some(swizzle),
+            );
+            let ops = (LoadOp::Clear, StoreOp::Store);
+            assert_depth_stencil_attachment_parity(&device, &depth_stencil, ops, ops, depth_error);
+        }
     }
 
     #[test]
@@ -1496,6 +1746,31 @@ mod tests {
     }
 
     #[test]
+    fn subpass_pass_layout_requires_color_input_from_named_writer() {
+        let mut descriptor = valid_two_subpass_deferred_layout();
+        descriptor.color_attachments.push(attachment_layout());
+        descriptor.subpasses.push(SubpassLayoutDesc {
+            color_attachment_indices: vec![2],
+            uses_depth_stencil: false,
+            input_attachments: vec![SubpassInputAttachment {
+                group: 0,
+                binding: 0,
+                source_subpass: 1,
+                source_attachment: 1,
+            }],
+        });
+        assert_eq!(
+            validate_subpass_pass_layout_descriptor_with_caps(&descriptor, caps()),
+            None
+        );
+        descriptor.subpasses[2].input_attachments[0].source_subpass = 0;
+        assert_eq!(
+            validate_subpass_pass_layout_descriptor_with_caps(&descriptor, caps()),
+            Some("subpass input sourceSubpass must write the sourceAttachment".to_owned())
+        );
+    }
+
+    #[test]
     fn subpass_pass_layout_rejects_depth_input_without_depth_stencil_attachment() {
         let mut descriptor = valid_two_subpass_deferred_layout();
         descriptor.subpasses[1].input_attachments[0].source_attachment =
@@ -1508,7 +1783,7 @@ mod tests {
     }
 
     #[test]
-    fn subpass_pass_layout_accepts_depth_input_with_depth_stencil_attachment() {
+    fn subpass_pass_layout_requires_depth_input_from_named_writer() {
         let mut descriptor = valid_two_subpass_deferred_layout();
         descriptor.depth_stencil_attachment = Some(depth_attachment_layout());
         descriptor.subpasses[0].uses_depth_stencil = true;
@@ -1519,6 +1794,11 @@ mod tests {
         assert_eq!(
             validate_subpass_pass_layout_descriptor_with_caps(&descriptor, caps()),
             None
+        );
+        descriptor.subpasses[0].uses_depth_stencil = false;
+        assert_eq!(
+            validate_subpass_pass_layout_descriptor_with_caps(&descriptor, caps()),
+            Some("subpass input sourceSubpass must write the sourceAttachment".to_owned())
         );
     }
 
@@ -1614,6 +1894,8 @@ mod tests {
     #[test]
     fn compute_subpass_color_slots_maps_input_binding_to_source_attachment_one() {
         let mut descriptor = valid_two_subpass_deferred_layout();
+        descriptor.subpasses[0].color_attachment_indices = vec![1];
+        descriptor.subpasses[1].color_attachment_indices = vec![0];
         descriptor.subpasses[1].input_attachments[0].source_attachment = 1;
 
         assert_eq!(
@@ -1626,6 +1908,7 @@ mod tests {
     fn compute_subpass_color_slots_maps_input_binding_to_source_attachment_two() {
         let mut descriptor = valid_two_subpass_deferred_layout();
         descriptor.color_attachments.push(attachment_layout());
+        descriptor.subpasses[0].color_attachment_indices = vec![2];
         descriptor.subpasses[1].input_attachments[0].source_attachment = 2;
 
         assert_eq!(
