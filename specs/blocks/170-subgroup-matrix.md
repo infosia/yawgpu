@@ -16,8 +16,15 @@ f32 and u8 / i8 → u32 / i32, subgroup range 32–32) and
 `e2e_vulkan_subgroup_matrix` is 7/0 under `VK_LAYER_KHRONOS_validation` with no
 validation output; workspace 1,530/0 and 1,785/0 with `vulkan`. The shared e2e
 body now also has the store-with-offset, out-of-bounds and constructor
-scenarios, each confirmed to fail under a mutation on Vulkan. Owed: a native
-Linux Vulkan run, and a Metal run of the three added scenarios. S4 (docs + Phase Review) not started.
+scenarios, each confirmed to fail under a mutation on Vulkan. **S3 DONE on
+Linux (2026-11-28)** — at `01cb53f` on the native Linux RTX 5060 Ti (driver
+615.71.09, Vulkan 1.4.351) the adapter reports 10 configurations (the six
+f16 → f16 / f32 ones, and u8 → u32 and i8 → i32 at 16×16×32 and 16×8×32; this
+driver does not list the two u8 → i32 configurations the Windows 621.24 driver
+does), subgroup range 32–32, and `e2e_vulkan_subgroup_matrix` is 7/0 with
+`YAWGPU_REQUIRE_SUBGROUP_MATRIX=1` under `VK_LAYER_KHRONOS_validation` with no
+validation output; workspace 1,533/0, Vulkan e2e 177/0. Owed: a Metal run of
+the three added scenarios. S4 (docs + Phase Review) not started.
 Ledger: `specs/tracking/subgroups.md` ("Block 170" section).
 
 Dawn's `ChromiumExperimentalSubgroupMatrix` feature enables the WGSL extension
