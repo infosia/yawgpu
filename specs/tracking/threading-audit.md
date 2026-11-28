@@ -78,9 +78,9 @@ consequence or the support contract is unconfirmed.
 | 11 | Suspected | Surface configuration accepts the Display-P3 / extended tone-mapping chain; the HAL configuration carries neither | Block 167 (rejected explicitly, as Dawn does) |
 | 12 | Suspected | `powerPreference` never participates in adapter selection | Block 166 (Dawn `SortAdapters` ranking) |
 
-Blocks 163–167 are complete (2026-11-28; gates and Phase Review in each block spec). Runs
-owed: Block 164 on native Vulkan; Block 166 R5/R6 on a multi-adapter host. 08 and 09 stay
-open.
+Blocks 163–167 are complete (2026-11-28; gates and Phase Review in each block spec). Block
+164 ran on native Vulkan (Windows NVIDIA, 2026-11-28). Run owed: Block 166 R5/R6 on a
+multi-adapter host. 08 and 09 stay open.
 
 Review rule going forward: for a changed descriptor field or command, record the function
 that consumes it and the one test that fails if it reverts to its default; when the same

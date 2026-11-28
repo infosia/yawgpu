@@ -93,6 +93,23 @@ Shared gates for Blocks 163–167 (2026-11-28, M2): `cargo test --workspace` 151
 `surface_smoke` on Metal requests its adapter, configures and reaches its frame loop.
 R5 and R6 are observable only on a multi-adapter host; that run is owed.
 
+### Windows native Vulkan (2026-11-28)
+
+Run on Windows 11, NVIDIA GeForce RTX 5060 Ti, driver 617.14, Vulkan 1.4.351, at yawgpu
+`b22601f`. The Khronos validation layer was on for the HAL ignored, e2e, and example runs.
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace` | 1,513 passed, 0 failed; with `yawgpu/vulkan,yawgpu/tiled` 1,870 passed, 0 failed |
+| clippy `-D warnings`, default (workspace), `vulkan,tiled`, `vulkan,shader-passthrough` and `gles` (`yawgpu-core`, `yawgpu-hal`, `yawgpu`, `yawgpu-tint`), all targets | clean |
+| Vulkan HAL lib tests, `vulkan,tiled` | 395 passed, 0 failed |
+| Vulkan HAL ignored tests, `vulkan,tiled` | 83 passed, 0 failed, 0 VUIDs |
+| Vulkan e2e (`e2e_vulkan_*`, `vulkan,tiled,shader-passthrough`, `--ignored`) | 177 passed, 0 failed, 0 VUIDs; `e2e_vulkan_tiled` 6 of 6 |
+| C examples on Vulkan (`device_info`, `compute`, `capture`; windowed `hello_triangle`, `triangle`, `triangle_passthrough`, `surface_smoke`, `tiled_msaa`, `tiled_deferred` for 8 s each; `tiled_deferred --verify`) | no error, no VUID; every windowed example configures its surface and presents |
+
+This host exposes a single Vulkan adapter, so R5 and R6 (multi-adapter selection) are not
+observable here; that run stays owed.
+
 ## Phase Review
 
 Fresh-agent review of Blocks 166–167: 0 CRITICAL, 0 MAJOR, 3 MINOR for this block.

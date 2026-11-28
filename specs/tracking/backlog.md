@@ -401,3 +401,4 @@ Re-verification after the fixes: `cargo test --workspace` 1093/0, clippy default
 - The Linux GLES runs owed by Block 156 S3
   (`submit_copies_rg11b10_clears_and_reads_back_via_compute`) and Block 157 (the
   `e2e_gles_*` lazy-init suites) are closed.
+- Blocks 163-167 on Windows native Vulkan at `b22601f` (2026-11-28): workspace 1,513/0 (1,870/0 with `vulkan,tiled`), clippy on four feature sets clean, Vulkan HAL ignored 83/83, Vulkan e2e 177/177 with 0 VUIDs, every C example runs on Vulkan. Block 164's owed native run is done: the probe passes, and with the change reverted the Khronos layer reports `VUID-vkCmdDraw-maintenance4-08602` for each draw although NVIDIA's readback stays correct. Block 166 R5/R6 stay owed (single-adapter host). `cargo test --test '*'` now needs `gles` for `e2e_gles_basic`; Vulkan runs use `--test 'e2e_vulkan_*'`.

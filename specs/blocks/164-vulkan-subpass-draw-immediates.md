@@ -72,6 +72,28 @@ Shared gates for Blocks 163–167 (2026-11-28, M2): `cargo test --workspace` 151
 read back [0.25, 0.75]). With the push removed the probe reads [0.0, 0.0] and the layer
 reports `VUID-vkCmdDraw-maintenance4-08602` for each draw. The native Vulkan run is owed.
 
+### Windows native Vulkan (2026-11-28)
+
+Run on Windows 11, NVIDIA GeForce RTX 5060 Ti, driver 617.14, Vulkan 1.4.351, at yawgpu
+`b22601f`. The Khronos validation layer was on for the HAL ignored, e2e, and example runs.
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace` | 1,513 passed, 0 failed; with `yawgpu/vulkan,yawgpu/tiled` 1,870 passed, 0 failed |
+| clippy `-D warnings`, default (workspace), `vulkan,tiled`, `vulkan,shader-passthrough` and `gles` (`yawgpu-core`, `yawgpu-hal`, `yawgpu`, `yawgpu-tint`), all targets | clean |
+| Vulkan HAL lib tests, `vulkan,tiled` | 395 passed, 0 failed |
+| Vulkan HAL ignored tests, `vulkan,tiled` | 83 passed, 0 failed, 0 VUIDs |
+| Vulkan e2e (`e2e_vulkan_*`, `vulkan,tiled,shader-passthrough`, `--ignored`) | 177 passed, 0 failed, 0 VUIDs; `e2e_vulkan_tiled` 6 of 6 |
+| C examples on Vulkan (`device_info`, `compute`, `capture`; windowed `hello_triangle`, `triangle`, `triangle_passthrough`, `surface_smoke`, `tiled_msaa`, `tiled_deferred` for 8 s each; `tiled_deferred --verify`) | no error, no VUID; every windowed example configures its surface and presents |
+
+The probe `vulkan_tiled_frag_depth_clamps_to_draw_viewport` passes natively: the regular-pass
+control and the subpass draws read back [0.25, 0.75]. Red check with the Block 164
+`encode.rs` change reverted (`df8ee94^`): on NVIDIA the readback is still correct, so the test
+passes, but the Khronos layer reports `VUID-vkCmdDraw-maintenance4-08602` for each of the 6
+draws. With the change the layer reports none. Natively the missing push is invalid usage that
+the driver happens to tolerate; MoltenVK showed it as wrong depth. The native Vulkan run owed
+by this block is done.
+
 ## Phase Review
 
 Fresh-agent review of Blocks 163–164: 0 CRITICAL, 0 MAJOR, 1 MINOR for this block
