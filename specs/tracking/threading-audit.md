@@ -73,7 +73,7 @@ consequence or the support contract is unconfirmed.
 | 06 | Reproduced | `compatibleSurface` does not constrain adapter selection | Block 166 |
 | 07 | Reproduced | A subpass input may name a producer subpass that does not write its source attachment | Block 163 |
 | 08 | Suspected | GLES: two sampled views of one texture differing only in mip range bind the same GL texture name, so each bind's `BASE_LEVEL`/`MAX_LEVEL` overwrites the other's within one draw or dispatch (`gles/queue.rs` `requires_texture_view_for`) | OPEN — needs a core-mode two-view probe on a native GLES host |
-| 09 | Suspected | Vulkan/Tint: one multisampled input binding sets a module-wide Tint option, changing SPIR-V generation for every input attachment (`pipeline_has_multisampled_input_attachment`) | OPEN — probe single-kind vs mixed inputs at pipeline creation; belongs with the SPIR-V MSAA input-attachment slice |
+| 09 | Suspected | Vulkan/Tint: one multisampled input binding sets a module-wide Tint option, changing SPIR-V generation for every input attachment (`pipeline_has_multisampled_input_attachment`) | OPEN — probe single-kind vs mixed inputs at pipeline creation; follow-up to the completed SPIR-V MSAA input-attachment slice (`tbdr-tint-rehome-plan.md` §9, Slice 4) |
 | 10 | Reproduced | A `WGPURequestAdapterWebXROptions` request succeeds; native Dawn declines it | Block 166 |
 | 11 | Suspected | Surface configuration accepts the Display-P3 / extended tone-mapping chain; the HAL configuration carries neither | Block 167 (rejected explicitly, as Dawn does) |
 | 12 | Suspected | `powerPreference` never participates in adapter selection | Block 166 (Dawn `SortAdapters` ranking) |
