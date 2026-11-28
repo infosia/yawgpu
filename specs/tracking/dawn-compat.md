@@ -7,8 +7,8 @@ Spec: `specs/blocks/171-dawn-compat-layer.md`.
 | S1 | ABI subset guard | **DONE 2026-11-28** — `tools/dawn_compat/{gen_dawn_headers,abi_guard}.py`, crate `yawgpu-dawn` (feature `dawn-compat`), `tests/abi_guard.rs` 4/0. At Dawn `9bba943462` on arm64 macOS: 203 functions, 98 structs, 459 members, 525 constants, no mismatch |
 | S2 | Dawn toggles / cache chained structs | **DONE 2026-11-28** — yawgpu already skipped unrelated chain nodes on the instance and adapter-request chains and never read the device descriptor's chain, so no runtime change; `yawgpu.h` declares the two descriptors and three Noop tests pin the behaviour (`yawgpu --lib` 344/0) |
 | S3 | `ImplicitDeviceSynchronization` | **DONE 2026-11-28** — F1, F3, F5, F7, F9 fixed; feature advertised on Noop / Metal / Vulkan, not GLES; `concurrent_device` (4 threads × 32 iterations) on Noop, and on the Apple M2 through `e2e_metal_concurrent_device` 5 runs / 0 failures. Metal e2e regression 188/0 (54 binaries). Not run: ThreadSanitizer (the nightly `-Zbuild-std` build needs a crate that is not in the local cache), the Vulkan wrapper `e2e_vulkan_concurrent_device` on a native driver |
-| S4 | proc table, stubs, Dawn API package | **DONE 2026-11-28** — `yawgpuDawnGetProcTable()`: 276 members, 203 yawgpu + 73 stubs; `tools/dawn_compat/make_dawn_api_package.py` (12 headers, 2 standalone sources); C++ smoke test through the package on Noop, and on the Apple M2 (`smoke_computes_on_metal`). `yawgpu-dawn --features dawn-compat` 11/0 |
-| S5 | ONNX Runtime bring-up | not started |
+| S4 | proc table, stubs, Dawn API package | **DONE 2026-11-28** — the table's `createInstance` selects the default real backend when no selector is chained, `yawgpuDawnSetDefaultBackend()` overrides it (`yawgpu-dawn --features dawn-compat` 13/0; the two Metal tests pass on the M2); `yawgpuDawnGetProcTable()`: 276 members, 203 yawgpu + 73 stubs; `tools/dawn_compat/make_dawn_api_package.py` (12 headers, 2 standalone sources); C++ smoke test through the package on Noop, and on the Apple M2 (`smoke_computes_on_metal`). `yawgpu-dawn --features dawn-compat` 11/0 |
+| S5 | ONNX Runtime bring-up | **DONE on macOS / Metal 2026-11-28** — see "ONNX Runtime bring-up" below |
 | S6 | docs + Phase Review | not started |
 
 ## Thread-safety audit (R3)
@@ -97,3 +97,56 @@ renames the consumer side with a pre-include instead.
 - The bodies of `vulkan/encode.rs`, `metal/encode.rs` and `gles/queue.rs`
   beyond their locking skeleton; Tint writer / transform internals.
 - External textures and render bundles beyond their lock fields.
+
+## ONNX Runtime bring-up (R7)
+
+ONNX Runtime 1.32.0 on the Apple M2, Metal backend, yawgpu at Dawn pin
+`9bba943462`.
+
+Build: `tools/ci_build/build.py --config Release --use_webgpu
+--use_external_dawn --build_shared_lib --skip_tests --skip_submodule_sync
+--compile_no_warning_as_error --parallel --target onnxruntime
+--cmake_extra_defines onnxruntime_DAWN_PREBUILT_DIR=<package>` with the
+package from `tools/dawn_compat/make_dawn_api_package.py`. It compiled with no
+source change: ONNX Runtime's code written for Dawn `v20261013` builds against
+the headers of yawgpu's pin. `build.py` needs Python 3.10 or later.
+
+Host: `examples/ort_webgpu` links `libyawgpu_dawn.a` and
+`libonnxruntime.dylib` and passes `yawgpuDawnGetProcTable()` as
+`dawnProcTable`. Every run below had `session.disable_cpu_ep_fallback=1` and
+`YAWGPU_DAWN_STRICT=1`; no stub was called.
+
+| Run | ONNX Runtime-owned device | Host-owned device |
+|---|---|---|
+| Abs (ONNX Runtime's own external-Dawn test model) | pass | pass |
+| `squeezenet/model.onnx` vs the CPU provider | 1000 elements, worst relative error 4.3e-7 | same |
+| `mnist.onnx` vs the CPU provider | 10 elements, 4.4e-7 | same |
+| `matmul_1.onnx`, `conv_autopad.onnx`, `mul_1.onnx` vs the CPU provider | exact | exact |
+| Noop backend | session runs, nothing computed | — |
+
+Findings:
+
+| # | Finding | Resolution |
+|---|---|---|
+| O1 | The instance ONNX Runtime creates carries no `YaWGPUInstanceBackendSelect`, so it was a Noop instance | R4: the table's `createInstance` selects the default real backend; `yawgpuDawnSetDefaultBackend()` |
+| O2 | The package's dispatch sources and yawgpu both define `wgpu*` | No change: ONNX Runtime keeps the dispatchers inside `libonnxruntime`, the host links yawgpu ("Linking note for consumers") |
+| O3 | `libyawgpu_dawn.a` needs `libtint_shim.dylib` next to the executable (`@loader_path`) | `examples/ort_webgpu/build.sh` copies it |
+
+ONNX Runtime features and toggles against yawgpu:
+
+| Item | yawgpu |
+|---|---|
+| `TimedWaitAny`, `ImplicitDeviceSynchronization` (required) | supported |
+| `ShaderF16`, `Subgroups`, `SubgroupSizeControl`, `TimestampQuery`, `ChromiumExperimentalSubgroupMatrix` | supported where the adapter has them |
+| `ChromiumExperimentalTimestampQueryInsidePasses`, `BufferMapExtendedUsages`, `AdapterPropertiesMemoryHeaps` | not advertised; ONNX Runtime takes its fallback path |
+| Toggles (`skip_validation`, `disable_robustness`, …) | accepted, no effect |
+
+Not done:
+
+- Linux / Windows Vulkan bring-up.
+- ONNX Runtime's own test suites (`onnxruntime_webgpu_external_dawn_test`
+  uses `dawn::native`, which is out of scope) and larger models, including
+  one that takes the subgroup-matrix MatMul path.
+- A performance comparison with Dawn; in particular the cost of yawgpu
+  validating although ONNX Runtime asks for `skip_validation`.
+- The host-supplied Dawn cache interface (accepted and unused).

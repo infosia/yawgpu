@@ -1,6 +1,8 @@
 # Block 171 — Dawn compatibility layer
 
-Status: **S1–S4 DONE (2026-11-28).** S5, S6 not started. Ledger:
+Status: **S1–S4 DONE; S5 DONE on macOS / Metal (2026-11-28)** — ONNX Runtime
+1.32.0 runs SqueezeNet and MNIST on yawgpu with CPU fallback disabled, matching
+the CPU provider. S6 (docs + Phase Review) not started. Ledger:
 `specs/tracking/dawn-compat.md`.
 
 A program written against Dawn's native API can run on yawgpu when it reaches
@@ -184,6 +186,21 @@ the life of the process.
 
 The member list is generated from Dawn's header and yawgpu's exports, not
 written by hand, so a Dawn bump or a new yawgpu function updates it.
+
+The table's `createInstance` differs from `wgpuCreateInstance` in one way. A
+Dawn consumer creates its instance without `yawgpu.h` and expects real
+adapters, while `wgpuCreateInstance` without a `YaWGPUInstanceBackendSelect`
+gives the Noop backend. So when the descriptor chains no
+`YaWGPUInstanceBackendSelect`, the table's entry selects the default backend:
+Metal on Apple platforms and Vulkan elsewhere when that backend is compiled
+in, else Noop. A descriptor that chains a selector is passed through
+unchanged.
+
+```c
+void yawgpuDawnSetDefaultBackend(uint32_t backend);  /* YAWGPU_INSTANCE_BACKEND_* */
+```
+
+overrides that default for instances created afterwards.
 
 ### R5 — stubs
 
