@@ -80,7 +80,8 @@ consequence or the support contract is unconfirmed.
 
 Blocks 163–167 are complete (2026-11-28; gates and Phase Review in each block spec). Block
 164 ran on native Vulkan (Windows NVIDIA, 2026-11-28). Block 166 R6/R7 ran on a
-three-adapter Linux host (2026-11-28); R5 with a real surface stays owed. 09 is fixed by
+three-adapter Linux host (2026-11-28), where R5 also declines a surface no adapter can
+present to; R5 keeping some adapters and removing others stays owed. 09 is fixed by
 Block 168. 08 is fixed by Block 169 (Linux native GLES, 2026-11-28).
 
 Review rule going forward: for a changed descriptor field or command, record the function

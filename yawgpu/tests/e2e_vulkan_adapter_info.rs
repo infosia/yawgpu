@@ -127,13 +127,23 @@ unsafe fn request_adapter_type(
     power_preference: native::WGPUPowerPreference,
     force_fallback: bool,
 ) -> Option<(native::WGPUAdapterType, String)> {
+    request_adapter_type_for_surface(instance, power_preference, force_fallback, std::ptr::null())
+}
+
+/// [`request_adapter_type`] with a `compatibleSurface`.
+unsafe fn request_adapter_type_for_surface(
+    instance: native::WGPUInstance,
+    power_preference: native::WGPUPowerPreference,
+    force_fallback: bool,
+    compatible_surface: native::WGPUSurface,
+) -> Option<(native::WGPUAdapterType, String)> {
     let options = native::WGPURequestAdapterOptions {
         nextInChain: std::ptr::null_mut(),
         featureLevel: native::WGPUFeatureLevel_Core,
         powerPreference: power_preference,
         forceFallbackAdapter: u32::from(force_fallback),
         backendType: native::WGPUBackendType_Vulkan,
-        compatibleSurface: std::ptr::null(),
+        compatibleSurface: compatible_surface,
     };
     let mut result: (native::WGPURequestAdapterStatus, native::WGPUAdapter) =
         (native::WGPURequestAdapterStatus_Error, std::ptr::null());
@@ -214,6 +224,55 @@ fn request_adapter_ranks_by_power_preference() {
             Some((kind, _)) => assert_eq!(kind, native::WGPUAdapterType_CPU),
             None => assert!(!cpu, "a CPU adapter exists but the fallback request failed"),
         }
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+/// Block 166 R5 on Linux hardware: yawgpu's Vulkan backend has no Xlib, XCB or
+/// Wayland presentation path, so no adapter can present to a surface created
+/// from such a source. A request that names it as `compatibleSurface` must be
+/// declined for every real adapter, while the same request without it succeeds.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "manual real-backend test"]
+fn request_adapter_declines_a_surface_no_adapter_can_present_to() {
+    if real_backend_skip_reason(RealBackend::Vulkan).is_some() {
+        return;
+    }
+    unsafe {
+        let instance = create_instance(YAWGPU_INSTANCE_BACKEND_VULKAN);
+        // Never dereferenced: surface creation has no Xlib path to hand it to.
+        let mut source = native::WGPUSurfaceSourceXlibWindow {
+            chain: native::WGPUChainedStruct {
+                next: std::ptr::null_mut(),
+                sType: native::WGPUSType_SurfaceSourceXlibWindow,
+            },
+            display: std::ptr::NonNull::<u8>::dangling().as_ptr().cast(),
+            window: 1,
+        };
+        let descriptor = native::WGPUSurfaceDescriptor {
+            nextInChain: &mut source.chain,
+            label: native::WGPUStringView {
+                data: std::ptr::null(),
+                length: 0,
+            },
+        };
+        let surface = yawgpu::wgpuInstanceCreateSurface(instance, &descriptor);
+        assert!(!surface.is_null());
+
+        for preference in [
+            native::WGPUPowerPreference_Undefined,
+            native::WGPUPowerPreference_HighPerformance,
+            native::WGPUPowerPreference_LowPower,
+        ] {
+            let without = request_adapter_type(instance, preference, false);
+            let with = request_adapter_type_for_surface(instance, preference, false, surface);
+            eprintln!("preference={preference} without={without:?} with={with:?}");
+            assert!(without.is_some());
+            assert_eq!(with, None, "no Vulkan adapter presents to an Xlib surface");
+        }
+
+        yawgpu::wgpuSurfaceRelease(surface);
         yawgpu::wgpuInstanceRelease(instance);
     }
 }

@@ -119,9 +119,18 @@ device types are the oracle) passes: `HighPerformance` selects the discrete adap
 `LowPower` the integrated one, `Undefined` the first enumerated GPU (the discrete one), and
 `forceFallbackAdapter` the CPU adapter. R6 and R7 are observed on hardware.
 
-R5 is not observable on this host: the Vulkan HAL has no Xlib/XCB/Wayland surface path, so
-no real surface exists to filter by. R5 with a real surface on a multi-adapter host stays
-owed.
+R5, declining side: `request_adapter_declines_a_surface_no_adapter_can_present_to` (same
+file, Linux only, at `cd143c9`) creates a surface from an Xlib source. The Vulkan HAL has
+no Xlib/XCB/Wayland surface path (backlog C2), so the surface carries no `VkSurfaceKHR`
+and the capability query fails for every adapter. With that surface as
+`compatibleSurface` the request completes `Unavailable` with a null adapter under each
+power preference, while the same request without it returns an adapter: the filter runs
+against all three real adapters and removes them.
+
+Still owed for R5: a host where the filter keeps some adapters and removes others — a
+real presentable surface (Windows or macOS; Linux has none until backlog C2) with more
+than one adapter. On the hosts run so far a real surface is accepted by the single
+adapter (Windows, macOS), which shows the keeping side only.
 
 ## Phase Review
 
