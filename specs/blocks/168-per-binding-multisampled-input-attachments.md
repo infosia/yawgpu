@@ -148,6 +148,16 @@ Run on Windows 11, NVIDIA GeForce RTX 5060 Ti, driver 617.14, Vulkan 1.4.351.
 `ResolverTest.MaxExpressionDepth_Pass` crashes the Windows Release test binary (exit
 127), most likely its stack depth; this change does not touch the resolver.
 
+Run on macOS, Apple M2, at `ea4d24e` with the fork at `9bba943462` (2026-11-28):
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace` | 1,514 passed, 0 failed; with `yawgpu/vulkan,yawgpu/tiled` 1,874 passed, 0 failed |
+| clippy `-D warnings` on default, `vulkan,tiled` and `metal,tiled`, all targets | clean |
+| `yawgpu-hal --lib` | 395 passed (`vulkan,tiled`); 218 passed (`metal,tiled`) |
+| Metal e2e (`metal,tiled`, `--ignored`) | 176 passed, 0 failed |
+| Vulkan e2e (`vulkan,tiled`, `--ignored`), MoltenVK, Khronos layer | 175 passed, 1 failed (the known `imageView2DOn3DImage` portability case; every VUID comes from that test). The mixed probe and both `vulkan_tiled_msaa_*` tests pass |
+
 ## Phase Review
 
 | ID | Finding | Disposition |
