@@ -1,6 +1,7 @@
 # Block 171 — Dawn compatibility layer
 
-Status: **spec only.** No slice started.
+Status: **S1 DONE, S2 DONE (2026-11-28).** S3–S6 not started. Ledger:
+`specs/tracking/dawn-compat.md`.
 
 A program written against Dawn's native API can run on yawgpu when it reaches
 the implementation only through Dawn's generated headers and a
@@ -127,26 +128,45 @@ Any other `sType` keeps its current handling.
 ### R3 — `ImplicitDeviceSynchronization`
 
 `Feature::ImplicitDeviceSynchronization` (`0x00050004`, Dawn's value) is
-advertised by every adapter and may be required at device creation.
+advertised by every Noop, Metal and Vulkan adapter and may be required at
+device creation. GLES does not advertise it: its context is bound to the
+calling thread (Block 67 matrix).
 
-Contract (Dawn `docs/dawn/features/implicit_device_synchronization.md`): on a
-device with the feature, every public entry point of the device and of its
-child objects may be called from several threads at once, except command
-encoding — one `WGPUCommandEncoder`, pass encoder or render bundle encoder is
-used by one thread at a time.
+Contract (Dawn `docs/dawn/features/implicit_device_synchronization.md`): every
+public entry point of the device and of its child objects may be called from
+several threads at once, except command encoding — one `WGPUCommandEncoder`,
+pass encoder or render bundle encoder is used by one thread at a time.
 
-The feature is advertised only once this holds for yawgpu, established by:
+yawgpu's synchronization does not depend on the feature: every entry point is
+safe with or without it, and enabling it selects no different code path. The
+audit in `specs/tracking/dawn-compat.md` records, per object type, what guards
+the state, and every `unsafe impl Send / Sync` with its justification. The
+rules the audit established:
 
-- an audit of every FFI entry point and the core / HAL state it touches,
-  recorded per object type in `specs/tracking/dawn-compat.md` (what guards the
-  state; `unsafe impl Send / Sync` items with their justification);
-- concurrent tests on Noop — threads sharing one device that create and drop
-  resources, write buffers, submit, map, pop error scopes and process events —
-  and the same workload on Metal and Vulkan as real-GPU e2e.
+- `tint::Initialize()` runs once per process.
+- Vulkan calls `vkDeviceWaitIdle` under the queue lock.
+- Several threads may wait on one future (`wgpuInstanceWaitAny`,
+  `wgpuInstanceProcessEvents`). A waiter is told the future completed only
+  after its callback has returned.
+- A queue write racing `wgpuBufferDestroy` / `wgpuTextureDestroy` reports a
+  validation error, as the same call after the destroy does.
+- Every `unsafe impl Send / Sync` in `yawgpu-hal` carries a `// SAFETY:`
+  comment.
 
-If the audit shows yawgpu is thread-safe without the feature, enabling it
-changes nothing. If it finds unguarded state, the fix makes the entry point
-safe unconditionally; the feature never selects a different code path.
+Deviations and limits:
+
+- Error scopes are per thread: `wgpuDevicePopErrorScope` pops a scope pushed
+  by the calling thread, and an error is routed to the scopes of the thread
+  that reports it. Dawn keeps one stack per device.
+- Surface entry points keep the window system's thread rules (on Metal the
+  `CAMetalLayer` setters); the feature does not make them callable from any
+  thread.
+- The `tiled` subpass pass holds a live HAL pass while encoding; it follows
+  the command-encoding exception.
+
+Concurrent tests on Noop — threads sharing one device that create and drop
+resources, write buffers, submit, map and wait, pop error scopes and process
+events — and the same workload on Metal and Vulkan as real-GPU e2e.
 
 ### R4 — proc table
 
@@ -255,9 +275,11 @@ S2, S3 and S4 are independent of each other; S5 needs all three.
   `DawnTogglesDescriptor` carrying ONNX Runtime's toggle names; device creation
   succeeds with toggles followed by a `DawnCacheDeviceDescriptor`, and neither
   callback is called.
-- S3: the audit ledger has no unguarded entry; the concurrent tests pass on
-  Noop repeatedly and under ThreadSanitizer where the toolchain supports it;
-  the device reports the feature; requiring it on an adapter succeeds.
+- S3: inline tests for each rule above (two waiters on one future both observe
+  the mapped buffer; destroy racing a write); the concurrent tests pass on
+  Noop repeatedly and under ThreadSanitizer where the toolchain supports it,
+  and on Metal and Vulkan; the Noop, Metal and Vulkan adapters report the
+  feature and GLES does not.
 - S4: the table has no null member and its `version` equals
   `dawn::kDawnVersion`; a stub prints once and returns the R5 value;
   `YAWGPU_DAWN_STRICT=1` aborts; a table with one changed `version` byte makes
