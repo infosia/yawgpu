@@ -6,8 +6,8 @@ Spec: `specs/blocks/171-dawn-compat-layer.md`.
 |---|---|---|
 | S1 | ABI subset guard | **DONE 2026-11-28** — `tools/dawn_compat/{gen_dawn_headers,abi_guard}.py`, crate `yawgpu-dawn` (feature `dawn-compat`), `tests/abi_guard.rs` 4/0. At Dawn `9bba943462` on arm64 macOS: 203 functions, 98 structs, 459 members, 525 constants, no mismatch |
 | S2 | Dawn toggles / cache chained structs | **DONE 2026-11-28** — yawgpu already skipped unrelated chain nodes on the instance and adapter-request chains and never read the device descriptor's chain, so no runtime change; `yawgpu.h` declares the two descriptors and three Noop tests pin the behaviour (`yawgpu --lib` 344/0) |
-| S3 | `ImplicitDeviceSynchronization` | audit done; fixes not started |
-| S4 | proc table, stubs, Dawn API package | not started |
+| S3 | `ImplicitDeviceSynchronization` | **DONE 2026-11-28** — F1, F3, F5, F7, F9 fixed; feature advertised on Noop / Metal / Vulkan, not GLES; `concurrent_device` (4 threads × 32 iterations) on Noop, and on the Apple M2 through `e2e_metal_concurrent_device` 5 runs / 0 failures. Metal e2e regression 188/0 (54 binaries). Not run: ThreadSanitizer (the nightly `-Zbuild-std` build needs a crate that is not in the local cache), the Vulkan wrapper `e2e_vulkan_concurrent_device` on a native driver |
+| S4 | proc table, stubs, Dawn API package | **DONE 2026-11-28** — `yawgpuDawnGetProcTable()`: 276 members, 203 yawgpu + 73 stubs; `tools/dawn_compat/make_dawn_api_package.py` (12 headers, 2 standalone sources); C++ smoke test through the package on Noop, and on the Apple M2 (`smoke_computes_on_metal`). `yawgpu-dawn --features dawn-compat` 11/0 |
 | S5 | ONNX Runtime bring-up | not started |
 | S6 | docs + Phase Review | not started |
 
@@ -72,6 +72,22 @@ Suspicions, not acted on:
 | Tint program / codegen / reflection | per-call state; Inspector under the shim mutex; no shim globals | safe; F1 |
 | Rust shader caches | `OnceLock`s and one mutex per cache | safe |
 | Process globals | atomics and `OnceLock`s; no `static mut`; no background threads | safe |
+
+### F5 design
+
+A poll claims one ready future under the registry mutex, records the executing
+thread, and releases the mutex before delivering. The registry entry is removed
+only when the callback has left the stack. Meanwhile other threads see the
+future as pending (a zero-timeout wait times out, a timed wait retries); the
+executing thread sees its own future as complete, so a callback may wait on it.
+
+### Linking note for consumers
+
+The package's `dawn_proc.cpp` defines the `wgpu*` symbols as dispatchers, and
+yawgpu defines the same names as implementations. They cannot be linked
+statically into one image. A consumer keeps the dispatch sources in its own
+shared library (ONNX Runtime does) and the host links yawgpu; the smoke test
+renames the consumer side with a pre-include instead.
 
 ### Not verified by the audit
 

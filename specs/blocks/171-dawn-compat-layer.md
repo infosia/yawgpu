@@ -1,6 +1,6 @@
 # Block 171 — Dawn compatibility layer
 
-Status: **S1 DONE, S2 DONE (2026-11-28).** S3–S6 not started. Ledger:
+Status: **S1–S4 DONE (2026-11-28).** S5, S6 not started. Ledger:
 `specs/tracking/dawn-compat.md`.
 
 A program written against Dawn's native API can run on yawgpu when it reaches
