@@ -457,8 +457,8 @@ provides:
 
 This is the contract of ONNX Runtime's *external Dawn* mode. ONNX Runtime
 1.32.0, built with `--use_webgpu --use_external_dawn` against the package, runs
-its WebGPU execution provider on yawgpu's Metal backend; see
-[`examples/ort_webgpu`](examples/ort_webgpu).
+its WebGPU execution provider on yawgpu's Metal backend (macOS) and Vulkan
+backend (Windows); see [`examples/ort_webgpu`](examples/ort_webgpu).
 
 For such consumers yawgpu also implements Dawn's
 `ImplicitDeviceSynchronization` feature (Metal and Vulkan): a device and its

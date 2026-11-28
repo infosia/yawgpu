@@ -6,9 +6,9 @@ Spec: `specs/blocks/171-dawn-compat-layer.md`.
 |---|---|---|
 | S1 | ABI subset guard | **DONE 2026-11-28** — `tools/dawn_compat/{gen_dawn_headers,abi_guard}.py`, crate `yawgpu-dawn` (feature `dawn-compat`), `tests/abi_guard.rs` 4/0. At Dawn `9bba943462` on arm64 macOS: 203 functions, 98 structs, 459 members, 525 constants, no mismatch |
 | S2 | Dawn toggles / cache chained structs | **DONE 2026-11-28** — yawgpu already skipped unrelated chain nodes on the instance and adapter-request chains and never read the device descriptor's chain, so no runtime change; `yawgpu.h` declares the two descriptors and three Noop tests pin the behaviour (`yawgpu --lib` 344/0) |
-| S3 | `ImplicitDeviceSynchronization` | **DONE 2026-11-28** — F1, F3, F5, F7, F9 fixed; feature advertised on Noop / Metal / Vulkan, not GLES; `concurrent_device` (4 threads × 32 iterations) on Noop, and on the Apple M2 through `e2e_metal_concurrent_device` 5 runs / 0 failures. Metal e2e regression 188/0 (54 binaries). Not run: ThreadSanitizer (the nightly `-Zbuild-std` build needs a crate that is not in the local cache), the Vulkan wrapper `e2e_vulkan_concurrent_device` on a native driver |
+| S3 | `ImplicitDeviceSynchronization` | **DONE 2026-11-28** — F1, F3, F5, F7, F9 fixed; feature advertised on Noop / Metal / Vulkan, not GLES; `concurrent_device` (4 threads × 32 iterations) on Noop, and on the Apple M2 through `e2e_metal_concurrent_device` 5 runs / 0 failures. Metal e2e regression 188/0 (54 binaries). `e2e_vulkan_concurrent_device` on a native Windows driver: see "Windows / Vulkan verification". Not run: ThreadSanitizer (the nightly `-Zbuild-std` build needs a crate that is not in the local cache) |
 | S4 | proc table, stubs, Dawn API package | **DONE 2026-11-28** — the table's `createInstance` selects the default real backend when no selector is chained, `yawgpuDawnSetDefaultBackend()` overrides it `yawgpuDawnGetProcTable()`: 276 members, 203 yawgpu + 73 stubs; `tools/dawn_compat/make_dawn_api_package.py` (12 headers, 2 standalone sources); C++ smoke test through the package on Noop, and on the Apple M2 (`smoke_computes_on_metal`). the table's `createInstance` selects the default real backend when no selector is chained and `yawgpuDawnSetDefaultBackend()` overrides it. `yawgpu-dawn --features dawn-compat` 17/0; its two Metal tests pass on the M2 |
-| S5 | ONNX Runtime bring-up | **DONE on macOS / Metal 2026-11-28** — see "ONNX Runtime bring-up" below |
+| S5 | ONNX Runtime bring-up | **DONE 2026-11-28** on macOS / Metal ("ONNX Runtime bring-up") and on Windows / Vulkan ("Windows / Vulkan verification") |
 | S6 | docs + Phase Review | **DONE 2026-11-28** — `README` section, `examples/ort_webgpu/README.md`, Phase Review below |
 
 ## Thread-safety audit (R3)
@@ -149,7 +149,8 @@ through a staging buffer on upload).
 
 Not done:
 
-- Linux / Windows Vulkan bring-up.
+- Linux Vulkan bring-up (Windows Vulkan is under "Windows / Vulkan
+  verification").
 - ONNX Runtime's own test suites (`onnxruntime_webgpu_external_dawn_test`
   uses `dawn::native`, which is out of scope) and larger models, including
   one that takes the subgroup-matrix MatMul path.
@@ -190,6 +191,10 @@ Limit: `ort_webgpu --noop` fails on Windows. ONNX Runtime's Windows build
 requests the backend type chosen at its build time (Vulkan here) and the Noop
 instance has no such adapter.
 
+On the Apple M2 at `6059d17`, after the smoke-test sources gained their Vulkan
+variants: `yawgpu-dawn --features dawn-compat,metal` 18/0, and the two Metal
+tests (`smoke_computes_on_metal`, `default_on_macos_with_metal_is_metal`) 2/0.
+
 Still open: ThreadSanitizer on the concurrent workload; ONNX Runtime on Linux
 Vulkan.
 
@@ -220,9 +225,10 @@ Gate after the fixes (Apple M2): `cargo fmt --check` clean; workspace 1,544/0;
 Metal e2e 188/0 (54 binaries); the ONNX Runtime host re-run in both device
 modes (Abs, SqueezeNet, MNIST).
 
-Open after the review, all needing a host or tool this machine lacks:
-ThreadSanitizer on the concurrent workload; `e2e_vulkan_concurrent_device` and
-the F3 fix on a native Vulkan driver; ONNX Runtime on Linux / Windows Vulkan.
+Not covered by this gate, which ran on the Mac: ThreadSanitizer on the
+concurrent workload, and everything on a native Vulkan driver (see "Windows /
+Vulkan verification" for `e2e_vulkan_concurrent_device`, the F3 fix under the
+validation layer and ONNX Runtime).
 
 ## Branch review (2026-11-28)
 

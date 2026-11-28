@@ -170,6 +170,6 @@ Fresh no-context review of `6cff8cb..717bee0` against R1–R10 and the Dawn sour
 | m9 | The Dawn-named block of `yawgpu.h` had no documentation | Fixed: Doxygen group with the shape convention, the error condition and the ownership / free contract |
 | m10 | `yawgpu-tint` builds `#[repr(u32)]` enums from shim-written memory | Deferred: the shim's `static_assert`s pin every value and range against Tint's header, so a Dawn bump that changes them fails the build |
 
-Gate after the fixes (Apple M2): `cargo fmt --check` clean; workspace 1,532/0; clippy clean on default, `metal` and `vulkan`; `e2e_metal_subgroup_matrix` 7/0. Before the fixes at `717bee0`: HAL lib 219/0 (`metal`) and 393/0 (`vulkan`). The e2e change (m8) is compiled for Vulkan by clippy but not re-run on a native Vulkan driver.
+Gate after the fixes (Apple M2): `cargo fmt --check` clean; workspace 1,532/0; clippy clean on default, `metal` and `vulkan`; `e2e_metal_subgroup_matrix` 7/0. Before the fixes at `717bee0`: HAL lib 219/0 (`metal`) and 393/0 (`vulkan`). The e2e change (m8) ran on a native Windows Vulkan driver afterwards: `e2e_vulkan_subgroup_matrix` 7/0 under the Khronos layer (`specs/tracking/dawn-compat.md`, "Windows / Vulkan verification").
 
 The bindgen input is `yawgpu.h`, so the Dawn-named extension items are generated into `yawgpu::native`.

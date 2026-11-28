@@ -1,10 +1,11 @@
 # Block 171 — Dawn compatibility layer
 
-Status: **COMPLETE on macOS / Metal (2026-11-28).** S1–S6 done; ONNX Runtime
-1.32.0 runs SqueezeNet and MNIST on yawgpu with CPU fallback disabled, matching
-the CPU provider. Phase Review: 0 CRITICAL, 2 MAJOR and 9 MINOR, all fixed or
-deferred with a written rationale. Owed on other hosts: the Vulkan concurrency
-run, ThreadSanitizer, and the ONNX Runtime bring-up on Linux / Windows Vulkan.
+Status: **COMPLETE on macOS / Metal and Windows / Vulkan (2026-11-28).** S1–S6
+done; ONNX Runtime 1.32.0 runs SqueezeNet and MNIST on yawgpu with CPU fallback
+disabled, matching the CPU provider, on the Apple M2 (Metal) and on a native
+NVIDIA Vulkan driver on Windows. Phase Review: 0 CRITICAL, 2 MAJOR and 9 MINOR,
+all fixed or deferred with a written rationale. Still open: ThreadSanitizer on
+the concurrent workload, and ONNX Runtime on Linux Vulkan.
 Ledger: `specs/tracking/dawn-compat.md`.
 
 A program written against Dawn's native API can run on yawgpu when it reaches
@@ -298,8 +299,9 @@ state, and which optional features (`BufferMapExtendedUsages`,
    only the package: compile its two sources, `dawnProcSetProcs` with
    `yawgpuDawnGetProcTable()`, then through `webgpu_cpp.h` create an instance,
    request an adapter and a device with a `DawnTogglesDescriptor`, run a
-   compute pass and read the result back. Noop in CI, Metal on the M2.
-5. **S5 — ONNX Runtime bring-up.** R7, on macOS / Metal first.
+   compute pass and read the result back. Noop by default, Metal and Vulkan as
+   real-GPU tests.
+5. **S5 — ONNX Runtime bring-up.** R7, on macOS / Metal and Windows / Vulkan.
 6. **S6 — docs and Phase Review.**
 
 S2, S3 and S4 are independent of each other; S5 needs all three.
