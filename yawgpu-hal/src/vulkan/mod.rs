@@ -890,6 +890,7 @@ impl VulkanAdapter {
                     supported,
                     &matrices,
                     self.supports_shader_float16(),
+                    self.float16_query().shader_int8,
                 ),
             }
         })
@@ -1646,6 +1647,7 @@ fn filter_subgroup_matrix_configs(
     supported: bool,
     properties: &[vk::CooperativeMatrixPropertiesKHR<'_>],
     shader_float16: bool,
+    shader_int8: bool,
 ) -> Vec<crate::HalSubgroupMatrixConfig> {
     let mut configs = Vec::new();
     if !supported {
@@ -1666,6 +1668,17 @@ fn filter_subgroup_matrix_configs(
             continue;
         };
         if !shader_float16 && [input, output].contains(&crate::HalSubgroupMatrixComponentType::F16)
+        {
+            continue;
+        }
+        if !shader_int8
+            && [input, output].iter().any(|component| {
+                matches!(
+                    component,
+                    crate::HalSubgroupMatrixComponentType::U8
+                        | crate::HalSubgroupMatrixComponentType::I8
+                )
+            })
         {
             continue;
         }
@@ -5296,7 +5309,7 @@ mod subgroup_matrix_tests {
                 0,
             );
             assert_eq!(
-                !filter_subgroup_matrix_configs(supported, &[property()], true).is_empty(),
+                !filter_subgroup_matrix_configs(supported, &[property()], true, true).is_empty(),
                 mask == 15
             );
         }
@@ -5322,7 +5335,7 @@ mod subgroup_matrix_tests {
                 version,
             );
             assert_eq!(
-                !filter_subgroup_matrix_configs(supported, &[property()], true).is_empty(),
+                !filter_subgroup_matrix_configs(supported, &[property()], true, true).is_empty(),
                 expected
             );
         }
@@ -5379,7 +5392,7 @@ mod subgroup_matrix_tests {
             (f16_output, true, true),
         ] {
             assert_eq!(
-                filter_subgroup_matrix_configs(true, &[candidate], f16).len(),
+                filter_subgroup_matrix_configs(true, &[candidate], f16, true).len(),
                 usize::from(kept)
             );
         }
@@ -5390,12 +5403,139 @@ mod subgroup_matrix_tests {
             .result_type(vk::ComponentTypeKHR::SINT32);
         use crate::HalSubgroupMatrixComponentType as T;
         assert_eq!(
-            filter_subgroup_matrix_configs(true, &[mixed, p, mixed], false),
+            filter_subgroup_matrix_configs(true, &[mixed, p, mixed], false, true),
             vec![
                 crate::HalSubgroupMatrixConfig::new(T::I8, T::I32, 8, 16, 32),
                 crate::HalSubgroupMatrixConfig::new(T::F32, T::F32, 8, 16, 32),
             ]
         );
+    }
+
+    #[test]
+    fn filtering_requires_shader_int8_for_operands() {
+        use crate::HalSubgroupMatrixComponentType as T;
+        for (input, output, input_type, output_type) in [
+            (
+                vk::ComponentTypeKHR::SINT8,
+                vk::ComponentTypeKHR::SINT32,
+                T::I8,
+                T::I32,
+            ),
+            (
+                vk::ComponentTypeKHR::UINT8,
+                vk::ComponentTypeKHR::UINT32,
+                T::U8,
+                T::U32,
+            ),
+        ] {
+            let p = property()
+                .a_type(input)
+                .b_type(input)
+                .c_type(output)
+                .result_type(output);
+            assert!(filter_subgroup_matrix_configs(true, &[p], true, false).is_empty());
+            assert_eq!(
+                filter_subgroup_matrix_configs(true, &[p], true, true),
+                vec![crate::HalSubgroupMatrixConfig::new(
+                    input_type,
+                    output_type,
+                    8,
+                    16,
+                    32
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn filtering_requires_shader_int8_for_results() {
+        use crate::HalSubgroupMatrixComponentType as T;
+        for (output, output_type) in [
+            (vk::ComponentTypeKHR::SINT8, T::I8),
+            (vk::ComponentTypeKHR::UINT8, T::U8),
+        ] {
+            let p = property().c_type(output).result_type(output);
+            assert!(filter_subgroup_matrix_configs(true, &[p], true, false).is_empty());
+            assert_eq!(
+                filter_subgroup_matrix_configs(true, &[p], true, true),
+                vec![crate::HalSubgroupMatrixConfig::new(
+                    T::F32,
+                    output_type,
+                    8,
+                    16,
+                    32
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn filtering_float16_and_int8_gates_are_independent() {
+        use crate::HalSubgroupMatrixComponentType as T;
+        let f32 = property();
+        let f16 = property()
+            .a_type(vk::ComponentTypeKHR::FLOAT16)
+            .b_type(vk::ComponentTypeKHR::FLOAT16)
+            .c_type(vk::ComponentTypeKHR::FLOAT16)
+            .result_type(vk::ComponentTypeKHR::FLOAT16);
+        let int8 = property()
+            .a_type(vk::ComponentTypeKHR::SINT8)
+            .b_type(vk::ComponentTypeKHR::SINT8)
+            .c_type(vk::ComponentTypeKHR::SINT32)
+            .result_type(vk::ComponentTypeKHR::SINT32);
+        let f32_config = crate::HalSubgroupMatrixConfig::new(T::F32, T::F32, 8, 16, 32);
+        let f16_config = crate::HalSubgroupMatrixConfig::new(T::F16, T::F16, 8, 16, 32);
+        let int8_config = crate::HalSubgroupMatrixConfig::new(T::I8, T::I32, 8, 16, 32);
+        for (shader_float16, shader_int8, expected) in [
+            (false, false, vec![f32_config]),
+            (false, true, vec![int8_config, f32_config]),
+            (true, false, vec![f32_config, f16_config]),
+            (true, true, vec![int8_config, f32_config, f16_config]),
+        ] {
+            assert_eq!(
+                filter_subgroup_matrix_configs(
+                    true,
+                    &[int8, f32, f16],
+                    shader_float16,
+                    shader_int8
+                ),
+                expected,
+                "shader_float16={shader_float16}, shader_int8={shader_int8}"
+            );
+        }
+        for shader_int8 in [false, true] {
+            assert_eq!(
+                filter_subgroup_matrix_configs(true, &[f32, f16], true, shader_int8),
+                vec![f32_config, f16_config]
+            );
+            assert_eq!(
+                filter_subgroup_matrix_configs(true, &[f32, f16], false, shader_int8),
+                vec![f32_config]
+            );
+        }
+    }
+
+    #[test]
+    fn filtering_only_int8_entries_without_shader_int8_is_empty() {
+        let signed = property()
+            .a_type(vk::ComponentTypeKHR::SINT8)
+            .b_type(vk::ComponentTypeKHR::SINT8)
+            .c_type(vk::ComponentTypeKHR::SINT32)
+            .result_type(vk::ComponentTypeKHR::SINT32);
+        let unsigned = property()
+            .a_type(vk::ComponentTypeKHR::UINT8)
+            .b_type(vk::ComponentTypeKHR::UINT8)
+            .c_type(vk::ComponentTypeKHR::UINT32)
+            .result_type(vk::ComponentTypeKHR::UINT32);
+        for shader_float16 in [false, true] {
+            assert!(filter_subgroup_matrix_configs(
+                true,
+                &[signed, unsigned],
+                shader_float16,
+                false
+            )
+            .is_empty());
+        }
     }
 
     #[test]
