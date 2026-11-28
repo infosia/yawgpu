@@ -46,6 +46,10 @@ fn tint_spirv_workarounds(
         workarounds.polyfill_saturate_as_min_max_f16;
     tint_workarounds.collapse_subgroup_min_max = workarounds.collapse_subgroup_min_max;
     tint_workarounds.pass_matrix_by_pointer = workarounds.pass_matrix_by_pointer;
+    tint_workarounds.disable_storage_subgroup_matrix_clamping =
+        workarounds.disable_storage_subgroup_matrix_clamping;
+    tint_workarounds.cooperative_matrix_stride_is_matrix_elements =
+        workarounds.cooperative_matrix_stride_is_matrix_elements;
     tint_workarounds
 }
 
@@ -2009,6 +2013,8 @@ mod tests {
             dva_transform_handle,
             polyfill_saturate_as_min_max_f16,
             pass_matrix_by_pointer,
+            disable_storage_subgroup_matrix_clamping,
+            cooperative_matrix_stride_is_matrix_elements,
         ) {
             let msl = tint_msl_workarounds(hal);
             let spirv = tint_spirv_workarounds(hal);
@@ -2049,6 +2055,8 @@ mod tests {
                 polyfill_saturate_as_min_max_f16,
                 collapse_subgroup_min_max,
                 pass_matrix_by_pointer,
+                disable_storage_subgroup_matrix_clamping,
+                cooperative_matrix_stride_is_matrix_elements,
             );
             for (writer, flags) in [
                 ("MSL", msl_flags.as_slice()),
@@ -2088,7 +2096,7 @@ mod tests {
                 assert_eq!(module.codegen_miss_count(), i + 1);
             }
         }
-        let mut spirv_flags = [yawgpu_hal::HalShaderWorkarounds::default(); 18];
+        let mut spirv_flags = [yawgpu_hal::HalShaderWorkarounds::default(); 20];
         spirv_flags[1].polyfill_bool_vec_dynamic_store = true;
         spirv_flags[2].replace_workgroup_atomic_store_with_exchange = true;
         spirv_flags[3].replace_unsigned_compare_zero = true;
@@ -2106,6 +2114,8 @@ mod tests {
         spirv_flags[15].polyfill_saturate_as_min_max_f16 = true;
         spirv_flags[16].collapse_subgroup_min_max = true;
         spirv_flags[17].pass_matrix_by_pointer = true;
+        spirv_flags[18].disable_storage_subgroup_matrix_clamping = true;
+        spirv_flags[19].cooperative_matrix_stride_is_matrix_elements = true;
         for (i, flags) in spirv_flags.into_iter().enumerate() {
             for _ in 0..2 {
                 module

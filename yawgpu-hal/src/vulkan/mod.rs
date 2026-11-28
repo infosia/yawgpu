@@ -276,6 +276,7 @@ pub struct VulkanAdapter {
     name: String,
     astc_sliced_3d_support: Arc<OnceLock<bool>>,
     subgroup_query: Arc<OnceLock<SubgroupQuery>>,
+    subgroup_matrix_query: Arc<OnceLock<SubgroupMatrixQuery>>,
     float16_query: Arc<OnceLock<Float16Query>>,
     int64_atomics_query: Arc<OnceLock<Int64AtomicsQuery>>,
 }
@@ -354,6 +355,7 @@ impl VulkanAdapter {
             name,
             astc_sliced_3d_support: Arc::new(OnceLock::new()),
             subgroup_query: Arc::new(OnceLock::new()),
+            subgroup_matrix_query: Arc::new(OnceLock::new()),
             float16_query: Arc::new(OnceLock::new()),
             int64_atomics_query: Arc::new(OnceLock::new()),
         })
@@ -706,6 +708,7 @@ impl VulkanAdapter {
         let supported_features = features2.features;
         Float16Query {
             supported_features,
+            shader_int8: extension_present && float16.shader_int8 == vk::TRUE,
             shader_float16: shader_float16_supported(
                 extension_present,
                 float16.shader_float16,
@@ -817,8 +820,79 @@ impl VulkanAdapter {
         self.subgroup_query().range
     }
 
+    /// Returns the supported cooperative matrix configurations in driver order.
     pub(super) fn subgroup_matrix_configs(&self) -> Vec<crate::HalSubgroupMatrixConfig> {
-        Vec::new()
+        self.subgroup_matrix_query().configs.clone()
+    }
+
+    fn subgroup_matrix_query(&self) -> &SubgroupMatrixQuery {
+        self.subgroup_matrix_query.get_or_init(|| {
+            let extension_present = self.has_device_extension(vk::KHR_COOPERATIVE_MATRIX_NAME);
+            if !extension_present {
+                return SubgroupMatrixQuery::default();
+            }
+            let mut matrix = vk::PhysicalDeviceCooperativeMatrixFeaturesKHR::default();
+            let mut memory = vk::PhysicalDeviceVulkanMemoryModelFeatures::default();
+            let properties = unsafe {
+                self.instance
+                    .instance
+                    .get_physical_device_properties(self.physical_device)
+            };
+            let memory_available = vulkan_memory_model_available(
+                YAWGPU_VULKAN_API_VERSION.min(properties.api_version),
+                self.has_device_extension(vk::KHR_VULKAN_MEMORY_MODEL_NAME),
+            );
+            let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut matrix);
+            if memory_available {
+                features = features.push_next(&mut memory);
+            }
+            let mut matrix_properties = vk::PhysicalDeviceCooperativeMatrixPropertiesKHR::default();
+            let mut properties2 =
+                vk::PhysicalDeviceProperties2::default().push_next(&mut matrix_properties);
+            unsafe {
+                self.instance
+                    .instance
+                    .get_physical_device_features2(self.physical_device, &mut features);
+                self.instance
+                    .instance
+                    .get_physical_device_properties2(self.physical_device, &mut properties2);
+            }
+            let loader = ash::khr::cooperative_matrix::Instance::new(
+                self.instance._entry,
+                &self.instance.instance,
+            );
+            // A failed enumeration cannot advertise a usable configuration.
+            let matrices = unsafe {
+                loader.get_physical_device_cooperative_matrix_properties(self.physical_device)
+            }
+            .unwrap_or_default();
+            let subgroup = self.subgroup_query();
+            let supported = subgroup_matrix_supported(
+                subgroup.range.is_some(),
+                matrix.cooperative_matrix == vk::TRUE
+                    && matrix_properties
+                        .cooperative_matrix_supported_stages
+                        .contains(vk::ShaderStageFlags::COMPUTE),
+                vulkan_memory_model_enabled(
+                    memory_available,
+                    memory.vulkan_memory_model,
+                    memory.vulkan_memory_model_device_scope,
+                ),
+                subgroup.extension_present
+                    && subgroup.subgroup_size_control == vk::TRUE
+                    && subgroup.compute_full_subgroups == vk::TRUE,
+                query_driver_id(&self.instance, self.physical_device),
+                properties.driver_version,
+            );
+            SubgroupMatrixQuery {
+                robust_buffer_access: matrix.cooperative_matrix_robust_buffer_access == vk::TRUE,
+                configs: filter_subgroup_matrix_configs(
+                    supported,
+                    &matrices,
+                    self.supports_shader_float16(),
+                ),
+            }
+        })
     }
 
     /// Returns the explicit compute subgroup size capabilities.
@@ -906,6 +980,9 @@ impl VulkanAdapter {
         &self,
         requested: crate::HalDeviceFeatures,
     ) -> Result<VulkanDevice, HalError> {
+        if requested.subgroup_matrix {
+            check_subgroup_matrix_request(true, !self.subgroup_matrix_configs().is_empty())?;
+        }
         let queue_family_index = self
             .queue_family_index()
             .ok_or(HalError::DeviceCreationFailed { backend: BACKEND })?;
@@ -1150,6 +1227,7 @@ impl VulkanAdapter {
         let float16_query = self.float16_query();
         let supported_features = float16_query.supported_features;
         let shader_float16 = float16_query.shader_float16;
+        let shader_int8 = requested.subgroup_matrix && float16_query.shader_int8;
         let storage_16bit_features = float16_query.storage;
         let occlusion_query_precise = supported_features.occlusion_query_precise == vk::TRUE;
         // Enable samplerAnisotropy when the physical device supports it.
@@ -1174,6 +1252,14 @@ impl VulkanAdapter {
             descriptor_indexing_available,
             descriptor_indexing_properties.robust_buffer_access_update_after_bind == vk::TRUE,
         );
+        let mut cooperative_matrix = enabled_cooperative_matrix_features(
+            requested.subgroup_matrix,
+            requested.subgroup_matrix && self.subgroup_matrix_query().robust_buffer_access,
+            buffer_robust_access2,
+        );
+        if cooperative_matrix.is_some() {
+            extension_names.push(vk::KHR_COOPERATIVE_MATRIX_NAME.as_ptr());
+        }
         // WebGPU render pipelines can configure blend/write masks per color target.
         // Vulkan requires independentBlend for differing per-attachment blend state.
         let independent_blend = supported_features.independent_blend == vk::TRUE;
@@ -1253,7 +1339,7 @@ impl VulkanAdapter {
         if shader_demote_to_helper_invocation && effective_api_version < vk::API_VERSION_1_3 {
             extension_names.push(vk::EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_NAME.as_ptr());
         }
-        if shader_float16 {
+        if shader_float16 || shader_int8 {
             extension_names.push(vk::KHR_SHADER_FLOAT16_INT8_NAME.as_ptr());
         }
         if storage_16bit_features.enabled && storage_16bit_extension {
@@ -1308,7 +1394,7 @@ impl VulkanAdapter {
             vk::PhysicalDeviceZeroInitializeWorkgroupMemoryFeatures::default()
                 .shader_zero_initialize_workgroup_memory(true);
         let mut shader_float16_int8_enable_features =
-            vk::PhysicalDeviceShaderFloat16Int8Features::default().shader_float16(true);
+            enabled_float16_int8_features(shader_float16, shader_int8);
         let mut vulkan_memory_model_enable_features =
             vk::PhysicalDeviceVulkanMemoryModelFeatures::default()
                 .vulkan_memory_model(true)
@@ -1338,8 +1424,11 @@ impl VulkanAdapter {
         if zero_initialize_workgroup_memory {
             create_info = create_info.push_next(&mut zero_initialize_enable_features);
         }
-        if shader_float16 {
-            create_info = create_info.push_next(&mut shader_float16_int8_enable_features);
+        if let Some(features) = shader_float16_int8_enable_features.as_mut() {
+            create_info = create_info.push_next(features);
+        }
+        if let Some(features) = cooperative_matrix.as_mut() {
+            create_info = create_info.push_next(features);
         }
         if vulkan_memory_model {
             create_info = create_info.push_next(&mut vulkan_memory_model_enable_features);
@@ -1394,6 +1483,8 @@ impl VulkanAdapter {
             buffer_robust_access2,
         );
         shader_workarounds.use_spirv_1_4 = use_spirv_1_4;
+        shader_workarounds.disable_storage_subgroup_matrix_clamping = cooperative_matrix
+            .is_some_and(|features| features.cooperative_matrix_robust_buffer_access == vk::TRUE);
         let inner = Arc::new(VulkanDeviceInner {
             #[cfg(test)]
             spirv_1_4_extensions_enabled: [
@@ -1421,6 +1512,7 @@ impl VulkanAdapter {
             image_format_list,
             swapchain_mutable_format,
             subgroup_size_control,
+            cooperative_matrix: requested.subgroup_matrix,
             default_compute_subgroup_size,
             storage_input_output16: storage_16bit_features.storage_input_output16,
             max_sampler_anisotropy,
@@ -1506,10 +1598,121 @@ impl Int64AtomicsQuery {
     }
 }
 
+/// Pointer-free cooperative matrix snapshot shared by adapter clones.
+#[derive(Debug, Default)]
+struct SubgroupMatrixQuery {
+    robust_buffer_access: bool,
+    configs: Vec<crate::HalSubgroupMatrixConfig>,
+}
+
+fn subgroup_matrix_supported(
+    subgroups: bool,
+    cooperative_compute: bool,
+    memory_model: bool,
+    full_subgroups: bool,
+    driver_id: Option<u32>,
+    driver_version: u32,
+) -> bool {
+    // Mesa uses the standard Vulkan major/minor/patch encoding on every OS.
+    let version = (
+        driver_version >> 22,
+        (driver_version >> 12) & 0x3ff,
+        driver_version & 0xfff,
+    );
+    subgroups
+        && cooperative_compute
+        && memory_model
+        && full_subgroups
+        && !(driver_id == Some(vk::DriverId::INTEL_OPEN_SOURCE_MESA.as_raw() as u32)
+            && version < (25, 2, 0))
+}
+
+fn subgroup_matrix_component_type(
+    value: vk::ComponentTypeKHR,
+) -> Option<crate::HalSubgroupMatrixComponentType> {
+    use crate::HalSubgroupMatrixComponentType as T;
+    match value {
+        vk::ComponentTypeKHR::FLOAT32 => Some(T::F32),
+        vk::ComponentTypeKHR::FLOAT16 => Some(T::F16),
+        vk::ComponentTypeKHR::UINT32 => Some(T::U32),
+        vk::ComponentTypeKHR::SINT32 => Some(T::I32),
+        vk::ComponentTypeKHR::UINT8 => Some(T::U8),
+        vk::ComponentTypeKHR::SINT8 => Some(T::I8),
+        _ => None,
+    }
+}
+
+fn filter_subgroup_matrix_configs(
+    supported: bool,
+    properties: &[vk::CooperativeMatrixPropertiesKHR<'_>],
+    shader_float16: bool,
+) -> Vec<crate::HalSubgroupMatrixConfig> {
+    let mut configs = Vec::new();
+    if !supported {
+        return configs;
+    }
+    for p in properties {
+        if p.a_type != p.b_type
+            || p.c_type != p.result_type
+            || p.scope != vk::ScopeKHR::SUBGROUP
+            || p.saturating_accumulation != vk::FALSE
+        {
+            continue;
+        }
+        let (Some(input), Some(output)) = (
+            subgroup_matrix_component_type(p.a_type),
+            subgroup_matrix_component_type(p.result_type),
+        ) else {
+            continue;
+        };
+        if !shader_float16 && [input, output].contains(&crate::HalSubgroupMatrixComponentType::F16)
+        {
+            continue;
+        }
+        let config =
+            crate::HalSubgroupMatrixConfig::new(input, output, p.m_size, p.n_size, p.k_size);
+        if !configs.contains(&config) {
+            configs.push(config);
+        }
+    }
+    configs
+}
+
+fn check_subgroup_matrix_request(requested: bool, available: bool) -> Result<(), HalError> {
+    if requested && !available {
+        return Err(HalError::DeviceCreationFailed { backend: BACKEND });
+    }
+    Ok(())
+}
+
+fn enabled_cooperative_matrix_features(
+    requested: bool,
+    robust_supported: bool,
+    buffer_robust_access2: bool,
+) -> Option<vk::PhysicalDeviceCooperativeMatrixFeaturesKHR<'static>> {
+    requested.then(|| {
+        vk::PhysicalDeviceCooperativeMatrixFeaturesKHR::default()
+            .cooperative_matrix(true)
+            .cooperative_matrix_robust_buffer_access(robust_supported && buffer_robust_access2)
+    })
+}
+
+fn enabled_float16_int8_features(
+    float16: bool,
+    int8: bool,
+) -> Option<vk::PhysicalDeviceShaderFloat16Int8Features<'static>> {
+    (float16 || int8).then(|| {
+        vk::PhysicalDeviceShaderFloat16Int8Features::default()
+            .shader_float16(float16)
+            .shader_int8(int8)
+    })
+}
+
 /// Pointer-free feature snapshot reused by adapter clones and device creation.
 #[derive(Debug, Clone, Copy)]
 struct Float16Query {
     supported_features: vk::PhysicalDeviceFeatures,
+    shader_int8: bool,
     shader_float16: bool,
     storage: Enabled16BitStorageFeatures,
 }
@@ -3135,6 +3338,7 @@ mod tests {
                 &[],
                 0,
                 None,
+                false,
             )
             .expect("create compute pipeline with selected SPIR-V version");
         device
@@ -3218,6 +3422,7 @@ mod tests {
                 }],
                 0,
                 None,
+                false,
             )
             .unwrap();
         let buffer = device
@@ -5035,5 +5240,197 @@ diagnostic(off, derivative_uniformity);
         assert!(texture_component_swizzle_supported(false, vk::TRUE));
         assert!(texture_component_swizzle_supported(true, vk::TRUE));
         assert!(!texture_component_swizzle_supported(true, vk::FALSE));
+    }
+}
+
+#[cfg(test)]
+mod subgroup_matrix_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    fn matrix_query_is_cached_across_adapter_clones() {
+        let instance = VulkanInstance::new().expect("create Vulkan instance");
+        let Some(adapter) = instance.enumerate_adapters().into_iter().next() else {
+            return;
+        };
+        let cloned = adapter.clone();
+        assert!(Arc::ptr_eq(
+            &adapter.subgroup_matrix_query,
+            &cloned.subgroup_matrix_query
+        ));
+        assert!(adapter.subgroup_matrix_query.get().is_none());
+        let configs = adapter.subgroup_matrix_configs();
+        assert!(adapter.subgroup_matrix_query.get().is_some());
+        assert_eq!(configs, cloned.subgroup_matrix_configs());
+        assert!(std::ptr::eq(
+            adapter.subgroup_matrix_query(),
+            cloned.subgroup_matrix_query()
+        ));
+        if !adapter.has_device_extension(vk::KHR_COOPERATIVE_MATRIX_NAME) {
+            assert!(configs.is_empty());
+        }
+    }
+
+    fn property() -> vk::CooperativeMatrixPropertiesKHR<'static> {
+        vk::CooperativeMatrixPropertiesKHR::default()
+            .a_type(vk::ComponentTypeKHR::FLOAT32)
+            .b_type(vk::ComponentTypeKHR::FLOAT32)
+            .c_type(vk::ComponentTypeKHR::FLOAT32)
+            .result_type(vk::ComponentTypeKHR::FLOAT32)
+            .scope(vk::ScopeKHR::SUBGROUP)
+            .m_size(8)
+            .n_size(16)
+            .k_size(32)
+    }
+
+    #[test]
+    fn advertisement_requires_every_condition_and_mesa_25_2() {
+        for mask in 0..16 {
+            let supported = subgroup_matrix_supported(
+                mask & 1 != 0,
+                mask & 2 != 0,
+                mask & 4 != 0,
+                mask & 8 != 0,
+                None,
+                0,
+            );
+            assert_eq!(
+                !filter_subgroup_matrix_configs(supported, &[property()], true).is_empty(),
+                mask == 15
+            );
+        }
+        for (driver, version, expected) in [
+            (
+                vk::DriverId::INTEL_OPEN_SOURCE_MESA,
+                vk::make_api_version(0, 25, 1, 99),
+                false,
+            ),
+            (
+                vk::DriverId::INTEL_OPEN_SOURCE_MESA,
+                vk::make_api_version(0, 25, 2, 0),
+                true,
+            ),
+            (vk::DriverId::NVIDIA_PROPRIETARY, 0, true),
+        ] {
+            let supported = subgroup_matrix_supported(
+                true,
+                true,
+                true,
+                true,
+                Some(driver.as_raw() as u32),
+                version,
+            );
+            assert_eq!(
+                !filter_subgroup_matrix_configs(supported, &[property()], true).is_empty(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn component_mapping_covers_all_six_types() {
+        use crate::HalSubgroupMatrixComponentType as T;
+        for (vk_type, hal_type) in [
+            (vk::ComponentTypeKHR::FLOAT32, T::F32),
+            (vk::ComponentTypeKHR::FLOAT16, T::F16),
+            (vk::ComponentTypeKHR::UINT32, T::U32),
+            (vk::ComponentTypeKHR::SINT32, T::I32),
+            (vk::ComponentTypeKHR::UINT8, T::U8),
+            (vk::ComponentTypeKHR::SINT8, T::I8),
+        ] {
+            assert_eq!(subgroup_matrix_component_type(vk_type), Some(hal_type));
+        }
+        for unsupported in [vk::ComponentTypeKHR::FLOAT64, vk::ComponentTypeKHR::SINT16] {
+            assert_eq!(subgroup_matrix_component_type(unsupported), None);
+        }
+    }
+
+    #[test]
+    fn filtering_checks_types_scope_saturation_f16_and_dimensions() {
+        let p = property();
+        let f16_input = p
+            .a_type(vk::ComponentTypeKHR::FLOAT16)
+            .b_type(vk::ComponentTypeKHR::FLOAT16);
+        let f16_output = p
+            .c_type(vk::ComponentTypeKHR::FLOAT16)
+            .result_type(vk::ComponentTypeKHR::FLOAT16);
+        for (candidate, f16, kept) in [
+            (p, false, true),
+            (p.b_type(vk::ComponentTypeKHR::UINT32), true, false),
+            (p.c_type(vk::ComponentTypeKHR::UINT32), true, false),
+            (p.scope(vk::ScopeKHR::WORKGROUP), true, false),
+            (p.saturating_accumulation(true), true, false),
+            (
+                p.a_type(vk::ComponentTypeKHR::FLOAT64)
+                    .b_type(vk::ComponentTypeKHR::FLOAT64),
+                true,
+                false,
+            ),
+            (
+                p.c_type(vk::ComponentTypeKHR::SINT16)
+                    .result_type(vk::ComponentTypeKHR::SINT16),
+                true,
+                false,
+            ),
+            (f16_input, false, false),
+            (f16_input, true, true),
+            (f16_output, false, false),
+            (f16_output, true, true),
+        ] {
+            assert_eq!(
+                filter_subgroup_matrix_configs(true, &[candidate], f16).len(),
+                usize::from(kept)
+            );
+        }
+        let mixed = p
+            .a_type(vk::ComponentTypeKHR::SINT8)
+            .b_type(vk::ComponentTypeKHR::SINT8)
+            .c_type(vk::ComponentTypeKHR::SINT32)
+            .result_type(vk::ComponentTypeKHR::SINT32);
+        use crate::HalSubgroupMatrixComponentType as T;
+        assert_eq!(
+            filter_subgroup_matrix_configs(true, &[mixed, p, mixed], false),
+            vec![
+                crate::HalSubgroupMatrixConfig::new(T::I8, T::I32, 8, 16, 32),
+                crate::HalSubgroupMatrixConfig::new(T::F32, T::F32, 8, 16, 32),
+            ]
+        );
+    }
+
+    #[test]
+    fn device_feature_combinations_and_request_validation() {
+        for requested in [false, true] {
+            for available in [false, true] {
+                assert_eq!(
+                    check_subgroup_matrix_request(requested, available).is_ok(),
+                    !requested || available
+                );
+                for robust2 in [false, true] {
+                    let features =
+                        enabled_cooperative_matrix_features(requested, available, robust2);
+                    assert_eq!(features.is_some(), requested);
+                    if let Some(features) = features {
+                        assert_eq!(features.cooperative_matrix, vk::TRUE);
+                        assert_eq!(
+                            features.cooperative_matrix_robust_buffer_access == vk::TRUE,
+                            available && robust2
+                        );
+                        assert!(features.p_next.is_null());
+                    }
+                }
+            }
+        }
+        for f16 in [false, true] {
+            for int8 in [false, true] {
+                let features = enabled_float16_int8_features(f16, int8);
+                assert_eq!(features.is_some(), f16 || int8);
+                if let Some(features) = features {
+                    assert_eq!(features.shader_float16 == vk::TRUE, f16);
+                    assert_eq!(features.shader_int8 == vk::TRUE, int8);
+                    assert!(features.p_next.is_null());
+                }
+            }
+        }
     }
 }

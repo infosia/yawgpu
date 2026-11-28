@@ -455,7 +455,11 @@ static_assert(offsetof(YawgpuTintMslWorkarounds, replace_workgroup_bool_with_u32
 static_assert(offsetof(YawgpuTintMslWorkarounds, scalarize_max_min_clamp) == 10,
               "YawgpuTintMslWorkarounds layout changed");
 
-static_assert(sizeof(YawgpuTintSpirvWorkarounds) == 23, "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, disable_storage_subgroup_matrix_clamping) == 23,
+              "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(offsetof(YawgpuTintSpirvWorkarounds, cooperative_matrix_stride_is_matrix_elements) == 24,
+              "YawgpuTintSpirvWorkarounds layout changed");
+static_assert(sizeof(YawgpuTintSpirvWorkarounds) == 25, "YawgpuTintSpirvWorkarounds layout changed");
 static_assert(alignof(YawgpuTintSpirvWorkarounds) == 1, "YawgpuTintSpirvWorkarounds alignment changed");
 static_assert(offsetof(YawgpuTintSpirvWorkarounds, use_demote_to_helper_invocation) == 0,
               "YawgpuTintSpirvWorkarounds layout changed");
@@ -2616,6 +2620,10 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
             workarounds->polyfill_saturate_as_min_max_f16;
         options.workarounds.collapse_subgroup_min_max = workarounds->collapse_subgroup_min_max;
         options.workarounds.pass_matrix_by_pointer = workarounds->pass_matrix_by_pointer;
+        options.extensions.disable_storage_subgroup_matrix_clamping =
+            workarounds->disable_storage_subgroup_matrix_clamping;
+        options.workarounds.cooperative_matrix_stride_is_matrix_elements =
+            workarounds->cooperative_matrix_stride_is_matrix_elements;
         options.disable_robustness = disable_robustness;
         options.extensions.disable_image_robustness = workarounds->disable_image_robustness;
         options.extensions.disable_storage_runtime_sized_array_index_clamping =

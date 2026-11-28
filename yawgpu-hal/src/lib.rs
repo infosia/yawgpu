@@ -340,6 +340,18 @@ fn reject_required_subgroup_size(
     }
 }
 
+#[cfg(any(test, feature = "gles"))]
+fn reject_full_subgroups(backend: &'static str, required: bool) -> Result<(), HalError> {
+    if required {
+        return Err(HalError::ShaderCompilationFailed {
+            backend,
+            message: "full subgroups for subgroup matrices are not supported on this backend"
+                .into(),
+        });
+    }
+    Ok(())
+}
+
 /// Noop module.
 #[cfg(feature = "noop")]
 pub mod noop;
@@ -829,6 +841,8 @@ impl HalAdapter {
 pub struct HalDeviceFeatures {
     /// Enable 64-bit buffer atomics for WGSL `atomic_vec2u_min_max`.
     pub atomic_vec2u_min_max: bool,
+    /// Enable cooperative matrices for WGSL subgroup matrix operations.
+    pub subgroup_matrix: bool,
 }
 
 /// Enumerates HAL backend values.
@@ -1089,6 +1103,8 @@ impl HalDevice {
     /// Metal uses its fixed width, with the required size checked by core.
     /// GLES returns a [`HalError`] for `Some(_)`. Vulkan requires subgroup size
     /// `S` with full subgroups (`VK_EXT_subgroup_size_control`).
+    /// `require_full_subgroups` also requires full subgroups for matrix shaders,
+    /// independently of an explicit size; Noop and Metal ignore it and GLES rejects it.
     #[allow(clippy::too_many_arguments)]
     pub fn create_compute_pipeline(
         &self,
@@ -1098,6 +1114,7 @@ impl HalDevice {
         bindings: &[HalDescriptorBinding],
         user_immediate_size: u32,
         required_subgroup_size: Option<u32>,
+        require_full_subgroups: bool,
     ) -> Result<HalComputePipeline, HalError> {
         #[cfg(not(any(feature = "gles", feature = "metal", feature = "vulkan")))]
         let _ = (
@@ -1108,7 +1125,7 @@ impl HalDevice {
             required_subgroup_size,
         );
         #[cfg(not(feature = "vulkan"))]
-        let _ = user_immediate_size;
+        let _ = (user_immediate_size, require_full_subgroups);
         match self {
             #[cfg(feature = "noop")]
             Self::Noop(_) => Ok(HalComputePipeline::Noop),
@@ -1121,6 +1138,7 @@ impl HalDevice {
                     bindings,
                     user_immediate_size,
                     required_subgroup_size,
+                    require_full_subgroups,
                 )
                 .map(HalComputePipeline::Vulkan),
             #[cfg(feature = "metal")]
@@ -1135,6 +1153,7 @@ impl HalDevice {
             #[cfg(feature = "gles")]
             Self::Gles(device) => {
                 reject_required_subgroup_size("gles", required_subgroup_size)?;
+                reject_full_subgroups("gles", require_full_subgroups)?;
                 device
                     .create_compute_pipeline(shader, entry_point, workgroup_size, bindings)
                     .map(HalComputePipeline::Gles)
@@ -1660,6 +1679,7 @@ mod tests {
         for requested in [false, true] {
             let features = HalDeviceFeatures {
                 atomic_vec2u_min_max: requested,
+                ..Default::default()
             };
             assert!(adapter.create_device_with_features(features).is_ok());
         }
@@ -1669,6 +1689,43 @@ mod tests {
     fn submission_index_none_is_pre_submission_value() {
         assert_eq!(SubmissionIndex::default(), SubmissionIndex::NONE);
         assert!(SubmissionIndex::NONE <= SubmissionIndex::default());
+    }
+
+    #[test]
+    fn subgroup_matrix_requests_default_off_and_noop_accepts_both() {
+        assert!(!HalDeviceFeatures::default().subgroup_matrix);
+        for requested in [false, true] {
+            let adapter = HalInstance::new_noop().enumerate_adapters().remove(0);
+            let device = adapter
+                .create_device_with_features(HalDeviceFeatures {
+                    subgroup_matrix: requested,
+                    ..Default::default()
+                })
+                .unwrap();
+            assert!(device
+                .create_compute_pipeline(
+                    HalShaderSource::Msl(String::new()),
+                    "cs",
+                    (4, 1, 1),
+                    &[],
+                    0,
+                    None,
+                    requested
+                )
+                .is_ok());
+        }
+    }
+
+    #[test]
+    fn gles_rejects_full_subgroups_only_when_requested() {
+        assert!(reject_full_subgroups("gles", false).is_ok());
+        assert!(matches!(
+            reject_full_subgroups("gles", true),
+            Err(HalError::ShaderCompilationFailed {
+                backend: "gles",
+                ..
+            })
+        ));
     }
 
     fn noop_device() -> Result<HalDevice, HalError> {
@@ -2118,6 +2175,7 @@ mod tests {
             &[],
             0,
             None,
+            false,
         )?;
 
         assert!(matches!(pipeline, HalComputePipeline::Noop));
@@ -2135,6 +2193,7 @@ mod tests {
             &[],
             0,
             Some(4),
+            false,
         )?;
 
         assert!(matches!(pipeline, HalComputePipeline::Noop));
@@ -2418,6 +2477,7 @@ mod tests {
             &[],
             0,
             None,
+            false,
         )?;
 
         queue.submit_copies(&[HalCopy::ComputePass(HalComputePass {

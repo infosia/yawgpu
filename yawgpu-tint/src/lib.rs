@@ -116,10 +116,14 @@ pub struct SpirvWorkarounds {
     pub pass_matrix_by_pointer: bool,
     /// Emit SPIR-V 1.4 instead of the default SPIR-V 1.3.
     pub use_spirv_1_4: bool,
+    /// Rely on enabled Vulkan cooperative matrix robust buffer access.
+    pub disable_storage_subgroup_matrix_clamping: bool,
+    /// Interpret cooperative matrix load/store strides in matrix elements.
+    pub cooperative_matrix_stride_is_matrix_elements: bool,
 }
 
 const _: () = {
-    assert!(core::mem::size_of::<SpirvWorkarounds>() == 23);
+    assert!(core::mem::size_of::<SpirvWorkarounds>() == 25);
     assert!(core::mem::align_of::<SpirvWorkarounds>() == 1);
     assert!(core::mem::offset_of!(SpirvWorkarounds, use_demote_to_helper_invocation) == 0);
     assert!(core::mem::offset_of!(SpirvWorkarounds, native_dot_4x8_packed) == 1);
@@ -154,6 +158,15 @@ const _: () = {
     assert!(core::mem::offset_of!(SpirvWorkarounds, collapse_subgroup_min_max) == 20);
     assert!(core::mem::offset_of!(SpirvWorkarounds, pass_matrix_by_pointer) == 21);
     assert!(core::mem::offset_of!(SpirvWorkarounds, use_spirv_1_4) == 22);
+    assert!(
+        core::mem::offset_of!(SpirvWorkarounds, disable_storage_subgroup_matrix_clamping) == 23
+    );
+    assert!(
+        core::mem::offset_of!(
+            SpirvWorkarounds,
+            cooperative_matrix_stride_is_matrix_elements
+        ) == 24
+    );
 };
 
 /// Whether this build links the Tint backend.

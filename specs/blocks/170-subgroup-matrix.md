@@ -9,8 +9,14 @@ advertises `{F32, F32}` and `{F16, F16}` 8×8×8 on Apple7; on the Apple M2
 multiply-accumulate in both layouts, scalar arithmetic, the two pipeline
 validation errors), each arithmetic test confirmed to fail under a mutated
 CPU reference. The store-with-offset, out-of-bounds and fill-constructor
-scenarios are owed in the shared e2e body. S3 (Vulkan on Windows / Linux) and
-S4 (docs + Phase Review) not started.
+scenarios are owed in the shared e2e body. **S3 DONE on Windows
+(2026-11-28)** — Vulkan advertises the filtered
+`VK_KHR_cooperative_matrix` list and enables the extension on request; on the
+RTX 5060 Ti (driver 621.24) the adapter reports 12 configurations (f16 → f16 /
+f32 and u8 / i8 → u32 / i32, subgroup range 32–32) and
+`e2e_vulkan_subgroup_matrix` is 4/0 under `VK_LAYER_KHRONOS_validation` with no
+validation output; workspace 1,530/0 and 1,781/0 with `vulkan`. Owed for S3: a
+native Linux Vulkan run. S4 (docs + Phase Review) not started.
 Ledger: `specs/tracking/subgroups.md` ("Block 170" section).
 
 Dawn's `ChromiumExperimentalSubgroupMatrix` feature enables the WGSL extension
@@ -232,6 +238,14 @@ advertised feature is always usable.
   without `@subgroup_size` (Dawn `ComputePipelineVk.cpp`).
 - Tint's SPIR-V writer already receives `use_vulkan_memory_model`; cooperative
   matrix SPIR-V is rejected by Tint without it, and R9.3 guarantees it.
+- On ARM proprietary (Mali) drivers Tint's SPIR-V writer runs with
+  `cooperative_matrix_stride_is_matrix_elements = true`: those drivers read the
+  stride operand of cooperative matrix load / store in matrix elements (Dawn
+  `PhysicalDeviceVk.cpp`, crbug.com/460209126). The predicate is the one the
+  existing ARM shader workarounds use.
+- A `subgroup_matrix` request on an adapter whose R9 list is empty is a
+  `HalError`. Core never sends one, because R1 advertises the feature only for
+  a non-empty list.
 
 ## Slices
 

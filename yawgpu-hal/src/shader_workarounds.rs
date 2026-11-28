@@ -115,6 +115,10 @@ pub struct HalShaderWorkarounds {
     pub polyfill_saturate_as_min_max_f16: bool,
     /// SPIR-V: Pass matrix arguments to user functions by pointer.
     pub pass_matrix_by_pointer: bool,
+    /// SPIR-V: rely on enabled cooperative matrix robust buffer access.
+    pub disable_storage_subgroup_matrix_clamping: bool,
+    /// SPIR-V: interpret cooperative matrix strides in matrix elements on Mali.
+    pub cooperative_matrix_stride_is_matrix_elements: bool,
 }
 
 impl HalShaderWorkarounds {
@@ -182,6 +186,7 @@ impl HalShaderWorkarounds {
             polyfill_saturate_as_min_max_f16: facts.is_intel_mesa,
             collapse_subgroup_min_max: facts.is_windows_amd,
             pass_matrix_by_pointer: facts.is_android_qualcomm,
+            cooperative_matrix_stride_is_matrix_elements: facts.may_be_arm_proprietary,
             ..Self::default()
         }
     }
@@ -218,6 +223,9 @@ impl HalShaderWorkarounds {
                 "dva_transform_handle" => flags.dva_transform_handle = true,
                 "polyfill_saturate_as_min_max_f16" => flags.polyfill_saturate_as_min_max_f16 = true,
                 "pass_matrix_by_pointer" => flags.pass_matrix_by_pointer = true,
+                "cooperative_matrix_stride_is_matrix_elements" => {
+                    flags.cooperative_matrix_stride_is_matrix_elements = true
+                }
                 _ => {}
             }
         }
@@ -228,6 +236,10 @@ impl HalShaderWorkarounds {
     pub(crate) fn with_forced(self, forced: Self) -> Self {
         Self {
             use_spirv_1_4: self.use_spirv_1_4,
+            disable_storage_subgroup_matrix_clamping: self.disable_storage_subgroup_matrix_clamping,
+            cooperative_matrix_stride_is_matrix_elements: self
+                .cooperative_matrix_stride_is_matrix_elements
+                || forced.cooperative_matrix_stride_is_matrix_elements,
             disable_demote_to_helper: self.disable_demote_to_helper,
             use_demote_to_helper_invocation: self.use_demote_to_helper_invocation,
             native_dot_4x8_packed: self.native_dot_4x8_packed,
@@ -624,6 +636,8 @@ mod tests {
                                 assert_eq!(f.texture_sample_compare_2d_polyfill, qualcomm);
                                 assert_eq!(f.scalarize_max_min_clamp, qualcomm);
                                 assert_eq!(f.polyfill_pack_unpack_4x8_norm, arm);
+                                assert_eq!(f.cooperative_matrix_stride_is_matrix_elements, arm);
+                                assert!(!f.disable_storage_subgroup_matrix_clamping);
                                 assert_eq!(f.dva_transform_handle, qualcomm || arm || swiftshader);
                                 assert_eq!(f.polyfill_saturate_as_min_max_f16, driver == Some(6));
                                 assert_eq!(
@@ -638,6 +652,24 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn subgroup_matrix_workarounds_preserve_device_robustness_and_force_only_stride() {
+        let forced = HalShaderWorkarounds::parse_forced(Some(
+            "cooperative_matrix_stride_is_matrix_elements,disable_storage_subgroup_matrix_clamping",
+        ));
+        assert!(forced.cooperative_matrix_stride_is_matrix_elements);
+        assert!(!forced.disable_storage_subgroup_matrix_clamping);
+        for enabled in [false, true] {
+            let selected = HalShaderWorkarounds {
+                disable_storage_subgroup_matrix_clamping: enabled,
+                ..Default::default()
+            }
+            .with_forced(forced);
+            assert_eq!(selected.disable_storage_subgroup_matrix_clamping, enabled);
+            assert!(selected.cooperative_matrix_stride_is_matrix_elements);
         }
     }
 

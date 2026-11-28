@@ -22,6 +22,13 @@ pub(crate) struct AdapterInner {
     pub(crate) consumed: Mutex<bool>,
 }
 
+fn requested_hal_features(features: &FeatureSet) -> yawgpu_hal::HalDeviceFeatures {
+    let mut requested = yawgpu_hal::HalDeviceFeatures::default();
+    requested.atomic_vec2u_min_max = features.contains(&Feature::AtomicVec2uMinMax);
+    requested.subgroup_matrix = features.contains(&Feature::ChromiumExperimentalSubgroupMatrix);
+    requested
+}
+
 impl Adapter {
     /// Returns the backend's hardware and driver identity.
     #[must_use]
@@ -154,8 +161,7 @@ impl Adapter {
             .validate_required_limits(required_limits)
             .map_err(Error::Validation)?;
         let features = self.resolve_features(required_features)?;
-        let mut hal_features = yawgpu_hal::HalDeviceFeatures::default();
-        hal_features.atomic_vec2u_min_max = features.contains(&Feature::AtomicVec2uMinMax);
+        let hal_features = requested_hal_features(&features);
         let hal = self.inner.hal.create_device_with_features(hal_features)?;
         *consumed = true;
         Ok(Device::from_hal_with_adapter_properties(
@@ -628,6 +634,24 @@ mod tests {
         assert!(device
             .features()
             .contains(&Feature::ChromiumExperimentalSubgroupMatrix));
+    }
+
+    #[test]
+    fn subgroup_matrix_request_reaches_hal_features_only_when_enabled() {
+        for matrix in [false, true] {
+            for atomics in [false, true] {
+                let mut features = FeatureSet::default();
+                if matrix {
+                    features.insert(Feature::ChromiumExperimentalSubgroupMatrix);
+                }
+                if atomics {
+                    features.insert(Feature::AtomicVec2uMinMax);
+                }
+                let requested = requested_hal_features(&features);
+                assert_eq!(requested.subgroup_matrix, matrix);
+                assert_eq!(requested.atomic_vec2u_min_max, atomics);
+            }
+        }
     }
 
     #[test]

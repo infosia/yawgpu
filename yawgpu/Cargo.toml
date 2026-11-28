@@ -528,6 +528,11 @@ path = "tests/e2e_vulkan_shader_workarounds.rs"
 required-features = ["vulkan"]
 
 [[test]]
+name = "e2e_vulkan_subgroup_matrix"
+path = "tests/e2e_vulkan_subgroup_matrix.rs"
+required-features = ["vulkan"]
+
+[[test]]
 name = "e2e_vulkan_subgroup_size_control"
 path = "tests/e2e_vulkan_subgroup_size_control.rs"
 required-features = ["vulkan"]

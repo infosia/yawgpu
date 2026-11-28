@@ -37,6 +37,8 @@ pub(super) struct VulkanDeviceInner {
     /// need it for a required subgroup size and for
     /// `ALLOW_VARYING_SUBGROUP_SIZE`.
     pub(super) subgroup_size_control: bool,
+    /// Whether this device enabled VK_KHR_cooperative_matrix.
+    pub(super) cooperative_matrix: bool,
     /// Required size for compute pipelines without an explicit WGSL subgroup size.
     pub(super) default_compute_subgroup_size: Option<u32>,
     /// Whether `VK_KHR_16bit_storage` / `storageInputOutput16` was enabled.
@@ -63,6 +65,7 @@ impl fmt::Debug for VulkanDeviceInner {
             .field("vulkan_memory_model", &self.vulkan_memory_model)
             .field("image_format_list", &self.image_format_list)
             .field("subgroup_size_control", &self.subgroup_size_control)
+            .field("cooperative_matrix", &self.cooperative_matrix)
             .field(
                 "default_compute_subgroup_size",
                 &self.default_compute_subgroup_size,
@@ -185,7 +188,9 @@ impl VulkanDevice {
     /// `@subgroup_size(S)` (Block 108): the stage requires subgroup size `S`
     /// with full subgroups. It returns a [`HalError`] when the device did not
     /// enable `VK_EXT_subgroup_size_control`. Without an explicit size the
-    /// device-selected default is required, when present, without full subgroups.
+    /// device-selected default is required, when present. Matrix shaders set
+    /// `require_full_subgroups` even when they do not declare an explicit size.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_compute_pipeline(
         &self,
         shader: HalShaderSource,
@@ -194,6 +199,7 @@ impl VulkanDevice {
         bindings: &[HalDescriptorBinding],
         user_immediate_size: u32,
         required_subgroup_size: Option<u32>,
+        require_full_subgroups: bool,
     ) -> Result<VulkanComputePipeline, HalError> {
         create_compute_pipeline(
             Arc::clone(&self.inner),
@@ -202,6 +208,7 @@ impl VulkanDevice {
             bindings,
             user_immediate_size,
             required_subgroup_size,
+            require_full_subgroups,
         )
     }
 
@@ -263,6 +270,52 @@ pub(super) fn physical_device_name(properties: vk::PhysicalDeviceProperties) -> 
 mod tests {
     use super::super::test_helpers::*;
     use super::*;
+
+    #[test]
+    #[ignore = "manual real Vulkan backend test"]
+    fn vulkan_device_subgroup_matrix_request_enables_full_subgroup_pipelines() {
+        let instance = VulkanInstance::new().expect("create Vulkan instance");
+        let Some(adapter) = instance.enumerate_adapters().into_iter().next() else {
+            eprintln!("skipping: no Vulkan adapter");
+            return;
+        };
+        let baseline = adapter.create_device().expect("create default device");
+        assert!(!baseline.inner.cooperative_matrix);
+        assert!(
+            !baseline
+                .inner
+                .shader_workarounds
+                .disable_storage_subgroup_matrix_clamping
+        );
+        let requested = crate::HalDeviceFeatures {
+            subgroup_matrix: true,
+            ..Default::default()
+        };
+        if adapter.subgroup_matrix_configs().is_empty() {
+            assert!(adapter.create_device_with_features(requested).is_err());
+            eprintln!("skipping enabled path: adapter has no subgroup matrix configurations");
+            return;
+        }
+        let device = adapter
+            .create_device_with_features(requested)
+            .expect("create matrix device");
+        assert!(device.inner.cooperative_matrix);
+        assert!(device.inner.vulkan_memory_model);
+        assert!(device.inner.subgroup_size_control);
+        let (_, max) = adapter.subgroup_size_range().expect("subgroup range");
+        let pipeline = device
+            .create_compute_pipeline(
+                HalShaderSource::SpirV(compute_spirv_with_workgroup_size_x(max)),
+                "main",
+                (max, 1, 1),
+                &[],
+                0,
+                None,
+                true,
+            )
+            .expect("create full subgroup pipeline without an explicit size");
+        assert_ne!(pipeline.inner.pipeline, vk::Pipeline::null());
+    }
 
     /// Block 102 R3: both query kinds allocate a real pool and each counts as
     /// one device allocation; the kind reaches the query set unchanged.
@@ -363,6 +416,7 @@ mod tests {
                 &[],
                 0,
                 None,
+                false,
             )
             .expect("create compute pipeline");
         assert_ne!(pipeline.inner.pipeline, vk::Pipeline::null());
@@ -501,6 +555,7 @@ mod tests {
                 &[],
                 0,
                 None,
+                false,
             )
             .expect("create compute pipeline without @subgroup_size");
         assert_ne!(pipeline.inner.pipeline, vk::Pipeline::null());
@@ -539,6 +594,7 @@ mod tests {
                 &[],
                 0,
                 Some(caps.min_size),
+                false,
             )
             .expect("create compute pipeline with a required subgroup size");
         assert_ne!(pipeline.inner.pipeline, vk::Pipeline::null());

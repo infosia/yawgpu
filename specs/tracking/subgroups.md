@@ -150,7 +150,7 @@ Spec: `specs/blocks/170-subgroup-matrix.md`.
 |---|---|---|
 | S1 | core `Feature::ChromiumExperimentalSubgroupMatrix` (⇒ `Subgroups`), FFI `0x00050034`, `WGPUAdapterPropertiesSubgroupMatrixConfigs` (`0x0005003B`) on both adapter-info queries with the caller chain preserved, Tint `kChromiumExperimentalSubgroupMatrix` gate, `uses_subgroup_matrix` + `SubgroupMatrixInfo` reflection on the override-substituted IR, core rules R5 / R6, HAL `subgroup_matrix_configs()` (Noop one 8×8×8 f32; Metal / Vulkan / GLES empty) | **DONE 2026-11-28** |
 | S2 | Metal advertisement (Apple7) + `e2e_metal_subgroup_matrix.rs` | **DONE 2026-11-28** — M2 reports 8×8×8 f32 and f16, range 32–32; e2e 4/0. Owed: store-with-offset, out-of-bounds, fill-constructor scenarios |
-| S3 | Vulkan advertisement, device enable, full subgroups + `e2e_vulkan_subgroup_matrix.rs` on native Windows / Linux | not started |
+| S3 | Vulkan advertisement, device enable, full subgroups + `e2e_vulkan_subgroup_matrix.rs` on native Windows / Linux | **DONE on Windows 2026-11-28** — RTX 5060 Ti (621.24): 12 configurations (16×16×16, 16×8×16, 16×8×8 f16 → f16 / f32; 16×16×32, 16×8×32 u8 → u32 / i32 and i8 → i32), range 32–32, `cooperativeMatrixRobustBufferAccess` false so Tint clamps; e2e 4/0 and the 4 ignored HAL subgroup tests under the Khronos layer, 0 VUID; `e2e_vulkan_subgroup_size_control` 3/0, `e2e_vulkan_subgroups` 3/0, `e2e_vulkan_compute` 4/0 regression. Owed: native Linux Vulkan run |
 | S4 | docs + Phase Review | not started |
 
 The bindgen input is `yawgpu.h`, so the Dawn-named extension items are generated into `yawgpu::native`.

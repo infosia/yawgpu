@@ -391,6 +391,10 @@ typedef struct {
     bool collapse_subgroup_min_max;
     bool pass_matrix_by_pointer;
     bool use_spirv_1_4;
+    // Rely on enabled Vulkan cooperative matrix robust buffer access.
+    bool disable_storage_subgroup_matrix_clamping;
+    // Interpret cooperative matrix strides in matrix elements.
+    bool cooperative_matrix_stride_is_matrix_elements;
 } YawgpuTintSpirvWorkarounds;
 
 /* `user_immediate_size` is the owning pipeline layout's reserved

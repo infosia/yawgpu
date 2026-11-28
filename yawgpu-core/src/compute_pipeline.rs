@@ -168,6 +168,8 @@ pub(crate) struct ResolvedComputeWorkgroup {
     /// pipeline's required subgroup size. `None` when the entry point does not
     /// declare the attribute.
     pub(crate) subgroup_size: Option<u32>,
+    /// Whether the entry point uses subgroup matrices and requires full subgroups.
+    pub(crate) require_full_subgroups: bool,
 }
 
 /// Stores binding metadata.
@@ -471,6 +473,7 @@ pub(crate) fn create_hal_compute_pipeline(
         &descriptor_bindings,
         user_immediate_size,
         workgroup.subgroup_size,
+        workgroup.require_full_subgroups,
     ) {
         Ok(pipeline) => (Some(pipeline), None),
         Err(error) => (None, Some(error.to_string())),
@@ -1152,6 +1155,7 @@ pub(crate) fn resolve_msl_passthrough_compute_pipeline_descriptor(
             size: entry.workgroup_size,
             storage_size: 0,
             subgroup_size: None,
+            require_full_subgroups: false,
         }),
         layout.bind_group_layouts().to_vec(),
         0,
@@ -1175,6 +1179,7 @@ pub(crate) fn resolve_spirv_passthrough_compute_pipeline_descriptor(
             size: [1, 1, 1],
             storage_size: 0,
             subgroup_size: None,
+            require_full_subgroups: false,
         }),
         layout.bind_group_layouts().to_vec(),
         0,
@@ -1401,6 +1406,7 @@ pub(crate) fn resolve_compute_workgroup(
         size,
         storage_size: workgroup.workgroup_storage_size,
         subgroup_size,
+        require_full_subgroups: workgroup.uses_subgroup_matrix,
     })
 }
 
@@ -4064,6 +4070,7 @@ var<workgroup> sink: vec4f;
                 size: [1, 1, 1],
                 storage_size: 0,
                 subgroup_size: None,
+                require_full_subgroups: false,
             })
         );
         assert_eq!(layouts.len(), layout.bind_group_layouts().len());
@@ -4876,6 +4883,34 @@ fn test() {{
             ),
             None
         );
+    }
+
+    #[test]
+    fn subgroup_matrix_full_subgroups_reaches_hal_descriptor() {
+        let device = noop_adapter()
+            .create_device(None, &[Feature::ChromiumExperimentalSubgroupMatrix], "", "")
+            .unwrap();
+        let source = "enable chromium_experimental_subgroup_matrix; enable subgroups;
+            @compute @workgroup_size(4) fn matrix() {
+                let left = subgroup_matrix_left<f32,8,8>();
+                let right = subgroup_matrix_right<f32,8,8>();
+                _ = subgroupMatrixMultiply<f32>(left, right);
+            }
+            @compute @workgroup_size(4) fn plain() {}";
+        for (entry, expected) in [("matrix", true), ("plain", false)] {
+            let mut descriptor = subgroup_size_descriptor(&device, source, vec![]);
+            descriptor.entry_point = Some(entry.into());
+            let (_, _, workgroup, _, _) = resolve_compute_pipeline_descriptor(
+                &descriptor,
+                device.limits(),
+                &device.features(),
+                &device.inner.subgroups,
+                1,
+            )
+            .unwrap();
+            assert_eq!(workgroup.unwrap().require_full_subgroups, expected);
+            assert!(!device.create_compute_pipeline(descriptor).is_error());
+        }
     }
 
     #[test]

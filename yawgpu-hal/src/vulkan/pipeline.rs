@@ -242,11 +242,13 @@ pub(super) fn create_compute_pipeline(
     bindings: &[HalDescriptorBinding],
     user_immediate_size: u32,
     required_subgroup_size: Option<u32>,
+    require_full_subgroups: bool,
 ) -> Result<VulkanComputePipeline, HalError> {
     let HalShaderSource::SpirV(code) = shader else {
         return Err(shader_error("Vulkan compute pipeline requires SPIR-V"));
     };
     check_required_subgroup_size_supported(required_subgroup_size, device.subgroup_size_control)?;
+    check_full_subgroups_supported(require_full_subgroups, device.subgroup_size_control)?;
     let entry_point =
         CString::new(entry_point).map_err(|_| shader_error("compute entry point contains NUL"))?;
     let shader_info = vk::ShaderModuleCreateInfo::default().code(&code);
@@ -290,6 +292,7 @@ pub(super) fn create_compute_pipeline(
         required_subgroup_size,
         device.default_compute_subgroup_size,
         device.subgroup_size_control,
+        require_full_subgroups,
     );
     let mut required_subgroup_size_info =
         vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo::default()
@@ -373,12 +376,22 @@ fn check_required_subgroup_size_supported(
     }
 }
 
+fn check_full_subgroups_supported(required: bool, enabled: bool) -> Result<(), HalError> {
+    if required && !enabled {
+        return Err(shader_error(
+            "full subgroups require VK_EXT_subgroup_size_control",
+        ));
+    }
+    Ok(())
+}
+
 /// Selects the compute stage's required size and create flags (Blocks 108/127, Dawn
 /// `ComputePipelineVk.cpp` parity).
 ///
 /// - `Some(_)` (WGSL `@subgroup_size`): `REQUIRE_FULL_SUBGROUPS` only; the
 ///   caller chains the required size.
-/// - A device default requires that size, without full or varying flags.
+/// - Matrix shaders require full subgroups with or without a required size.
+/// - Otherwise a device default requires that size, without full or varying flags.
 /// - No explicit or default size with `VK_EXT_subgroup_size_control` enabled:
 ///   `ALLOW_VARYING_SUBGROUP_SIZE` only, so `@builtin(subgroup_size)` reports
 ///   the dispatched width on variable-width GPUs.
@@ -390,9 +403,10 @@ fn compute_stage_subgroup_config(
     explicit_size: Option<u32>,
     default_size: Option<u32>,
     subgroup_size_control_enabled: bool,
+    require_full_subgroups: bool,
 ) -> (Option<u32>, vk::PipelineShaderStageCreateFlags) {
     let required_size = explicit_size.or(default_size);
-    let flags = if explicit_size.is_some() {
+    let flags = if explicit_size.is_some() || require_full_subgroups {
         vk::PipelineShaderStageCreateFlags::REQUIRE_FULL_SUBGROUPS
     } else if required_size.is_none() && subgroup_size_control_enabled {
         vk::PipelineShaderStageCreateFlags::ALLOW_VARYING_SUBGROUP_SIZE
@@ -2570,9 +2584,33 @@ mod tests {
             (None, None, false, (None, empty)),
         ] {
             assert_eq!(
-                compute_stage_subgroup_config(explicit, default, enabled),
+                compute_stage_subgroup_config(explicit, default, enabled, false),
                 expected
             );
+        }
+    }
+
+    #[test]
+    fn subgroup_matrix_stages_require_full_subgroups_without_varying() {
+        for explicit in [None, Some(32)] {
+            for default in [None, Some(16)] {
+                let (size, flags) = compute_stage_subgroup_config(explicit, default, true, true);
+                assert_eq!(size, explicit.or(default));
+                assert_eq!(
+                    flags,
+                    vk::PipelineShaderStageCreateFlags::REQUIRE_FULL_SUBGROUPS
+                );
+                assert!(!flags
+                    .contains(vk::PipelineShaderStageCreateFlags::ALLOW_VARYING_SUBGROUP_SIZE));
+            }
+        }
+        for required in [false, true] {
+            for enabled in [false, true] {
+                assert_eq!(
+                    check_full_subgroups_supported(required, enabled).is_ok(),
+                    !required || enabled
+                );
+            }
         }
     }
 
@@ -2601,7 +2639,8 @@ mod tests {
         for required in [None, Some(4), Some(32), Some(128)] {
             for default in [None, Some(16)] {
                 for enabled in [false, true] {
-                    let (size, flags) = compute_stage_subgroup_config(required, default, enabled);
+                    let (size, flags) =
+                        compute_stage_subgroup_config(required, default, enabled, false);
                     assert!(!flags.contains(both), "{required:?}/{default:?}/{enabled}");
                     assert!(
                         !(size.is_some()
