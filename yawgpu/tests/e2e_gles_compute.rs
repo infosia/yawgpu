@@ -681,3 +681,446 @@ fn empty_string_view() -> native::WGPUStringView {
         length: 0,
     }
 }
+
+/// Propagation audit 2026-11 candidate 08: two sampled views of one texture
+/// that differ only in mip range share one GL texture name, so each view must
+/// still read its own level within a single dispatch.
+#[test]
+#[ignore = "manual real-backend test"]
+fn gles_compute_reads_two_mip_views_of_one_texture() {
+    assert!(
+        real_backend_available(RealBackend::Gles),
+        "GLES backend not available; this test needs a real GLES 3.1 adapter."
+    );
+
+    const SHADER: &str = r#"
+@group(0) @binding(0) var first: texture_2d<f32>;
+@group(0) @binding(1) var second: texture_2d<f32>;
+@group(0) @binding(2) var<storage, read_write> dst: array<u32>;
+
+@compute @workgroup_size(1)
+fn main() {
+    dst[0] = u32(textureLoad(first, vec2<i32>(0, 0), 0).r * 255.0 + 0.5);
+    dst[1] = u32(textureLoad(second, vec2<i32>(0, 0), 0).r * 255.0 + 0.5);
+    dst[2] = textureDimensions(first).x;
+    dst[3] = textureDimensions(second).x;
+}
+"#;
+    const MIP0_RED: u8 = 10;
+    const MIP1_RED: u8 = 200;
+
+    unsafe {
+        let instance = create_gles_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+
+        let texture = create_two_mip_texture(device);
+        write_mip(queue, texture, 0, 2, MIP0_RED);
+        write_mip(queue, texture, 1, 1, MIP1_RED);
+        let mip0 = create_single_mip_view(texture, 0);
+        let mip1 = create_single_mip_view(texture, 1);
+
+        // Both binding orders: whichever view binds last must not win for both.
+        for (views, expected) in [
+            (
+                [mip0, mip1],
+                [u32::from(MIP0_RED), u32::from(MIP1_RED), 2, 1],
+            ),
+            (
+                [mip1, mip0],
+                [u32::from(MIP1_RED), u32::from(MIP0_RED), 1, 2],
+            ),
+        ] {
+            let readback = run_two_view_readback_compute(device, views, SHADER);
+            if lacks_texture_view(&errors) {
+                eprintln!("skipping: this GLES host has no glTextureView");
+                return;
+            }
+            let actual = read_u32_buffer(instance, readback);
+            assert_eq!(
+                actual[..4],
+                expected,
+                "each view must read its own mip level (red, red, width, width)"
+            );
+            yawgpu::wgpuBufferRelease(readback);
+        }
+
+        assert!(errors.lock().expect("error lock").is_empty());
+        yawgpu::wgpuTextureViewRelease(mip1);
+        yawgpu::wgpuTextureViewRelease(mip0);
+        yawgpu::wgpuTextureRelease(texture);
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+/// Whether a submit failed with the Tier 2 `HalError` for a host without
+/// `glTextureView` (ES 3.1 without `OES`/`EXT_texture_view`), where a second
+/// mip range of one texture cannot be bound.
+fn lacks_texture_view(errors: &Mutex<Vec<yawgpu_core::DeviceError>>) -> bool {
+    errors
+        .lock()
+        .expect("error lock")
+        .iter()
+        .any(|error| error.message.contains("glTextureView"))
+}
+
+unsafe fn create_two_mip_texture(device: native::WGPUDevice) -> native::WGPUTexture {
+    create_two_mip_texture_with_usage(
+        device,
+        native::WGPUTextureUsage_CopyDst | native::WGPUTextureUsage_TextureBinding,
+    )
+}
+
+unsafe fn create_two_mip_texture_with_usage(
+    device: native::WGPUDevice,
+    usage: native::WGPUTextureUsage,
+) -> native::WGPUTexture {
+    let descriptor = native::WGPUTextureDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        usage,
+        dimension: native::WGPUTextureDimension_2D,
+        size: native::WGPUExtent3D {
+            width: 2,
+            height: 2,
+            depthOrArrayLayers: 1,
+        },
+        format: native::WGPUTextureFormat_RGBA8Unorm,
+        mipLevelCount: 2,
+        sampleCount: 1,
+        viewFormatCount: 0,
+        viewFormats: std::ptr::null(),
+    };
+    let texture = yawgpu::wgpuDeviceCreateTexture(device, &descriptor);
+    assert!(!texture.is_null());
+    texture
+}
+
+unsafe fn write_mip(
+    queue: native::WGPUQueue,
+    texture: native::WGPUTexture,
+    mip_level: u32,
+    size: u32,
+    red: u8,
+) {
+    let pixels: Vec<u8> = (0..size * size).flat_map(|_| [red, 0, 0, 255]).collect();
+    let destination = native::WGPUTexelCopyTextureInfo {
+        texture,
+        mipLevel: mip_level,
+        origin: native::WGPUOrigin3D { x: 0, y: 0, z: 0 },
+        aspect: native::WGPUTextureAspect_All,
+    };
+    let layout = native::WGPUTexelCopyBufferLayout {
+        offset: 0,
+        bytesPerRow: size * 4,
+        rowsPerImage: size,
+    };
+    let extent = native::WGPUExtent3D {
+        width: size,
+        height: size,
+        depthOrArrayLayers: 1,
+    };
+    yawgpu::wgpuQueueWriteTexture(
+        queue,
+        &destination,
+        pixels.as_ptr().cast(),
+        pixels.len(),
+        &layout,
+        &extent,
+    );
+}
+
+unsafe fn create_single_mip_view(
+    texture: native::WGPUTexture,
+    base_mip_level: u32,
+) -> native::WGPUTextureView {
+    let descriptor = native::WGPUTextureViewDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        format: native::WGPUTextureFormat_Undefined,
+        dimension: native::WGPUTextureViewDimension_Undefined,
+        baseMipLevel: base_mip_level,
+        mipLevelCount: 1,
+        baseArrayLayer: 0,
+        arrayLayerCount: 1,
+        aspect: native::WGPUTextureAspect_All,
+        // Inherit the texture's usage, so one view serves sampled and storage bindings.
+        usage: native::WGPUTextureUsage_None,
+    };
+    let view = yawgpu::wgpuTextureCreateView(texture, &descriptor);
+    assert!(!view.is_null());
+    view
+}
+
+unsafe fn run_two_view_readback_compute(
+    device: native::WGPUDevice,
+    views: [native::WGPUTextureView; 2],
+    shader: &str,
+) -> native::WGPUBuffer {
+    let queue = yawgpu::wgpuDeviceGetQueue(device);
+    let output = create_buffer(
+        device,
+        native::WGPUBufferUsage_Storage | native::WGPUBufferUsage_CopySrc,
+    );
+    let readback = create_buffer(
+        device,
+        native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+    );
+    let module = create_wgsl_module(device, shader);
+    let pipeline = create_compute_pipeline(device, module);
+    let layout = yawgpu::wgpuComputePipelineGetBindGroupLayout(pipeline, 0);
+    let texture_entry = |binding: u32, view| native::WGPUBindGroupEntry {
+        nextInChain: std::ptr::null_mut(),
+        binding,
+        buffer: std::ptr::null(),
+        offset: 0,
+        size: 0,
+        sampler: std::ptr::null(),
+        textureView: view,
+    };
+    let entries = [
+        texture_entry(0, views[0]),
+        texture_entry(1, views[1]),
+        native::WGPUBindGroupEntry {
+            nextInChain: std::ptr::null_mut(),
+            binding: 2,
+            buffer: output,
+            offset: 0,
+            size: BUFFER_SIZE,
+            sampler: std::ptr::null(),
+            textureView: std::ptr::null(),
+        },
+    ];
+    let descriptor = native::WGPUBindGroupDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout,
+        entryCount: entries.len(),
+        entries: entries.as_ptr(),
+    };
+    let bind_group = yawgpu::wgpuDeviceCreateBindGroup(device, &descriptor);
+    assert!(!bind_group.is_null());
+
+    let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+    let pass = yawgpu::wgpuCommandEncoderBeginComputePass(encoder, std::ptr::null());
+    yawgpu::wgpuComputePassEncoderSetPipeline(pass, pipeline);
+    yawgpu::wgpuComputePassEncoderSetBindGroup(pass, 0, bind_group, 0, std::ptr::null());
+    yawgpu::wgpuComputePassEncoderDispatchWorkgroups(pass, 1, 1, 1);
+    yawgpu::wgpuComputePassEncoderEnd(pass);
+    yawgpu::wgpuCommandEncoderCopyBufferToBuffer(encoder, output, 0, readback, 0, BUFFER_SIZE);
+    let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+    yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+
+    yawgpu::wgpuCommandBufferRelease(command_buffer);
+    yawgpu::wgpuComputePassEncoderRelease(pass);
+    yawgpu::wgpuCommandEncoderRelease(encoder);
+    yawgpu::wgpuBindGroupRelease(bind_group);
+    yawgpu::wgpuBindGroupLayoutRelease(layout);
+    yawgpu::wgpuComputePipelineRelease(pipeline);
+    yawgpu::wgpuShaderModuleRelease(module);
+    yawgpu::wgpuBufferRelease(output);
+    yawgpu::wgpuQueueRelease(queue);
+    readback
+}
+
+/// Block 169 S2: a storage write to a mip level outside the range of a sampled
+/// view of the same texture must land, both when the sampled view is bound in
+/// the same dispatch and when an earlier dispatch left its mip bounds behind.
+#[test]
+#[ignore = "manual real-backend test"]
+fn gles_compute_stores_to_mip_outside_sampled_view_range() {
+    assert!(
+        real_backend_available(RealBackend::Gles),
+        "GLES backend not available; this test needs a real GLES 3.1 adapter."
+    );
+
+    const COPY_SHADER: &str = r#"
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var dst: texture_storage_2d<rgba8unorm, write>;
+
+@compute @workgroup_size(1)
+fn main() {
+    textureStore(dst, vec2<i32>(0, 0), textureLoad(src, vec2<i32>(0, 0), 0));
+}
+"#;
+    const SAMPLE_SHADER: &str = r#"
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var<storage, read_write> dst: array<u32>;
+
+@compute @workgroup_size(1)
+fn main() {
+    dst[0] = u32(textureLoad(src, vec2<i32>(0, 0), 0).r * 255.0 + 0.5);
+}
+"#;
+    const STORE_SHADER: &str = r#"
+@group(0) @binding(1) var dst: texture_storage_2d<rgba8unorm, write>;
+
+@compute @workgroup_size(1)
+fn main() {
+    textureStore(dst, vec2<i32>(0, 0), vec4<f32>(1.0, 0.0, 1.0, 1.0));
+}
+"#;
+    const USAGE: native::WGPUTextureUsage = native::WGPUTextureUsage_CopyDst
+        | native::WGPUTextureUsage_CopySrc
+        | native::WGPUTextureUsage_TextureBinding
+        | native::WGPUTextureUsage_StorageBinding;
+
+    unsafe {
+        let instance = create_gles_instance();
+        let adapter = request_adapter(instance);
+        let device = request_device(instance, adapter);
+        let errors = install_error_capture(device);
+        let queue = yawgpu::wgpuDeviceGetQueue(device);
+
+        // Separate dispatches: sample mip 0 first, then only store to mip 1. This
+        // half needs no `glTextureView`, so it runs before the skip below.
+        let texture = create_two_mip_texture_with_usage(device, USAGE);
+        write_mip(queue, texture, 0, 2, 10);
+        write_mip(queue, texture, 1, 1, 200);
+        let mip0 = create_single_mip_view(texture, 0);
+        let mip1 = create_single_mip_view(texture, 1);
+        let sampled = run_texture_readback_compute(device, mip0, SAMPLE_SHADER);
+        assert_eq!(read_u32_buffer(instance, sampled)[0], 10);
+        run_store_compute(device, STORE_SHADER, None, mip1);
+        assert_eq!(
+            read_mip1_pixel(instance, device, texture),
+            [255, 0, 255, 255],
+            "a store to mip 1 after an earlier dispatch sampled mip 0 must land"
+        );
+        yawgpu::wgpuBufferRelease(sampled);
+        yawgpu::wgpuTextureViewRelease(mip1);
+        yawgpu::wgpuTextureViewRelease(mip0);
+        yawgpu::wgpuTextureRelease(texture);
+
+        // Same dispatch: sample mip 0, store it to mip 1.
+        let texture = create_two_mip_texture_with_usage(device, USAGE);
+        write_mip(queue, texture, 0, 2, 10);
+        write_mip(queue, texture, 1, 1, 200);
+        let mip0 = create_single_mip_view(texture, 0);
+        let mip1 = create_single_mip_view(texture, 1);
+        run_store_compute(device, COPY_SHADER, Some(mip0), mip1);
+        if lacks_texture_view(&errors) {
+            eprintln!("skipping: this GLES host has no glTextureView");
+            return;
+        }
+        assert_eq!(
+            read_mip1_pixel(instance, device, texture),
+            [10, 0, 0, 255],
+            "a store to mip 1 next to a sampled mip-0 view must land"
+        );
+        yawgpu::wgpuTextureViewRelease(mip1);
+        yawgpu::wgpuTextureViewRelease(mip0);
+        yawgpu::wgpuTextureRelease(texture);
+
+        assert!(errors.lock().expect("error lock").is_empty());
+        yawgpu::wgpuQueueRelease(queue);
+        yawgpu::wgpuDeviceRelease(device);
+        yawgpu::wgpuAdapterRelease(adapter);
+        yawgpu::wgpuInstanceRelease(instance);
+    }
+}
+
+/// Runs one dispatch with an optional sampled view at binding 0 and a storage
+/// view at binding 1.
+unsafe fn run_store_compute(
+    device: native::WGPUDevice,
+    shader: &str,
+    sampled: Option<native::WGPUTextureView>,
+    storage: native::WGPUTextureView,
+) {
+    let queue = yawgpu::wgpuDeviceGetQueue(device);
+    let module = create_wgsl_module(device, shader);
+    let pipeline = create_compute_pipeline(device, module);
+    let layout = yawgpu::wgpuComputePipelineGetBindGroupLayout(pipeline, 0);
+    let entries: Vec<_> = sampled
+        .into_iter()
+        .map(|view| (0, view))
+        .chain([(1, storage)])
+        .map(|(binding, view)| native::WGPUBindGroupEntry {
+            nextInChain: std::ptr::null_mut(),
+            binding,
+            buffer: std::ptr::null(),
+            offset: 0,
+            size: 0,
+            sampler: std::ptr::null(),
+            textureView: view,
+        })
+        .collect();
+    let descriptor = native::WGPUBindGroupDescriptor {
+        nextInChain: std::ptr::null_mut(),
+        label: empty_string_view(),
+        layout,
+        entryCount: entries.len(),
+        entries: entries.as_ptr(),
+    };
+    let bind_group = yawgpu::wgpuDeviceCreateBindGroup(device, &descriptor);
+    assert!(!bind_group.is_null());
+
+    let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+    let pass = yawgpu::wgpuCommandEncoderBeginComputePass(encoder, std::ptr::null());
+    yawgpu::wgpuComputePassEncoderSetPipeline(pass, pipeline);
+    yawgpu::wgpuComputePassEncoderSetBindGroup(pass, 0, bind_group, 0, std::ptr::null());
+    yawgpu::wgpuComputePassEncoderDispatchWorkgroups(pass, 1, 1, 1);
+    yawgpu::wgpuComputePassEncoderEnd(pass);
+    let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+    yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+
+    yawgpu::wgpuCommandBufferRelease(command_buffer);
+    yawgpu::wgpuComputePassEncoderRelease(pass);
+    yawgpu::wgpuCommandEncoderRelease(encoder);
+    yawgpu::wgpuBindGroupRelease(bind_group);
+    yawgpu::wgpuBindGroupLayoutRelease(layout);
+    yawgpu::wgpuComputePipelineRelease(pipeline);
+    yawgpu::wgpuShaderModuleRelease(module);
+    yawgpu::wgpuQueueRelease(queue);
+}
+
+/// Copies the single texel of mip 1 to a buffer and returns it.
+unsafe fn read_mip1_pixel(
+    instance: native::WGPUInstance,
+    device: native::WGPUDevice,
+    texture: native::WGPUTexture,
+) -> [u8; 4] {
+    let queue = yawgpu::wgpuDeviceGetQueue(device);
+    let readback = create_buffer(
+        device,
+        native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+    );
+    let source = native::WGPUTexelCopyTextureInfo {
+        texture,
+        mipLevel: 1,
+        origin: native::WGPUOrigin3D { x: 0, y: 0, z: 0 },
+        aspect: native::WGPUTextureAspect_All,
+    };
+    let destination = native::WGPUTexelCopyBufferInfo {
+        layout: native::WGPUTexelCopyBufferLayout {
+            offset: 0,
+            bytesPerRow: 256,
+            rowsPerImage: 1,
+        },
+        buffer: readback,
+    };
+    let extent = native::WGPUExtent3D {
+        width: 1,
+        height: 1,
+        depthOrArrayLayers: 1,
+    };
+    let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(device, std::ptr::null());
+    yawgpu::wgpuCommandEncoderCopyTextureToBuffer(encoder, &source, &destination, &extent);
+    let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
+    yawgpu::wgpuQueueSubmit(queue, 1, &command_buffer);
+    yawgpu::wgpuCommandBufferRelease(command_buffer);
+    yawgpu::wgpuCommandEncoderRelease(encoder);
+    yawgpu::wgpuQueueRelease(queue);
+
+    let pixel = read_buffer(instance, readback, 0, 4)
+        .try_into()
+        .expect("one RGBA8 texel");
+    yawgpu::wgpuBufferRelease(readback);
+    pixel
+}

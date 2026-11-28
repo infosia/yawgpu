@@ -398,36 +398,28 @@ fn submit_compute_pass(
             gl.uniform_1_u32(Some(location), word);
         }
         apply_buffer_bindings(gl, &buffer_bindings);
-        let texture_units = bind_combined_samplers(
-            gl,
-            pipeline.combined_samplers(),
-            &pass.bind_textures,
-            &pass.bind_samplers,
-            placeholder_sampler,
-            texture_view_caps,
-        )?;
-        let _texture_cleanup = TextureUnitCleanup {
-            gl,
-            texture_units: texture_units.units,
-            texture_views: texture_units.texture_views,
-        };
-        let _texture_metadata_cleanup = bind_texture_metadata_ubo(
-            gl,
-            pipeline.texture_metadata_ubo_binding(),
-            pipeline.texture_metadata_slots(),
-            &pass.bind_textures,
-        )?;
-        let storage_views = bind_storage_textures(
+        let storage = bind_storage_textures(
             gl,
             pipeline.bindings(),
             pipeline.binding_remaps(),
             &pass.bind_textures,
             texture_view_caps,
         )?;
-        let _storage_cleanup = StorageImageCleanup {
+        let _texture_cleanup = bind_combined_samplers(
             gl,
-            views: storage_views,
-        };
+            pipeline.combined_samplers(),
+            &pass.bind_textures,
+            &pass.bind_samplers,
+            &storage.raw_mip_levels,
+            placeholder_sampler,
+            texture_view_caps,
+        )?;
+        let _texture_metadata_cleanup = bind_texture_metadata_ubo(
+            gl,
+            pipeline.texture_metadata_ubo_binding(),
+            pipeline.texture_metadata_slots(),
+            &pass.bind_textures,
+        )?;
         match &pass.dispatch {
             HalComputeDispatch::Direct { workgroups } => {
                 // WebGPU: a dispatch with any zero workgroup count does
@@ -530,27 +522,76 @@ struct TextureViewCaps {
     texture_view: Option<GlesTextureViewFn>,
 }
 
-struct BoundCombinedSamplers {
-    units: Vec<u32>,
-    texture_views: Vec<TransientTextureView>,
-}
-
 struct TransientTextureView {
     unit: u32,
     target: u32,
     texture: glow::Texture,
 }
 
-fn bind_combined_samplers(
-    gl: &glow::Context,
+/// Inputs for [`mip_range_conflict_views`]: one sampled binding of a bind set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SampledMipBinding {
+    /// GL name of the texture object the binding resolves to.
+    texture: u32,
+    base_mip_level: u32,
+    mip_level_count: u32,
+    /// The binding already needs its own transient view (target, layer range,
+    /// format or stencil aspect differ from the texture).
+    requires_view: bool,
+}
+
+/// Decides which sampled bindings of one bind set must be bound through a
+/// transient view because of a mip-range conflict.
+///
+/// `GL_TEXTURE_BASE_LEVEL` / `GL_TEXTURE_MAX_LEVEL` are texture-object state,
+/// so two units bound to the same GL texture name share one mip range. The
+/// first sampled range that includes every raw storage level of its texture
+/// keeps the raw name. A range that excludes a storage level or differs from
+/// the first eligible range is marked `true`. Bindings that already need a
+/// view own their GL name and neither conflict nor claim the first range.
+fn mip_range_conflict_views(
+    bindings: &[SampledMipBinding],
+    raw_storage_mip_levels: &[(u32, u32)],
+) -> Vec<bool> {
+    let mut first_ranges = Vec::new();
+    bindings
+        .iter()
+        .map(|binding| {
+            if binding.requires_view {
+                return false;
+            }
+            let range = (binding.base_mip_level, binding.mip_level_count);
+            if raw_storage_mip_levels.iter().any(|&(texture, level)| {
+                texture == binding.texture
+                    && (level < binding.base_mip_level
+                        || level - binding.base_mip_level >= binding.mip_level_count)
+            }) {
+                return true;
+            }
+            match first_ranges
+                .iter()
+                .find(|(texture, _)| *texture == binding.texture)
+            {
+                Some(&(_, first_range)) => first_range != range,
+                None => {
+                    first_ranges.push((binding.texture, range));
+                    false
+                }
+            }
+        })
+        .collect()
+}
+
+fn bind_combined_samplers<'gl>(
+    gl: &'gl glow::Context,
     combined_samplers: &[super::pipeline::GlesResolvedCombinedSampler],
     textures: &[HalBoundTexture],
     samplers: &[HalBoundSampler],
+    raw_storage_mip_levels: &[(u32, u32)],
     placeholder_sampler: glow::Sampler,
     texture_view_caps: TextureViewCaps,
-) -> Result<BoundCombinedSamplers, HalError> {
-    let mut units = Vec::with_capacity(combined_samplers.len());
-    let mut texture_views = Vec::new();
+) -> Result<TextureUnitCleanup<'gl>, HalError> {
+    let mut resolved = Vec::with_capacity(combined_samplers.len());
     for combined in combined_samplers {
         let texture = textures
             .iter()
@@ -578,6 +619,33 @@ fn bind_combined_samplers(
             texture_view_caps.supports_cube_map_array,
         )?;
         let raw_texture = gles_texture.raw_or_err()?;
+        resolved.push((combined, texture, gles_texture, target, raw_texture));
+    }
+    let conflict_views = mip_range_conflict_views(
+        &resolved
+            .iter()
+            .map(
+                |(_, texture, gles_texture, target, raw_texture)| SampledMipBinding {
+                    texture: gl_texture_name(*raw_texture),
+                    base_mip_level: texture.base_mip_level,
+                    mip_level_count: texture.mip_level_count,
+                    requires_view: requires_texture_view(gles_texture.meta(), texture, *target),
+                },
+            )
+            .collect::<Vec<_>>(),
+        raw_storage_mip_levels,
+    );
+
+    // Owns every unit and transient view bound so far, so an error part-way
+    // through still unbinds them and deletes the views.
+    let mut cleanup = TextureUnitCleanup {
+        gl,
+        texture_units: Vec::with_capacity(resolved.len()),
+        texture_views: Vec::new(),
+    };
+    for ((combined, texture, gles_texture, target, raw_texture), mip_conflict) in
+        resolved.into_iter().zip(conflict_views)
+    {
         let base_level = i32_from_u32(
             texture.base_mip_level,
             "texture base mip level exceeds GLES limit",
@@ -598,8 +666,17 @@ fn bind_combined_samplers(
             target,
             gles_texture.meta(),
             texture,
+            mip_conflict,
             texture_view_caps,
         )?;
+        if owns_bound_texture {
+            cleanup.texture_views.push(TransientTextureView {
+                unit,
+                target,
+                texture: bound_texture,
+            });
+        }
+        cleanup.texture_units.push(unit);
         unsafe {
             gl.active_texture(glow::TEXTURE0 + unit);
             gl.bind_texture(target, Some(bound_texture));
@@ -607,7 +684,9 @@ fn bind_combined_samplers(
             if target != glow::TEXTURE_2D_MULTISAMPLE {
                 // This mutates texture-object state. GLES queue submission is
                 // single-context serialized, so restoring per-view mip bounds
-                // at each bind is deterministic for this backend.
+                // at each bind is deterministic for this backend. Bindings of
+                // one texture with different mip ranges in the same bind set
+                // are given their own views by `mip_range_conflict_views`.
                 if owns_bound_texture {
                     gl.tex_parameter_i32(target, glow::TEXTURE_BASE_LEVEL, 0);
                     gl.tex_parameter_i32(
@@ -623,13 +702,6 @@ fn bind_combined_samplers(
                     gl.tex_parameter_i32(target, glow::TEXTURE_MAX_LEVEL, max_level);
                 }
             }
-        }
-        if owns_bound_texture {
-            texture_views.push(TransientTextureView {
-                unit,
-                target,
-                texture: bound_texture,
-            });
         }
         if combined.uses_placeholder_sampler {
             unsafe {
@@ -659,12 +731,8 @@ fn bind_combined_samplers(
                 gl.bind_sampler(unit, Some(gles_sampler.raw()));
             }
         }
-        units.push(unit);
     }
-    Ok(BoundCombinedSamplers {
-        units,
-        texture_views,
-    })
+    Ok(cleanup)
 }
 
 fn texture_handle_for_sampled_view(
@@ -673,9 +741,10 @@ fn texture_handle_for_sampled_view(
     target: u32,
     meta: &GlesTextureMeta,
     texture: &HalBoundTexture,
+    mip_conflict: bool,
     caps: TextureViewCaps,
 ) -> Result<(glow::Texture, bool), HalError> {
-    if !requires_texture_view(meta, texture, target) {
+    if !mip_conflict && !requires_texture_view(meta, texture, target) {
         return Ok((raw_texture, false));
     }
     if !caps.supports_texture_view {
@@ -816,14 +885,18 @@ fn gl_texture_name(texture: glow::Texture) -> u32 {
     texture.0.get()
 }
 
-fn bind_storage_textures(
-    gl: &glow::Context,
+fn bind_storage_textures<'gl>(
+    gl: &'gl glow::Context,
     descriptors: &[HalDescriptorBinding],
     remaps: &[HalGlesBindingRemap],
     textures: &[HalBoundTexture],
     texture_view_caps: TextureViewCaps,
-) -> Result<Vec<glow::Texture>, HalError> {
-    let mut transient_views = Vec::new();
+) -> Result<StorageImageCleanup<'gl>, HalError> {
+    let mut storage = StorageImageCleanup {
+        gl,
+        views: Vec::new(),
+        raw_mip_levels: Vec::new(),
+    };
     for texture in textures
         .iter()
         .filter(|texture| texture.storage_access.is_some())
@@ -889,6 +962,11 @@ fn bind_storage_textures(
             texture_view_full_layer_count(meta.target, meta.depth_or_array_layers),
         )? {
             StorageImageBinding::Base { layered, layer } => unsafe {
+                // Normalize before sampled units are installed for this dispatch or draw.
+                normalize_texture_mip_bounds(gl, meta, raw_texture)?;
+                storage
+                    .raw_mip_levels
+                    .push((gl_texture_name(raw_texture), texture.base_mip_level));
                 gl.bind_image_texture(
                     flat_binding,
                     raw_texture,
@@ -932,14 +1010,14 @@ fn bind_storage_textures(
                     texture,
                     texture_view,
                 )?;
-                transient_views.push(view);
+                storage.views.push(view);
                 unsafe {
                     gl.bind_image_texture(flat_binding, view, 0, true, 0, access, internal_format);
                 }
             }
         }
     }
-    Ok(transient_views)
+    Ok(storage)
 }
 
 fn storage_texture_access(access: HalStorageTextureAccess) -> u32 {
@@ -1178,12 +1256,12 @@ impl Drop for TextureUnitCleanup<'_> {
 }
 
 /// Deletes the transient `glTextureView`s that back layer-subrange storage
-/// (image) bindings. The views must outlive the dispatch/draw that reads them,
-/// so this guard is dropped only after the GPU work is issued, mirroring
-/// `TextureUnitCleanup` for sampled views.
+/// (image) bindings on a binding error or after the draw/dispatch.
 struct StorageImageCleanup<'a> {
     gl: &'a glow::Context,
     views: Vec<glow::Texture>,
+    /// GL name and bound mip level for each image actually bound by raw name.
+    raw_mip_levels: Vec<(u32, u32)>,
 }
 
 impl Drop for StorageImageCleanup<'_> {
@@ -2350,36 +2428,28 @@ fn run_render_draw(
         }
     }
     bind_render_buffers(gl, &state.bind_buffers, pipeline)?;
-    let texture_units = bind_combined_samplers(
-        gl,
-        pipeline.combined_samplers(),
-        &state.bind_textures,
-        &state.bind_samplers,
-        placeholder_sampler,
-        texture_view_caps,
-    )?;
-    let _texture_cleanup = TextureUnitCleanup {
-        gl,
-        texture_units: texture_units.units,
-        texture_views: texture_units.texture_views,
-    };
-    let _texture_metadata_cleanup = bind_texture_metadata_ubo(
-        gl,
-        pipeline.texture_metadata_ubo_binding(),
-        pipeline.texture_metadata_slots(),
-        &state.bind_textures,
-    )?;
-    let storage_views = bind_storage_textures(
+    let storage = bind_storage_textures(
         gl,
         pipeline.bindings(),
         pipeline.binding_remaps(),
         &state.bind_textures,
         texture_view_caps,
     )?;
-    let _storage_cleanup = StorageImageCleanup {
+    let _texture_cleanup = bind_combined_samplers(
         gl,
-        views: storage_views,
-    };
+        pipeline.combined_samplers(),
+        &state.bind_textures,
+        &state.bind_samplers,
+        &storage.raw_mip_levels,
+        placeholder_sampler,
+        texture_view_caps,
+    )?;
+    let _texture_metadata_cleanup = bind_texture_metadata_ubo(
+        gl,
+        pipeline.texture_metadata_ubo_binding(),
+        pipeline.texture_metadata_slots(),
+        &state.bind_textures,
+    )?;
     let first_instance = draw_first_instance(draw);
     bind_vertex_buffers(
         gl,
@@ -8068,6 +8138,482 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
+    /// Uploads a 2x2 two-level RGBA8 texture whose level 0 is solid
+    /// `level_colors[0]` and level 1 is solid `level_colors[1]`.
+    fn sampled_rgba8_two_level_texture(
+        device: &super::super::device::GlesDevice,
+        level_colors: [[u8; 4]; 2],
+    ) -> super::super::texture::GlesTexture {
+        let texture = device
+            .create_texture(&crate::HalTextureDescriptor {
+                view_formats: Vec::new(),
+                dimension: crate::HalTextureDimension::D2,
+                format: crate::HalTextureFormat::Rgba8Unorm,
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 1,
+                mip_level_count: 2,
+                sample_count: 1,
+                usage: crate::HalTextureUsage {
+                    copy_src: true,
+                    copy_dst: true,
+                    texture_binding: true,
+                    storage_binding: true,
+                    render_attachment: false,
+                    transient: false,
+                },
+            })
+            .expect("GLES two-level sampled texture creation must succeed");
+        for (mip_level, (color, size)) in level_colors.iter().zip([2_u32, 1]).enumerate() {
+            let pixels: Vec<u8> = (0..size * size).flat_map(|_| *color).collect();
+            let upload = device
+                .create_buffer(
+                    pixels.len() as u64,
+                    crate::HalBufferUsage {
+                        copy_src: true,
+                        ..crate::HalBufferUsage::default()
+                    },
+                )
+                .expect("GLES mip upload buffer creation must succeed");
+            upload
+                .write(0, &pixels)
+                .expect("writing mip pixels must succeed");
+            device
+                .queue()
+                .submit_copies(&[HalCopy::BufferToTexture(HalBufferTextureCopy {
+                    buffer: HalBuffer::Gles(upload),
+                    buffer_layout: crate::HalBufferTextureLayout {
+                        offset: 0,
+                        bytes_per_row: 4 * size,
+                        rows_per_image: size,
+                    },
+                    texture: HalTexture::Gles(texture.clone()),
+                    format: crate::HalTextureFormat::Rgba8Unorm,
+                    aspect: crate::HalTextureAspect::All,
+                    mip_level: mip_level as u32,
+                    origin: crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+                    extent: crate::HalExtent3d {
+                        width: size,
+                        height: size,
+                        depth_or_array_layers: 1,
+                    },
+                })])
+                .expect("uploading mip pixels must succeed");
+        }
+        texture
+    }
+
+    /// Two sampled views of one texture that differ only in mip range each
+    /// read their own level within one dispatch, in either bind order.
+    #[test]
+    fn submit_compute_pass_samples_two_mip_views_of_one_texture() {
+        let Some(device) = gles_device_or_skip("GLES two-mip-view sampling test") else {
+            return;
+        };
+        if !device.inner_clone().supports_texture_view() {
+            eprintln!("skipping GLES two-mip-view sampling test; glTextureView unavailable");
+            return;
+        }
+        let level_colors = [[10, 20, 30, 255], [200, 150, 100, 255]];
+        let sampled = sampled_rgba8_two_level_texture(&device, level_colors);
+        let pipeline = device
+            .create_compute_pipeline(
+                crate::HalShaderSource::Glsl {
+                    source: "#version 310 es\n\
+                             precision highp float;\n\
+                             precision highp int;\n\
+                             layout(local_size_x = 1) in;\n\
+                             uniform highp sampler2D u_a;\n\
+                             uniform highp sampler2D u_b;\n\
+                             layout(std430, binding = 0) buffer Out { uvec4 values[3]; } out_buf;\n\
+                             void main() {\n\
+                                 out_buf.values[0] = uvec4(texelFetch(u_a, ivec2(0, 0), 0) * 255.0 + 0.5);\n\
+                                 out_buf.values[1] = uvec4(texelFetch(u_b, ivec2(0, 0), 0) * 255.0 + 0.5);\n\
+                                 out_buf.values[2] = uvec4(uint(textureSize(u_a, 0).x), uint(textureSize(u_b, 0).x), 0u, 0u);\n\
+                             }\n"
+                    .to_owned(),
+                    stage: crate::HalShaderStage::Compute,
+                    combined_samplers: vec![
+                        crate::HalCombinedSampler {
+                            glsl_uniform_name: "u_a".to_owned(),
+                            texture_group: 0,
+                            texture_binding: 1,
+                            sampler_group: u32::MAX,
+                            sampler_binding: u32::MAX,
+                            uses_placeholder_sampler: true,
+                        },
+                        crate::HalCombinedSampler {
+                            glsl_uniform_name: "u_b".to_owned(),
+                            texture_group: 0,
+                            texture_binding: 2,
+                            sampler_group: u32::MAX,
+                            sampler_binding: u32::MAX,
+                            uses_placeholder_sampler: true,
+                        },
+                    ],
+                    texture_metadata_slots: Vec::new(),
+                    binding_remaps: vec![crate::HalGlesBindingRemap::new(
+                        0,
+                        0,
+                        crate::HalGlesBindingClass::StorageBuffer,
+                        0,
+                    )],
+                    texture_metadata_ubo_binding: None,
+                },
+                "main",
+                (1, 1, 1),
+                &[
+                    HalDescriptorBinding {
+                        group: 0,
+                        binding: 0,
+                        kind: HalDescriptorBindingKind::Buffer(HalBufferBindingKind::Storage),
+                    },
+                    HalDescriptorBinding {
+                        group: 0,
+                        binding: 1,
+                        kind: HalDescriptorBindingKind::Texture,
+                    },
+                    HalDescriptorBinding {
+                        group: 0,
+                        binding: 2,
+                        kind: HalDescriptorBindingKind::Texture,
+                    },
+                ],
+            )
+            .expect("GLES two-mip-view compute pipeline creation must succeed");
+
+        // `[a_mip, b_mip]`: the base mip level bound to `u_a` and `u_b`.
+        for [a_mip, b_mip] in [[0_u32, 1], [1, 0]] {
+            let output = device
+                .create_buffer(
+                    3 * 16,
+                    crate::HalBufferUsage {
+                        storage: true,
+                        copy_src: true,
+                        ..crate::HalBufferUsage::default()
+                    },
+                )
+                .expect("GLES two-mip-view output buffer creation must succeed");
+            let mip_view = |binding: u32, base_mip_level: u32| HalBoundTexture {
+                base_mip_level,
+                ..bound_sampled_texture(sampled.clone(), binding)
+            };
+            device
+                .queue()
+                .submit_copies(&[HalCopy::ComputePass(crate::HalComputePass {
+                    pipeline: HalComputePipeline::Gles(pipeline.clone()),
+                    bind_buffers: vec![crate::HalBoundBuffer {
+                        group: 0,
+                        binding: 0,
+                        metal_index: 0,
+                        vertex_metal_index: None,
+                        fragment_metal_index: None,
+                        buffer: HalBuffer::Gles(output.clone()),
+                        offset: 0,
+                        size: 3 * 16,
+                    }],
+                    bind_textures: vec![mip_view(1, a_mip), mip_view(2, b_mip)],
+                    bind_samplers: Vec::new(),
+                    bind_external_textures: Vec::new(),
+                    immediate_data: Vec::new(),
+                    dispatch: HalComputeDispatch::Direct {
+                        workgroups: (1, 1, 1),
+                    },
+                })])
+                .expect("compute pass sampling two mip views of one texture must succeed");
+
+            let bytes = output
+                .read(0, 3 * 16)
+                .expect("reading two-mip-view compute output must succeed");
+            let actual: Vec<[u32; 4]> = bytes
+                .as_chunks::<16>()
+                .0
+                .iter()
+                .map(|chunk| {
+                    [
+                        u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
+                        u32::from_ne_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]),
+                        u32::from_ne_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]),
+                        u32::from_ne_bytes([chunk[12], chunk[13], chunk[14], chunk[15]]),
+                    ]
+                })
+                .collect();
+            let width = |mip: u32| 2_u32 >> mip;
+            let expected = vec![
+                level_colors[a_mip as usize].map(u32::from),
+                level_colors[b_mip as usize].map(u32::from),
+                [width(a_mip), width(b_mip), 0, 0],
+            ];
+            assert_eq!(
+                actual, expected,
+                "views bound as [u_a, u_b] = mips {a_mip}, {b_mip}"
+            );
+        }
+    }
+
+    /// Writes one texel at mip 1, either fetched from the source's mip-0
+    /// view or supplied as a shader constant in a storage-only dispatch.
+    fn store_to_mip_one(
+        device: &super::super::device::GlesDevice,
+        sampled: Option<&super::super::texture::GlesTexture>,
+        destination: &super::super::texture::GlesTexture,
+    ) {
+        let mut descriptors = vec![HalDescriptorBinding {
+            group: 0,
+            binding: 0,
+            kind: HalDescriptorBindingKind::StorageTexture {
+                access: HalStorageTextureAccess::WriteOnly,
+            },
+        }];
+        let mut bind_textures = vec![HalBoundTexture {
+            base_mip_level: 1,
+            ..bound_storage_texture(
+                destination.clone(),
+                crate::HalTextureFormat::Rgba8Unorm,
+                HalStorageTextureAccess::WriteOnly,
+            )
+        }];
+        let mut combined_samplers = Vec::new();
+        let color = if let Some(sampled) = sampled {
+            descriptors.push(HalDescriptorBinding {
+                group: 0,
+                binding: 1,
+                kind: HalDescriptorBindingKind::Texture,
+            });
+            bind_textures.push(bound_sampled_texture(sampled.clone(), 1));
+            combined_samplers.push(crate::HalCombinedSampler {
+                glsl_uniform_name: "src".to_owned(),
+                texture_group: 0,
+                texture_binding: 1,
+                sampler_group: u32::MAX,
+                sampler_binding: u32::MAX,
+                uses_placeholder_sampler: true,
+            });
+            "texelFetch(src, ivec2(0), 0)"
+        } else {
+            "vec4(0.0, 1.0, 0.0, 1.0)"
+        };
+        let pipeline = device
+            .create_compute_pipeline(
+                crate::HalShaderSource::Glsl {
+                    source: format!(
+                        "#version 310 es
+                         layout(local_size_x = 1) in;
+                         uniform highp sampler2D src;
+                         layout(binding = 0, rgba8) uniform highp writeonly image2D dst;
+                         void main() {{ imageStore(dst, ivec2(0), {color}); }}"
+                    ),
+                    stage: crate::HalShaderStage::Compute,
+                    combined_samplers,
+                    binding_remaps: vec![HalGlesBindingRemap::new(
+                        0,
+                        0,
+                        HalGlesBindingClass::StorageTexture,
+                        0,
+                    )],
+                    texture_metadata_slots: Vec::new(),
+                    texture_metadata_ubo_binding: None,
+                },
+                "main",
+                (1, 1, 1),
+                &descriptors,
+            )
+            .expect("create mip-1 image store pipeline");
+        device
+            .queue()
+            .submit_copies(&[HalCopy::ComputePass(HalComputePass {
+                pipeline: HalComputePipeline::Gles(pipeline),
+                bind_buffers: Vec::new(),
+                bind_textures,
+                bind_samplers: Vec::new(),
+                bind_external_textures: Vec::new(),
+                immediate_data: Vec::new(),
+                dispatch: HalComputeDispatch::Direct {
+                    workgroups: (1, 1, 1),
+                },
+            })])
+            .expect("dispatch mip-1 image store");
+    }
+
+    #[test]
+    fn storage_mip_one_next_to_sampled_mip_zero() {
+        let Some(device) = gles_device_or_skip("GLES sampled and storage mip views") else {
+            return;
+        };
+        if !device.inner_clone().supports_texture_view() {
+            eprintln!("skipping GLES sampled and storage mip views; glTextureView unavailable");
+            return;
+        }
+        let colors = [[10, 20, 30, 255], [200, 150, 100, 255]];
+        let texture = sampled_rgba8_two_level_texture(&device, colors);
+        store_to_mip_one(&device, Some(&texture), &texture);
+        assert_eq!(
+            read_back_rgba8_region(
+                &device,
+                &texture,
+                1,
+                crate::HalOrigin3d { x: 0, y: 0, z: 0 },
+                1,
+                1
+            ),
+            colors[0]
+        );
+    }
+
+    #[test]
+    fn render_draw_samples_mip_zero_and_stores_to_mip_one() {
+        let Some(device) = gles_device_or_skip("GLES render sampled and storage mip views") else {
+            return;
+        };
+        if !device.inner_clone().supports_texture_view() {
+            eprintln!(
+                "skipping GLES render sampled and storage mip views; glTextureView unavailable"
+            );
+            return;
+        }
+        let colors = [[10, 20, 30, 255], [200, 150, 100, 255]];
+        let texture = sampled_rgba8_two_level_texture(&device, colors);
+        let format = crate::HalTextureFormat::Rgba8Unorm;
+        let target = render_attachment_texture(&device, format);
+        let pipeline = device
+            .create_render_pipeline(
+                crate::HalShaderSource::GlslStages {
+                    vertex: "#version 310 es
+                        void main() {
+                            vec2 vertices[3] = vec2[3](vec2(-1, -1), vec2(3, -1), vec2(-1, 3));
+                            gl_Position = vec4(vertices[gl_VertexID], 0.0, 1.0);
+                        }"
+                    .to_owned(),
+                    fragment: Some(
+                        "#version 310 es
+                         precision highp float;
+                         uniform highp sampler2D src;
+                         layout(binding = 0, rgba8) uniform highp writeonly image2D dst;
+                         layout(location = 0) out vec4 color;
+                         void main() {
+                             color = texelFetch(src, ivec2(0), 0);
+                             imageStore(dst, ivec2(0), color);
+                         }"
+                        .to_owned(),
+                    ),
+                    combined_samplers: vec![crate::HalCombinedSampler {
+                        glsl_uniform_name: "src".to_owned(),
+                        texture_group: 0,
+                        texture_binding: 1,
+                        sampler_group: u32::MAX,
+                        sampler_binding: u32::MAX,
+                        uses_placeholder_sampler: true,
+                    }],
+                    texture_metadata_slots: Vec::new(),
+                    binding_remaps: vec![HalGlesBindingRemap::new(
+                        0,
+                        0,
+                        HalGlesBindingClass::StorageTexture,
+                        0,
+                    )],
+                    texture_metadata_ubo_binding: None,
+                },
+                "main",
+                Some("main"),
+                &crate::HalRenderPipelineDescriptor {
+                    sample_count: 1,
+                    sample_mask: u32::MAX,
+                    alpha_to_coverage_enabled: false,
+                    color_targets: vec![Some(HalColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: 0xf,
+                    })],
+                    depth_stencil: None,
+                    vertex_buffers: Vec::new(),
+                    primitive_topology: crate::HalPrimitiveTopology::TriangleList,
+                    front_face: HalFrontFace::Ccw,
+                    cull_mode: HalCullMode::None,
+                    unclipped_depth: false,
+                    needs_frag_depth_range_push_constant: false,
+                    user_immediate_size: 0,
+                },
+                &[
+                    HalDescriptorBinding {
+                        group: 0,
+                        binding: 0,
+                        kind: HalDescriptorBindingKind::StorageTexture {
+                            access: HalStorageTextureAccess::WriteOnly,
+                        },
+                    },
+                    HalDescriptorBinding {
+                        group: 0,
+                        binding: 1,
+                        kind: HalDescriptorBindingKind::Texture,
+                    },
+                ],
+            )
+            .expect("create render pipeline sampling mip 0 and storing to mip 1");
+        let mut pass = render_pass(vec![Some(color_target_for(
+            target.clone(),
+            format,
+            [0.0; 4],
+        ))]);
+        pass.commands = vec![
+            HalRenderPassCommand::SetPipeline(HalRenderPipeline::Gles(pipeline)),
+            HalRenderPassCommand::SetBindGroup {
+                index: 0,
+                buffers: Vec::new(),
+                textures: vec![
+                    bound_sampled_texture(texture.clone(), 1),
+                    HalBoundTexture {
+                        base_mip_level: 1,
+                        ..bound_storage_texture(
+                            texture.clone(),
+                            format,
+                            HalStorageTextureAccess::WriteOnly,
+                        )
+                    },
+                ],
+                samplers: Vec::new(),
+                external_textures: Vec::new(),
+            },
+            direct_triangle_draw(),
+        ];
+        device
+            .queue()
+            .submit_copies(&[HalCopy::RenderPassCommandStream(pass)])
+            .expect("draw sampling mip 0 and storing to mip 1");
+
+        let origin = crate::HalOrigin3d { x: 0, y: 0, z: 0 };
+        assert_eq!(
+            read_back_rgba8_region(&device, &target, 0, origin, 1, 1),
+            colors[0],
+            "fragment must sample mip 0"
+        );
+        assert_eq!(
+            read_back_rgba8_region(&device, &texture, 1, origin, 1, 1),
+            colors[0],
+            "fragment must store the sampled color in mip 1"
+        );
+    }
+
+    #[test]
+    fn storage_mip_one_after_sampling_mip_zero() {
+        let Some(device) = gles_device_or_skip("GLES storage mip after sampling") else {
+            return;
+        };
+        let colors = [[10, 20, 30, 255], [200, 150, 100, 255]];
+        let texture = sampled_rgba8_two_level_texture(&device, colors);
+        let output = sampled_rgba8_two_level_texture(&device, colors);
+        store_to_mip_one(&device, Some(&texture), &output);
+        store_to_mip_one(&device, None, &texture);
+        let origin = crate::HalOrigin3d { x: 0, y: 0, z: 0 };
+        assert_eq!(
+            read_back_rgba8_region(&device, &output, 1, origin, 1, 1),
+            colors[0]
+        );
+        assert_eq!(
+            read_back_rgba8_region(&device, &texture, 1, origin, 1, 1),
+            [0, 255, 0, 255]
+        );
+    }
+
     #[test]
     fn submit_compute_pass_binds_buffers_and_textures_across_groups() {
         let Some(device) = gles_device_or_skip("GLES multi-group compute binding test") else {
@@ -9545,12 +10091,12 @@ mod tests {
         run_storage_array_subrange_test("GLES storage-array subrange (base=0,count=3)", 0, 3, 4);
     }
 
-    fn run_storage_array_subrange_test(label: &str, base: u32, count: u32, total: u32) {
-        let Some(device) = gles_device_or_skip(label) else {
-            return;
-        };
+    fn storage_array_texture(
+        device: &super::super::device::GlesDevice,
+        total: u32,
+    ) -> super::super::texture::GlesTexture {
         let format = crate::HalTextureFormat::R32Uint;
-        let texture = device
+        device
             .create_texture(&crate::HalTextureDescriptor {
                 view_formats: Vec::new(),
                 dimension: crate::HalTextureDimension::D2,
@@ -9569,7 +10115,83 @@ mod tests {
                     transient: false,
                 },
             })
-            .expect("GLES storage array texture creation must succeed");
+            .expect("GLES storage array texture creation must succeed")
+    }
+
+    #[test]
+    fn storage_bind_failure_deletes_earlier_subrange_view() {
+        let Some(device) = gles_device_or_skip("GLES partial storage bind cleanup") else {
+            return;
+        };
+        let inner = device.inner_clone();
+        if !inner.supports_texture_view() {
+            eprintln!("skipping GLES partial storage bind cleanup; glTextureView unavailable");
+            return;
+        }
+        let texture = storage_array_texture(&device, 4);
+        let subrange = HalBoundTexture {
+            dimension: HalTextureViewDimension::D2Array,
+            base_array_layer: 1,
+            array_layer_count: 2,
+            ..bound_storage_texture(
+                texture,
+                crate::HalTextureFormat::R32Uint,
+                HalStorageTextureAccess::WriteOnly,
+            )
+        };
+        let invalid = HalBoundTexture {
+            binding: 1,
+            ..subrange.clone()
+        };
+        let textures = [subrange, invalid];
+        let descriptors = [HalDescriptorBinding {
+            group: 0,
+            binding: 0,
+            kind: HalDescriptorBindingKind::StorageTexture {
+                access: HalStorageTextureAccess::WriteOnly,
+            },
+        }];
+        let remaps = [HalGlesBindingRemap::new(
+            0,
+            0,
+            HalGlesBindingClass::StorageTexture,
+            0,
+        )];
+        inner
+            .with_current_context(|gl| {
+                let result = bind_storage_textures(
+                    gl,
+                    &descriptors,
+                    &remaps,
+                    &textures,
+                    TextureViewCaps {
+                        supports_texture_view: true,
+                        supports_cube_map_array: inner.supports_cube_map_array(),
+                        texture_view: inner.texture_view(),
+                    },
+                );
+                assert!(matches!(
+                    result,
+                    Err(HalError::BufferOperationFailed {
+                        message: "storage texture binding is missing from pipeline layout",
+                        ..
+                    })
+                ));
+                // Deleting the first view also clears its image-unit binding.
+                unsafe {
+                    assert_eq!(gl.get_parameter_indexed_i32(glow::IMAGE_BINDING_NAME, 0), 0);
+                    assert_eq!(gl.get_error(), glow::NO_ERROR);
+                }
+            })
+            .expect("query storage image unit after binding failure");
+    }
+
+    fn run_storage_array_subrange_test(label: &str, base: u32, count: u32, total: u32) {
+        let Some(device) = gles_device_or_skip(label) else {
+            return;
+        };
+        let format = crate::HalTextureFormat::R32Uint;
+        let texture = storage_array_texture(&device, total);
 
         // Seed every layer with a sentinel so untouched layers are detectable.
         const SENTINEL: u32 = 9;
@@ -10906,6 +11528,170 @@ mod tests {
                 message: "GLES lacks cube-array textures",
             }
         ));
+    }
+
+    fn mip_binding(texture: u32, base: u32, count: u32, requires_view: bool) -> SampledMipBinding {
+        SampledMipBinding {
+            texture,
+            base_mip_level: base,
+            mip_level_count: count,
+            requires_view,
+        }
+    }
+
+    #[test]
+    fn mip_range_conflict_views_single_binding_has_no_conflict() {
+        assert_eq!(
+            mip_range_conflict_views(&[mip_binding(1, 1, 1, false)], &[]),
+            vec![false]
+        );
+        assert!(mip_range_conflict_views(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn mip_range_conflict_views_same_range_shares_raw_texture() {
+        // Also covers one texture binding paired with several samplers: each
+        // combined unit repeats the same texture and range.
+        assert_eq!(
+            mip_range_conflict_views(
+                &[
+                    mip_binding(1, 0, 2, false),
+                    mip_binding(1, 0, 2, false),
+                    mip_binding(1, 0, 2, false),
+                ],
+                &[]
+            ),
+            vec![false, false, false]
+        );
+    }
+
+    #[test]
+    fn mip_range_conflict_views_marks_only_later_different_range() {
+        assert_eq!(
+            mip_range_conflict_views(
+                &[mip_binding(1, 0, 1, false), mip_binding(1, 1, 1, false)],
+                &[]
+            ),
+            vec![false, true]
+        );
+        assert_eq!(
+            mip_range_conflict_views(
+                &[mip_binding(1, 1, 1, false), mip_binding(1, 0, 1, false)],
+                &[]
+            ),
+            vec![false, true]
+        );
+        // Same base level, different level count is still a different range.
+        assert_eq!(
+            mip_range_conflict_views(
+                &[mip_binding(1, 0, 2, false), mip_binding(1, 0, 1, false)],
+                &[]
+            ),
+            vec![false, true]
+        );
+    }
+
+    #[test]
+    fn mip_range_conflict_views_marks_only_ranges_unlike_the_first() {
+        assert_eq!(
+            mip_range_conflict_views(
+                &[
+                    mip_binding(1, 0, 1, false),
+                    mip_binding(1, 1, 1, false),
+                    mip_binding(1, 0, 1, false),
+                ],
+                &[]
+            ),
+            vec![false, true, false]
+        );
+    }
+
+    #[test]
+    fn mip_range_conflict_views_different_textures_never_conflict() {
+        assert_eq!(
+            mip_range_conflict_views(
+                &[
+                    mip_binding(1, 0, 1, false),
+                    mip_binding(2, 1, 1, false),
+                    mip_binding(3, 2, 1, false),
+                ],
+                &[]
+            ),
+            vec![false, false, false]
+        );
+    }
+
+    #[test]
+    fn mip_range_conflict_views_ignores_bindings_that_already_need_a_view() {
+        // The view-owning binding does not claim texture 1's first range, so
+        // the later raw binding with another range keeps the raw name.
+        assert_eq!(
+            mip_range_conflict_views(
+                &[mip_binding(1, 0, 1, true), mip_binding(1, 1, 1, false)],
+                &[]
+            ),
+            vec![false, false]
+        );
+        // A view-owning binding is never marked, even against a claimed range.
+        assert_eq!(
+            mip_range_conflict_views(
+                &[
+                    mip_binding(1, 0, 1, false),
+                    mip_binding(1, 1, 1, true),
+                    mip_binding(1, 1, 1, false),
+                ],
+                &[]
+            ),
+            vec![false, false, true]
+        );
+    }
+
+    #[test]
+    fn mip_range_conflict_views_checks_storage_levels_of_the_same_texture() {
+        let storage = [(1, 1)];
+        let mip_zero = mip_binding(1, 0, 1, false);
+        let mip_one = mip_binding(1, 1, 1, false);
+        let full = mip_binding(1, 0, 3, false);
+        assert_eq!(mip_range_conflict_views(&[mip_zero], &storage), [true]);
+        assert_eq!(mip_range_conflict_views(&[mip_one], &storage), [false]);
+        assert_eq!(mip_range_conflict_views(&[full], &storage), [false]);
+        assert_eq!(
+            mip_range_conflict_views(
+                &[mip_binding(2, 0, 1, false), mip_binding(1, 0, 1, true)],
+                &storage
+            ),
+            [false, false],
+        );
+    }
+
+    #[test]
+    fn mip_range_conflict_views_only_first_eligible_range_claims_the_raw_name() {
+        let storage = [(1, 1)];
+        let mip_zero = mip_binding(1, 0, 1, false);
+        let mip_one = mip_binding(1, 1, 1, false);
+        let full = mip_binding(1, 0, 3, false);
+        for (first, second) in [(mip_one, full), (full, mip_one)] {
+            assert_eq!(
+                mip_range_conflict_views(&[mip_zero, first, second, first], &storage),
+                [true, false, true, false],
+            );
+        }
+    }
+
+    #[test]
+    fn mip_range_conflict_views_must_include_every_storage_level() {
+        let storage = [(1, 1), (1, 2)];
+        assert_eq!(
+            mip_range_conflict_views(
+                &[
+                    mip_binding(1, 1, 1, false),
+                    mip_binding(1, 2, 1, false),
+                    mip_binding(1, 1, 2, false),
+                ],
+                &storage,
+            ),
+            [true, true, false],
+        );
     }
 
     #[test]

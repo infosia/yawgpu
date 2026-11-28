@@ -72,15 +72,16 @@ consequence or the support contract is unconfirmed.
 | 05 | Reproduced | `timedWaitAnyMaxCount` is advertised as 64 but neither negotiated at instance creation nor enforced by `wgpuInstanceWaitAny` | Block 166 |
 | 06 | Reproduced | `compatibleSurface` does not constrain adapter selection | Block 166 |
 | 07 | Reproduced | A subpass input may name a producer subpass that does not write its source attachment | Block 163 |
-| 08 | Suspected | GLES: two sampled views of one texture differing only in mip range bind the same GL texture name, so each bind's `BASE_LEVEL`/`MAX_LEVEL` overwrites the other's within one draw or dispatch (`gles/queue.rs` `requires_texture_view_for`) | OPEN — needs a core-mode two-view probe on a native GLES host |
+| 08 | Reproduced (native GLES, 2026-11-28) | GLES: two sampled views of one texture differing only in mip range bind the same GL texture name, so each bind's `BASE_LEVEL`/`MAX_LEVEL` overwrites the other's within one draw or dispatch (`gles/queue.rs` `requires_texture_view_for`). Phase Review found the same state hiding storage-image levels: a store to a mip outside a sampled view's range was dropped, in the same dispatch or a later one | Block 169 (later ranges and ranges that exclude a storage level bind through a transient `glTextureView`; raw storage binds reset the range) |
 | 09 | Reproduced | Vulkan/Tint: one multisampled input binding sets a module-wide Tint option, changing SPIR-V generation for every input attachment (`pipeline_has_multisampled_input_attachment`) | Block 168 (multisampling per binding; the mixed probe failed at pipeline creation on Windows NVIDIA before, passes after) |
 | 10 | Reproduced | A `WGPURequestAdapterWebXROptions` request succeeds; native Dawn declines it | Block 166 |
 | 11 | Suspected | Surface configuration accepts the Display-P3 / extended tone-mapping chain; the HAL configuration carries neither | Block 167 (rejected explicitly, as Dawn does) |
 | 12 | Suspected | `powerPreference` never participates in adapter selection | Block 166 (Dawn `SortAdapters` ranking) |
 
 Blocks 163–167 are complete (2026-11-28; gates and Phase Review in each block spec). Block
-164 ran on native Vulkan (Windows NVIDIA, 2026-11-28). Run owed: Block 166 R5/R6 on a
-multi-adapter host. 09 is fixed by Block 168. 08 stays open.
+164 ran on native Vulkan (Windows NVIDIA, 2026-11-28). Block 166 R6/R7 ran on a
+three-adapter Linux host (2026-11-28); R5 with a real surface stays owed. 09 is fixed by
+Block 168. 08 is fixed by Block 169 (Linux native GLES, 2026-11-28).
 
 Review rule going forward: for a changed descriptor field or command, record the function
 that consumes it and the one test that fails if it reverts to its default; when the same
