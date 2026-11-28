@@ -2,56 +2,90 @@
 
 Status: **spec only.** No slice started.
 
-Programs written against Dawn's native API — the generated `dawn/webgpu.h`,
-the `webgpu_cpp.h` C++ wrapper, `DawnProcTable`, and the `dawn::native` C++
-classes — cannot link against yawgpu today, even though yawgpu implements the
-same `webgpu.h` semantics. This block adds an opt-in layer that presents
-Dawn's native surface on top of yawgpu, so such a program builds and runs with
-yawgpu in place of Dawn's monolithic `webgpu_dawn` library.
+A program written against Dawn's native API can run on yawgpu when it reaches
+the implementation only through Dawn's generated headers and a
+`DawnProcTable`. This block provides that surface: the proc table filled with
+yawgpu's functions, and the "Dawn API package" (headers and dispatch sources)
+a consumer compiles against.
 
-The motivating consumer is ONNX Runtime's native WebGPU execution provider,
-which targets Dawn. Its source is not available to this block (the upstream
-repository returned 404 on 2026-11-28), so the surface below is derived from
-Dawn alone and the consumer-specific part is deferred to S5.
+The motivating consumer is ONNX Runtime's native WebGPU execution provider.
+Its *external Dawn* mode is exactly this contract, so the block targets it
+directly. `$ORT` below is an ONNX Runtime checkout.
+
+## Consumer contract (ONNX Runtime 1.32.0)
+
+Measured from `$ORT/docs/WebGPU_External_Dawn.md`,
+`$ORT/cmake/external/onnxruntime_external_deps.cmake` and
+`$ORT/onnxruntime/core/providers/webgpu/`.
+
+Built with `onnxruntime_USE_EXTERNAL_DAWN` and
+`onnxruntime_DAWN_PREBUILT_DIR=<package>`, ONNX Runtime neither builds nor
+links Dawn. It compiles `<package>/src/dawn_proc.cpp` and
+`dawn_thread_dispatch_proc.cpp` with its own toolchain, includes
+`webgpu/webgpu_cpp.h`, and uses no `dawn::native` or `dawn::platform` symbol.
+The host passes the address of a `DawnProcTable` in the session option
+`ep.webgpuexecutionprovider.dawnProcTable`; ONNX Runtime calls
+`dawnProcSetProcs` with it, which aborts unless the table's `version` bytes
+equal the package's `dawn/dawn_version.h`.
+
+What ONNX Runtime then asks of the implementation:
+
+| Item | Use | yawgpu today |
+|---|---|---|
+| Instance feature `TimedWaitAny` | required at `CreateInstance` | supported |
+| `WGPUFeatureName_ImplicitDeviceSynchronization` (`0x00050004`) | **required** on every native device, ORT-created or host-supplied; a device without it is rejected | not advertised (R3) |
+| `WGPUDawnTogglesDescriptor` (`0x0005000A`) | chained on `WGPURequestAdapterOptions` and on `WGPUDeviceDescriptor`, always | R2 |
+| `WGPUDawnCacheDeviceDescriptor` (`0x00050007`) | chained after the device toggles when the host supplies a cache interface | R2 |
+| `ChromiumExperimentalSubgroupMatrix`, `ShaderF16`, `Subgroups`, `SubgroupSizeControl`, `TimestampQuery` | requested when the adapter has them | supported (Blocks 62, 108, 170) |
+| `WGPUAdapterPropertiesSubgroupMatrixConfigs` | chained on `GetAdapterInfo` when the device has the feature | supported (Block 170) |
+| `ChromiumExperimentalTimestampQueryInsidePasses` (`0x00050003`) | requested when present; enables `wgpuComputePassEncoderWriteTimestamp` | not advertised, so not called |
+| `BufferMapExtendedUsages` (`0x00050013`), `AdapterPropertiesMemoryHeaps` (`0x00050014`) | requested / queried when present | not advertised |
+| `SharedBufferMemory*`, `SharedFence*`, `RequestAdapterOptionsLUID`, `dawn::native::d3d12` | Windows D3D12 weight loading and PIX only | out of scope |
+
+The toggles ONNX Runtime passes are `use_dxc`, `allow_unsafe_apis`,
+`decompose_uniform_buffers`, `use_vulkan_memory_model`,
+`vulkan_enable_f16_on_nvidia` (adapter); `skip_validation`,
+`d3d_disable_ieee_strictness`, `disable_robustness`,
+`lazy_clear_resource_on_first_use` (device, enabled); `timestamp_quantization`
+(device, disabled).
+
+A host may instead create the instance and device itself and pass them through
+`webgpuInstance` / `webgpuDevice` / `deviceId`; the same requirements apply to
+that device.
+
+ONNX Runtime is written against Dawn `v20261013`; the package is generated
+from yawgpu's pinned Dawn. Source-level drift between the two is found by S5.
 
 ## Measured starting point
 
-Comparison of the pinned yawgpu `webgpu.h` with Dawn's generated
-`dawn/webgpu.h` (Dawn build `v20261030`), by normalized text:
+Comparison of the pinned yawgpu headers with Dawn's generated `dawn/webgpu.h`
+(Dawn build `v20261030`), by normalized text:
 
 | Item | Dawn | yawgpu | Result |
 |---|---|---|---|
-| C functions | 276 | 202 | all 202 exist in Dawn under the same name |
-| Structs | 196 | 92 | all 92 have identical member lists |
+| C functions | 276 | 203 | all 203 exist in Dawn under the same name |
+| Structs | 196 | 92 + Block 170's | identical member lists |
 | Enum values | — | — | no name has two different values |
 
-yawgpu's C ABI is a subset of Dawn's. The comparison did not check `sizeof` /
-`offsetof` with a compiler; R1 does.
+The comparison did not check `sizeof` / `offsetof` with a compiler; R1 does.
 
-The 74 Dawn-only functions fall into these groups:
-
-| Group | Functions | Plan |
-|---|---|---|
-| Device / adapter plumbing | `wgpuDeviceTick`, `wgpuDeviceGetAdapter`, `wgpuAdapterGetInstance`, `wgpuAdapterCreateDevice`, `wgpuDeviceSetLoggingCallback` | Implemented (R2) |
-| Subgroup matrix | `wgpuAdapterPropertiesSubgroupMatrixConfigsFreeMembers` | Implemented by Block 170 |
-| External texture | `wgpuDeviceCreateExternalTexture`, `wgpuExternalTexture{Destroy,Expire,Refresh}` | Stub (yawgpu's own API is `yawgpuDeviceCreateExternalTexture`) |
-| In-pass timestamps | `wgpu{Compute,Render}PassEncoderWriteTimestamp` | Stub |
-| Shared memory / fences | `wgpuShared*`, `wgpuDeviceImportShared*` (26) | Stub |
-| Resource tables, texel buffer views | `wgpuResourceTable*`, `wgpuTexelBufferView*`, `wgpu*SetResourceTable`, `wgpuBufferCreateTexelView` (15) | Stub |
-| Error injection / testing | `wgpuDeviceCreateError*`, `wgpuDeviceInjectError`, `wgpuDeviceForceLoss`, `wgpuCommandEncoderInjectValidationError`, `wgpuTextureCreateErrorView`, `wgpuDeviceValidateTextureDescriptor` | Stub |
-| Other | multi-draw indirect, pixel local storage, browser copies, format capabilities, memory heaps, DRM, AHardwareBuffer, memory dump | Stub |
+Of the 73 Dawn-only functions, ONNX Runtime's non-Windows code can reach one,
+`wgpuComputePassEncoderWriteTimestamp`, and only behind a feature yawgpu does
+not advertise. All 73 are stubs (R5).
 
 ## Scope
 
 - Opt-in. Nothing in this block is part of the default cargo build or the
-  default `libyawgpu` export set beyond R2's five functions.
+  default `libyawgpu` export set, except R2's chain handling and R3's feature.
 - Experimental: the layer tracks the pinned Dawn revision and carries no
   SemVer guarantee.
 - Backends: every yawgpu backend. The layer contains no backend code.
 
-Out of scope: Dawn's wire, Dawn's D3D / OpenGL backend headers
-(`D3D12Backend.h` and siblings), `dawn::platform`, Chromium shared-memory
-interop, and reproducing Dawn toggles' behaviour.
+Out of scope: a `dawn::native` C++ shim (`dawn::native::Instance`, `Adapter`,
+`GetProcs`), a drop-in `webgpu_dawn` library with a `find_package(Dawn)` CMake
+package, `dawn::platform`, Dawn's wire, D3D / shared-memory interop, PIX, and
+reproducing Dawn toggles' behaviour. A consumer that needs one of these is a
+new block.
 
 ## Rules
 
@@ -67,72 +101,69 @@ of Dawn's:
 - Every enum constant in both headers has the same value.
 
 Dawn's header is generated from the `third_party/dawn` submodule by Dawn's own
-generator (`generator/dawn_json_generator.py`, target `headers`), not copied
-from another checkout. The test fails at a Dawn pin bump that breaks the
-subset, and prints the offending names.
+generator (`generator/dawn_json_generator.py`), not copied from another
+checkout. The test fails at a Dawn pin bump that breaks the subset, and prints
+the offending names. The `yawgpu.h` items that reuse Dawn names (Block 170) are
+covered by the same check.
 
-The `yawgpu.h` items that reuse Dawn names (Block 170) are covered by the same
-check.
+### R2 — Dawn chained structs
 
-### R2 — Dawn plumbing entry points
-
-Five functions are added to yawgpu's C ABI with Dawn's signatures, declared in
-`yawgpu.h`, registered with `wgpuGetProcAddress`:
-
-- `wgpuDeviceTick(device)` — processes the pending events of the device's
-  instance, like `wgpuInstanceProcessEvents`.
-- `wgpuDeviceGetAdapter(device)` — returns a new reference to the adapter the
-  device was created from.
-- `wgpuAdapterGetInstance(adapter)` — returns a new reference to the adapter's
-  instance.
-- `wgpuAdapterCreateDevice(adapter, descriptor)` — synchronous device
-  creation. Returns null on failure; the failure message goes to the logging
-  callback when one is set, else to stderr.
-- `wgpuDeviceSetLoggingCallback(device, callbackInfo)` — installs a callback
-  that receives the device's log messages (`WGPULoggingType` + message).
-
-`WGPULoggingType`, `WGPULoggingCallback` and `WGPULoggingCallbackInfo` are
-declared with Dawn's values.
-
-### R3 — Dawn chained structs
-
-Descriptor chains accept these Dawn `sType`s without error:
+These Dawn `sType`s are accepted without error:
 
 | `sType` | Where | Behaviour |
 |---|---|---|
-| `WGPUSType_DawnTogglesDescriptor` (`0x0005000A`) | instance, adapter-request and device descriptors | Accepted. The toggle names are recorded and readable through R6's `GetTogglesUsed`. No toggle changes yawgpu's behaviour in this block. |
-| `WGPUSType_DawnCacheDeviceDescriptor` (`0x00050007`) | device descriptor | Accepted and ignored. |
+| `WGPUSType_DawnTogglesDescriptor` (`0x0005000A`) | instance descriptor, request-adapter options, device descriptor | Accepted. No toggle changes yawgpu's behaviour. |
+| `WGPUSType_DawnCacheDeviceDescriptor` (`0x00050007`) | device descriptor, including behind a toggles node | Accepted. The load / store callbacks are never called. |
 
-A toggle that asks Dawn for less validation or robustness (`skip_validation`,
-`disable_robustness`) is therefore not honoured: yawgpu keeps validating. Dawn
-features that Dawn hides behind `allow_unsafe_apis` are advertised by yawgpu
-whenever the adapter supports them.
+Consequences, stated so a consumer is not surprised:
+
+- `skip_validation` and `disable_robustness` are not honoured: yawgpu keeps
+  validating and keeps robustness.
+- Dawn features that Dawn hides behind `allow_unsafe_apis` are advertised by
+  yawgpu whenever the adapter supports them.
 
 Any other `sType` keeps its current handling.
 
-### R4 — compat library
+### R3 — `ImplicitDeviceSynchronization`
 
-A new directory `yawgpu-dawn/` builds one library, `webgpu_dawn`, that a
-Dawn consumer links instead of Dawn's library of the same name. It contains
-the yawgpu static library plus a C++ shim, and exports:
+`Feature::ImplicitDeviceSynchronization` (`0x00050004`, Dawn's value) is
+advertised by every adapter and may be required at device creation.
 
-- every `wgpu*` symbol of Dawn's generated `webgpu.h` (276 at the measured
-  revision): yawgpu's own, R2's, and a stub for each remaining one (R5);
-- `dawnProcSetProcs` and `dawnProcGetVersion` (`dawn/dawn_proc.h`).
-  `dawnProcSetProcs` stores the table; the exported `wgpu*` symbols always
-  call yawgpu directly;
-- the `dawn::native` symbols of R6.
+Contract (Dawn `docs/dawn/features/implicit_device_synchronization.md`): on a
+device with the feature, every public entry point of the device and of its
+child objects may be called from several threads at once, except command
+encoding — one `WGPUCommandEncoder`, pass encoder or render bundle encoder is
+used by one thread at a time.
 
-It installs Dawn's generated `dawn/webgpu.h`, `dawn/webgpu_cpp.h`,
-`dawn/webgpu_cpp_print.h`, `dawn/dawn_proc_table.h`, the `webgpu/` forwarding
-headers, `dawn/dawn_proc.h`, and the shim's own `dawn/native/DawnNative.h`.
+The feature is advertised only once this holds for yawgpu, established by:
 
-It ships a CMake package so that `find_package(Dawn)` followed by
-`target_link_libraries(app dawn::webgpu_dawn)` works unchanged.
+- an audit of every FFI entry point and the core / HAL state it touches,
+  recorded per object type in `specs/tracking/dawn-compat.md` (what guards the
+  state; `unsafe impl Send / Sync` items with their justification);
+- concurrent tests on Noop — threads sharing one device that create and drop
+  resources, write buffers, submit, map, pop error scopes and process events —
+  and the same workload on Metal and Vulkan as real-GPU e2e.
 
-The stub list is generated from the difference between Dawn's header and
-yawgpu's exports, not written by hand, so a Dawn bump or a new yawgpu function
-updates it.
+If the audit shows yawgpu is thread-safe without the feature, enabling it
+changes nothing. If it finds unguarded state, the fix makes the entry point
+safe unconditionally; the feature never selects a different code path.
+
+### R4 — proc table
+
+A new directory `yawgpu-dawn/` builds one static library, opt-in, that exports
+
+```c
+const DawnProcTable* yawgpuDawnGetProcTable(void);
+```
+
+The returned table has Dawn's layout for the pinned revision
+(`dawn/dawn_proc_table.h`), `version` equal to that revision's
+`dawn::kDawnVersion`, and every member non-null: yawgpu's function where
+yawgpu implements the entry point, else a stub (R5). The pointer is valid for
+the life of the process.
+
+The member list is generated from Dawn's header and yawgpu's exports, not
+written by hand, so a Dawn bump or a new yawgpu function updates it.
 
 ### R5 — stubs
 
@@ -143,8 +174,7 @@ A stub for a Dawn entry point yawgpu does not implement:
   values, and does nothing for `void`;
 - never crashes and never reports success.
 
-`wgpuGetProcAddress` returns null for a stubbed name. `DawnProcTable` (R6)
-holds the stub, so a table call is safe.
+`wgpuGetProcAddress` returns null for a stubbed name.
 
 Setting the environment variable `YAWGPU_DAWN_STRICT=1` makes a stub abort
 after printing, to find the first unsupported call in a consumer.
@@ -153,84 +183,93 @@ Feature and limit queries need no stub: a Dawn-only `WGPUFeatureName` is not
 advertised, and requesting it fails device creation as for any unsupported
 feature.
 
-### R6 — `dawn::native` shim
+### R6 — Dawn API package
 
-`dawn/native/DawnNative.h` declares, with Dawn's signatures:
+A script produces a directory in the layout ONNX Runtime's
+`onnxruntime_DAWN_PREBUILT_DIR` expects:
 
-- `dawn::native::GetProcs()` — a `DawnProcTable` with Dawn's `version` bytes
-  for the pinned revision and every member filled (yawgpu function or stub).
-- `dawn::native::Instance` — constructors from `WGPUInstanceDescriptor*` and
-  `wgpu::InstanceDescriptor*`, `Get()`, `EnumerateAdapters(options)`,
-  `GetToggleInfo(name)` (returns null),
-  `SetBackendValidationLevel(level)` (ignored).
-- `dawn::native::Adapter` — default and copy construction, `operator bool`,
-  `Get()`, `CreateDevice(descriptor)` (both overloads),
-  `SetUseTieredLimits(bool)` (ignored).
-- `dawn::native::DawnInstanceDescriptor` — accepted on the instance chain;
-  its `loggingCallbackInfo` is installed, the other members are ignored.
-- `dawn::native::GetTogglesUsed(device)` — the names recorded by R3.
-- `dawn::native::DeviceTick(device)`,
-  `dawn::native::InstanceProcessEvents(instance)`.
+```text
+<package>/
+  include/dawn/      Dawn public and generated headers, including
+                     dawn_proc.h, dawn_proc_table.h, dawn_version.h,
+                     dawn_thread_dispatch_proc.h, webgpu.h, webgpu_cpp.h
+  include/webgpu/    webgpu.h, webgpu_cpp.h and their companions
+  src/dawn_proc.cpp
+  src/dawn_thread_dispatch_proc.cpp
+```
 
-`Instance::EnumerateAdapters` returns yawgpu's adapters for the backend chosen
-by `options->backendType`; `Undefined` uses yawgpu's default selection.
+- The headers are generated from the `third_party/dawn` submodule, so they
+  match R4's table and R1's guard by construction.
+- The two sources compile using only the package headers and the C++ standard
+  library. Dawn's generated `dawn_proc.cpp` includes private headers
+  (`src/dawn/common/Compiler.h`, `src/utils/assert.h`, `src/utils/log.h`), so
+  the package carries a standalone equivalent.
+- `dawnProcSetProcs` keeps the version check: a table whose `version` differs
+  from `dawn_version.h` aborts.
 
-Classes and functions of `DawnNative.h` not listed here are not declared, so
-a consumer that needs one fails at compile time rather than at run time.
+The package contains no yawgpu-specific header; a host that wants `yawgpu.h`
+(backend selection) includes it from yawgpu.
 
-### R7 — consumer bring-up (S5)
+### R7 — ONNX Runtime bring-up
 
-For each real consumer, starting with ONNX Runtime:
-
-1. Build it against R4's package with `YAWGPU_DAWN_STRICT` unset.
-2. Compile and link errors list the `dawn::native` items and symbols the
-   consumer needs beyond R6.
-3. Run its tests with `YAWGPU_DAWN_STRICT=1`; each abort names a stub the
-   consumer actually calls.
+1. Build ONNX Runtime with `--use_webgpu --use_external_dawn` and R6's package.
+   Compile errors are source drift between ONNX Runtime's Dawn and yawgpu's pin
+   (see "Consumer contract").
+2. A host program links ONNX Runtime and yawgpu, passes
+   `yawgpuDawnGetProcTable()` as `dawnProcTable`, and runs a model with CPU
+   fallback disabled, in both modes: ONNX Runtime creates the device, and the
+   host supplies `webgpuInstance` / `webgpuDevice`.
+3. Run with `YAWGPU_DAWN_STRICT=1`; each abort names a stub the consumer
+   actually calls.
 4. Each finding is recorded in `specs/tracking/dawn-compat.md` and resolved by
    implementing the entry point in yawgpu (with its inline unit test) or by a
    documented decision not to support it.
 
-The consumer's required and optional `WGPUFeatureName`s and toggles are
-recorded in the same ledger with yawgpu's support state.
+The ledger also records, per ONNX Runtime feature and toggle, yawgpu's support
+state, and which optional features (`BufferMapExtendedUsages`,
+`ChromiumExperimentalTimestampQueryInsidePasses`) are worth a follow-up block.
 
 ## Slices
 
 1. **S1 — ABI subset guard.** R1. Generates Dawn's headers from the submodule
    and adds the test.
-2. **S2 — plumbing entry points and chains.** R2, R3, in `yawgpu` /
-   `yawgpu-core`, with inline unit tests on Noop.
-3. **S3 — compat library.** R4, R5, R6.
-4. **S4 — C++ consumer test.** A small C++ program using only
-   `webgpu_cpp.h` and `dawn::native` — create an instance, enumerate
-   adapters, create a device, run a compute pass, read the result back — built
-   through the CMake package. Runs on Noop in CI and on Metal on the M2.
-5. **S5 — ONNX Runtime bring-up.** R7. Blocked on access to the ONNX Runtime
-   source.
+2. **S2 — Dawn chains.** R2, in `yawgpu`, with inline unit tests on Noop.
+3. **S3 — implicit device synchronization.** R3: the audit, the fixes it
+   finds, the concurrent tests, then the feature.
+4. **S4 — proc table and package.** R4, R5, R6, and a C++ smoke test that uses
+   only the package: compile its two sources, `dawnProcSetProcs` with
+   `yawgpuDawnGetProcTable()`, then through `webgpu_cpp.h` create an instance,
+   request an adapter and a device with a `DawnTogglesDescriptor`, run a
+   compute pass and read the result back. Noop in CI, Metal on the M2.
+5. **S5 — ONNX Runtime bring-up.** R7, on macOS / Metal first.
 6. **S6 — docs and Phase Review.**
+
+S2, S3 and S4 are independent of each other; S5 needs all three.
 
 ## Verification
 
 - S1: the guard passes at the current pin; it fails when a struct member in a
   scratch copy of yawgpu's header is reordered, and when an enum value is
   changed.
-- S2: inline tests — `wgpuDeviceGetAdapter` / `wgpuAdapterGetInstance` return
-  the originating objects and add a reference; `wgpuAdapterCreateDevice`
-  succeeds on Noop and returns null for an unsupported required feature;
-  `wgpuDeviceTick` completes a pending map callback; the logging callback
-  receives a message; device creation with a `DawnTogglesDescriptor` succeeds
-  and records the names.
-- S3: `nm` on the built library shows every `wgpu*` name of Dawn's header,
-  `dawnProcSetProcs`, and the R6 symbols; a stub prints once and returns the
-  R5 value; `YAWGPU_DAWN_STRICT=1` aborts.
-- S4: the consumer program's compute result matches on Noop (validation path)
-  and on Metal (execution).
-- S5: the ledger has no unresolved finding for the consumer's default code
-  path.
+- S2: inline tests — adapter request and device creation succeed with a
+  `DawnTogglesDescriptor` carrying ONNX Runtime's toggle names; device creation
+  succeeds with toggles followed by a `DawnCacheDeviceDescriptor`, and neither
+  callback is called.
+- S3: the audit ledger has no unguarded entry; the concurrent tests pass on
+  Noop repeatedly and under ThreadSanitizer where the toolchain supports it;
+  the device reports the feature; requiring it on an adapter succeeds.
+- S4: the table has no null member and its `version` equals
+  `dawn::kDawnVersion`; a stub prints once and returns the R5 value;
+  `YAWGPU_DAWN_STRICT=1` aborts; a table with one changed `version` byte makes
+  `dawnProcSetProcs` abort; the smoke test's compute result matches on Noop
+  (validation path) and on Metal (execution).
+- S5: a model runs on Metal through ONNX Runtime with CPU fallback disabled in
+  both device modes, and the ledger has no unresolved finding for that path.
 
 ## Open questions
 
-- Whether a consumer needs Dawn's `webgpu_cpp.h` C++ module target
-  (`dawn::cpp_module`); it is not provided unless S5 finds a use.
-- Whether to honour a small set of toggles (for example
-  `disable_symbol_renaming`) once a consumer depends on their effect.
+- Whether `skip_validation` should be honoured later for performance. ONNX
+  Runtime enables it by default in release builds; yawgpu validating every call
+  is correct but slower. Measured in S5 before deciding.
+- Whether a second consumer needs the `dawn::native` shim or the
+  `webgpu_dawn` CMake package excluded above.
