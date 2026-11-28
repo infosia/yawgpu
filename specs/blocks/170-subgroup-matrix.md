@@ -23,8 +23,10 @@ f16 → f16 / f32 ones, and u8 → u32 and i8 → i32 at 16×16×32 and 16×8×3
 driver does not list the two u8 → i32 configurations the Windows 621.24 driver
 does), subgroup range 32–32, and `e2e_vulkan_subgroup_matrix` is 7/0 with
 `YAWGPU_REQUIRE_SUBGROUP_MATRIX=1` under `VK_LAYER_KHRONOS_validation` with no
-validation output; workspace 1,533/0, Vulkan e2e 177/0. Owed: a Metal run of
-the three added scenarios. S4 (docs + Phase Review) not started.
+validation output; workspace 1,533/0, Vulkan e2e 177/0. On the Apple M2 at
+`7863494` `e2e_metal_subgroup_matrix` is 7/0 with the three added scenarios
+(not re-checked under a mutation on Metal). S4 (docs + Phase Review) not
+started.
 Ledger: `specs/tracking/subgroups.md` ("Block 170" section).
 
 Dawn's `ChromiumExperimentalSubgroupMatrix` feature enables the WGSL extension
