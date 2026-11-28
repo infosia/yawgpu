@@ -3,8 +3,14 @@
 Status: **S1 DONE (2026-11-28)** — feature, configuration query, WGSL gate,
 reflection and both pipeline rules on Noop; workspace 1,526/0, HAL lib tests
 with `metal` 215/0 and `vulkan` 381/0, Metal subgroup / subgroup-size-control /
-compute e2e 11/0 on the M2. S2 (Metal), S3 (Vulkan on Windows / Linux), S4
-(docs + Phase Review) not started.
+compute e2e 11/0 on the M2. **S2 DONE (2026-11-28)** — Metal
+advertises `{F32, F32}` and `{F16, F16}` 8×8×8 on Apple7; on the Apple M2
+`e2e_metal_subgroup_matrix` is 4/0 (configuration query, multiply and
+multiply-accumulate in both layouts, scalar arithmetic, the two pipeline
+validation errors), each arithmetic test confirmed to fail under a mutated
+CPU reference. The store-with-offset, out-of-bounds and fill-constructor
+scenarios are owed in the shared e2e body. S3 (Vulkan on Windows / Linux) and
+S4 (docs + Phase Review) not started.
 Ledger: `specs/tracking/subgroups.md` ("Block 170" section).
 
 Dawn's `ChromiumExperimentalSubgroupMatrix` feature enables the WGSL extension

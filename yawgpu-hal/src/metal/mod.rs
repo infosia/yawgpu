@@ -554,8 +554,13 @@ impl MetalAdapter {
         reported_subgroup_size_range_for_vendor(self.vendor_id())
     }
 
+    /// Returns the 8×8×8 configurations on subgroup-capable Apple7 and later devices.
+    #[must_use]
     pub(super) fn subgroup_matrix_configs(&self) -> Vec<crate::HalSubgroupMatrixConfig> {
-        Vec::new()
+        subgroup_matrix_configs_for_family(
+            self.device.supportsFamily(MTLGPUFamily::Apple7),
+            self.supports_subgroups(),
+        )
     }
 
     /// Returns the explicit compute subgroup size capabilities.
@@ -645,6 +650,22 @@ impl MetalAdapter {
 
 fn subgroups_supported(apple6: bool, mac2: bool) -> bool {
     apple6 || mac2
+}
+
+fn subgroup_matrix_configs_for_family(
+    apple7: bool,
+    subgroups: bool,
+) -> Vec<crate::HalSubgroupMatrixConfig> {
+    use crate::HalSubgroupMatrixComponentType::{F16, F32};
+    use crate::HalSubgroupMatrixConfig;
+
+    if !apple7 || !subgroups {
+        return Vec::new();
+    }
+    vec![
+        HalSubgroupMatrixConfig::new(F32, F32, 8, 8, 8),
+        HalSubgroupMatrixConfig::new(F16, F16, 8, 8, 8),
+    ]
 }
 
 fn atomic_vec2u_min_max_supported(apple9: bool, mac2: bool, apple8: bool) -> bool {
@@ -850,6 +871,38 @@ mod tests {
                 expected,
                 "{name}"
             );
+        }
+    }
+
+    #[test]
+    fn subgroup_matrix_configs_require_apple7_and_subgroups() {
+        use crate::HalSubgroupMatrixComponentType::{F16, F32};
+        use crate::HalSubgroupMatrixConfig;
+
+        assert_eq!(
+            subgroup_matrix_configs_for_family(true, true),
+            [
+                HalSubgroupMatrixConfig::new(F32, F32, 8, 8, 8),
+                HalSubgroupMatrixConfig::new(F16, F16, 8, 8, 8),
+            ]
+        );
+        assert!(subgroup_matrix_configs_for_family(false, true).is_empty());
+        assert!(subgroup_matrix_configs_for_family(true, false).is_empty());
+        assert!(subgroup_matrix_configs_for_family(false, false).is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires a real Metal GPU"]
+    fn subgroup_matrix_configs_follow_device_apple7_support() {
+        let Some(device) = test_helpers::metal_device_or_skip() else {
+            return;
+        };
+        let adapter = MetalAdapter::new(device.device.clone());
+        let configs = adapter.subgroup_matrix_configs();
+        if device.device.supportsFamily(MTLGPUFamily::Apple7) {
+            assert!(!configs.is_empty());
+        } else {
+            assert!(configs.is_empty());
         }
     }
 

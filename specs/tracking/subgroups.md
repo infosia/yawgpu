@@ -149,7 +149,7 @@ Spec: `specs/blocks/170-subgroup-matrix.md`.
 | Slice | Content | Status |
 |---|---|---|
 | S1 | core `Feature::ChromiumExperimentalSubgroupMatrix` (⇒ `Subgroups`), FFI `0x00050034`, `WGPUAdapterPropertiesSubgroupMatrixConfigs` (`0x0005003B`) on both adapter-info queries with the caller chain preserved, Tint `kChromiumExperimentalSubgroupMatrix` gate, `uses_subgroup_matrix` + `SubgroupMatrixInfo` reflection on the override-substituted IR, core rules R5 / R6, HAL `subgroup_matrix_configs()` (Noop one 8×8×8 f32; Metal / Vulkan / GLES empty) | **DONE 2026-11-28** |
-| S2 | Metal advertisement (Apple7) + `e2e_metal_subgroup_matrix.rs` | not started |
+| S2 | Metal advertisement (Apple7) + `e2e_metal_subgroup_matrix.rs` | **DONE 2026-11-28** — M2 reports 8×8×8 f32 and f16, range 32–32; e2e 4/0. Owed: store-with-offset, out-of-bounds, fill-constructor scenarios |
 | S3 | Vulkan advertisement, device enable, full subgroups + `e2e_vulkan_subgroup_matrix.rs` on native Windows / Linux | not started |
 | S4 | docs + Phase Review | not started |
 
