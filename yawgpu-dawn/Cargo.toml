@@ -5,9 +5,24 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[lib]
+crate-type = ["staticlib", "rlib"]
+
 [features]
-dawn-compat = []
+dawn-compat = ["dep:cc", "dep:yawgpu"]
+metal = ["yawgpu?/metal"]
+vulkan = ["yawgpu?/vulkan"]
+
+[dependencies]
+yawgpu = { path = "../yawgpu", optional = true }
+
+[build-dependencies]
+cc = { version = "1", optional = true }
 
 [[test]]
 name = "abi_guard"
+required-features = ["dawn-compat"]
+
+[[test]]
+name = "proc_table_smoke"
 required-features = ["dawn-compat"]

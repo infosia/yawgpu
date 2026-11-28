@@ -815,6 +815,10 @@ dependencies = [
 [[package]]
 name = "yawgpu-dawn"
 version = "0.1.0"
+dependencies = [
+ "cc",
+ "yawgpu",
+]
 
 [[package]]
 name = "yawgpu-hal"
