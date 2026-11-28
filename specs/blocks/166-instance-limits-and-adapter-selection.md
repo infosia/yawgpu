@@ -110,6 +110,19 @@ Run on Windows 11, NVIDIA GeForce RTX 5060 Ti, driver 617.14, Vulkan 1.4.351, at
 This host exposes a single Vulkan adapter, so R5 and R6 (multi-adapter selection) are not
 observable here; that run stays owed.
 
+### Linux native Vulkan, multi-adapter (2026-11-28)
+
+Run on Linux with three Vulkan adapters (NVIDIA GeForce RTX 5060 Ti discrete, AMD RADV
+integrated, llvmpipe CPU) at yawgpu `ff6913a`.
+`e2e_vulkan_adapter_info` `request_adapter_ranks_by_power_preference` (the loader's own
+device types are the oracle) passes: `HighPerformance` selects the discrete adapter,
+`LowPower` the integrated one, `Undefined` the first enumerated GPU (the discrete one), and
+`forceFallbackAdapter` the CPU adapter. R6 and R7 are observed on hardware.
+
+R5 is not observable on this host: the Vulkan HAL has no Xlib/XCB/Wayland surface path, so
+no real surface exists to filter by. R5 with a real surface on a multi-adapter host stays
+owed.
+
 ## Phase Review
 
 Fresh-agent review of Blocks 166–167: 0 CRITICAL, 0 MAJOR, 3 MINOR for this block.
