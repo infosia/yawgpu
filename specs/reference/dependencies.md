@@ -38,6 +38,13 @@
   a file in `yawgpu-tint/shim/` is also needed, because Cargo does not watch the
   Dawn sources themselves.
 
+  **After every pin change, run the Dawn ABI guard:**
+  `cargo test -p yawgpu-dawn --features dawn-compat`. It regenerates Dawn's
+  `webgpu.h` from the new pin and fails, naming each function, struct, member or
+  constant, when yawgpu's C ABI is no longer a subset of it (Block 171 R1). It
+  needs `python3` and a C compiler and is not part of the default test run, so
+  nothing else catches a divergence.
+
   The same missing `origin` breaks `git pull` when incoming commits move the pin:
   the recursive submodule fetch fails, and the pull stops before it merges. Use
   `git pull --no-recurse-submodules`, then `git submodule update third_party/dawn`.

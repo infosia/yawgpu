@@ -1,9 +1,11 @@
 # Block 171 — Dawn compatibility layer
 
-Status: **S1–S4 DONE; S5 DONE on macOS / Metal (2026-11-28)** — ONNX Runtime
+Status: **COMPLETE on macOS / Metal (2026-11-28).** S1–S6 done; ONNX Runtime
 1.32.0 runs SqueezeNet and MNIST on yawgpu with CPU fallback disabled, matching
-the CPU provider. S6 (docs + Phase Review) not started. Ledger:
-`specs/tracking/dawn-compat.md`.
+the CPU provider. Phase Review: 0 CRITICAL, 2 MAJOR and 9 MINOR, all fixed or
+deferred with a written rationale. Owed on other hosts: the Vulkan concurrency
+run, ThreadSanitizer, and the ONNX Runtime bring-up on Linux / Windows Vulkan.
+Ledger: `specs/tracking/dawn-compat.md`.
 
 A program written against Dawn's native API can run on yawgpu when it reaches
 the implementation only through Dawn's generated headers and a
@@ -105,7 +107,9 @@ of Dawn's:
 
 Dawn's header is generated from the `third_party/dawn` submodule by Dawn's own
 generator (`generator/dawn_json_generator.py`), not copied from another
-checkout. The test fails at a Dawn pin bump that breaks the subset, and prints
+checkout. The guard is opt-in (`cargo test -p yawgpu-dawn --features
+dawn-compat`); the Dawn bump procedure in `specs/reference/dependencies.md`
+runs it. The test fails at a Dawn pin bump that breaks the subset, and prints
 the offending names. The `yawgpu.h` items that reuse Dawn names (Block 170) are
 covered by the same check.
 
@@ -165,6 +169,10 @@ Deviations and limits:
   thread.
 - The `tiled` subpass pass holds a live HAL pass while encoding; it follows
   the command-encoding exception.
+- While a future's callback runs, other threads see that future as pending.
+  Two callbacks that each wait, without a timeout, on the future the other
+  thread is delivering therefore never return; so does a callback blocked on a
+  user lock held by a thread waiting on that callback's future.
 
 Concurrent tests on Noop — threads sharing one device that create and drop
 resources, write buffers, submit, map and wait, pop error scopes and process
@@ -201,6 +209,13 @@ void yawgpuDawnSetDefaultBackend(uint32_t backend);  /* YAWGPU_INSTANCE_BACKEND_
 ```
 
 overrides that default for instances created afterwards.
+
+The table's `getProcAddress` returns this `createInstance` entry for the name
+`wgpuCreateInstance`, so a consumer that resolves procs by name gets the same
+behaviour.
+
+Building the table runs R1's guard first and fails when the subset does not
+hold, so a table is never produced for an ABI-incompatible yawgpu.
 
 ### R5 — stubs
 

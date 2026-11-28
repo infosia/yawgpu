@@ -7,9 +7,9 @@ Spec: `specs/blocks/171-dawn-compat-layer.md`.
 | S1 | ABI subset guard | **DONE 2026-11-28** — `tools/dawn_compat/{gen_dawn_headers,abi_guard}.py`, crate `yawgpu-dawn` (feature `dawn-compat`), `tests/abi_guard.rs` 4/0. At Dawn `9bba943462` on arm64 macOS: 203 functions, 98 structs, 459 members, 525 constants, no mismatch |
 | S2 | Dawn toggles / cache chained structs | **DONE 2026-11-28** — yawgpu already skipped unrelated chain nodes on the instance and adapter-request chains and never read the device descriptor's chain, so no runtime change; `yawgpu.h` declares the two descriptors and three Noop tests pin the behaviour (`yawgpu --lib` 344/0) |
 | S3 | `ImplicitDeviceSynchronization` | **DONE 2026-11-28** — F1, F3, F5, F7, F9 fixed; feature advertised on Noop / Metal / Vulkan, not GLES; `concurrent_device` (4 threads × 32 iterations) on Noop, and on the Apple M2 through `e2e_metal_concurrent_device` 5 runs / 0 failures. Metal e2e regression 188/0 (54 binaries). Not run: ThreadSanitizer (the nightly `-Zbuild-std` build needs a crate that is not in the local cache), the Vulkan wrapper `e2e_vulkan_concurrent_device` on a native driver |
-| S4 | proc table, stubs, Dawn API package | **DONE 2026-11-28** — the table's `createInstance` selects the default real backend when no selector is chained, `yawgpuDawnSetDefaultBackend()` overrides it (`yawgpu-dawn --features dawn-compat` 13/0; the two Metal tests pass on the M2); `yawgpuDawnGetProcTable()`: 276 members, 203 yawgpu + 73 stubs; `tools/dawn_compat/make_dawn_api_package.py` (12 headers, 2 standalone sources); C++ smoke test through the package on Noop, and on the Apple M2 (`smoke_computes_on_metal`). `yawgpu-dawn --features dawn-compat` 11/0 |
+| S4 | proc table, stubs, Dawn API package | **DONE 2026-11-28** — the table's `createInstance` selects the default real backend when no selector is chained, `yawgpuDawnSetDefaultBackend()` overrides it `yawgpuDawnGetProcTable()`: 276 members, 203 yawgpu + 73 stubs; `tools/dawn_compat/make_dawn_api_package.py` (12 headers, 2 standalone sources); C++ smoke test through the package on Noop, and on the Apple M2 (`smoke_computes_on_metal`). the table's `createInstance` selects the default real backend when no selector is chained and `yawgpuDawnSetDefaultBackend()` overrides it. `yawgpu-dawn --features dawn-compat` 17/0; its two Metal tests pass on the M2 |
 | S5 | ONNX Runtime bring-up | **DONE on macOS / Metal 2026-11-28** — see "ONNX Runtime bring-up" below |
-| S6 | docs + Phase Review | not started |
+| S6 | docs + Phase Review | **DONE 2026-11-28** — `README` section, `examples/ort_webgpu/README.md`, Phase Review below |
 
 ## Thread-safety audit (R3)
 
@@ -141,6 +141,12 @@ ONNX Runtime features and toggles against yawgpu:
 | `ChromiumExperimentalTimestampQueryInsidePasses`, `BufferMapExtendedUsages`, `AdapterPropertiesMemoryHeaps` | not advertised; ONNX Runtime takes its fallback path |
 | Toggles (`skip_validation`, `disable_robustness`, …) | accepted, no effect |
 
+Optional features worth a follow-up block, by what ONNX Runtime gains:
+`ChromiumExperimentalTimestampQueryInsidePasses` (per-kernel profiling inside
+one pass; yawgpu's Metal backend already samples at pass boundaries), then
+`BufferMapExtendedUsages` (maps storage buffers directly instead of copying
+through a staging buffer on upload).
+
 Not done:
 
 - Linux / Windows Vulkan bring-up.
@@ -150,3 +156,34 @@ Not done:
 - A performance comparison with Dawn; in particular the cost of yawgpu
   validating although ONNX Runtime asks for `skip_validation`.
 - The host-supplied Dawn cache interface (accepted and unused).
+
+## Phase Review (2026-11-28)
+
+Fresh no-context review of `6370d11..9347b53` against R1–R7. **0 CRITICAL,
+2 MAJOR, 9 MINOR.** The future-delivery protocol and the Vulkan teardown lock
+order were read in full and found clean.
+
+| # | Finding | Decision |
+|---|---|---|
+| M1 | The proc-table build did not run R1's guard, so a Dawn bump could produce a table pointing at ABI-incompatible functions | Fixed: the table generator runs the guard first and fails naming the mismatch; `table_generator_rejects_an_incompatible_signature` |
+| M2 | Nothing told whoever bumps Dawn to run the guard | Fixed: step added to the bump procedure in `specs/reference/dependencies.md` |
+| m1 | While a callback runs, other threads see its future as pending; two callbacks waiting on each other's future never return | Documented as a limit in R3 |
+| m2 | `FutureRegistry::register`, `Poll::ExternalCallback`, `WaitAnyResult::callbacks_to_fire` were test-only and could drop a callback | Fixed: removed, tests ported to `register_with_callback` |
+| m3 | Stale Vulkan lock-order comment in `vulkan/encode.rs` | Fixed |
+| m4 | `getProcAddress("wgpuCreateInstance")` bypassed the default-backend wrapper | Fixed: the table's lookup returns its own entry; R4 updated |
+| m5 | Stub tests covered only `WGPUStatus`; the generator had no guard for a return type whose zero value may mean success | Fixed: every stub return kind classified, unknown kinds fail generation, one stub of each kind tested |
+| m6 | Tests that can pass without their property: `initialize_supports_concurrent_parsers` (only ThreadSanitizer sees the race), `shared_hal_handles_are_send_and_sync` (covers compiled-in backends), `smoke_runs_on_noop` (no data on Noop), the guard's pass test (no minimum count) | Guard minimum counts fixed. The others deferred: the Send / Sync test runs under each backend's HAL gate; Noop computes nothing by design; the Tint race needs ThreadSanitizer, listed as not run |
+| m7 | The standalone `dawn_proc.cpp` warning lost its trailing newline | Fixed |
+| m8 | Ledger gave two test counts in one row; `yawgpu-dawn/README.md` carried session-local paths; no list of features worth a follow-up | Fixed |
+| m9 | Redundant explicit `concurrent_device` test target | Fixed: removed |
+
+Gate after the fixes (Apple M2): `cargo fmt --check` clean; workspace 1,544/0;
+`yawgpu-dawn --features dawn-compat` 17/0 and its Metal tests 2/0; HAL lib
+221/0 (`metal`) and 395/0 (`vulkan`); clippy clean on default, `metal`,
+`vulkan`, `gles` and `dawn-compat,metal`; `e2e_metal_concurrent_device` 1/0;
+Metal e2e 188/0 (54 binaries); the ONNX Runtime host re-run in both device
+modes (Abs, SqueezeNet, MNIST).
+
+Open after the review, all needing a host or tool this machine lacks:
+ThreadSanitizer on the concurrent workload; `e2e_vulkan_concurrent_device` and
+the F3 fix on a native Vulkan driver; ONNX Runtime on Linux / Windows Vulkan.
