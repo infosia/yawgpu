@@ -163,11 +163,11 @@ def measurements(header, wanted, executable):
     return dict(line.rsplit(" ", 1) for line in output.splitlines())
 
 
-def guard(include, work):
-    gen_dawn_headers(work)
+def check_abi(include, dawn_include, work):
+    """Return ABI mismatches against the supplied generated Dawn headers."""
     cc = shlex.split(os.environ.get("CC", "cc"))
     yawgpu = Header([*cc, "-DYAWGPU_HAS_TILED"], include, ["webgpu.h", "yawgpu.h"])
-    dawn = Header(cc, work / "include", ["dawn/webgpu.h"])
+    dawn = Header(cc, dawn_include, ["dawn/webgpu.h"])
     expected = measurements(yawgpu, yawgpu, work / "yawgpu-probe")
     actual = measurements(dawn, yawgpu, work / "dawn-probe")
     problems = incompatible_functions(dawn, yawgpu)
@@ -185,9 +185,7 @@ def guard(include, work):
               for kind in ("struct", "member", "enum")]
     print(f"Checked {len(yawgpu.functions)} functions, {counts[0]} structs, "
           f"{counts[1]} members, {counts[2]} constants.", file=sys.stderr)
-    for problem in problems:
-        print(problem)
-    return int(bool(problems))
+    return problems
 
 
 def main():
@@ -198,7 +196,12 @@ def main():
     if args.work:
         args.work.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=args.work) as work:
-        return guard(args.yawgpu_include.resolve(), Path(work).resolve())
+        work = Path(work).resolve()
+        gen_dawn_headers(work)
+        problems = check_abi(args.yawgpu_include.resolve(), work / "include", work)
+        for problem in problems:
+            print(problem)
+        return int(bool(problems))
 
 
 if __name__ == "__main__":

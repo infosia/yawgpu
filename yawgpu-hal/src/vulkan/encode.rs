@@ -263,8 +263,9 @@ pub(super) fn record_and_submit_copies(
             );
             command_pool_cleanup = None;
             // Lock order: queue_access -> surface states -> submissions/recycler.
-            // Release queue_access and surface states before retire; retirement
-            // may take submissions/recycler, but never takes queue_access.
+            // Release surface states and queue_access before locking retire. Harvest may
+            // take submissions/recycler locks, and a final swapchain drop can acquire
+            // queue_access under retire if the teardown wait has not run.
             drop(_queue_access);
             let mut retire = queue
                 .retire

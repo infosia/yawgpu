@@ -21,13 +21,16 @@ def standalone_proc(source):
         '#include "src/utils/log.h"': "#include <iostream>",
         "CreateInstanceThatWarns(const WGPUInstanceDescriptor* desc)":
             "CreateInstanceThatWarns(const WGPUInstanceDescriptor*)",
-        "dawn::ErrorLog() <<": "std::cerr <<",
         f"DAWN_CHECK({check});": f"if (!{check}) std::abort();",
     }
     for original, replacement in replacements.items():
         if source.count(original) != 1:
             raise ValueError(f"Expected exactly one {original!r} in dawn_proc.cpp")
         source = source.replace(original, replacement)
+    source, warnings = re.subn(r'dawn::ErrorLog\(\) <<(\s*R"\(.*?\)")\s*;',
+                               r'std::cerr <<\1 << std::endl;', source, flags=re.S)
+    if warnings != 1:
+        raise ValueError("Expected exactly one ErrorLog warning in dawn_proc.cpp")
     source = source.replace('// The sanitizer is disabled for calls to procs.* since those functions may be\n'
                             '// dynamically loaded.\n', '')
     source = source.replace('DAWN_NO_SANITIZE("cfi-icall")\n', '')

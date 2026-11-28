@@ -34,11 +34,29 @@ extern "C" WGPUBackendType smokeAdapterBackend(const WGPUInstanceDescriptor* des
     return backend;
 }
 
-extern "C" bool smokeCallStub() {
+extern "C" bool smokeCheckProcAddress() {
     const auto* table = yawgpuDawnGetProcTable();
-    if (table->getProcAddress({"wgpuAdapterGetFormatCapabilities", WGPU_STRLEN})) return false;
-    return table->adapterGetFormatCapabilities(nullptr, WGPUTextureFormat_Undefined, nullptr)
-        == WGPUStatus_Error;
+    auto create = reinterpret_cast<WGPUProc>(table->createInstance);
+    return table->getProcAddress({"wgpuCreateInstance", WGPU_STRLEN}) == create &&
+           table->getProcAddress({"wgpuCreateInstance!", sizeof("wgpuCreateInstance") - 1}) == create &&
+           table->getProcAddress({"wgpuInstanceRelease", WGPU_STRLEN}) ==
+               reinterpret_cast<WGPUProc>(table->instanceRelease) &&
+           !table->getProcAddress({"wgpuAdapterGetFormatCapabilities", WGPU_STRLEN}) &&
+           !table->getProcAddress({"wgpuCreateInstance!", WGPU_STRLEN});
+}
+
+extern "C" bool smokeCallStubs() {
+    const auto* table = yawgpuDawnGetProcTable();
+    if (table->adapterGetFormatCapabilities(nullptr, WGPUTextureFormat_Undefined, nullptr)
+        != WGPUStatus_Error) return false;
+    table->deviceTick(nullptr);
+    return table->adapterGetInstance(nullptr) == nullptr &&
+           table->resourceTableGetSize(nullptr) == 0 &&
+           table->sharedBufferMemoryIsDeviceLost(nullptr) == 0;
+}
+
+extern "C" bool smokeUnconfiguredCreateInstance() {
+    return wgpuCreateInstance(nullptr) == nullptr;
 }
 
 extern "C" void smokeSetWrongVersion() {

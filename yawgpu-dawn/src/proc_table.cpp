@@ -21,6 +21,14 @@ void reportUnsupported(const char* name, std::atomic_flag& reported) {
     if (strict) std::abort();
 }
 
+WGPUProc getProcAddress(WGPUStringView name) {
+    WGPUProc proc = wgpuGetProcAddress(name);
+    if (proc == reinterpret_cast<WGPUProc>(&wgpuCreateInstance)) {
+        return reinterpret_cast<WGPUProc>(&yawgpuDawnCreateInstance);
+    }
+    return proc;
+}
+
 constexpr DawnProcTable makeTable() {
     DawnProcTable table{};
     std::ranges::copy(dawn::kDawnVersion, table.version);

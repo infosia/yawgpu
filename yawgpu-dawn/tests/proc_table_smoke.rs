@@ -6,7 +6,9 @@ use yawgpu_dawn::{dawn_proc_table, DawnProcTable};
 #[link(name = "dawn_smoke", kind = "static")]
 extern "C" {
     fn smokeCheckTable(table: *const DawnProcTable) -> bool;
-    fn smokeCallStub() -> bool;
+    fn smokeCheckProcAddress() -> bool;
+    fn smokeCallStubs() -> bool;
+    fn smokeUnconfiguredCreateInstance() -> bool;
     fn smokeSetWrongVersion();
     fn smokeCompute(metal: i32, bytes: *mut u8, size: usize) -> *const c_char;
 }
@@ -80,15 +82,25 @@ fn table_has_all_members_and_pinned_version() {
     assert!(unsafe { smokeCheckTable(dawn_proc_table()) });
 }
 
+#[test]
+fn table_resolves_create_instance_and_forwards_other_names() {
+    // SAFETY: the helper compares function pointers from the static table.
+    assert!(unsafe { smokeCheckProcAddress() });
+}
+
 const CHILD: &str = "YAWGPU_DAWN_SMOKE_CHILD";
 
 #[test]
 fn child_probe() {
     match std::env::var(CHILD).as_deref() {
         Ok("stub") => {
-            // SAFETY: this helper calls the known status stub, which ignores its arguments.
-            assert!(unsafe { smokeCallStub() });
-            assert!(unsafe { smokeCallStub() });
+            // SAFETY: the tested stubs ignore their arguments.
+            assert!(unsafe { smokeCallStubs() });
+            assert!(unsafe { smokeCallStubs() });
+        }
+        Ok("warning") => {
+            // SAFETY: the child starts with Dawn's default dispatch table.
+            assert!(unsafe { smokeUnconfiguredCreateInstance() });
         }
         Ok("version") => {
             // SAFETY: the helper passes a live table copy; Dawn checks its changed version.
@@ -117,29 +129,47 @@ fn assert_aborted(output: &Output) {
     assert!(!output.status.success(), "{output:?}");
 }
 
-fn assert_one_stub_message(output: &Output) {
-    assert_eq!(
-        String::from_utf8_lossy(&output.stderr).trim_end(),
-        "yawgpu-dawn: unsupported wgpuAdapterGetFormatCapabilities",
-        "{output:?}"
-    );
+const STUBS: [&str; 5] = [
+    "wgpuAdapterGetFormatCapabilities",
+    "wgpuDeviceTick",
+    "wgpuAdapterGetInstance",
+    "wgpuResourceTableGetSize",
+    "wgpuSharedBufferMemoryIsDeviceLost",
+];
+
+fn assert_stub_messages(output: &Output, names: &[&str]) {
+    let expected: Vec<_> = names
+        .iter()
+        .map(|name| format!("yawgpu-dawn: unsupported {name}"))
+        .collect();
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    assert_eq!(stderr.lines().collect::<Vec<_>>(), expected);
 }
 
 #[test]
-fn stub_reports_once_and_returns_error() {
+fn stubs_report_once_and_return_their_fallbacks() {
     let output = child("stub", false);
     assert!(output.status.success(), "{output:?}");
-    assert_one_stub_message(&output);
+    assert_stub_messages(&output, &STUBS);
 }
 
 #[test]
 fn strict_stub_reports_and_aborts() {
     let output = child("stub", true);
     assert_aborted(&output);
-    assert_one_stub_message(&output);
+    assert_stub_messages(&output, &STUBS[..1]);
 }
 
 #[test]
 fn mismatched_version_aborts() {
     assert_aborted(&child("version", false));
+}
+
+#[test]
+fn standalone_create_instance_warning_ends_with_newline() {
+    let output = child("warning", false);
+    assert!(output.status.success(), "{output:?}");
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    assert!(stderr.contains("wgpuCreateInstance"), "{stderr}");
+    assert!(stderr.ends_with('\n'), "{stderr:?}");
 }

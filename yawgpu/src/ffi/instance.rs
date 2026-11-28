@@ -723,7 +723,7 @@ mod tests {
         let future = instance
             .core
             .future_registry()
-            .register(core::FutureCallbackMode::WaitAnyOnly);
+            .register_with_callback(core::FutureCallbackMode::WaitAnyOnly, |_| {});
         let handle = Arc::into_raw(instance);
         let mut info = native::WGPUFutureWaitInfo {
             future: native::WGPUFuture { id: future.get() },
@@ -830,7 +830,7 @@ mod tests {
     fn ready_waits<const N: usize>(instance: &WGPUInstanceImpl) -> [native::WGPUFutureWaitInfo; N] {
         let registry = instance.core.future_registry();
         std::array::from_fn(|_| {
-            let id = registry.register(core::FutureCallbackMode::WaitAnyOnly);
+            let id = registry.register_with_callback(core::FutureCallbackMode::WaitAnyOnly, |_| {});
             registry.complete(id);
             native::WGPUFutureWaitInfo {
                 future: native::WGPUFuture { id: id.get() },

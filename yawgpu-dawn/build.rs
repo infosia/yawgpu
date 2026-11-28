@@ -22,10 +22,16 @@ fn main() {
         println!("cargo:rerun-if-changed={path}");
     }
     assert!(Command::new("python3")
-        .args(["-B", "../tools/dawn_compat/gen_proc_table.py", "--out"])
+        .args([
+            "-B",
+            "../tools/dawn_compat/gen_proc_table.py",
+            "--yawgpu-include",
+            "../yawgpu/ffi/webgpu-headers",
+            "--out",
+        ])
         .arg(&out)
         .status()
-        .expect("run the Dawn generators")
+        .expect("check the Dawn ABI and generate the proc table")
         .success());
 
     let package = out.join("dawn-api");

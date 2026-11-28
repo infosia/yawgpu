@@ -6,12 +6,11 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 
 sys.dont_write_bytecode = True
+from abi_guard import DEFAULT_INCLUDE, check_abi
 from make_dawn_api_package import DAWN, make_package
-
-
-YAWGPU_INCLUDE = DAWN.parents[1] / "yawgpu/ffi/webgpu-headers"
 
 
 def exports(header):
@@ -34,6 +33,27 @@ def members(header):
             yield match[2], "wgpu" + match[1]
 
 
+def stub_returns(header):
+    """Map recognized Dawn C types to their unsupported-call return statements."""
+    source = header.read_text()
+    returns = {"void": "return;", "WGPUStatus": "return WGPUStatus_Error;",
+               "WGPUBool": "return 0;"}
+    for name in ("int", "unsigned", "size_t", "int8_t", "uint8_t", "int16_t", "uint16_t",
+                 "int32_t", "uint32_t", "int64_t", "uint64_t"):
+        returns[name] = "return 0;"
+    for base, alias in re.findall(r"^typedef (\w+) (\w+);", source, re.M):
+        if returns.get(base) == "return 0;":
+            returns[alias] = "return 0;"
+    for handle in re.findall(r"^typedef struct \w+\s*\*\s*(\w+) WGPU_OBJECT_ATTRIBUTE;",
+                             source, re.M):
+        returns[handle] = "return nullptr;"
+    for proc in re.findall(r"^typedef [^;()]+\(\*([A-Za-z_]\w*)\)\(", source, re.M):
+        returns[proc] = "return nullptr;"
+    for struct in re.findall(r"^} (\w+) WGPU_STRUCTURE_ATTRIBUTE;", source, re.M):
+        returns[struct] = "return {};"
+    return returns
+
+
 def watch_dawn_revision():
     # A pin bump can change kDawnVersion without changing any template.
     def git_path(name):
@@ -51,13 +71,19 @@ def watch_dawn_revision():
                 print("cargo:rerun-if-changed=" + str(path))
 
 
-def generate(out):
+def generate(out, yawgpu_include):
     watch_dawn_revision()
     package = out / "dawn-api"
     make_package(package)
     dawn = package / "include/dawn"
-    functions = exports(dawn / "webgpu.h")
-    backed = exports(YAWGPU_INCLUDE / "webgpu.h") | exports(YAWGPU_INCLUDE / "yawgpu.h")
+    with tempfile.TemporaryDirectory(dir=out) as work:
+        problems = check_abi(yawgpu_include, dawn.parent, Path(work))
+    if problems:
+        raise ValueError("Incompatible yawgpu ABI:\n" + "\n".join(problems))
+    header = dawn / "webgpu.h"
+    functions = exports(header)
+    returns = stub_returns(header)
+    backed = exports(yawgpu_include / "webgpu.h") | exports(yawgpu_include / "yawgpu.h")
     fields = list(members(dawn / "dawn_proc_table.h"))
     names = {name for _, name in fields}
     if len(names) != len(fields) or names != functions.keys() or not backed.keys() <= names:
@@ -68,11 +94,14 @@ def generate(out):
         checks.append(f"if (!table->{member}) return false;")
         aliases.append(f"#define {name} smoke_dispatch_{name}")
         if name in backed:
-            target = "yawgpuDawnCreateInstance" if name == "wgpuCreateInstance" else name
+            target = {"wgpuCreateInstance": "yawgpuDawnCreateInstance",
+                      "wgpuGetProcAddress": "getProcAddress"}.get(name, name)
             init.append(f"table.{member} = &{target};")
             continue
-        result = functions[name]
-        fallback = {"WGPUStatus": "return WGPUStatus_Error;", "void": "return;"}.get(result, "return {};")
+        result = functions[name].removeprefix("WGPU_NULLABLE ")
+        fallback = "return nullptr;" if result.endswith("*") else returns.get(result)
+        if fallback is None:
+            raise ValueError(f"Unclassified stub return type {result} for {name}")
         init.extend([f"table.{member} = [](auto...) -> {result} {{",
                      "    static std::atomic_flag reported{};",
                      f'    reportUnsupported("{name}", reported);',
@@ -86,4 +115,9 @@ def generate(out):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, required=True)
-    generate(parser.parse_args().out)
+    parser.add_argument("--yawgpu-include", type=Path, default=DEFAULT_INCLUDE)
+    args = parser.parse_args()
+    try:
+        generate(args.out.resolve(), args.yawgpu_include.resolve())
+    except ValueError as error:
+        sys.exit(str(error))
