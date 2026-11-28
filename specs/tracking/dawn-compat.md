@@ -166,7 +166,7 @@ Native Vulkan driver (NVIDIA), MSVC 2022, yawgpu at Dawn pin `9bba943462`.
 | `concurrent_device` (Noop) | 1/0 |
 | `e2e_vulkan_concurrent_device` | 1/0, then 5 more runs / 0 failures; clean under `VK_LAYER_KHRONOS_validation` |
 | `e2e_vulkan_subgroup_matrix` (Block 170) | 7/0, 12 configurations advertised; clean under the validation layer |
-| `yawgpu-dawn --features dawn-compat,vulkan` | 18/0; guard: 203 functions, 98 structs, 459 members, 526 constants, no mismatch |
+| `yawgpu-dawn --features dawn-compat,vulkan` | 20/0 including `smoke_computes_on_vulkan` and `default_off_apple_with_vulkan_is_vulkan` (both clean under the validation layer); guard: 203 functions, 98 structs, 459 members, 526 constants, no mismatch |
 | ONNX Runtime 1.32.0, Abs | pass, ONNX Runtime-owned and host-owned device |
 | `squeezenet/model.onnx` vs the CPU provider | 1000 elements, worst relative error 2.3e-7, both modes; clean under the validation layer |
 | `mnist.onnx`, `matmul_1.onnx`, `conv_autopad.onnx`, `mul_1.onnx` vs the CPU provider | exact, both modes |
@@ -191,7 +191,7 @@ requests the backend type chosen at its build time (Vulkan here) and the Noop
 instance has no such adapter.
 
 Still open: ThreadSanitizer on the concurrent workload; ONNX Runtime on Linux
-Vulkan; a Vulkan counterpart of `smoke_computes_on_metal`.
+Vulkan.
 
 ## Phase Review (2026-11-28)
 

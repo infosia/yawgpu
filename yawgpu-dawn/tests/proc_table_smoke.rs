@@ -10,16 +10,17 @@ extern "C" {
     fn smokeCallStubs() -> bool;
     fn smokeUnconfiguredCreateInstance() -> bool;
     fn smokeSetWrongVersion();
-    fn smokeCompute(metal: i32, bytes: *mut u8, size: usize) -> *const c_char;
+    fn smokeCompute(backend: u32, bytes: *mut u8, size: usize) -> *const c_char;
 }
 
-fn compute(metal: bool) -> [u8; 16] {
+/// Runs the C++ consumer's compute pass on a `YAWGPU_INSTANCE_BACKEND_*` backend.
+fn compute(backend: u32) -> [u8; 16] {
     // dawnProcSetProcs changes the consumer's process-wide dispatch table.
     static DISPATCH: Mutex<()> = Mutex::new(());
     let _guard = DISPATCH.lock().unwrap();
     let mut bytes = [0; 16];
     // SAFETY: bytes is writable for exactly size bytes throughout the synchronous call.
-    let error = unsafe { smokeCompute(metal.into(), bytes.as_mut_ptr(), bytes.len()) };
+    let error = unsafe { smokeCompute(backend, bytes.as_mut_ptr(), bytes.len()) };
     if !error.is_null() {
         // SAFETY: the helper returns a static, null-terminated diagnostic on failure.
         panic!("C++ smoke failed at {:?}", unsafe { CStr::from_ptr(error) });
@@ -29,23 +30,35 @@ fn compute(metal: bool) -> [u8; 16] {
 
 #[test]
 fn smoke_runs_on_noop() {
-    compute(false);
+    compute(yawgpu::YAWGPU_INSTANCE_BACKEND_NOOP);
+}
+
+#[cfg(any(all(target_os = "macos", feature = "metal"), feature = "vulkan"))]
+fn assert_computed(bytes: [u8; 16]) {
+    for (i, word) in bytes.as_chunks::<4>().0.iter().enumerate() {
+        assert_eq!(u32::from_le_bytes(*word), 0x1710_0000 + i as u32);
+    }
 }
 
 #[test]
 #[cfg(all(target_os = "macos", feature = "metal"))]
 #[ignore = "manual real-backend test"]
 fn smoke_computes_on_metal() {
-    let bytes = compute(true);
-    for (i, word) in bytes.as_chunks::<4>().0.iter().enumerate() {
-        assert_eq!(u32::from_le_bytes(*word), 0x1710_0000 + i as u32);
-    }
+    assert_computed(compute(yawgpu::YAWGPU_INSTANCE_BACKEND_METAL));
+}
+
+#[test]
+#[cfg(feature = "vulkan")]
+#[ignore = "manual real-backend test"]
+fn smoke_computes_on_vulkan() {
+    assert_computed(compute(yawgpu::YAWGPU_INSTANCE_BACKEND_VULKAN));
 }
 
 // This test binary never sets the default backend.
 #[cfg(any(
     not(any(feature = "metal", feature = "vulkan")),
-    all(target_os = "macos", feature = "metal")
+    all(target_os = "macos", feature = "metal"),
+    all(not(target_vendor = "apple"), feature = "vulkan")
 ))]
 fn default_adapter_backend() -> yawgpu::native::WGPUBackendType {
     extern "C" {
@@ -73,6 +86,16 @@ fn default_on_macos_with_metal_is_metal() {
     assert_eq!(
         default_adapter_backend(),
         yawgpu::native::WGPUBackendType_Metal
+    );
+}
+
+#[test]
+#[cfg(all(not(target_vendor = "apple"), feature = "vulkan"))]
+#[ignore = "manual real-backend test"]
+fn default_off_apple_with_vulkan_is_vulkan() {
+    assert_eq!(
+        default_adapter_backend(),
+        yawgpu::native::WGPUBackendType_Vulkan
     );
 }
 

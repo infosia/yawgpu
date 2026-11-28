@@ -7,19 +7,19 @@
 #include <iostream>
 #include <iterator>
 
-extern "C" const void* smokeBackendChain(int metal);
+extern "C" const void* smokeBackendChain(uint32_t backend);
 
 namespace {
 constexpr uint64_t kTimeoutNs = 10'000'000'000;
 constexpr size_t kBytes = 4 * sizeof(uint32_t);
 
-const char* runCompute(int metal, uint8_t* bytes, std::atomic_bool& deviceError) {
+const char* runCompute(uint32_t backend, uint8_t* bytes, std::atomic_bool& deviceError) {
     wgpu::Adapter adapter;
     wgpu::Device device;
     bool mapped = false;
     constexpr auto timedWait = wgpu::InstanceFeatureName::TimedWaitAny;
     wgpu::InstanceDescriptor instanceDesc{
-        .nextInChain = static_cast<const wgpu::ChainedStruct*>(smokeBackendChain(metal)),
+        .nextInChain = static_cast<const wgpu::ChainedStruct*>(smokeBackendChain(backend)),
         .requiredFeatureCount = 1, .requiredFeatures = &timedWait};
     auto instance = wgpu::CreateInstance(&instanceDesc);
     if (!instance) return "CreateInstance";
@@ -118,11 +118,11 @@ const char* runCompute(int metal, uint8_t* bytes, std::atomic_bool& deviceError)
 }
 }  // namespace
 
-extern "C" const char* smokeCompute(int metal, uint8_t* bytes, size_t size) {
+extern "C" const char* smokeCompute(uint32_t backend, uint8_t* bytes, size_t size) {
     if (size != kBytes) return "wrong readback size";
     dawnProcSetProcs(yawgpuDawnGetProcTable());
     std::atomic_bool deviceError{false};
-    const char* error = runCompute(metal, bytes, deviceError);
+    const char* error = runCompute(backend, bytes, deviceError);
     dawnProcSetProcs(nullptr);
     return deviceError.load() ? "uncaptured device error" : error;
 }
