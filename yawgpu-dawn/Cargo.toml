@@ -1,0 +1,13 @@
+[package]
+name = "yawgpu-dawn"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+dawn-compat = []
+
+[[test]]
+name = "abi_guard"
+required-features = ["dawn-compat"]

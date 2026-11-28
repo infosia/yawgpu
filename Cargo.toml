@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "yawgpu",
     "yawgpu-core",
+    "yawgpu-dawn",
     "yawgpu-hal",
     "yawgpu-test",
     "yawgpu-tint",
