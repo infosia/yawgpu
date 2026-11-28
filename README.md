@@ -439,6 +439,37 @@ bypassing WGSL and Tint entirely:
   MSL external textures consume two texture slots and one parameter buffer slot;
   MSL passthrough rejects layouts with non-zero `immediateSize`.
 
+## Dawn compatibility — running ONNX Runtime on yawgpu (experimental)
+
+A program that reaches WebGPU only through Dawn's generated headers and a
+`DawnProcTable` can run on yawgpu instead of Dawn. The opt-in
+[`yawgpu-dawn`](yawgpu-dawn/README.md) crate (cargo feature `dawn-compat`)
+provides:
+
+- `yawgpuDawnGetProcTable()` — Dawn's proc table for the pinned Dawn revision.
+  Every entry yawgpu implements points at yawgpu; a Dawn-only entry is a stub
+  that logs once and reports failure (`YAWGPU_DAWN_STRICT=1` makes it abort).
+- `tools/dawn_compat/make_dawn_api_package.py` — the *Dawn API package*
+  (Dawn's headers plus the two dispatch sources) the consumer compiles against.
+- An ABI guard test that compiles Dawn's generated `webgpu.h` against yawgpu's
+  headers and fails on any difference in a function signature, struct layout or
+  constant.
+
+This is the contract of ONNX Runtime's *external Dawn* mode. ONNX Runtime
+1.32.0, built with `--use_webgpu --use_external_dawn` against the package, runs
+its WebGPU execution provider on yawgpu's Metal backend; see
+[`examples/ort_webgpu`](examples/ort_webgpu).
+
+For such consumers yawgpu also implements Dawn's
+`ImplicitDeviceSynchronization` feature (Metal and Vulkan): a device and its
+objects may be used from several threads, except that one command encoder is
+used by one thread at a time. Dawn's toggles descriptor is accepted and has no
+effect — yawgpu keeps validating when a consumer asks for `skip_validation`.
+
+Not provided: Dawn's `dawn::native` C++ classes and a drop-in `webgpu_dawn`
+library. The layer follows the pinned Dawn revision and carries no SemVer
+guarantee.
+
 ## Quality
 
 - **Validation-tested**: the WebGPU validation rules are exercised by an
