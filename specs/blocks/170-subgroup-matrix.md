@@ -8,15 +8,16 @@ advertises `{F32, F32}` and `{F16, F16}` 8×8×8 on Apple7; on the Apple M2
 `e2e_metal_subgroup_matrix` is 4/0 (configuration query, multiply and
 multiply-accumulate in both layouts, scalar arithmetic, the two pipeline
 validation errors), each arithmetic test confirmed to fail under a mutated
-CPU reference. The store-with-offset, out-of-bounds and fill-constructor
-scenarios are owed in the shared e2e body. **S3 DONE on Windows
+CPU reference. **S3 DONE on Windows
 (2026-11-28)** — Vulkan advertises the filtered
 `VK_KHR_cooperative_matrix` list and enables the extension on request; on the
 RTX 5060 Ti (driver 621.24) the adapter reports 12 configurations (f16 → f16 /
 f32 and u8 / i8 → u32 / i32, subgroup range 32–32) and
-`e2e_vulkan_subgroup_matrix` is 4/0 under `VK_LAYER_KHRONOS_validation` with no
-validation output; workspace 1,530/0 and 1,781/0 with `vulkan`. Owed for S3: a
-native Linux Vulkan run. S4 (docs + Phase Review) not started.
+`e2e_vulkan_subgroup_matrix` is 7/0 under `VK_LAYER_KHRONOS_validation` with no
+validation output; workspace 1,530/0 and 1,785/0 with `vulkan`. The shared e2e
+body now also has the store-with-offset, out-of-bounds and constructor
+scenarios, each confirmed to fail under a mutation on Vulkan. Owed: a native
+Linux Vulkan run, and a Metal run of the three added scenarios. S4 (docs + Phase Review) not started.
 Ledger: `specs/tracking/subgroups.md` ("Block 170" section).
 
 Dawn's `ChromiumExperimentalSubgroupMatrix` feature enables the WGSL extension
@@ -217,12 +218,19 @@ configurations, both `M = N = K = 8`: `{F32, F32}` and `{F16, F16}` (Dawn
 The list is `vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR` filtered to
 entries with `AType == BType`, `CType == ResultType`,
 `scope == VK_SCOPE_SUBGROUP_KHR`, no `saturatingAccumulation`, component types
-among the six of `WGPUSubgroupMatrixComponentType`, and `F16` only when the
-adapter advertises `shader-f16`.
+among the six of `WGPUSubgroupMatrixComponentType`, `F16` only when the
+adapter advertises `shader-f16`, and `U8` / `I8` only when the driver reports
+`shaderInt8` through `VK_KHR_shader_float16_int8`. The `F16` and 8-bit tests
+apply to the operand type and to the result type.
 
-Deviation from Dawn: Dawn advertises on conditions 1–5 alone and can return an
-empty list. yawgpu also requires the filtered list to be non-empty, so an
-advertised feature is always usable.
+Deviations from Dawn, both so that an advertised configuration is always
+usable:
+
+- Dawn advertises on conditions 1–5 alone and can return an empty list. yawgpu
+  also requires the filtered list to be non-empty.
+- Dawn lists 8-bit configurations without `shaderInt8` and enables the feature
+  only when the driver has it (`DeviceVk.cpp`), so such a configuration would
+  fail at pipeline creation. yawgpu omits them.
 
 ### R10 — Vulkan device and pipeline (S3)
 

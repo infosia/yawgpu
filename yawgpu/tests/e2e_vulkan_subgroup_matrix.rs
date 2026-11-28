@@ -45,6 +45,30 @@ fn vulkan_matrix_scalar_arithmetic_matches_reference() {
 
 #[test]
 #[ignore = "manual real-backend test"]
+fn vulkan_matrix_store_with_offset() {
+    subgroup_matrix::matrix_store_with_offset(RealBackend::Vulkan, YAWGPU_INSTANCE_BACKEND_VULKAN);
+}
+
+#[test]
+#[ignore = "manual real-backend test"]
+fn vulkan_out_of_bounds_access_leaves_unbound_data_intact() {
+    subgroup_matrix::out_of_bounds_access_leaves_unbound_data_intact(
+        RealBackend::Vulkan,
+        YAWGPU_INSTANCE_BACKEND_VULKAN,
+    );
+}
+
+#[test]
+#[ignore = "manual real-backend test"]
+fn vulkan_matrix_constructor_fills_every_element() {
+    subgroup_matrix::matrix_constructor_fills_every_element(
+        RealBackend::Vulkan,
+        YAWGPU_INSTANCE_BACKEND_VULKAN,
+    );
+}
+
+#[test]
+#[ignore = "manual real-backend test"]
 fn vulkan_subgroup_matrix_validation_errors() {
     subgroup_matrix::subgroup_matrix_validation_errors(
         RealBackend::Vulkan,

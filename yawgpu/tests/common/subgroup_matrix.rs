@@ -11,6 +11,12 @@
 //!   `subgroupMatrixMultiplyAccumulate` match a CPU reference bit for bit, with
 //!   column-major and row-major load / store;
 //! - `subgroupMatrixScalarAdd` / `Subtract` / `Multiply` match a CPU reference;
+//! - `subgroupMatrixStore` at a non-zero offset writes the matrix there and leaves the
+//!   bytes before it alone, for every array element size the matrix can be stored
+//!   through;
+//! - an out-of-bounds `subgroupMatrixLoad` / `subgroupMatrixStore` never touches bytes
+//!   outside the bound range of the buffer, with and without a dynamic offset;
+//! - the zero-value and the fill constructor set every element;
 //! - the pipeline rules fire as validation errors on a real device: a matrix shape no
 //!   configuration has, and a workgroup x-size that is not a multiple of the maximum
 //!   subgroup size.
@@ -129,6 +135,68 @@ pub fn matrix_scalar_arithmetic_matches_reference(backend: RealBackend, select: 
                     run_scalar_case(ctx, config, op, column_major);
                     ran += 1;
                 }
+            }
+        }
+        assert!(ran > 0, "no runnable configuration");
+    });
+}
+
+pub fn matrix_store_with_offset(backend: RealBackend, select: u32) {
+    with_matrix_device(backend, select, |ctx| unsafe {
+        let mut ran = 0;
+        for config in &ctx.configs {
+            for column_major in [true, false] {
+                // Store through every array element size that is at least one matrix
+                // element and at most one stride wide.
+                for array_bytes in [2usize, 4, 8, 16] {
+                    let element_bytes = byte_size(config.componentType);
+                    let stride = if column_major { config.M } else { config.K };
+                    if array_bytes < element_bytes || array_bytes > stride as usize * element_bytes
+                    {
+                        continue;
+                    }
+                    // A 2-byte array element is `f16`.
+                    if array_bytes == 2 && !ctx.has_f16 {
+                        continue;
+                    }
+                    run_store_offset_case(ctx, config, column_major, array_bytes);
+                    ran += 1;
+                }
+            }
+        }
+        assert!(ran > 0, "no runnable configuration");
+    });
+}
+
+pub fn out_of_bounds_access_leaves_unbound_data_intact(backend: RealBackend, select: u32) {
+    with_matrix_device(backend, select, |ctx| unsafe {
+        let mut ran = 0;
+        for config in &ctx.configs {
+            // Dawn's shaders bind `array<ComponentType>`, which has no 8-bit form.
+            if is_8bit(config.componentType) {
+                continue;
+            }
+            for column_major in [true, false] {
+                for dynamic_offset in [false, true] {
+                    run_store_out_of_bounds_case(ctx, config, column_major, dynamic_offset);
+                    run_load_out_of_bounds_case(ctx, config, column_major, dynamic_offset);
+                    ran += 1;
+                }
+            }
+        }
+        if ran == 0 {
+            eprintln!("skip: every configuration has 8-bit operands");
+        }
+    });
+}
+
+pub fn matrix_constructor_fills_every_element(backend: RealBackend, select: u32) {
+    with_matrix_device(backend, select, |ctx| unsafe {
+        let mut ran = 0;
+        for config in &ctx.configs {
+            for with_argument in [false, true] {
+                run_constructor_case(ctx, config, with_argument);
+                ran += 1;
             }
         }
         assert!(ran > 0, "no runnable configuration");
@@ -365,6 +433,279 @@ unsafe fn run_scalar_case(ctx: &Context, config: &Config, op: ScalarOp, column_m
     );
 }
 
+/// Byte the buffers start out filled with where a case checks that data survives.
+const CANARY: u8 = 0xCD;
+
+/// The storage-buffer dynamic offset the out-of-bounds cases use: the default
+/// `minStorageBufferOffsetAlignment`, which every smaller alignment divides.
+const DYNAMIC_OFFSET: u32 = 256;
+
+fn major_name(column_major: bool) -> &'static str {
+    if column_major {
+        "col_major"
+    } else {
+        "row_major"
+    }
+}
+
+unsafe fn run_store_offset_case(
+    ctx: &Context,
+    config: &Config,
+    column_major: bool,
+    array_bytes: usize,
+) {
+    let trace = format!(
+        "{} store offset column_major={column_major} array_bytes={array_bytes}",
+        describe(config)
+    );
+    let array_type = match array_bytes {
+        2 => "f16",
+        4 => "u32",
+        8 => "vec2u",
+        _ => "vec4u",
+    };
+    // Offsets and strides are counted in array elements.
+    let factor = array_bytes / byte_size(config.componentType);
+    let major = major_name(column_major);
+    let shader = format!(
+        "{extra_enable}{header}\
+         alias ArrayType = {array_type};\n\
+         alias InputType = subgroup_matrix_left<ComponentType, K, M>;\n\
+         const K = {k};\nconst M = {m};\n\
+         const kStoreOffset = K * M / {factor};\n\
+         const stride = {stride} / {factor};\n\
+         const kInputArraySize = kStoreOffset;\n\
+         const SubgroupMaxSize = {max};\n\
+         @group(0) @binding(0) var<storage, read> input : array<ArrayType, kInputArraySize>;\n\
+         @group(0) @binding(1) var<storage, read_write> output : array<ArrayType, kInputArraySize * 2>;\n\
+         @compute @workgroup_size(SubgroupMaxSize)\n\
+         fn main() {{\n\
+             let input_matrix = subgroupMatrixLoad<InputType, {major}>(&input, 0, stride);\n\
+             subgroupMatrixStore<{major}>(&output, kStoreOffset, input_matrix, stride);\n\
+         }}\n",
+        extra_enable = if array_bytes == 2 && !uses_f16(config) {
+            "enable f16;\n"
+        } else {
+            ""
+        },
+        header = shader_header(config),
+        k = config.K,
+        m = config.M,
+        stride = if column_major { "M" } else { "K" },
+        max = ctx.max_subgroup_size,
+    );
+
+    let mut matrix = Matrix::new(config.K, config.M, config.componentType, column_major);
+    matrix.fill(0);
+    let len = matrix.data.len();
+    let output_init = vec![CANARY; len * 2];
+    let actual = run_pipeline(
+        ctx,
+        &shader,
+        &[
+            Bound::whole(0, &matrix.data, true),
+            Bound::whole(1, &output_init, false),
+        ],
+        false,
+        &trace,
+    );
+    assert!(
+        actual[..len].iter().all(|&byte| byte == CANARY),
+        "{trace}: the store wrote before its offset"
+    );
+    assert_eq!(
+        &actual[len..],
+        &matrix.data[..],
+        "{trace}: the matrix was not stored at the offset"
+    );
+}
+
+/// WGSL shared by the two out-of-bounds shaders; `oobStride` makes an access reach past
+/// the bound range.
+fn out_of_bounds_prelude(ctx: &Context, config: &Config, column_major: bool) -> String {
+    format!(
+        "{header}\
+         alias InputType = subgroup_matrix_left<ComponentType, K, M>;\n\
+         const K = {k};\nconst M = {m};\n\
+         const naturalStride = {stride};\n\
+         const oobStride = naturalStride * 2;\n\
+         const kStoreOffset = K * M;\n\
+         const SubgroupMaxSize = {max};\n",
+        header = shader_header(config),
+        k = config.K,
+        m = config.M,
+        stride = if column_major { config.M } else { config.K },
+        max = ctx.max_subgroup_size,
+    )
+}
+
+unsafe fn run_store_out_of_bounds_case(
+    ctx: &Context,
+    config: &Config,
+    column_major: bool,
+    dynamic: bool,
+) {
+    let trace = format!(
+        "{} store out of bounds column_major={column_major} dynamic={dynamic}",
+        describe(config)
+    );
+    let major = major_name(column_major);
+    let shader = format!(
+        "{prelude}\
+         @group(0) @binding(0) var<storage, read> input : array<ComponentType, K * M>;\n\
+         @group(0) @binding(1) var<storage, read_write> output : array<ComponentType>;\n\
+         @compute @workgroup_size(SubgroupMaxSize)\n\
+         fn main() {{\n\
+             let mat = subgroupMatrixLoad<InputType, {major}>(&input, 0, naturalStride);\n\
+             subgroupMatrixStore<{major}>(&output, 0, mat, oobStride);\n\
+         }}\n",
+        prelude = out_of_bounds_prelude(ctx, config, column_major),
+    );
+
+    let mut matrix = Matrix::new(config.K, config.M, config.componentType, column_major);
+    matrix.fill(0);
+    let bound = matrix.data.len();
+    let offset = if dynamic { DYNAMIC_OFFSET as usize } else { 0 };
+    // Only `output[offset, offset + bound)` is bound; the rest must keep the canary
+    // however the out-of-bounds store is handled.
+    let output_init = vec![CANARY; offset + bound * 2];
+    let actual = run_pipeline(
+        ctx,
+        &shader,
+        &[
+            Bound::whole(0, &matrix.data, true),
+            Bound {
+                binding: 1,
+                contents: &output_init,
+                bound_size: bound as u64,
+                dynamic_offset: dynamic.then_some(DYNAMIC_OFFSET),
+                read_only: false,
+            },
+        ],
+        true,
+        &trace,
+    );
+    assert!(
+        actual[..offset].iter().all(|&byte| byte == CANARY),
+        "{trace}: the store wrote before the bound range"
+    );
+    assert!(
+        actual[offset + bound..].iter().all(|&byte| byte == CANARY),
+        "{trace}: the store wrote past the bound range"
+    );
+}
+
+unsafe fn run_load_out_of_bounds_case(
+    ctx: &Context,
+    config: &Config,
+    column_major: bool,
+    dynamic: bool,
+) {
+    let trace = format!(
+        "{} load out of bounds column_major={column_major} dynamic={dynamic}",
+        describe(config)
+    );
+    let major = major_name(column_major);
+    let shader = format!(
+        "{prelude}\
+         @group(0) @binding(0) var<storage, read> input : array<ComponentType>;\n\
+         @group(0) @binding(1) var<storage, read_write> output : array<ComponentType, kStoreOffset * 2>;\n\
+         @compute @workgroup_size(SubgroupMaxSize)\n\
+         fn main() {{\n\
+             let mat = subgroupMatrixLoad<InputType, {major}>(&input, 0, oobStride);\n\
+             subgroupMatrixStore<{major}>(&output, kStoreOffset, mat, naturalStride);\n\
+         }}\n",
+        prelude = out_of_bounds_prelude(ctx, config, column_major),
+    );
+
+    let mut matrix = Matrix::new(config.K, config.M, config.componentType, column_major);
+    matrix.fill(0);
+    let bound = matrix.data.len();
+    let offset = if dynamic { DYNAMIC_OFFSET as usize } else { 0 };
+    // The input buffer continues past the bound range, so an unclamped load reads
+    // memory that is inside the buffer but outside the binding.
+    let mut input = vec![CANARY; offset + bound * 2];
+    input[offset..offset + bound].copy_from_slice(&matrix.data);
+    let output_init = vec![CANARY; bound * 2];
+    let actual = run_pipeline(
+        ctx,
+        &shader,
+        &[
+            Bound {
+                binding: 0,
+                contents: &input,
+                bound_size: bound as u64,
+                dynamic_offset: dynamic.then_some(DYNAMIC_OFFSET),
+                read_only: true,
+            },
+            Bound::whole(1, &output_init, false),
+        ],
+        true,
+        &trace,
+    );
+    // The shader stores only into the second half, whatever the load returned.
+    assert!(
+        actual[..bound].iter().all(|&byte| byte == CANARY),
+        "{trace}: the out-of-bounds load changed data the shader never stores to"
+    );
+}
+
+unsafe fn run_constructor_case(ctx: &Context, config: &Config, with_argument: bool) {
+    let trace = format!(
+        "{} constructor with_argument={with_argument}",
+        describe(config)
+    );
+    let div = if is_8bit(config.componentType) {
+        "/4"
+    } else {
+        ""
+    };
+    let shader = format!(
+        "{header}\
+         alias ArrayType = {array};\n\
+         const K = {k};\nconst M = {m};\n\
+         const kOutputArraySize = (K * M){div};\n\
+         const kStride = K{div};\n\
+         const SubgroupMaxSize = {max};\n\
+         @group(0) @binding(1) var<storage, read_write> output : array<ArrayType, kOutputArraySize>;\n\
+         @compute @workgroup_size(SubgroupMaxSize)\n\
+         fn main() {{\n\
+             let input_matrix = subgroup_matrix_left<ComponentType, K, M>({argument});\n\
+             subgroupMatrixStore<row_major>(&output, 0, input_matrix, kStride);\n\
+         }}\n",
+        header = shader_header(config),
+        array = scalar_shader_type(config.componentType),
+        k = config.K,
+        m = config.M,
+        argument = if with_argument { "5" } else { "" },
+        max = ctx.max_subgroup_size,
+    );
+
+    let mut expected = Matrix::new(config.K, config.M, config.componentType, false);
+    for r in 0..expected.rows {
+        for c in 0..expected.cols {
+            if is_float(config.componentType) {
+                expected.set_float(if with_argument { 5.0 } else { 0.0 }, c, r);
+            } else {
+                expected.set_int(if with_argument { 5 } else { 0 }, c, r);
+            }
+        }
+    }
+    // A canary start makes the zero-value constructor's zeros observable.
+    let output_init = vec![CANARY; expected.data.len()];
+    let actual = run_pipeline(
+        ctx,
+        &shader,
+        &[Bound::whole(1, &output_init, false)],
+        false,
+        &trace,
+    );
+    assert_eq!(
+        actual, expected.data,
+        "{trace}: constructed matrix differs from the expected fill"
+    );
+}
+
 /// Runs `shader` once with `input` at binding 0 (read-only storage) and `output_init` at
 /// binding 1 (read-write storage), and returns the first `output_init.len()` output bytes.
 unsafe fn run_two_buffer_pipeline(
@@ -374,53 +715,135 @@ unsafe fn run_two_buffer_pipeline(
     output_init: &[u8],
     trace: &str,
 ) -> Vec<u8> {
-    ctx.errors.lock().expect("error lock").clear();
-    let input_size = input.len().next_multiple_of(4) as u64;
-    let output_size = output_init.len().next_multiple_of(4) as u64;
-    let storage_dst = native::WGPUBufferUsage_Storage | native::WGPUBufferUsage_CopyDst;
-    let input_buffer = create_buffer_sized(ctx.device, input_size, storage_dst);
-    let output_buffer = create_buffer_sized(
-        ctx.device,
-        output_size,
-        storage_dst | native::WGPUBufferUsage_CopySrc,
-    );
-    let readback = create_buffer_sized(
-        ctx.device,
-        output_size,
-        native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
-    );
     let mut padded_input = input.to_vec();
-    padded_input.resize(input_size as usize, 0);
+    padded_input.resize(input.len().next_multiple_of(4), 0);
     let mut padded_output = output_init.to_vec();
-    padded_output.resize(output_size as usize, 0);
-    yawgpu::wgpuQueueWriteBuffer(
-        ctx.queue,
-        input_buffer,
-        0,
-        padded_input.as_ptr().cast(),
-        padded_input.len(),
+    padded_output.resize(output_init.len().next_multiple_of(4), 0);
+    let mut bytes = run_pipeline(
+        ctx,
+        shader,
+        &[
+            Bound::whole(0, &padded_input, true),
+            Bound::whole(1, &padded_output, false),
+        ],
+        false,
+        trace,
     );
-    yawgpu::wgpuQueueWriteBuffer(
-        ctx.queue,
-        output_buffer,
-        0,
-        padded_output.as_ptr().cast(),
-        padded_output.len(),
-    );
+    bytes.truncate(output_init.len());
+    bytes
+}
+
+/// One storage buffer of a [`run_pipeline`] call.
+struct Bound<'a> {
+    binding: u32,
+    /// Initial contents of the whole buffer; the length is a multiple of 4.
+    contents: &'a [u8],
+    /// Bytes bound to the shader, starting at the dynamic offset (0 without one).
+    bound_size: u64,
+    /// Bound through a dynamic offset of this many bytes. Needs the explicit layout.
+    dynamic_offset: Option<u32>,
+    read_only: bool,
+}
+
+impl<'a> Bound<'a> {
+    /// Binds the whole buffer at offset 0.
+    fn whole(binding: u32, contents: &'a [u8], read_only: bool) -> Self {
+        Self {
+            binding,
+            contents,
+            bound_size: contents.len() as u64,
+            dynamic_offset: None,
+            read_only,
+        }
+    }
+}
+
+/// Runs `shader` once with `buffers` bound in group 0 and returns the whole final
+/// contents of the last one. `explicit_layout` builds the bind group layout from
+/// `buffers` instead of taking the pipeline's default one.
+unsafe fn run_pipeline(
+    ctx: &Context,
+    shader: &str,
+    buffers: &[Bound],
+    explicit_layout: bool,
+    trace: &str,
+) -> Vec<u8> {
+    ctx.errors.lock().expect("error lock").clear();
+    let usage = native::WGPUBufferUsage_Storage
+        | native::WGPUBufferUsage_CopyDst
+        | native::WGPUBufferUsage_CopySrc;
+    let gpu_buffers: Vec<native::WGPUBuffer> = buffers
+        .iter()
+        .map(|bound| {
+            assert_eq!(bound.contents.len() % 4, 0, "{trace}: unaligned buffer");
+            let buffer = create_buffer_sized(ctx.device, bound.contents.len() as u64, usage);
+            yawgpu::wgpuQueueWriteBuffer(
+                ctx.queue,
+                buffer,
+                0,
+                bound.contents.as_ptr().cast(),
+                bound.contents.len(),
+            );
+            buffer
+        })
+        .collect();
 
     let module = create_wgsl_module(ctx.device, shader);
-    let pipeline = create_compute_pipeline(ctx.device, module);
+    let (pipeline, layout) = if explicit_layout {
+        let layout_entries: Vec<native::WGPUBindGroupLayoutEntry> = buffers
+            .iter()
+            .map(|bound| {
+                let mut entry: native::WGPUBindGroupLayoutEntry = std::mem::zeroed();
+                entry.binding = bound.binding;
+                entry.visibility = native::WGPUShaderStage_Compute;
+                entry.buffer.type_ = if bound.read_only {
+                    native::WGPUBufferBindingType_ReadOnlyStorage
+                } else {
+                    native::WGPUBufferBindingType_Storage
+                };
+                entry.buffer.hasDynamicOffset = u32::from(bound.dynamic_offset.is_some());
+                entry
+            })
+            .collect();
+        let mut layout_descriptor: native::WGPUBindGroupLayoutDescriptor = std::mem::zeroed();
+        layout_descriptor.entryCount = layout_entries.len();
+        layout_descriptor.entries = layout_entries.as_ptr();
+        let layout = yawgpu::wgpuDeviceCreateBindGroupLayout(ctx.device, &layout_descriptor);
+        assert!(!layout.is_null());
+        let mut pipeline_layout_descriptor: native::WGPUPipelineLayoutDescriptor =
+            std::mem::zeroed();
+        pipeline_layout_descriptor.bindGroupLayoutCount = 1;
+        pipeline_layout_descriptor.bindGroupLayouts = &layout;
+        let pipeline_layout =
+            yawgpu::wgpuDeviceCreatePipelineLayout(ctx.device, &pipeline_layout_descriptor);
+        assert!(!pipeline_layout.is_null());
+        let pipeline = create_compute_pipeline_with_layout(ctx.device, module, pipeline_layout);
+        yawgpu::wgpuPipelineLayoutRelease(pipeline_layout);
+        (pipeline, layout)
+    } else {
+        assert!(
+            buffers.iter().all(|bound| bound.dynamic_offset.is_none()),
+            "{trace}: a dynamic offset needs the explicit layout"
+        );
+        let pipeline = create_compute_pipeline(ctx.device, module);
+        assert!(!pipeline.is_null(), "{trace}: no pipeline\n{shader}");
+        (
+            pipeline,
+            yawgpu::wgpuComputePipelineGetBindGroupLayout(pipeline, 0),
+        )
+    };
     assert!(
         ctx.errors.lock().expect("error lock").is_empty(),
         "{trace}: pipeline creation raised {:?}\n{shader}",
         ctx.errors.lock().expect("error lock")
     );
     assert!(!pipeline.is_null());
-    let layout = yawgpu::wgpuComputePipelineGetBindGroupLayout(pipeline, 0);
-    let entries = [
-        buffer_entry(0, input_buffer, input_size),
-        buffer_entry(1, output_buffer, output_size),
-    ];
+
+    let entries: Vec<native::WGPUBindGroupEntry> = buffers
+        .iter()
+        .zip(&gpu_buffers)
+        .map(|(bound, &buffer)| buffer_entry(bound.binding, buffer, bound.bound_size))
+        .collect();
     let bind_group_descriptor = native::WGPUBindGroupDescriptor {
         nextInChain: std::ptr::null_mut(),
         label: empty_string_view(),
@@ -430,11 +853,32 @@ unsafe fn run_two_buffer_pipeline(
     };
     let bind_group = yawgpu::wgpuDeviceCreateBindGroup(ctx.device, &bind_group_descriptor);
     assert!(!bind_group.is_null());
+    // Dynamic offsets are passed in binding order.
+    let mut dynamic: Vec<(u32, u32)> = buffers
+        .iter()
+        .filter_map(|bound| bound.dynamic_offset.map(|offset| (bound.binding, offset)))
+        .collect();
+    dynamic.sort_unstable();
+    let dynamic_offsets: Vec<u32> = dynamic.into_iter().map(|(_, offset)| offset).collect();
+
+    let output_buffer = *gpu_buffers.last().expect("at least one buffer");
+    let output_size = buffers.last().expect("at least one buffer").contents.len();
+    let readback = create_buffer_sized(
+        ctx.device,
+        output_size as u64,
+        native::WGPUBufferUsage_CopyDst | native::WGPUBufferUsage_MapRead,
+    );
 
     let encoder = yawgpu::wgpuDeviceCreateCommandEncoder(ctx.device, std::ptr::null());
     let pass = yawgpu::wgpuCommandEncoderBeginComputePass(encoder, std::ptr::null());
     yawgpu::wgpuComputePassEncoderSetPipeline(pass, pipeline);
-    yawgpu::wgpuComputePassEncoderSetBindGroup(pass, 0, bind_group, 0, std::ptr::null());
+    yawgpu::wgpuComputePassEncoderSetBindGroup(
+        pass,
+        0,
+        bind_group,
+        dynamic_offsets.len(),
+        dynamic_offsets.as_ptr(),
+    );
     yawgpu::wgpuComputePassEncoderDispatchWorkgroups(pass, 1, 1, 1);
     yawgpu::wgpuComputePassEncoderEnd(pass);
     yawgpu::wgpuCommandEncoderCopyBufferToBuffer(
@@ -443,7 +887,7 @@ unsafe fn run_two_buffer_pipeline(
         0,
         readback,
         0,
-        output_size,
+        output_size as u64,
     );
     let command_buffer = yawgpu::wgpuCommandEncoderFinish(encoder, std::ptr::null());
     yawgpu::wgpuQueueSubmit(ctx.queue, 1, &command_buffer);
@@ -451,8 +895,7 @@ unsafe fn run_two_buffer_pipeline(
     yawgpu::wgpuComputePassEncoderRelease(pass);
     yawgpu::wgpuCommandEncoderRelease(encoder);
 
-    let mut bytes = read_buffer(ctx.instance, readback, output_size as usize);
-    bytes.truncate(output_init.len());
+    let bytes = read_buffer(ctx.instance, readback, output_size);
     assert!(
         ctx.errors.lock().expect("error lock").is_empty(),
         "{trace}: execution raised {:?}",
@@ -464,8 +907,9 @@ unsafe fn run_two_buffer_pipeline(
     yawgpu::wgpuComputePipelineRelease(pipeline);
     yawgpu::wgpuShaderModuleRelease(module);
     yawgpu::wgpuBufferRelease(readback);
-    yawgpu::wgpuBufferRelease(output_buffer);
-    yawgpu::wgpuBufferRelease(input_buffer);
+    for buffer in gpu_buffers {
+        yawgpu::wgpuBufferRelease(buffer);
+    }
     bytes
 }
 
@@ -733,6 +1177,8 @@ struct Context {
     /// `shader-f16`).
     configs: Vec<Config>,
     max_subgroup_size: u32,
+    /// The device has `shader-f16`.
+    has_f16: bool,
 }
 
 fn with_matrix_device(backend: RealBackend, select: u32, body: impl FnOnce(&Context)) {
@@ -750,7 +1196,9 @@ fn with_matrix_device(backend: RealBackend, select: u32, body: impl FnOnce(&Cont
         let (mut configs, _, max_subgroup_size) =
             query_configs(|info| yawgpu::wgpuAdapterGetInfo(adapter, info));
         let mut features = vec![native::WGPUFeatureName_ChromiumExperimentalSubgroupMatrix];
-        if yawgpu::wgpuAdapterHasFeature(adapter, native::WGPUFeatureName_ShaderF16) != 0 {
+        let has_f16 =
+            yawgpu::wgpuAdapterHasFeature(adapter, native::WGPUFeatureName_ShaderF16) != 0;
+        if has_f16 {
             features.push(native::WGPUFeatureName_ShaderF16);
         } else {
             configs.retain(|config| !uses_f16(config));
@@ -765,6 +1213,7 @@ fn with_matrix_device(backend: RealBackend, select: u32, body: impl FnOnce(&Cont
             errors,
             configs,
             max_subgroup_size,
+            has_f16,
         };
         body(&ctx);
         yawgpu::wgpuQueueRelease(queue);
@@ -845,10 +1294,19 @@ unsafe fn create_compute_pipeline(
     device: native::WGPUDevice,
     module: native::WGPUShaderModule,
 ) -> native::WGPUComputePipeline {
+    create_compute_pipeline_with_layout(device, module, std::ptr::null())
+}
+
+/// A null `layout` takes the pipeline's default layout.
+unsafe fn create_compute_pipeline_with_layout(
+    device: native::WGPUDevice,
+    module: native::WGPUShaderModule,
+    layout: native::WGPUPipelineLayout,
+) -> native::WGPUComputePipeline {
     let descriptor = native::WGPUComputePipelineDescriptor {
         nextInChain: std::ptr::null_mut(),
         label: empty_string_view(),
-        layout: std::ptr::null(),
+        layout,
         compute: native::WGPUComputeState {
             nextInChain: std::ptr::null_mut(),
             module,
