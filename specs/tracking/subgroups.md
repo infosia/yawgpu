@@ -151,6 +151,25 @@ Spec: `specs/blocks/170-subgroup-matrix.md`.
 | S1 | core `Feature::ChromiumExperimentalSubgroupMatrix` (⇒ `Subgroups`), FFI `0x00050034`, `WGPUAdapterPropertiesSubgroupMatrixConfigs` (`0x0005003B`) on both adapter-info queries with the caller chain preserved, Tint `kChromiumExperimentalSubgroupMatrix` gate, `uses_subgroup_matrix` + `SubgroupMatrixInfo` reflection on the override-substituted IR, core rules R5 / R6, HAL `subgroup_matrix_configs()` (Noop one 8×8×8 f32; Metal / Vulkan / GLES empty) | **DONE 2026-11-28** |
 | S2 | Metal advertisement (Apple7) + `e2e_metal_subgroup_matrix.rs` | **DONE 2026-11-28** — M2 reports 8×8×8 f32 and f16, range 32–32; e2e 7/0 at `7863494`, including the store-with-offset, out-of-bounds and constructor scenarios added in S3 (those three not checked under a mutation on Metal) |
 | S3 | Vulkan advertisement, device enable, full subgroups + `e2e_vulkan_subgroup_matrix.rs` on native Windows / Linux | **DONE on Windows 2026-11-28** — RTX 5060 Ti (621.24): 12 configurations (16×16×16, 16×8×16, 16×8×8 f16 → f16 / f32; 16×16×32, 16×8×32 u8 → u32 / i32 and i8 → i32), range 32–32, `cooperativeMatrixRobustBufferAccess` false so Tint clamps; e2e 7/0 (store-with-offset, out-of-bounds load / store and constructor scenarios added to the shared body; each fails under a mutation) and the 4 ignored HAL subgroup tests under the Khronos layer, 0 VUID; 8-bit configurations are listed only with `shaderInt8` (R9, stricter than Dawn); `e2e_vulkan_subgroup_size_control` 3/0, `e2e_vulkan_subgroups` 3/0, `e2e_vulkan_compute` 4/0 regression. **DONE on Linux 2026-11-28** at `01cb53f` — native RTX 5060 Ti (615.71.09, Vulkan 1.4.351): 10 configurations (the same six f16 ones; u8 → u32 and i8 → i32 at 16×16×32 and 16×8×32 — the two u8 → i32 configurations of the Windows 621.24 driver are not listed), range 32–32; with `YAWGPU_REQUIRE_SUBGROUP_MATRIX=1` under the Khronos layer `e2e_vulkan_subgroup_matrix` 7/0, `e2e_vulkan_subgroup_size_control` 3/0, `e2e_vulkan_subgroups` 3/0, `e2e_vulkan_compute` 4/0, 0 VUID |
-| S4 | docs + Phase Review | not started |
+| S4 | docs + Phase Review | **DONE 2026-11-28** — `README` section, Block 67 matrix row, Phase Review below |
+
+### Block 170 Phase Review (2026-11-28)
+
+Fresh no-context review of `6cff8cb..717bee0` against R1–R10 and the Dawn sources. **0 CRITICAL, 0 MAJOR, 10 MINOR.**
+
+| # | Finding | Decision |
+|---|---|---|
+| m1 | `yawgpu/src/ffi/mod.rs` `write_adapter_info` held a `#[cfg(test)]` thread-local to model an adapter without the feature | Fixed: the writer takes the configuration slice; the test passes an empty one |
+| m2 | Both adapter-info entry points read the caller's `nextInChain`, so `*info` must be initialized; R2 did not say so | Fixed in the spec (R2) and in the `yawgpu.h` comment. In-repo callers all initialize. `webgpu-native-cts` and the JS binding are outside the repo and were not checked |
+| m3 | R6 is scoped to the pipeline's entry point; Dawn's Vulkan backend gathers from the whole module. The Vulkan list is de-duplicated; Dawn's is not | Documented in R6 and R9. Behaviour kept: it matches Dawn's Metal backend and R4 |
+| m4 | Metal predicate is Apple7 **and** subgroups; R8 said Apple7 | Spec R8 updated. Equivalent on real devices |
+| m5 | `VulkanDeviceInner::cooperative_matrix` is read only by `Debug` and an ignored real-device test | Deferred: it is the record that R10's enable took effect, which that test asserts on native drivers; removing it loses the check |
+| m6 | No core test for a matrix shader with an override-driven workgroup size | Fixed: `subgroup_matrix_pipeline_validates_overridden_workgroup_size` (`x = 6` rejected, `x = 8` accepted) |
+| m7 | `subgroup_matrix_full_subgroups_reaches_hal_descriptor` asserted only the resolved flag | Fixed: renamed `subgroup_matrix_entry_point_requires_full_subgroups` |
+| m8 | Shared e2e body: only the advertisement test honoured `required`; `subgroup_matrix_validation_errors` had no non-empty assertion | Fixed: every scenario takes `required`, and the validation scenario asserts a non-empty configuration list. The out-of-bounds scenario still skips when every configuration is 8-bit: Dawn's shader binds `array<ComponentType>`, which has no 8-bit form |
+| m9 | The Dawn-named block of `yawgpu.h` had no documentation | Fixed: Doxygen group with the shape convention, the error condition and the ownership / free contract |
+| m10 | `yawgpu-tint` builds `#[repr(u32)]` enums from shim-written memory | Deferred: the shim's `static_assert`s pin every value and range against Tint's header, so a Dawn bump that changes them fails the build |
+
+Gate after the fixes (Apple M2): `cargo fmt --check` clean; workspace 1,532/0; clippy clean on default, `metal` and `vulkan`; `e2e_metal_subgroup_matrix` 7/0. Before the fixes at `717bee0`: HAL lib 219/0 (`metal`) and 393/0 (`vulkan`). The e2e change (m8) is compiled for Vulkan by clippy but not re-run on a native Vulkan driver.
 
 The bindgen input is `yawgpu.h`, so the Dawn-named extension items are generated into `yawgpu::native`.

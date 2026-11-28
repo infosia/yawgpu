@@ -25,8 +25,9 @@ does), subgroup range 32–32, and `e2e_vulkan_subgroup_matrix` is 7/0 with
 `YAWGPU_REQUIRE_SUBGROUP_MATRIX=1` under `VK_LAYER_KHRONOS_validation` with no
 validation output; workspace 1,533/0, Vulkan e2e 177/0. On the Apple M2 at
 `7863494` `e2e_metal_subgroup_matrix` is 7/0 with the three added scenarios
-(not re-checked under a mutation on Metal). S4 (docs + Phase Review) not
-started.
+(not re-checked under a mutation on Metal). **S4 DONE (2026-11-28)** — docs
+and Phase Review: 0 CRITICAL, 0 MAJOR, 10 MINOR (8 fixed, 2 deferred with a
+written rationale). **Block COMPLETE.**
 Ledger: `specs/tracking/subgroups.md` ("Block 170" section).
 
 Dawn's `ChromiumExperimentalSubgroupMatrix` feature enables the WGSL extension
@@ -140,6 +141,9 @@ non-empty. A device created with it also has `Feature::Subgroups`
 - The caller's `nextInChain` pointer is preserved in the returned
   `WGPUAdapterInfo`, with or without a node on it.
 
+Both functions read `info->nextInChain` before writing, so the caller must
+initialize `*info` (`WGPU_ADAPTER_INFO_INIT` or zero).
+
 `wgpuAdapterPropertiesSubgroupMatrixConfigsFreeMembers` frees the array. A
 null `configs` is accepted. The symbol is registered with `wgpuGetProcAddress`.
 
@@ -201,6 +205,12 @@ Dawn runs this check in its Vulkan backend and relies on Tint's MSL
 of R8 the two accept the same shaders, so yawgpu runs the one core check on
 every backend.
 
+The check covers the pipeline's entry point only (R4). Dawn's Vulkan backend
+gathers the information from the whole module (`spirv/writer/writer.cc`
+gathers before `SingleEntryPoint`), so it also rejects a pipeline whose
+*sibling* entry point uses an unsupported configuration; yawgpu, like Dawn's
+Metal backend, accepts it.
+
 ### R7 — Noop
 
 `subgroup_matrix_configs()` returns one configuration:
@@ -208,7 +218,9 @@ every backend.
 
 ### R8 — Metal (S2)
 
-Advertised when `[MTLDevice supportsFamily:MTLGPUFamilyApple7]`. Two
+Advertised when `[MTLDevice supportsFamily:MTLGPUFamilyApple7]` and the
+adapter advertises `Feature::Subgroups` (R1's implication; every Apple7 device
+does). Two
 configurations, both `M = N = K = 8`: `{F32, F32}` and `{F16, F16}` (Dawn
 `PhysicalDeviceMTL.mm`). Tint's MSL writer runs with `enable_tensors = false`.
 
@@ -232,7 +244,7 @@ adapter advertises `shader-f16`, and `U8` / `I8` only when the driver reports
 `shaderInt8` through `VK_KHR_shader_float16_int8`. The `F16` and 8-bit tests
 apply to the operand type and to the result type.
 
-Deviations from Dawn, both so that an advertised configuration is always
+Deviations from Dawn, so that an advertised configuration is always
 usable:
 
 - Dawn advertises on conditions 1–5 alone and can return an empty list. yawgpu
@@ -240,6 +252,9 @@ usable:
 - Dawn lists 8-bit configurations without `shaderInt8` and enables the feature
   only when the driver has it (`DeviceVk.cpp`), so such a configuration would
   fail at pipeline creation. yawgpu omits them.
+
+The list has no duplicate entries: driver properties that differ only in a
+field the filter drops collapse to one configuration.
 
 ### R10 — Vulkan device and pipeline (S3)
 

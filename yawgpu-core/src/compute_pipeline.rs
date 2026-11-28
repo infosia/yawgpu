@@ -4886,7 +4886,36 @@ fn test() {{
     }
 
     #[test]
-    fn subgroup_matrix_full_subgroups_reaches_hal_descriptor() {
+    fn subgroup_matrix_pipeline_validates_overridden_workgroup_size() {
+        let device = noop_adapter()
+            .create_device(None, &[Feature::ChromiumExperimentalSubgroupMatrix], "", "")
+            .unwrap();
+        let source = "enable chromium_experimental_subgroup_matrix; enable subgroups;
+            override x: u32;
+            @compute @workgroup_size(x) fn cs() {
+                let left = subgroup_matrix_left<f32,8,8>();
+                let right = subgroup_matrix_right<f32,8,8>();
+                _ = subgroupMatrixMultiply<f32>(left, right);
+            }";
+        let create = |x| {
+            create_subgroup_size_pipeline(
+                &device,
+                source,
+                vec![PipelineConstant {
+                    key: "x".to_owned(),
+                    value: x,
+                }],
+            )
+        };
+        assert_eq!(
+            create(6.0).as_deref(),
+            Some("subgroup matrix workgroup_size.x (6) must be a multiple of the adapter's maximum subgroup size (4)")
+        );
+        assert_eq!(create(8.0), None);
+    }
+
+    #[test]
+    fn subgroup_matrix_entry_point_requires_full_subgroups() {
         let device = noop_adapter()
             .create_device(None, &[Feature::ChromiumExperimentalSubgroupMatrix], "", "")
             .unwrap();

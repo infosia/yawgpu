@@ -107,8 +107,8 @@ pub fn adapter_advertises_subgroup_matrix(backend: RealBackend, select: u32, req
     }
 }
 
-pub fn matrix_multiply_matches_reference(backend: RealBackend, select: u32) {
-    with_matrix_device(backend, select, |ctx| unsafe {
+pub fn matrix_multiply_matches_reference(backend: RealBackend, select: u32, required: bool) {
+    with_matrix_device(backend, select, required, |ctx| unsafe {
         let mut ran = 0;
         for config in &ctx.configs {
             for accumulate in [false, true] {
@@ -122,8 +122,12 @@ pub fn matrix_multiply_matches_reference(backend: RealBackend, select: u32) {
     });
 }
 
-pub fn matrix_scalar_arithmetic_matches_reference(backend: RealBackend, select: u32) {
-    with_matrix_device(backend, select, |ctx| unsafe {
+pub fn matrix_scalar_arithmetic_matches_reference(
+    backend: RealBackend,
+    select: u32,
+    required: bool,
+) {
+    with_matrix_device(backend, select, required, |ctx| unsafe {
         let mut ran = 0;
         for config in &ctx.configs {
             // Dawn's scalar shader does not cover the packed 8-bit element types.
@@ -141,8 +145,8 @@ pub fn matrix_scalar_arithmetic_matches_reference(backend: RealBackend, select: 
     });
 }
 
-pub fn matrix_store_with_offset(backend: RealBackend, select: u32) {
-    with_matrix_device(backend, select, |ctx| unsafe {
+pub fn matrix_store_with_offset(backend: RealBackend, select: u32, required: bool) {
+    with_matrix_device(backend, select, required, |ctx| unsafe {
         let mut ran = 0;
         for config in &ctx.configs {
             for column_major in [true, false] {
@@ -168,8 +172,12 @@ pub fn matrix_store_with_offset(backend: RealBackend, select: u32) {
     });
 }
 
-pub fn out_of_bounds_access_leaves_unbound_data_intact(backend: RealBackend, select: u32) {
-    with_matrix_device(backend, select, |ctx| unsafe {
+pub fn out_of_bounds_access_leaves_unbound_data_intact(
+    backend: RealBackend,
+    select: u32,
+    required: bool,
+) {
+    with_matrix_device(backend, select, required, |ctx| unsafe {
         let mut ran = 0;
         for config in &ctx.configs {
             // Dawn's shaders bind `array<ComponentType>`, which has no 8-bit form.
@@ -190,8 +198,8 @@ pub fn out_of_bounds_access_leaves_unbound_data_intact(backend: RealBackend, sel
     });
 }
 
-pub fn matrix_constructor_fills_every_element(backend: RealBackend, select: u32) {
-    with_matrix_device(backend, select, |ctx| unsafe {
+pub fn matrix_constructor_fills_every_element(backend: RealBackend, select: u32, required: bool) {
+    with_matrix_device(backend, select, required, |ctx| unsafe {
         let mut ran = 0;
         for config in &ctx.configs {
             for with_argument in [false, true] {
@@ -203,8 +211,8 @@ pub fn matrix_constructor_fills_every_element(backend: RealBackend, select: u32)
     });
 }
 
-pub fn subgroup_matrix_validation_errors(backend: RealBackend, select: u32) {
-    with_matrix_device(backend, select, |ctx| unsafe {
+pub fn subgroup_matrix_validation_errors(backend: RealBackend, select: u32, required: bool) {
+    with_matrix_device(backend, select, required, |ctx| unsafe {
         let mut unsupported_m = 1;
         while ctx.configs.iter().any(|c| c.M == unsupported_m) {
             unsupported_m += 1;
@@ -257,6 +265,7 @@ pub fn subgroup_matrix_validation_errors(backend: RealBackend, select: u32) {
             );
             expect_pipeline_error(ctx, &half, "maximum subgroup size");
         }
+        assert!(!ctx.configs.is_empty(), "no runnable configuration");
     });
 }
 
@@ -1181,7 +1190,13 @@ struct Context {
     has_f16: bool,
 }
 
-fn with_matrix_device(backend: RealBackend, select: u32, body: impl FnOnce(&Context)) {
+/// `required`: the adapter must advertise the feature; otherwise a missing feature skips.
+fn with_matrix_device(
+    backend: RealBackend,
+    select: u32,
+    required: bool,
+    body: impl FnOnce(&Context),
+) {
     if real_backend_skip_reason(backend).is_some() {
         return;
     }
@@ -1189,6 +1204,7 @@ fn with_matrix_device(backend: RealBackend, select: u32, body: impl FnOnce(&Cont
         let instance = create_backend_instance(select);
         let adapter = request_adapter(instance);
         if !adapter_has_matrix(adapter) {
+            assert!(!required, "the adapter must advertise subgroup matrix");
             eprintln!("skip: adapter does not expose subgroup matrix");
             release_adapter_instance(adapter, instance);
             return;

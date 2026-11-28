@@ -378,6 +378,30 @@ on the Tier-2 GLES backend):
 
 Each is advertised only when the underlying device supports it, matching Dawn.
 
+### Subgroup matrices (Dawn extension, experimental)
+
+yawgpu implements Dawn's `chromium_experimental_subgroup_matrix` WGSL extension
+— `subgroup_matrix_left` / `_right` / `_result` and the `subgroupMatrix*`
+builtins — with Dawn's names and numeric values, declared in
+[`yawgpu.h`](yawgpu/ffi/webgpu-headers/yawgpu.h):
+
+- Request `WGPUFeatureName_ChromiumExperimentalSubgroupMatrix` (`0x00050034`);
+  it implies `subgroups`.
+- Chain a `WGPUAdapterPropertiesSubgroupMatrixConfigs` to `WGPUAdapterInfo` to
+  read the matrix configurations (component types, `M` / `N` / `K`, subgroup
+  size range) the adapter supports, and release it with
+  `wgpuAdapterPropertiesSubgroupMatrixConfigsFreeMembers`. A compute pipeline
+  whose shader uses any other configuration is a validation error.
+
+| Backend | Support |
+|---|---|
+| Metal | Apple silicon (`MTLGPUFamilyApple7` and later): 8×8×8 `f32` and `f16` |
+| Vulkan | Drivers with `VK_KHR_cooperative_matrix` in compute stages; the configurations are the driver's |
+| GLES | Not available |
+
+The feature follows Dawn's experimental extension and carries no SemVer
+guarantee.
+
 ### Native shader passthrough (vendor, opt-in, unsafe)
 
 For engines that ship **precompiled native shaders**, the opt-in

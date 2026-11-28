@@ -37,6 +37,15 @@
 extern "C" {
 #endif
 
+/**
+ * \defgroup SubgroupMatrix Subgroup Matrix
+ * \brief Adapter configurations for Dawn's `chromium_experimental_subgroup_matrix`.
+ *
+ * The declarations use Dawn's names and numeric values.
+ *
+ * @{
+ */
+
 #define WGPUFeatureName_ChromiumExperimentalSubgroupMatrix ((WGPUFeatureName)0x00050034u)
 #define WGPUSType_AdapterPropertiesSubgroupMatrixConfigs   ((WGPUSType)0x0005003Bu)
 
@@ -50,6 +59,12 @@ typedef enum WGPUSubgroupMatrixComponentType {
     WGPUSubgroupMatrixComponentType_Force32 = 0x7FFFFFFF
 } WGPUSubgroupMatrixComponentType;
 
+/**
+ * A supported matrix multiply with shape `Result(M x N) = Left(M x K) * Right(K x N)`.
+ * `componentType` is the element type of both operands. `resultComponentType`
+ * is the element type of the result. The minimum and maximum subgroup sizes
+ * equal the adapter's `subgroupMinSize` and `subgroupMaxSize`, respectively.
+ */
 typedef struct WGPUSubgroupMatrixConfig {
     WGPUSubgroupMatrixComponentType componentType;
     WGPUSubgroupMatrixComponentType resultComponentType;
@@ -60,15 +75,29 @@ typedef struct WGPUSubgroupMatrixConfig {
     uint32_t maxSubgroupSize;
 } WGPUSubgroupMatrixConfig;
 
-/* Chained out-struct on WGPUAdapterInfo. */
+/**
+ * The caller must initialize the `WGPUAdapterInfo` with `WGPU_ADAPTER_INFO_INIT`
+ * or zero, then chain this output structure onto its `nextInChain` with
+ * `chain.sType` set to @ref WGPUSType_AdapterPropertiesSubgroupMatrixConfigs.
+ * Both `wgpuAdapterGetInfo` and `wgpuDeviceGetAdapterInfo` return
+ * `WGPUStatus_Error` and write nothing if the adapter does not advertise
+ * the feature. On success the caller owns the `configs` array and frees it
+ * with @ref wgpuAdapterPropertiesSubgroupMatrixConfigsFreeMembers.
+ */
 typedef struct WGPUAdapterPropertiesSubgroupMatrixConfigs {
     WGPUChainedStruct chain;
     size_t configCount;
     const WGPUSubgroupMatrixConfig* configs;
 } WGPUAdapterPropertiesSubgroupMatrixConfigs;
 
+/**
+ * Frees the `configs` array. Pass `configCount` and `configs` exactly as
+ * returned by the query. A null `configs` pointer is accepted.
+ */
 WGPU_EXPORT void wgpuAdapterPropertiesSubgroupMatrixConfigsFreeMembers(
     WGPUAdapterPropertiesSubgroupMatrixConfigs value);
+
+/** @} */
 
 #ifdef __cplusplus
 }

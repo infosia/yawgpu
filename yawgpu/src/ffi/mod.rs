@@ -2802,42 +2802,44 @@ fn backend_type_from_hal(backend: yawgpu_hal::HalBackend) -> native::WGPUBackend
     }
 }
 
-#[cfg(test)]
-thread_local! {
-    // Models an adapter without matrix support for queries through both C entry points.
-    static OMIT_MATRIX_CONFIGS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
 /// Writes adapter info and any requested output extensions. The caller initializes the chain.
 unsafe fn write_adapter_info(
     adapter: &core::Adapter,
     info: *mut native::WGPUAdapterInfo,
 ) -> native::WGPUStatus {
-    if info.is_null() {
+    let Some(info) = info.as_mut() else {
         return native::WGPUStatus_Error;
-    }
-    let head = (*info).nextInChain;
-    let mut node = head;
-    let mut matrix_nodes = Vec::new();
+    };
+    let configs = if info.nextInChain.is_null() {
+        Vec::new()
+    } else {
+        adapter.hal().subgroup_matrix_configs()
+    };
+    write_adapter_info_from_hal(
+        info,
+        &adapter.name(),
+        adapter.backend(),
+        &adapter.info(),
+        adapter.hal().subgroup_size_range().unwrap_or_default(),
+        &configs,
+    )
+}
+
+unsafe fn write_adapter_info_from_hal(
+    info: &mut native::WGPUAdapterInfo,
+    name: &str,
+    backend: yawgpu_hal::HalBackend,
+    hal_info: &yawgpu_hal::HalAdapterInfo,
+    range: (u32, u32),
+    configs: &[yawgpu_hal::HalSubgroupMatrixConfig],
+) -> native::WGPUStatus {
+    let mut node = info.nextInChain;
     while !node.is_null() {
         if (*node).sType == native::WGPUSType_AdapterPropertiesSubgroupMatrixConfigs {
-            matrix_nodes.push(node.cast::<native::WGPUAdapterPropertiesSubgroupMatrixConfigs>());
-        }
-        node = (*node).next;
-    }
-    let range = adapter.hal().subgroup_size_range().unwrap_or_default();
-    if !matrix_nodes.is_empty() {
-        let configs = adapter.hal().subgroup_matrix_configs();
-        #[cfg(test)]
-        let configs = if OMIT_MATRIX_CONFIGS.get() {
-            Vec::new()
-        } else {
-            configs
-        };
-        if configs.is_empty() {
-            return native::WGPUStatus_Error;
-        }
-        for node in matrix_nodes {
+            if configs.is_empty() {
+                return native::WGPUStatus_Error;
+            }
+            let matrix_node = node.cast::<native::WGPUAdapterPropertiesSubgroupMatrixConfigs>();
             let array: Box<[_]> = configs
                 .iter()
                 .map(|c| native::WGPUSubgroupMatrixConfig {
@@ -2851,19 +2853,14 @@ unsafe fn write_adapter_info(
                     maxSubgroupSize: range.1,
                 })
                 .collect();
-            (*node).configCount = array.len();
-            (*node).configs = Box::into_raw(array).cast();
+            (*matrix_node).configCount = array.len();
+            (*matrix_node).configs = Box::into_raw(array).cast();
         }
+        node = (*node).next;
     }
-    let mut result = adapter_info_from_hal(
-        &adapter.name(),
-        adapter.backend(),
-        &adapter.info(),
-        range.0,
-        range.1,
-    );
-    result.nextInChain = head;
-    info.write(result);
+    let mut result = adapter_info_from_hal(name, backend, hal_info, range.0, range.1);
+    result.nextInChain = info.nextInChain;
+    *info = result;
     native::WGPUStatus_Success
 }
 
@@ -9699,9 +9696,22 @@ mod tests {
                 info.vendorID = 123;
                 matrices.configCount = 456;
                 // An empty capability list must leave both the root and its extension untouched.
-                OMIT_MATRIX_CONFIGS.set(true);
-                let unsupported = query(&mut info);
-                OMIT_MATRIX_CONFIGS.set(false);
+                let query_adapter = if query_device {
+                    &(*device).adapter
+                } else {
+                    &(*adapter).core
+                };
+                let unsupported = write_adapter_info_from_hal(
+                    &mut info,
+                    &query_adapter.name(),
+                    query_adapter.backend(),
+                    &query_adapter.info(),
+                    query_adapter
+                        .hal()
+                        .subgroup_size_range()
+                        .unwrap_or_default(),
+                    &[],
+                );
                 assert_eq!(unsupported, native::WGPUStatus_Error);
                 assert_eq!(info.vendorID, 123);
                 assert!(info.device.data.is_null());
