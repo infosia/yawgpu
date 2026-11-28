@@ -8,14 +8,17 @@ yawgpu's Dawn API package. Verified with ONNX Runtime 1.32.0 on macOS / Metal.
 ## Build
 
 ```sh
+# Run from the yawgpu checkout. $ORT is the ONNX Runtime checkout, $ORT_OUT its build dir.
+DAWN_API_DIR="$PWD/target/dawn-api"
+
 # 1. The Dawn API package ONNX Runtime compiles against.
-python3 tools/dawn_compat/make_dawn_api_package.py --out "$PWD/target/dawn-api"
+python3 tools/dawn_compat/make_dawn_api_package.py --out "$DAWN_API_DIR"
 
 # 2. ONNX Runtime in external Dawn mode (build.py needs Python 3.10 or later).
 (cd "$ORT" && python3 tools/ci_build/build.py --build_dir "$ORT_OUT" --config Release \
     --use_webgpu --use_external_dawn --build_shared_lib --skip_tests --parallel \
     --compile_no_warning_as_error --target onnxruntime \
-    --cmake_extra_defines onnxruntime_DAWN_PREBUILT_DIR="$PWD/target/dawn-api")
+    --cmake_extra_defines onnxruntime_DAWN_PREBUILT_DIR="$DAWN_API_DIR")
 
 # 3. yawgpu with the proc table, as a static library.
 cargo rustc -p yawgpu-dawn --features dawn-compat,metal --release --lib --crate-type staticlib

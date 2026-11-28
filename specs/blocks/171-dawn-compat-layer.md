@@ -102,7 +102,9 @@ of Dawn's:
 - Every `wgpu*` function yawgpu declares exists in Dawn's generated header with
   the same signature.
 - Every struct in both headers has the same `sizeof`, and every member the same
-  `offsetof`, measured by a compiler on the host.
+  `offsetof` and the same type with typedefs resolved, decided by a compiler on
+  the host. Equal size and offset are not enough: an integer member that became
+  a floating-point one changes how a struct is passed and returned.
 - Every enum constant in both headers has the same value.
 
 Dawn's header is generated from the `third_party/dawn` submodule by Dawn's own
@@ -203,6 +205,9 @@ gives the Noop backend. So when the descriptor chains no
 Metal on Apple platforms and Vulkan elsewhere when that backend is compiled
 in, else Noop. A descriptor that chains a selector is passed through
 unchanged.
+Nothing else changes: a null descriptor keeps `wgpuCreateInstance(NULL)`'s
+instance features (`TimedWaitAny` enabled), and an empty descriptor keeps an
+empty descriptor's.
 
 ```c
 void yawgpuDawnSetDefaultBackend(uint32_t backend);  /* YAWGPU_INSTANCE_BACKEND_* */
@@ -211,8 +216,9 @@ void yawgpuDawnSetDefaultBackend(uint32_t backend);  /* YAWGPU_INSTANCE_BACKEND_
 overrides that default for instances created afterwards.
 
 The table's `getProcAddress` returns this `createInstance` entry for the name
-`wgpuCreateInstance`, so a consumer that resolves procs by name gets the same
-behaviour.
+`wgpuCreateInstance`, and itself for `wgpuGetProcAddress`, so a consumer that
+resolves procs by name — directly or through the looked-up lookup function —
+gets the same behaviour.
 
 Building the table runs R1's guard first and fails when the subset does not
 hold, so a table is never produced for an ABI-incompatible yawgpu.

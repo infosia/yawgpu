@@ -187,3 +187,31 @@ modes (Abs, SqueezeNet, MNIST).
 Open after the review, all needing a host or tool this machine lacks:
 ThreadSanitizer on the concurrent workload; `e2e_vulkan_concurrent_device` and
 the F3 fix on a native Vulkan driver; ONNX Runtime on Linux / Windows Vulkan.
+
+## Branch review (2026-11-28)
+
+An independent review of `block-171-dawn-compat` at `2040a95`
+(`REPORT-dawn.md`, a working file) requested four changes and made one
+suggestion. Each was confirmed against the source and fixed.
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | `concurrent_device` failed in the Tint-stub build (no Dawn submodule): it always encoded a WGSL compute pass | The workload probes for Tint through a validation scope and skips the shader / pipeline part on the stub; the rest runs in both builds |
+| 2 | The ABI guard compared struct sizes and member offsets but not member types (`WGPUFuture.id` as `double` passed) | The compiler checks each shared member's type with typedefs resolved; regression tests for the guard and the table generator (R1 updated) |
+| 3 | The table's `createInstance` turned a null descriptor into an empty one, dropping `TimedWaitAny` | A null descriptor keeps `wgpuCreateInstance(NULL)`'s features; tests for null, empty and explicit-feature descriptors (R4 updated) |
+| 4 | `examples/ort_webgpu/README.md` expanded `$PWD` after `cd "$ORT"` | The package directory is set once in the yawgpu checkout |
+| 5 | Looking up `wgpuGetProcAddress` and then `wgpuCreateInstance` through it bypassed the wrapper | The table's lookup returns itself for `wgpuGetProcAddress`; two-step lookup tested (R4 updated) |
+
+Checking finding 1 on the whole workspace found one more test of this block
+that needed Tint, `wgpuAdapterRequestDevice_ignores_dawn_cache_callbacks`; it
+now uses the same probe.
+
+Tint-stub build, `cargo test --workspace --no-fail-fast`: 318 failures at the
+block's base commit `6370d11` and the same 318 after this block — the block
+adds none. Those 318 are tests that compile WGSL (256 of them in
+`yawgpu-core`); they predate this block and are not addressed here.
+
+Gate (Apple M2, full Tint): workspace 1,544/0; `yawgpu-dawn --features
+dawn-compat` 19/0 and its Metal tests 2/0; clippy clean on default, `metal`,
+`vulkan` and `dawn-compat,metal`; `e2e_metal_concurrent_device` 1/0; the ONNX
+Runtime host re-run in both device modes (Abs, SqueezeNet, MNIST).
