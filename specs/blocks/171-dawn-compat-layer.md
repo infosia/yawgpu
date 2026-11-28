@@ -4,8 +4,9 @@ Status: **COMPLETE on macOS / Metal and Windows / Vulkan (2026-11-28).** S1–S6
 done; ONNX Runtime 1.32.0 runs SqueezeNet and MNIST on yawgpu with CPU fallback
 disabled, matching the CPU provider, on the Apple M2 (Metal) and on a native
 NVIDIA Vulkan driver on Windows. Phase Review: 0 CRITICAL, 2 MAJOR and 9 MINOR,
-all fixed or deferred with a written rationale. Still open: ThreadSanitizer on
-the concurrent workload, and ONNX Runtime on Linux Vulkan.
+all fixed or deferred with a written rationale. The concurrent workload and the
+unit tests are clean under ThreadSanitizer with Rust and the Tint shim both
+instrumented. Still open: ONNX Runtime on Linux Vulkan.
 Ledger: `specs/tracking/dawn-compat.md`.
 
 A program written against Dawn's native API can run on yawgpu when it reaches
@@ -317,7 +318,7 @@ S2, S3 and S4 are independent of each other; S5 needs all three.
   callback is called.
 - S3: inline tests for each rule above (two waiters on one future both observe
   the mapped buffer; destroy racing a write); the concurrent tests pass on
-  Noop repeatedly and under ThreadSanitizer where the toolchain supports it,
+  Noop repeatedly and under ThreadSanitizer (`tools/tsan_test.sh`),
   and on Metal and Vulkan; the Noop, Metal and Vulkan adapters report the
   feature and GLES does not.
 - S4: the table has no null member and its `version` equals

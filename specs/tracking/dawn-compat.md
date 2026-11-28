@@ -6,7 +6,7 @@ Spec: `specs/blocks/171-dawn-compat-layer.md`.
 |---|---|---|
 | S1 | ABI subset guard | **DONE 2026-11-28** — `tools/dawn_compat/{gen_dawn_headers,abi_guard}.py`, crate `yawgpu-dawn` (feature `dawn-compat`), `tests/abi_guard.rs` 4/0. At Dawn `9bba943462` on arm64 macOS: 203 functions, 98 structs, 459 members, 525 constants, no mismatch |
 | S2 | Dawn toggles / cache chained structs | **DONE 2026-11-28** — yawgpu already skipped unrelated chain nodes on the instance and adapter-request chains and never read the device descriptor's chain, so no runtime change; `yawgpu.h` declares the two descriptors and three Noop tests pin the behaviour (`yawgpu --lib` 344/0) |
-| S3 | `ImplicitDeviceSynchronization` | **DONE 2026-11-28** — F1, F3, F5, F7, F9 fixed; feature advertised on Noop / Metal / Vulkan, not GLES; `concurrent_device` (4 threads × 32 iterations) on Noop, and on the Apple M2 through `e2e_metal_concurrent_device` 5 runs / 0 failures. Metal e2e regression 188/0 (54 binaries). `e2e_vulkan_concurrent_device` on a native Windows driver: see "Windows / Vulkan verification". Not run: ThreadSanitizer (the nightly `-Zbuild-std` build needs a crate that is not in the local cache) |
+| S3 | `ImplicitDeviceSynchronization` | **DONE 2026-11-28** — F1, F3, F5, F7, F9 fixed; feature advertised on Noop / Metal / Vulkan, not GLES; `concurrent_device` (4 threads × 32 iterations) on Noop, and on the Apple M2 through `e2e_metal_concurrent_device` 5 runs / 0 failures. Metal e2e regression 188/0 (54 binaries). `e2e_vulkan_concurrent_device` on a native Windows driver: see "Windows / Vulkan verification". ThreadSanitizer: see "ThreadSanitizer" |
 | S4 | proc table, stubs, Dawn API package | **DONE 2026-11-28** — the table's `createInstance` selects the default real backend when no selector is chained, `yawgpuDawnSetDefaultBackend()` overrides it `yawgpuDawnGetProcTable()`: 276 members, 203 yawgpu + 73 stubs; `tools/dawn_compat/make_dawn_api_package.py` (12 headers, 2 standalone sources); C++ smoke test through the package on Noop, and on the Apple M2 (`smoke_computes_on_metal`). the table's `createInstance` selects the default real backend when no selector is chained and `yawgpuDawnSetDefaultBackend()` overrides it. `yawgpu-dawn --features dawn-compat` 17/0; its two Metal tests pass on the M2 |
 | S5 | ONNX Runtime bring-up | **DONE 2026-11-28** on macOS / Metal ("ONNX Runtime bring-up") and on Windows / Vulkan ("Windows / Vulkan verification") |
 | S6 | docs + Phase Review | **DONE 2026-11-28** — `README` section, `examples/ort_webgpu/README.md`, Phase Review below |
@@ -195,8 +195,7 @@ On the Apple M2 at `6059d17`, after the smoke-test sources gained their Vulkan
 variants: `yawgpu-dawn --features dawn-compat,metal` 18/0, and the two Metal
 tests (`smoke_computes_on_metal`, `default_on_macos_with_metal_is_metal`) 2/0.
 
-Still open: ThreadSanitizer on the concurrent workload; ONNX Runtime on Linux
-Vulkan.
+Still open: ONNX Runtime on Linux Vulkan.
 
 ## Phase Review (2026-11-28)
 
@@ -225,8 +224,8 @@ Gate after the fixes (Apple M2): `cargo fmt --check` clean; workspace 1,544/0;
 Metal e2e 188/0 (54 binaries); the ONNX Runtime host re-run in both device
 modes (Abs, SqueezeNet, MNIST).
 
-Not covered by this gate, which ran on the Mac: ThreadSanitizer on the
-concurrent workload, and everything on a native Vulkan driver (see "Windows /
+Not covered by this gate, which ran on the Mac: ThreadSanitizer (see
+"ThreadSanitizer") and everything on a native Vulkan driver (see "Windows /
 Vulkan verification" for `e2e_vulkan_concurrent_device`, the F3 fix under the
 validation layer and ONNX Runtime).
 
@@ -257,3 +256,48 @@ Gate (Apple M2, full Tint): workspace 1,544/0; `yawgpu-dawn --features
 dawn-compat` 19/0 and its Metal tests 2/0; clippy clean on default, `metal`,
 `vulkan` and `dawn-compat,metal`; `e2e_metal_concurrent_device` 1/0; the ONNX
 Runtime host re-run in both device modes (Abs, SqueezeNet, MNIST).
+
+## ThreadSanitizer (2026-11-28)
+
+Apple M2, nightly `rustc 1.101.0-nightly (2026-10-20)`, Apple Clang 21, yawgpu
+at `8efdd7d`, Noop backend. `tools/tsan_test.sh` instruments the Rust crates
+(`-Zsanitizer=thread`, `-Zbuild-std`) and the C++ Tint shim with Tint
+(`-fsanitize=thread`), with one TSan runtime in the process.
+
+| Run | Result | TSan reports |
+|---|---|---|
+| `yawgpu --test concurrent_device`, 5 consecutive runs | 5 passed | 0 |
+| `yawgpu-tint --lib` | 131/0 | 0 |
+| `yawgpu-core --lib` | 758/0 | 0 |
+| `yawgpu-hal --lib` | 140/0 | 0 |
+| `yawgpu --lib` | 346/0 | 0 |
+
+Checks that the zero is meaningful:
+
+- Rust instrumentation: a program with a deliberate unsynchronized write from
+  two threads, built with the same flags, is reported as a data race.
+- C++ instrumentation and F1: with the `std::call_once` around
+  `tint::Initialize()` removed from the shim, both
+  `initialize_supports_concurrent_parsers` and `concurrent_device` report
+  `data race tint.cc:83 in tint::Initialize()` (two threads writing the
+  static printer; in `concurrent_device` through
+  `wgpuDeviceCreateShaderModule`). With the guard in place the same runs are
+  clean. So F1 was an observable race and the fix removes it; the unit test
+  alone passes either way.
+
+Setup notes (also in the script):
+
+- `-fsanitize=thread` makes Clang link its runtime into the shim, and rustc
+  links its own into Rust binaries. Two runtimes abort at start with
+  "Interceptors are not working". `-Zexternal-clangrt` plus link arguments
+  make Rust binaries use Clang's.
+- The shim's native build tree does not reconfigure when only the flags in the
+  environment change; a stale tree gave a run that passed with an
+  uninstrumented shim. Check `nm -u libtint_shim.dylib | grep tsan`.
+- `yawgpu-core` has tests that request allocations the TSan allocator aborts on;
+  `TSAN_OPTIONS=allocator_may_return_null=1`.
+
+Limits of this result: only code the tests execute is checked — the workload
+is compute, buffers, maps, waits and error scopes on Noop, so render passes,
+surfaces, the `tiled` path and the Metal / Vulkan HAL code are not covered;
+races that are synchronized but logically wrong are outside what TSan reports.
