@@ -10,7 +10,9 @@ extern "C" {
 typedef struct DawnProcTable DawnProcTable;
 
 /* The table is immutable and valid for the lifetime of the process.
- * Its getProcAddress returns the table's createInstance for "wgpuCreateInstance".
+ * Its getProcAddress returns the table's createInstance for "wgpuCreateInstance"
+ * and itself for "wgpuGetProcAddress". A null createInstance descriptor enables
+ * TimedWaitAny. An explicit descriptor enables it when requested.
  * Other names use yawgpu's lookup, which returns null for stubbed entries. */
 const DawnProcTable* yawgpuDawnGetProcTable(void);
 

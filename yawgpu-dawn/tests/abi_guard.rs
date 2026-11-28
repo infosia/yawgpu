@@ -125,6 +125,15 @@ fn check_generator_failure(before: &str, after: &str, expected: &str) {
 }
 
 #[test]
+fn guard_and_generator_reject_a_same_width_member_type_change() {
+    let before = "uint64_t id;";
+    let after = "double id;";
+    let member = "member WGPUFuture.id";
+    check_mutation("webgpu.h", before, after, &[member]);
+    check_generator_failure(before, after, member);
+}
+
+#[test]
 fn table_generator_rejects_an_incompatible_signature() {
     check_generator_failure(
         "wgpuBufferGetSize(WGPUBuffer buffer)",

@@ -18,7 +18,11 @@ Include `yawgpu-dawn/include/yawgpu_dawn.h` in the host and call `yawgpuDawnGetP
 
 For a null descriptor or a chain without a backend selector, the table's `createInstance` defaults to Metal on Apple targets built with `metal`, Vulkan on other targets built with `vulkan`, and Noop otherwise. A host can change the process-wide default for subsequent instances with `yawgpuDawnSetDefaultBackend(backend)` or Rust's `yawgpu_dawn::set_default_backend(backend)`, using a `YAWGPU_INSTANCE_BACKEND_*` value. The setter is thread-safe. A `YaWGPUInstanceBackendSelect` anywhere in the descriptor chain takes precedence.
 
-Unsupported entry points print their name to stderr on first use. They return null handles or pointers, `WGPUStatus_Error` for status, or zero for other values. Void stubs return after logging. Set `YAWGPU_DAWN_STRICT=1` to abort at an unsupported call. The table's `getProcAddress` returns its own `createInstance` entry for `wgpuCreateInstance`. It delegates all other names to yawgpu's lookup, which returns null for stubs.
+A null descriptor enables `TimedWaitAny`. An explicit descriptor enables it only when the feature is requested.
+
+The table's `getProcAddress` returns itself for `wgpuGetProcAddress` and its own `createInstance` entry for `wgpuCreateInstance`. Loaders that resolve these names in succession use the same backend selection as direct table callers. Other names use yawgpu's lookup, which returns null for stubs.
+
+Unsupported entry points print their name to stderr on first use. They return null handles or pointers, `WGPUStatus_Error` for status, or zero for other values. Void stubs return after logging. Set `YAWGPU_DAWN_STRICT=1` to abort at an unsupported call.
 
 ## ONNX Runtime external Dawn
 

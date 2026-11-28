@@ -9895,6 +9895,25 @@ mod tests {
             STORE_CALLS.fetch_add(1, Ordering::Relaxed);
         }
 
+        unsafe fn has_tint(instance: native::WGPUInstance, device: native::WGPUDevice) -> bool {
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let module = create_wgsl_module(device, "@compute @workgroup_size(1) fn cs() {}");
+            wgpuShaderModuleRelease(module);
+            let mut state = PopErrorScopeState::default();
+            pop_error_scope(instance, device, &mut state);
+            assert_eq!(state.fired, 1);
+            assert_eq!(state.status, native::WGPUPopErrorScopeStatus_Success);
+            if state.error_type == native::WGPUErrorType_NoError {
+                return true;
+            }
+            assert_eq!(state.error_type, native::WGPUErrorType_Validation);
+            assert_eq!(
+                state.message,
+                "yawgpu-tint was built without Tint (YAWGPU_DAWN_DIR unset)"
+            );
+            false
+        }
+
         unsafe {
             for toggles_first in [true, false] {
                 let instance = make_noop_instance();
@@ -9917,10 +9936,12 @@ mod tests {
                     ..std::mem::zeroed()
                 };
                 let device = request_noop_device_with_descriptor(instance, adapter, &descriptor);
-                let pipeline = noop_compute_pipeline(device);
-                assert!(!pipeline.is_null());
-                assert!(!(*pipeline)._core.is_error());
-                wgpuComputePipelineRelease(pipeline);
+                if has_tint(instance, device) {
+                    let pipeline = noop_compute_pipeline(device);
+                    assert!(!pipeline.is_null());
+                    assert!(!(*pipeline)._core.is_error());
+                    wgpuComputePipelineRelease(pipeline);
+                }
                 release_handles(instance, adapter, device);
                 assert_eq!(LOAD_CALLS.load(Ordering::Relaxed), 0);
                 assert_eq!(STORE_CALLS.load(Ordering::Relaxed), 0);

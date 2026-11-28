@@ -26,6 +26,9 @@ WGPUProc getProcAddress(WGPUStringView name) {
     if (proc == reinterpret_cast<WGPUProc>(&wgpuCreateInstance)) {
         return reinterpret_cast<WGPUProc>(&yawgpuDawnCreateInstance);
     }
+    if (proc == reinterpret_cast<WGPUProc>(&wgpuGetProcAddress)) {
+        return reinterpret_cast<WGPUProc>(&getProcAddress);
+    }
     return proc;
 }
 

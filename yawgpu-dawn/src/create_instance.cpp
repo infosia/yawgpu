@@ -18,6 +18,11 @@ extern "C" WGPUInstance yawgpuDawnCreateInstance(const WGPUInstanceDescriptor* d
     }
 
     WGPUInstanceDescriptor copy = descriptor ? *descriptor : WGPUInstanceDescriptor{};
+    constexpr WGPUInstanceFeatureName timedWait = WGPUInstanceFeatureName_TimedWaitAny;
+    if (!descriptor) {
+        copy.requiredFeatureCount = 1;
+        copy.requiredFeatures = &timedWait;
+    }
     YaWGPUInstanceBackendSelect selector{
         {copy.nextInChain, YAWGPU_STYPE_INSTANCE_BACKEND_SELECT},
         defaultBackend.load(std::memory_order_relaxed)};

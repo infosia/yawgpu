@@ -31,17 +31,22 @@ pub fn set_default_backend(backend: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{ptr, sync::Mutex};
     use yawgpu::{native, YaWGPUInstanceBackendSelect};
+
+    static DEFAULT_BACKEND: Mutex<()> = Mutex::new(());
 
     #[link(name = "dawn_smoke", kind = "static")]
     extern "C" {
         fn smokeAdapterBackend(
             desc: *const native::WGPUInstanceDescriptor,
         ) -> native::WGPUBackendType;
+        fn smokeTimedWait(desc: *const native::WGPUInstanceDescriptor) -> native::WGPUWaitStatus;
     }
 
     #[test]
     fn default_backend_applies_only_without_a_selector() {
+        let _guard = DEFAULT_BACKEND.lock().unwrap();
         let mut desc = native::WGPUInstanceDescriptor {
             nextInChain: std::ptr::null_mut(),
             requiredFeatureCount: 0,
@@ -83,6 +88,50 @@ mod tests {
             assert_eq!(smokeAdapterBackend(&desc), native::WGPUBackendType_Null);
             assert_eq!(desc.nextInChain, std::ptr::addr_of_mut!(prefix));
             assert_eq!(prefix.next, std::ptr::addr_of_mut!(selector.chain));
+        }
+    }
+
+    #[test]
+    fn default_backend_preserves_timed_wait_for_each_descriptor() {
+        let _guard = DEFAULT_BACKEND.lock().unwrap();
+        set_default_backend(yawgpu::YAWGPU_INSTANCE_BACKEND_NOOP);
+        let empty = native::WGPUInstanceDescriptor {
+            nextInChain: ptr::null_mut(),
+            requiredFeatureCount: 0,
+            requiredFeatures: ptr::null(),
+            requiredLimits: ptr::null(),
+        };
+        let timed = native::WGPUInstanceDescriptor {
+            requiredFeatureCount: 1,
+            requiredFeatures: &native::WGPUInstanceFeatureName_TimedWaitAny,
+            ..empty
+        };
+        let mut noop = YaWGPUInstanceBackendSelect {
+            chain: native::WGPUChainedStruct {
+                next: ptr::null_mut(),
+                sType: yawgpu::YAWGPU_STYPE_INSTANCE_BACKEND_SELECT,
+            },
+            backend: yawgpu::YAWGPU_INSTANCE_BACKEND_NOOP,
+        };
+        for (mut desc, expected) in [
+            (None, native::WGPUWaitStatus_Success),
+            (Some(empty), native::WGPUWaitStatus_Error),
+            (Some(timed), native::WGPUWaitStatus_Success),
+        ] {
+            // SAFETY: The descriptors and selector live through both synchronous probes.
+            unsafe {
+                let wrapped = smokeTimedWait(desc.as_ref().map_or(ptr::null(), ptr::from_ref));
+                if let Some(d) = &mut desc {
+                    d.nextInChain = &mut noop.chain;
+                }
+                let direct =
+                    yawgpu::wgpuCreateInstance(desc.as_ref().map_or(ptr::null(), ptr::from_ref));
+                assert!(!direct.is_null());
+                let status = yawgpu::wgpuInstanceWaitAny(direct, 0, ptr::null_mut(), 1);
+                yawgpu::wgpuInstanceRelease(direct);
+                assert_eq!(status, expected);
+                assert_eq!(wrapped, status);
+            }
         }
     }
 

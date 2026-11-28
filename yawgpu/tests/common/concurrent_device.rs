@@ -13,6 +13,7 @@ mod indirect_dispatch;
 use indirect_dispatch::{create_buffer, create_wgsl_module, request_adapter, string_view};
 
 const ITERATIONS: u32 = 32;
+const COMPUTE_SHADER: &str = "@compute @workgroup_size(1) fn main() {}";
 const WRITE_ERRORS: [(u64, usize, &str); 4] = [
     (1, 4, "queue write offset must be 4-byte aligned"),
     (0, 1, "queue write size must be 4-byte aligned"),
@@ -64,6 +65,7 @@ pub(super) fn run(backend: u32) {
         wait(instance, future, true);
         assert!(!device.is_null());
         assert_ne!(wgpuDeviceHasFeature(device, feature), 0);
+        let have_tint = has_tint(instance, device);
         let queue = wgpuDeviceGetQueue(device);
         // These C handles are owned until every scoped worker has joined.
         let handles = (instance as usize, device as usize, queue as usize);
@@ -79,7 +81,14 @@ pub(super) fn run(backend: u32) {
                             start.wait();
                         }
                         let word = 1 + worker as u32 * ITERATIONS + iteration;
-                        round(handles.0 as _, handles.1 as _, handles.2 as _, word, error);
+                        round(
+                            handles.0 as _,
+                            handles.1 as _,
+                            handles.2 as _,
+                            word,
+                            error,
+                            have_tint,
+                        );
                     }
                 });
             }
@@ -142,19 +151,37 @@ unsafe fn wait(instance: WGPUInstance, future: WGPUFuture, timed: bool) {
     }
 }
 
+unsafe fn has_tint(instance: WGPUInstance, device: WGPUDevice) -> bool {
+    wgpuDevicePushErrorScope(device, WGPUErrorFilter_Validation);
+    wgpuShaderModuleRelease(create_wgsl_module(device, COMPUTE_SHADER));
+    let (kind, message) = pop_scope(instance, device);
+    if kind == WGPUErrorType_NoError {
+        return true;
+    }
+    assert_eq!(kind, WGPUErrorType_Validation);
+    assert_eq!(
+        message,
+        "yawgpu-tint was built without Tint (YAWGPU_DAWN_DIR unset)"
+    );
+    false
+}
+
 unsafe fn round(
     instance: WGPUInstance,
     device: WGPUDevice,
     queue: WGPUQueue,
     word: u32,
     error: (u64, usize, &str),
+    have_tint: bool,
 ) {
     let source = create_buffer(device, 4, WGPUBufferUsage_CopySrc | WGPUBufferUsage_CopyDst);
     let readback = create_buffer(device, 4, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
     let data = word.to_ne_bytes();
     wgpuQueueWriteBuffer(queue, source, 0, data.as_ptr().cast(), data.len());
     let encoder = wgpuDeviceCreateCommandEncoder(device, ptr::null());
-    encode_compute(device, encoder);
+    if have_tint {
+        encode_compute(device, encoder);
+    }
     wgpuCommandEncoderCopyBufferToBuffer(encoder, source, 0, readback, 0, 4);
     let commands = wgpuCommandEncoderFinish(encoder, ptr::null());
     wgpuQueueSubmit(queue, 1, &commands);
@@ -185,6 +212,14 @@ unsafe fn round(
     wgpuBufferUnmap(readback);
 
     wgpuQueueWriteBuffer(queue, source, error.0, data.as_ptr().cast(), error.1);
+    let (kind, message) = pop_scope(instance, device);
+    assert_eq!(kind, WGPUErrorType_Validation);
+    assert_eq!(message, error.2);
+    wgpuBufferRelease(readback);
+    wgpuBufferRelease(source);
+}
+
+unsafe fn pop_scope(instance: WGPUInstance, device: WGPUDevice) -> (WGPUErrorType, String) {
     let mut captured: Option<(WGPUPopErrorScopeStatus, WGPUErrorType, String)> = None;
     let future = wgpuDevicePopErrorScope(
         device,
@@ -198,10 +233,7 @@ unsafe fn round(
     wait(instance, future, false);
     let (status, kind, message) = captured.expect("error scope callback");
     assert_eq!(status, WGPUPopErrorScopeStatus_Success);
-    assert_eq!(kind, WGPUErrorType_Validation);
-    assert_eq!(message, error.2);
-    wgpuBufferRelease(readback);
-    wgpuBufferRelease(source);
+    (kind, message)
 }
 
 unsafe fn encode_compute(device: WGPUDevice, encoder: WGPUCommandEncoder) {
@@ -221,7 +253,7 @@ unsafe fn encode_compute(device: WGPUDevice, encoder: WGPUCommandEncoder) {
             ..std::mem::zeroed()
         },
     );
-    let module = create_wgsl_module(device, "@compute @workgroup_size(1) fn main() {}");
+    let module = create_wgsl_module(device, COMPUTE_SHADER);
     let pipeline = wgpuDeviceCreateComputePipeline(
         device,
         &WGPUComputePipelineDescriptor {

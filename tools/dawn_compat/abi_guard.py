@@ -34,6 +34,20 @@ def public_source(preprocessed, paths):
     return "\n".join(lines)
 
 
+def declarators(field):
+    """Split a field declaration at commas outside argument lists and array bounds."""
+    start = depth = 0
+    for i, char in enumerate(field):
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth -= 1
+        elif char == "," and depth == 0:
+            yield field[start:i]
+            start = i + 1
+    yield field[start:]
+
+
 def struct_definitions(declarations):
     structs = {}
     for start in re.finditer(r"\b(?:(typedef)\s+)?struct\s*(\w+)?\s*\{", declarations):
@@ -45,16 +59,17 @@ def struct_definitions(declarations):
         name = alias if typedef else tag
         if not name or name.startswith(VENDOR_PREFIXES):
             continue
-        members = []
+        members = {}
         for field in body.split(";"):
             if not field.strip():
                 continue
-            for declarator in field.split(","):
-                member = re.search(r"\b(\w+)\s*(?:\[[^\]]*\]\s*)*$", declarator)
+            for declarator in declarators(field):
+                member = (re.search(r"\(\s*\*\s*(\w+)\s*(?:\[[^\]]*\]\s*)*\)\s*\(", declarator)
+                          or re.search(r"\b(\w+)\s*(?:\[[^\]]*\]\s*)*$", declarator))
                 if not member:
                     raise ValueError(f"Cannot identify member of {name}: {field}")
-                members.append(member[1])
-        structs[name] = (alias if typedef else f"struct {tag}", members)
+                members[member[1]] = field.strip()
+        structs[name] = (f"struct {tag}" if tag else alias, members)
     return structs
 
 
@@ -73,9 +88,12 @@ class Header:
                 self.functions[match[1]] = declaration.strip() + ";"
 
         self.aliases = {}
-        for declaration in re.findall(r"\btypedef\s+[^;{}]+;", declarations):
+        # Keep the tag behind a typedef that also defines its struct or enum.
+        typedefs = re.sub(r"\btypedef\s+(struct|enum)\s+(\w+)\s*\{[^{}]*\}\s*(\w+)\s*;",
+                          r"typedef \1 \2 \3;", declarations)
+        for declaration in re.findall(r"\btypedef\s+[^;{}]+;", typedefs):
             alias = (re.search(r"\(\s*\*\s*(\w+)\s*\)", declaration)
-                     or re.search(r"\b(\w+)\s*;$", declaration))
+                     or re.search(r"\b(\w+)\s*(?:\[[^\]]*\]\s*)*;$", declaration))
             if alias:
                 self.aliases[alias[1]] = declaration
 
@@ -98,12 +116,28 @@ class Header:
         return result
 
 
-def incompatible_functions(dawn, yawgpu):
-    # Check the address before redeclaration so an absent function also fails.
+def incompatible_declarations(dawn, yawgpu):
+    probes = []
+    for name, declaration in yawgpu.functions.items():
+        # Check the address before redeclaration so an absent function also fails.
+        check = f'_Static_assert(sizeof(&{name}), "{name}");\n{declaration}'
+        probes.append((f"function {name}", check))
+    for name in sorted(yawgpu.structs.keys() & dawn.structs.keys()):
+        c_type, dawn_members = dawn.structs[name]
+        _, fields = yawgpu.structs[name]
+        for member in sorted(fields.keys() & dawn_members.keys()):
+            # Replay the C field declaration with its typedefs. Comparing addresses
+            # preserves array bounds and qualifiers on the member itself.
+            key = f"member {name}.{member}"
+            actual = f"__typeof__(&(({c_type}*)0)->{member})"
+            expected = f"__typeof__(&reference.{member})"
+            check = (f"{{ struct {{ {fields[member]}; }} reference;\n"
+                     f'_Static_assert(__builtin_types_compatible_p({actual}, {expected}), "{key}"); }}')
+            probes.append((key, check))
+
     # Bisect a failing batch to attribute all errors without parsing diagnostics.
     def check(batch):
-        checks = "\n".join(f"_Static_assert(sizeof(&{name}), \"{name}\");\n{decl}"
-                           for name, decl in batch)
+        checks = "\n".join(source for _, source in batch)
         # Give the redeclarations their original scalar, handle and callback
         # typedefs. Otherwise a change behind the same typedef name is invisible.
         needed = set(re.findall(r"\b\w+\b", checks))
@@ -116,11 +150,11 @@ def incompatible_functions(dawn, yawgpu):
         if dawn.compile(source, "-fsyntax-only", check=False).returncode == 0:
             return []
         if len(batch) == 1:
-            return ["function " + batch[0][0]]
+            return [batch[0][0]]
         middle = len(batch) // 2
         return check(batch[:middle]) + check(batch[middle:])
 
-    return check(list(yawgpu.functions.items()))
+    return check(probes)
 
 
 # Keep the full precision of integers and floating-point sentinels (including NaN).
@@ -170,7 +204,7 @@ def check_abi(include, dawn_include, work):
     dawn = Header(cc, dawn_include, ["dawn/webgpu.h"])
     expected = measurements(yawgpu, yawgpu, work / "yawgpu-probe")
     actual = measurements(dawn, yawgpu, work / "dawn-probe")
-    problems = incompatible_functions(dawn, yawgpu)
+    problems = set(incompatible_declarations(dawn, yawgpu))
     for key in sorted(expected.keys() | actual.keys()):
         kind, name = key.split()
         # A missing type already identifies all of its missing fields.
@@ -179,13 +213,13 @@ def check_abi(include, dawn_include, work):
         if kind == "enum" and name not in dawn.constants and not name.startswith("WGPU"):
             continue
         if expected.get(key) != actual.get(key):
-            problems.append(key)
+            problems.add(key)
 
     counts = [sum(key.startswith(kind + " ") for key in expected)
               for kind in ("struct", "member", "enum")]
     print(f"Checked {len(yawgpu.functions)} functions, {counts[0]} structs, "
           f"{counts[1]} members, {counts[2]} constants.", file=sys.stderr)
-    return problems
+    return sorted(problems)
 
 
 def main():
