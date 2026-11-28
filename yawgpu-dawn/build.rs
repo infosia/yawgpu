@@ -8,6 +8,7 @@ fn main() {
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     for path in [
         "src/proc_table.cpp",
+        "src/create_instance.cpp",
         "include",
         "tests/smoke",
         "../tools/dawn_compat",
@@ -34,11 +35,22 @@ fn main() {
         .include(package.join("include"))
         .include("include")
         .include(&out);
+    let apple_target = env::var("CARGO_CFG_TARGET_VENDOR").unwrap() == "apple";
+    let default_backend = if apple_target && cfg!(feature = "metal") {
+        "YAWGPU_INSTANCE_BACKEND_METAL"
+    } else if !apple_target && cfg!(feature = "vulkan") {
+        "YAWGPU_INSTANCE_BACKEND_VULKAN"
+    } else {
+        "YAWGPU_INSTANCE_BACKEND_NOOP"
+    };
     cpp.clone()
+        .include("../yawgpu/ffi/webgpu-headers")
+        .define("YAWGPU_DAWN_DEFAULT_BACKEND", default_backend)
+        .file("src/create_instance.cpp")
         .file("src/proc_table.cpp")
         .compile("yawgpu_procs");
 
-    // Only the integration test requests this archive via #[link]. Its private
+    // Only tests request this archive via #[link]. Its private
     // dispatch symbols let both sides of the C ABI coexist in the test executable.
     let aliases = out.join("smoke_dispatch.h");
     if cpp.get_compiler().is_like_msvc() {

@@ -40,6 +40,40 @@ fn smoke_computes_on_metal() {
     }
 }
 
+// This test binary never sets the default backend.
+#[cfg(any(
+    not(any(feature = "metal", feature = "vulkan")),
+    all(target_os = "macos", feature = "metal")
+))]
+fn default_adapter_backend() -> yawgpu::native::WGPUBackendType {
+    extern "C" {
+        fn smokeAdapterBackend(
+            desc: *const yawgpu::native::WGPUInstanceDescriptor,
+        ) -> yawgpu::native::WGPUBackendType;
+    }
+    // SAFETY: The table accepts a null descriptor.
+    unsafe { smokeAdapterBackend(std::ptr::null()) }
+}
+
+#[test]
+#[cfg(not(any(feature = "metal", feature = "vulkan")))]
+fn default_without_backend_features_is_noop() {
+    assert_eq!(
+        default_adapter_backend(),
+        yawgpu::native::WGPUBackendType_Null
+    );
+}
+
+#[test]
+#[cfg(all(target_os = "macos", feature = "metal"))]
+#[ignore = "manual real-backend test"]
+fn default_on_macos_with_metal_is_metal() {
+    assert_eq!(
+        default_adapter_backend(),
+        yawgpu::native::WGPUBackendType_Metal
+    );
+}
+
 #[test]
 fn table_has_all_members_and_pinned_version() {
     // SAFETY: the accessor returns the static table inspected by this helper.

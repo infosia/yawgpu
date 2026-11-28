@@ -68,7 +68,8 @@ def generate(out):
         checks.append(f"if (!table->{member}) return false;")
         aliases.append(f"#define {name} smoke_dispatch_{name}")
         if name in backed:
-            init.append(f"table.{member} = &{name};")
+            target = "yawgpuDawnCreateInstance" if name == "wgpuCreateInstance" else name
+            init.append(f"table.{member} = &{target};")
             continue
         result = functions[name]
         fallback = {"WGPUStatus": "return WGPUStatus_Error;", "void": "return;"}.get(result, "return {};")

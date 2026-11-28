@@ -15,6 +15,8 @@ Use `dawn-compat` alone for Noop or `dawn-compat,vulkan` for Vulkan. Link the ho
 
 Include `yawgpu-dawn/include/yawgpu_dawn.h` in the host and call `yawgpuDawnGetProcTable()`. Rust callers can use `yawgpu_dawn::dawn_proc_table()`. The pointer stays valid for the life of the process. A C++ consumer compiles the package's two sources with its `include/` directory and installs the pointer with `dawnProcSetProcs(table)` before calling the WebGPU API. Generate the package and library from the same checkout. The consumer aborts on a version mismatch.
 
+For a null descriptor or a chain without a backend selector, the table's `createInstance` defaults to Metal on Apple targets built with `metal`, Vulkan on other targets built with `vulkan`, and Noop otherwise. A host can change the process-wide default for subsequent instances with `yawgpuDawnSetDefaultBackend(backend)` or Rust's `yawgpu_dawn::set_default_backend(backend)`, using a `YAWGPU_INSTANCE_BACKEND_*` value. The setter is thread-safe. A `YaWGPUInstanceBackendSelect` anywhere in the descriptor chain takes precedence.
+
 Unsupported entry points print their name to stderr on first use. They return null handles or pointers, `WGPUStatus_Error` for status, or zero for other values. Void stubs return after logging. Set `YAWGPU_DAWN_STRICT=1` to abort at an unsupported call. Looking up a stub with the table's `getProcAddress` returns null.
 
 ## ONNX Runtime external Dawn

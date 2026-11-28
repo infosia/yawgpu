@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include <cstring>
 
+extern "C" decltype(wgpuCreateInstance) yawgpuDawnCreateInstance;
+
 namespace {
 void reportUnsupported(const char* name, std::atomic_flag& reported) {
     const char* setting = std::getenv("YAWGPU_DAWN_STRICT");
