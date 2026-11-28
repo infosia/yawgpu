@@ -190,6 +190,11 @@ impl NoopAdapter {
         Some((4, 4))
     }
 
+    pub(super) fn subgroup_matrix_configs(&self) -> Vec<crate::HalSubgroupMatrixConfig> {
+        use crate::HalSubgroupMatrixComponentType::F32;
+        vec![crate::HalSubgroupMatrixConfig::new(F32, F32, 8, 8, 8)]
+    }
+
     /// Returns the explicit compute subgroup size capabilities.
     ///
     /// Nominal values (Block 108): the range matches

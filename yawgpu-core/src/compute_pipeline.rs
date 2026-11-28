@@ -4,11 +4,12 @@ use std::sync::Arc;
 use yawgpu_hal::{
     HalBackend, HalBufferBindingKind, HalComputePipeline, HalDescriptorBinding,
     HalDescriptorBindingKind, HalDevice, HalMslBufferSizeBinding, HalShaderSource,
-    HalStorageTextureAccess, HalSubgroupSizeControlCaps,
+    HalStorageTextureAccess, HalSubgroupMatrixComponentType, HalSubgroupMatrixConfig,
+    HalSubgroupSizeControlCaps,
 };
 
 use crate::bind_group_layout::*;
-use crate::device::FeatureSet;
+use crate::device::{AdapterSubgroupProperties, FeatureSet};
 use crate::format::*;
 use crate::frontend;
 use crate::limits::*;
@@ -401,7 +402,7 @@ pub(crate) fn resolve_compute_pipeline_descriptor_for_source(
     descriptor: &ComputePipelineDescriptor,
     limits: Limits,
     features: &FeatureSet,
-    subgroup_size_control: Option<HalSubgroupSizeControlCaps>,
+    subgroups: &AdapterSubgroupProperties,
     pipeline_id: u64,
 ) -> Result<ResolvedPipelineParts, String> {
     #[cfg(feature = "shader-passthrough")]
@@ -412,13 +413,7 @@ pub(crate) fn resolve_compute_pipeline_descriptor_for_source(
     if let Some((_source, entries)) = descriptor.shader_module.msl_passthrough() {
         return resolve_msl_passthrough_compute_pipeline_descriptor(descriptor, entries, limits);
     }
-    resolve_compute_pipeline_descriptor(
-        descriptor,
-        limits,
-        features,
-        subgroup_size_control,
-        pipeline_id,
-    )
+    resolve_compute_pipeline_descriptor(descriptor, limits, features, subgroups, pipeline_id)
 }
 
 /// Creates HAL compute pipeline and reports validation errors through the owning device.
@@ -1090,7 +1085,7 @@ pub(crate) fn resolve_compute_pipeline_descriptor(
     descriptor: &ComputePipelineDescriptor,
     limits: Limits,
     features: &FeatureSet,
-    subgroup_size_control: Option<HalSubgroupSizeControlCaps>,
+    subgroups: &AdapterSubgroupProperties,
     pipeline_id: u64,
 ) -> Result<ResolvedPipelineParts, String> {
     if descriptor.shader_module.is_error() {
@@ -1101,13 +1096,7 @@ pub(crate) fn resolve_compute_pipeline_descriptor(
     };
     let entry_name = resolve_compute_entry(module, descriptor.entry_point.as_deref())?;
     let constants = resolve_pipeline_constants(module, &entry_name, &descriptor.constants)?;
-    let workgroup = resolve_compute_workgroup(
-        module,
-        &entry_name,
-        &constants,
-        limits,
-        subgroup_size_control,
-    )?;
+    let workgroup = resolve_compute_workgroup(module, &entry_name, &constants, limits, subgroups)?;
     let bindings = module.resource_bindings_for_entry(&entry_name)?;
     validate_compute_pipeline_layout(&descriptor.layout, &bindings)?;
     let immediate_size_budget =
@@ -1382,15 +1371,13 @@ pub(crate) fn validate_pipeline_constant_value(
 /// Resolves and validates the compute entry point's workgroup (size, storage,
 /// and explicit `@subgroup_size`) after pipeline-constant substitution.
 ///
-/// `subgroup_size_control` is the device adapter's explicit subgroup size
-/// caps (Block 108), consulted only when the entry point declares
-/// `@subgroup_size`.
+/// Subgroup validation uses the size range and matrix configurations of the owning adapter.
 pub(crate) fn resolve_compute_workgroup(
     module: &frontend::ReflectedModule,
     entry_name: &str,
     constants: &[ResolvedOverrideConstant],
     limits: Limits,
-    subgroup_size_control: Option<HalSubgroupSizeControlCaps>,
+    subgroups: &AdapterSubgroupProperties,
 ) -> Result<ResolvedComputeWorkgroup, String> {
     let pipeline_constants = resolved_pipeline_constant_map(constants);
     let workgroup = module.resolved_compute_workgroup_size(entry_name, &pipeline_constants)?;
@@ -1401,7 +1388,14 @@ pub(crate) fn resolve_compute_workgroup(
         return Err("compute workgroup storage size exceeds the device limit".to_owned());
     }
     let subgroup_size =
-        validate_explicit_subgroup_size(size, workgroup.subgroup_size, subgroup_size_control)?;
+        validate_explicit_subgroup_size(size, workgroup.subgroup_size, subgroups.size_control)?;
+    validate_subgroup_matrix_workgroup(
+        size[0],
+        workgroup.uses_subgroup_matrix,
+        subgroup_size,
+        subgroups.size_range,
+    )?;
+    validate_subgroup_matrix_configuration(&workgroup.subgroup_matrix, &subgroups.matrix_configs)?;
 
     Ok(ResolvedComputeWorkgroup {
         size,
@@ -1429,6 +1423,71 @@ fn validate_compute_workgroup_size(size: [u32; 3], limits: Limits) -> Result<(),
         .ok_or_else(|| "compute workgroup invocation count overflows".to_owned())?;
     if invocations > limits.max_compute_invocations_per_workgroup {
         return Err("compute workgroup invocation count exceeds the device limit".to_owned());
+    }
+    Ok(())
+}
+
+/// Validates matrix workgroups without an explicit subgroup size against the adapter maximum.
+pub(crate) fn validate_subgroup_matrix_workgroup(
+    x: u32,
+    uses_matrix: bool,
+    explicit_size: Option<u32>,
+    size_range: Option<(u32, u32)>,
+) -> Result<(), String> {
+    if uses_matrix && explicit_size.is_none() {
+        let max = size_range.map_or(0, |(_, max)| max);
+        if max == 0 || !x.is_multiple_of(max) {
+            return Err(format!("subgroup matrix workgroup_size.x ({x}) must be a multiple of the adapter's maximum subgroup size ({max})"));
+        }
+    }
+    Ok(())
+}
+
+fn matrix_component_type(ty: yawgpu_tint::SubgroupMatrixType) -> HalSubgroupMatrixComponentType {
+    use yawgpu_tint::SubgroupMatrixType as Tint;
+    match ty {
+        Tint::F32 => HalSubgroupMatrixComponentType::F32,
+        Tint::F16 => HalSubgroupMatrixComponentType::F16,
+        Tint::I32 => HalSubgroupMatrixComponentType::I32,
+        Tint::U32 => HalSubgroupMatrixComponentType::U32,
+        Tint::I8 => HalSubgroupMatrixComponentType::I8,
+        Tint::U8 => HalSubgroupMatrixComponentType::U8,
+    }
+}
+
+/// Matches each matrix type and each complete multiply against an adapter configuration.
+pub(crate) fn validate_subgroup_matrix_configuration(
+    usage: &yawgpu_tint::SubgroupMatrixInfo,
+    configs: &[HalSubgroupMatrixConfig],
+) -> Result<(), String> {
+    use yawgpu_tint::SubgroupMatrixDirection::{Left, Result, Right};
+    for ty in &usage.configs {
+        let component = matrix_component_type(ty.component_type);
+        let supported = configs.iter().any(|c| match ty.direction {
+            Left => c.component_type == component && c.m == ty.m && c.k == ty.k,
+            Right => c.component_type == component && c.n == ty.n && c.k == ty.k,
+            Result => c.result_component_type == component && c.m == ty.m && c.n == ty.n,
+        });
+        if !supported {
+            return Err(format!(
+                "unsupported subgroup matrix {:?} {:?} (M={}, N={}, K={})",
+                ty.direction, ty.component_type, ty.m, ty.n, ty.k
+            ));
+        }
+    }
+    for op in &usage.multiplies {
+        let input = matrix_component_type(op.input_type);
+        let output = matrix_component_type(op.output_type);
+        if !configs.iter().any(|c| {
+            c.component_type == input
+                && c.result_component_type == output
+                && (c.m, c.n, c.k) == (op.m, op.n, op.k)
+        }) {
+            return Err(format!(
+                "unsupported subgroup matrix multiply {:?} -> {:?} (M={}, N={}, K={})",
+                op.input_type, op.output_type, op.m, op.n, op.k
+            ));
+        }
     }
     Ok(())
 }
@@ -2359,9 +2418,15 @@ override required: u32;
         )
         .unwrap();
         assert_eq!(
-            resolve_compute_workgroup(&workgroup, "cs", &constants, Limits::DEFAULT, None)
-                .unwrap()
-                .size,
+            resolve_compute_workgroup(
+                &workgroup,
+                "cs",
+                &constants,
+                Limits::DEFAULT,
+                &AdapterSubgroupProperties::default()
+            )
+            .unwrap()
+            .size,
             [2, 1, 1]
         );
     }
@@ -2420,13 +2485,24 @@ var<workgroup> b: array<u32, 3072>;
         )
         .unwrap();
         for entry in ["first", "second"] {
-            let workgroup =
-                resolve_compute_workgroup(&module, entry, &[], Limits::DEFAULT, None).unwrap();
+            let workgroup = resolve_compute_workgroup(
+                &module,
+                entry,
+                &[],
+                Limits::DEFAULT,
+                &AdapterSubgroupProperties::default(),
+            )
+            .unwrap();
             assert_eq!(workgroup.storage_size, 12288);
         }
-        assert!(
-            resolve_compute_workgroup(&module, "missing", &[], Limits::DEFAULT, None,).is_err()
-        );
+        assert!(resolve_compute_workgroup(
+            &module,
+            "missing",
+            &[],
+            Limits::DEFAULT,
+            &AdapterSubgroupProperties::default(),
+        )
+        .is_err());
     }
 
     #[test]
@@ -4056,7 +4132,7 @@ var<workgroup> sink: vec4f;
             &spirv_passthrough_descriptor(module, ComputePipelineLayout::Auto),
             device.limits(),
             &FeatureSet::default(),
-            None,
+            &device.inner.subgroups,
             1,
         )
         .expect_err("auto layout should fail");
@@ -4083,7 +4159,7 @@ var<workgroup> sink: vec4f;
             &descriptor,
             device.limits(),
             &FeatureSet::default(),
-            None,
+            &device.inner.subgroups,
             1,
         )
         .expect_err("constants should fail");
@@ -4142,7 +4218,7 @@ var<workgroup> sink: vec4f;
             &msl_passthrough_descriptor(module, ComputePipelineLayout::Auto),
             device.limits(),
             &FeatureSet::default(),
-            None,
+            &device.inner.subgroups,
             1,
         )
         .expect_err("auto layout should fail");
@@ -4171,7 +4247,7 @@ var<workgroup> sink: vec4f;
             &msl_passthrough_descriptor(missing, layout.clone()),
             device.limits(),
             &FeatureSet::default(),
-            None,
+            &device.inner.subgroups,
             1,
         )
         .expect_err("missing compute metadata should fail");
@@ -4191,7 +4267,7 @@ var<workgroup> sink: vec4f;
             &msl_passthrough_descriptor(zero, layout),
             device.limits(),
             &FeatureSet::default(),
-            None,
+            &device.inner.subgroups,
             1,
         )
         .expect_err("zero workgroup metadata should fail");
@@ -4217,7 +4293,7 @@ var<workgroup> sink: vec4f;
             &descriptor,
             device.limits(),
             &FeatureSet::default(),
-            None,
+            &device.inner.subgroups,
             1,
         )
         .expect_err("constants should fail");
@@ -4619,7 +4695,10 @@ fn test() {{
             "",
             "",
             1.0,
-            Some(NOOP_SUBGROUP_SIZE_CONTROL_CAPS),
+            AdapterSubgroupProperties {
+                size_control: Some(NOOP_SUBGROUP_SIZE_CONTROL_CAPS),
+                ..Default::default()
+            },
         )
     }
 
@@ -4669,6 +4748,134 @@ fn test() {{
             key: "sg".to_owned(),
             value,
         }]
+    }
+
+    #[test]
+    fn subgroup_matrix_workgroup_uses_maximum_only_without_an_explicit_size() {
+        let range = Some((2, 4));
+        assert!(validate_subgroup_matrix_workgroup(4, true, None, range).is_ok());
+        assert!(validate_subgroup_matrix_workgroup(6, true, None, range).is_err());
+        assert!(validate_subgroup_matrix_workgroup(6, false, None, range).is_ok());
+        assert!(validate_subgroup_matrix_workgroup(6, true, Some(2), range).is_ok());
+    }
+
+    #[test]
+    fn subgroup_matrix_types_match_their_operand_dimensions_and_component() {
+        use yawgpu_tint::{
+            SubgroupMatrixConfig, SubgroupMatrixDirection::*, SubgroupMatrixInfo,
+            SubgroupMatrixType::*,
+        };
+        let supported = [HalSubgroupMatrixConfig::new(
+            HalSubgroupMatrixComponentType::F16,
+            HalSubgroupMatrixComponentType::F32,
+            4,
+            8,
+            16,
+        )];
+        for (direction, component_type, m, n, k) in [
+            (Left, F16, 4, 0, 16),
+            (Right, F16, 0, 8, 16),
+            (Result, F32, 4, 8, 0),
+        ] {
+            let config = SubgroupMatrixConfig {
+                direction,
+                component_type,
+                m,
+                n,
+                k,
+            };
+            let check = |c| {
+                validate_subgroup_matrix_configuration(
+                    &SubgroupMatrixInfo {
+                        configs: vec![c],
+                        multiplies: vec![],
+                    },
+                    &supported,
+                )
+            };
+            assert!(check(config).is_ok());
+            assert!(check(SubgroupMatrixConfig {
+                component_type: I32,
+                ..config
+            })
+            .is_err());
+            for changed in [
+                SubgroupMatrixConfig { m: 32, ..config },
+                SubgroupMatrixConfig { n: 32, ..config },
+                SubgroupMatrixConfig { k: 32, ..config },
+            ] {
+                let unused = (direction == Left && changed.n == 32)
+                    || (direction == Right && changed.m == 32)
+                    || (direction == Result && changed.k == 32);
+                assert_eq!(check(changed).is_ok(), unused, "{changed:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn subgroup_matrix_multiply_must_match_one_complete_configuration() {
+        use yawgpu_tint::{SubgroupMatrixInfo, SubgroupMatrixMultiply, SubgroupMatrixType};
+        use HalSubgroupMatrixComponentType::{F16, F32};
+        let op = SubgroupMatrixMultiply {
+            m: 4,
+            n: 8,
+            k: 16,
+            input_type: SubgroupMatrixType::F16,
+            output_type: SubgroupMatrixType::F32,
+        };
+        let usage = SubgroupMatrixInfo {
+            configs: vec![],
+            multiplies: vec![op],
+        };
+        let mixed = HalSubgroupMatrixConfig::new(F16, F32, 4, 8, 16);
+        assert!(validate_subgroup_matrix_configuration(&usage, &[mixed]).is_ok());
+        let error = validate_subgroup_matrix_configuration(
+            &usage,
+            &[
+                HalSubgroupMatrixConfig::new(F16, F16, 4, 8, 16),
+                HalSubgroupMatrixConfig::new(F32, F32, 4, 8, 16),
+            ],
+        )
+        .unwrap_err();
+        assert!(error.contains("F16 -> F32 (M=4, N=8, K=16)"), "{error}");
+    }
+
+    #[test]
+    fn noop_compute_pipeline_validates_matrix_workgroups_types_and_shapes() {
+        let device = noop_adapter()
+            .create_device(None, &[Feature::ChromiumExperimentalSubgroupMatrix], "", "")
+            .unwrap();
+        for (x, ty, dim, expected_error) in [
+            (4, "f32", 8, None),
+            (6, "f32", 8, Some("workgroup_size.x (6)")),
+            (4, "f32", 4, Some("F32 (M=4")),
+            (4, "i32", 8, Some("I32 (M=8")),
+        ] {
+            let src = format!(
+                "enable chromium_experimental_subgroup_matrix; enable subgroups;
+                @compute @workgroup_size({x}) fn cs() {{
+                  let left = subgroup_matrix_left<{ty},{dim},{dim}>();
+                  let right = subgroup_matrix_right<{ty},{dim},{dim}>();
+                  _ = subgroupMatrixMultiply<{ty}>(left, right);
+                }}"
+            );
+            let error = create_subgroup_size_pipeline(&device, &src, vec![]);
+            match expected_error {
+                Some(message) => assert!(
+                    error.as_deref().is_some_and(|e| e.contains(message)),
+                    "{error:?}"
+                ),
+                None => assert_eq!(error, None),
+            }
+        }
+        assert_eq!(
+            create_subgroup_size_pipeline(
+                &device,
+                "@compute @workgroup_size(6) fn cs() {}",
+                vec![]
+            ),
+            None
+        );
     }
 
     #[test]
@@ -4869,7 +5076,7 @@ fn test() {{
                 &descriptor,
                 device.limits(),
                 &device.features(),
-                device.inner.subgroup_size_control_caps,
+                &device.inner.subgroups,
                 1,
             )
             .expect("pipeline should resolve");

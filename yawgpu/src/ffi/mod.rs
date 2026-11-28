@@ -2802,14 +2802,69 @@ fn backend_type_from_hal(backend: yawgpu_hal::HalBackend) -> native::WGPUBackend
     }
 }
 
-fn adapter_info_from_core(adapter: &core::Adapter) -> native::WGPUAdapterInfo {
-    adapter_info_from_hal(
+#[cfg(test)]
+thread_local! {
+    // Models an adapter without matrix support for queries through both C entry points.
+    static OMIT_MATRIX_CONFIGS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Writes adapter info and any requested output extensions. The caller initializes the chain.
+unsafe fn write_adapter_info(
+    adapter: &core::Adapter,
+    info: *mut native::WGPUAdapterInfo,
+) -> native::WGPUStatus {
+    if info.is_null() {
+        return native::WGPUStatus_Error;
+    }
+    let head = (*info).nextInChain;
+    let mut node = head;
+    let mut matrix_nodes = Vec::new();
+    while !node.is_null() {
+        if (*node).sType == native::WGPUSType_AdapterPropertiesSubgroupMatrixConfigs {
+            matrix_nodes.push(node.cast::<native::WGPUAdapterPropertiesSubgroupMatrixConfigs>());
+        }
+        node = (*node).next;
+    }
+    let range = adapter.hal().subgroup_size_range().unwrap_or_default();
+    if !matrix_nodes.is_empty() {
+        let configs = adapter.hal().subgroup_matrix_configs();
+        #[cfg(test)]
+        let configs = if OMIT_MATRIX_CONFIGS.get() {
+            Vec::new()
+        } else {
+            configs
+        };
+        if configs.is_empty() {
+            return native::WGPUStatus_Error;
+        }
+        for node in matrix_nodes {
+            let array: Box<[_]> = configs
+                .iter()
+                .map(|c| native::WGPUSubgroupMatrixConfig {
+                    componentType: c.component_type as native::WGPUSubgroupMatrixComponentType,
+                    resultComponentType: c.result_component_type
+                        as native::WGPUSubgroupMatrixComponentType,
+                    M: c.m,
+                    N: c.n,
+                    K: c.k,
+                    minSubgroupSize: range.0,
+                    maxSubgroupSize: range.1,
+                })
+                .collect();
+            (*node).configCount = array.len();
+            (*node).configs = Box::into_raw(array).cast();
+        }
+    }
+    let mut result = adapter_info_from_hal(
         &adapter.name(),
         adapter.backend(),
         &adapter.info(),
-        adapter.subgroup_min_size(),
-        adapter.subgroup_max_size(),
-    )
+        range.0,
+        range.1,
+    );
+    result.nextInChain = head;
+    info.write(result);
+    native::WGPUStatus_Success
 }
 
 fn adapter_info_from_hal(
@@ -9526,7 +9581,7 @@ mod tests {
             };
 
             wgpuAdapterGetFeatures(adapter, &mut features);
-            assert_eq!(features.featureCount, 25);
+            assert_eq!(features.featureCount, 26);
             let values = std::slice::from_raw_parts(features.features, features.featureCount);
             assert!(values.contains(&native::WGPUFeatureName_CoreFeaturesAndLimits));
             assert!(values.contains(&native::WGPUFeatureName_TextureCompressionBC));
@@ -9542,6 +9597,7 @@ mod tests {
             assert!(values.contains(&native::WGPUFeatureName_ShaderF16));
             assert!(values.contains(&native::WGPUFeatureName_Subgroups));
             assert!(values.contains(&native::WGPUFeatureName_SubgroupSizeControl));
+            assert!(values.contains(&native::WGPUFeatureName_ChromiumExperimentalSubgroupMatrix));
             assert!(values.contains(&native::WGPUFeatureName_DepthClipControl));
             assert!(values.contains(&native::WGPUFeatureName_Float32Blendable));
             assert!(values.contains(&native::WGPUFeatureName_DualSourceBlending));
@@ -9610,6 +9666,96 @@ mod tests {
         assert_eq!(info.subgroupMinSize, adapter.subgroup_min_size());
         assert_eq!(info.subgroupMaxSize, adapter.subgroup_max_size());
         assert!(info.nextInChain.is_null());
+    }
+
+    #[test]
+    fn adapter_and_device_query_chained_matrix_configs_and_free_members() {
+        unsafe {
+            let (instance, adapter, device) = noop_chain();
+            assert_eq!(
+                wgpuDeviceHasFeature(
+                    device,
+                    native::WGPUFeatureName_ChromiumExperimentalSubgroupMatrix
+                ),
+                0
+            );
+            for query_device in [false, true] {
+                let query = |info: *mut native::WGPUAdapterInfo| {
+                    if query_device {
+                        wgpuDeviceGetAdapterInfo(device, info)
+                    } else {
+                        wgpuAdapterGetInfo(adapter, info)
+                    }
+                };
+                let mut matrices: native::WGPUAdapterPropertiesSubgroupMatrixConfigs =
+                    std::mem::zeroed();
+                matrices.chain.sType = native::WGPUSType_AdapterPropertiesSubgroupMatrixConfigs;
+                let mut head = native::WGPUChainedStruct {
+                    next: &mut matrices.chain,
+                    sType: native::WGPUSType_Force32,
+                };
+                let mut info = zeroed_adapter_info();
+                info.nextInChain = &mut head;
+                info.vendorID = 123;
+                matrices.configCount = 456;
+                // An empty capability list must leave both the root and its extension untouched.
+                OMIT_MATRIX_CONFIGS.set(true);
+                let unsupported = query(&mut info);
+                OMIT_MATRIX_CONFIGS.set(false);
+                assert_eq!(unsupported, native::WGPUStatus_Error);
+                assert_eq!(info.vendorID, 123);
+                assert!(info.device.data.is_null());
+                assert_eq!(info.nextInChain, &raw mut head);
+                assert_eq!(matrices.configCount, 456);
+                assert!(matrices.configs.is_null());
+
+                assert_eq!(query(&mut info), native::WGPUStatus_Success);
+                assert_eq!(info.nextInChain, &raw mut head);
+                assert_eq!(head.next, &raw mut matrices.chain);
+                assert_eq!(matrices.configCount, 1);
+                let config = *matrices.configs;
+                assert_eq!((config.M, config.N, config.K), (8, 8, 8));
+                assert_eq!(
+                    config.componentType,
+                    native::WGPUSubgroupMatrixComponentType_F32
+                );
+                assert_eq!(config.resultComponentType, config.componentType);
+                assert_eq!((config.minSubgroupSize, config.maxSubgroupSize), (4, 4));
+                assert_eq!(
+                    (config.minSubgroupSize, config.maxSubgroupSize),
+                    (info.subgroupMinSize, info.subgroupMaxSize)
+                );
+                wgpuAdapterPropertiesSubgroupMatrixConfigsFreeMembers(matrices);
+                wgpuAdapterInfoFreeMembers(info);
+
+                head.next = std::ptr::null_mut();
+                let mut info = zeroed_adapter_info();
+                info.nextInChain = &mut head;
+                assert_eq!(query(&mut info), native::WGPUStatus_Success);
+                assert_eq!(info.nextInChain, &raw mut head);
+                wgpuAdapterInfoFreeMembers(info);
+            }
+            wgpuAdapterPropertiesSubgroupMatrixConfigsFreeMembers(std::mem::zeroed());
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn subgroup_matrix_component_types_match_the_c_abi() {
+        use yawgpu_hal::HalSubgroupMatrixComponentType::*;
+        for (component, c_value) in [
+            (F32, native::WGPUSubgroupMatrixComponentType_F32),
+            (F16, native::WGPUSubgroupMatrixComponentType_F16),
+            (U32, native::WGPUSubgroupMatrixComponentType_U32),
+            (I32, native::WGPUSubgroupMatrixComponentType_I32),
+            (U8, native::WGPUSubgroupMatrixComponentType_U8),
+            (I8, native::WGPUSubgroupMatrixComponentType_I8),
+        ] {
+            assert_eq!(
+                component as native::WGPUSubgroupMatrixComponentType,
+                c_value
+            );
+        }
     }
 
     #[test]

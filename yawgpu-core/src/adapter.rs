@@ -89,6 +89,9 @@ impl Adapter {
         add_shader_float16_feature(&mut features, &self.inner.hal);
         add_subgroups_feature(&mut features, &self.inner.hal);
         add_subgroup_size_control_feature(&mut features, &self.inner.hal);
+        if !self.inner.hal.subgroup_matrix_configs().is_empty() {
+            features.insert(Feature::ChromiumExperimentalSubgroupMatrix);
+        }
         add_depth_clip_control_feature(&mut features, &self.inner.hal);
         add_float32_blendable_feature(&mut features, &self.inner.hal);
         add_dual_source_blending_feature(&mut features, &self.inner.hal);
@@ -162,7 +165,11 @@ impl Adapter {
             label,
             queue_label,
             self.inner.hal.timestamp_period(),
-            self.inner.hal.subgroup_size_control_caps(),
+            AdapterSubgroupProperties {
+                size_control: self.inner.hal.subgroup_size_control_caps(),
+                size_range: self.inner.hal.subgroup_size_range(),
+                matrix_configs: self.inner.hal.subgroup_matrix_configs(),
+            },
         ))
     }
 
@@ -236,6 +243,8 @@ pub enum Feature {
     /// `@subgroup_size(S)` to require an explicit subgroup size. Implies
     /// [`Feature::Subgroups`].
     SubgroupSizeControl,
+    /// Experimental WGSL subgroup matrix types and operations.
+    ChromiumExperimentalSubgroupMatrix,
     /// Depth clip control support.
     DepthClipControl,
     /// Float32 color target blend support.
@@ -435,7 +444,9 @@ pub(crate) fn apply_feature_implications(features: &mut FeatureSet) {
     if features.contains(&Feature::TextureFormatsTier1) {
         features.insert(Feature::Rg11b10UfloatRenderable);
     }
-    if features.contains(&Feature::SubgroupSizeControl) {
+    if features.contains(&Feature::SubgroupSizeControl)
+        || features.contains(&Feature::ChromiumExperimentalSubgroupMatrix)
+    {
         features.insert(Feature::Subgroups);
     }
 }
@@ -606,6 +617,20 @@ mod tests {
     }
 
     #[test]
+    fn noop_subgroup_matrix_feature_enables_subgroups_on_the_device() {
+        let adapter = noop_adapter();
+        assert!(!supported_features().contains(&Feature::ChromiumExperimentalSubgroupMatrix));
+        assert!(adapter.has_feature(Feature::ChromiumExperimentalSubgroupMatrix));
+        let device = adapter
+            .create_device(None, &[Feature::ChromiumExperimentalSubgroupMatrix], "", "")
+            .unwrap();
+        assert!(device.features().contains(&Feature::Subgroups));
+        assert!(device
+            .features()
+            .contains(&Feature::ChromiumExperimentalSubgroupMatrix));
+    }
+
+    #[test]
     fn subgroup_size_control_feature_is_adapter_gated_and_noop_advertises() {
         let base = supported_features();
         assert!(!base.contains(&Feature::SubgroupSizeControl));
@@ -640,7 +665,7 @@ mod tests {
         assert!(device.features().contains(&Feature::SubgroupSizeControl));
         assert!(device.features().contains(&Feature::Subgroups));
         assert_eq!(
-            device.inner.subgroup_size_control_caps,
+            device.inner.subgroups.size_control,
             Some(yawgpu_hal::HalSubgroupSizeControlCaps::new(4, 4, 64))
         );
     }

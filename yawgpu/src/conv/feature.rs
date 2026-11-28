@@ -23,6 +23,9 @@ pub fn map_feature(value: native::WGPUFeatureName) -> core::Feature {
         native::WGPUFeatureName_ShaderF16 => core::Feature::ShaderF16,
         native::WGPUFeatureName_Subgroups => core::Feature::Subgroups,
         native::WGPUFeatureName_SubgroupSizeControl => core::Feature::SubgroupSizeControl,
+        native::WGPUFeatureName_ChromiumExperimentalSubgroupMatrix => {
+            core::Feature::ChromiumExperimentalSubgroupMatrix
+        }
         native::WGPUFeatureName_DepthClipControl => core::Feature::DepthClipControl,
         native::WGPUFeatureName_Float32Blendable => core::Feature::Float32Blendable,
         native::WGPUFeatureName_DualSourceBlending => core::Feature::DualSourceBlending,
@@ -65,6 +68,9 @@ pub fn map_feature_to_native(value: core::Feature) -> native::WGPUFeatureName {
         core::Feature::ShaderF16 => native::WGPUFeatureName_ShaderF16,
         core::Feature::Subgroups => native::WGPUFeatureName_Subgroups,
         core::Feature::SubgroupSizeControl => native::WGPUFeatureName_SubgroupSizeControl,
+        core::Feature::ChromiumExperimentalSubgroupMatrix => {
+            native::WGPUFeatureName_ChromiumExperimentalSubgroupMatrix
+        }
         core::Feature::DepthClipControl => native::WGPUFeatureName_DepthClipControl,
         core::Feature::Float32Blendable => native::WGPUFeatureName_Float32Blendable,
         core::Feature::DualSourceBlending => native::WGPUFeatureName_DualSourceBlending,
@@ -119,6 +125,20 @@ mod tests {
         assert_eq!(
             map_feature_to_native(core::Feature::Subgroups),
             native::WGPUFeatureName_Subgroups
+        );
+    }
+
+    #[test]
+    fn subgroup_matrix_feature_round_trip() {
+        let raw = native::WGPUFeatureName_ChromiumExperimentalSubgroupMatrix;
+        assert_eq!(raw, 0x00050034);
+        assert_eq!(
+            map_feature(raw),
+            core::Feature::ChromiumExperimentalSubgroupMatrix
+        );
+        assert_eq!(
+            map_feature_to_native(core::Feature::ChromiumExperimentalSubgroupMatrix),
+            raw
         );
     }
 

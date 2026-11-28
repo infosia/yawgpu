@@ -55,6 +55,7 @@ fn lookup(name: &str) -> native::WGPUProc {
         wgpuHasInstanceFeature,
         // --- webgpu.h: *FreeMembers ---
         wgpuAdapterInfoFreeMembers,
+        wgpuAdapterPropertiesSubgroupMatrixConfigsFreeMembers,
         wgpuSupportedFeaturesFreeMembers,
         wgpuSupportedInstanceFeaturesFreeMembers,
         wgpuSupportedWGSLLanguageFeaturesFreeMembers,
@@ -402,7 +403,11 @@ mod tests {
 
     #[test]
     fn wgpuGetProcAddress_returns_the_exported_symbol_address() {
-        let expected: [(&str, usize); 3] = [
+        let expected: [(&str, usize); 4] = [
+            (
+                "wgpuAdapterPropertiesSubgroupMatrixConfigsFreeMembers",
+                crate::wgpuAdapterPropertiesSubgroupMatrixConfigsFreeMembers as *const () as usize,
+            ),
             (
                 "wgpuCreateInstance",
                 crate::wgpuCreateInstance as *const () as usize,

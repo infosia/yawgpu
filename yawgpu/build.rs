@@ -27,8 +27,27 @@ const OBJECT_HANDLES: &[&str] = &[
     "TextureView",
 ];
 
+/// Keeps the C enum type of extension macros when bindgen evaluates their integer value.
+#[derive(Debug)]
+struct ExtensionMacroTypes;
+
+impl bindgen::callbacks::ParseCallbacks for ExtensionMacroTypes {
+    fn int_macro(&self, name: &str, _value: i64) -> Option<bindgen::callbacks::IntKind> {
+        let name = match name {
+            "WGPUFeatureName_ChromiumExperimentalSubgroupMatrix" => "WGPUFeatureName",
+            "WGPUSType_AdapterPropertiesSubgroupMatrixConfigs" => "WGPUSType",
+            _ => return None,
+        };
+        Some(bindgen::callbacks::IntKind::Custom {
+            name,
+            is_signed: false,
+        })
+    }
+}
+
 fn main() {
-    let header = "ffi/webgpu-headers/webgpu.h";
+    let header = "ffi/webgpu-headers/yawgpu.h";
+    println!("cargo:rerun-if-changed=ffi/webgpu-headers/webgpu.h");
     println!("cargo:rerun-if-changed={header}");
 
     // Give the cdylib an `@rpath`-relative install name on Apple targets. Cargo's
@@ -49,6 +68,7 @@ fn main() {
 
     let mut builder = bindgen::Builder::default()
         .header(header)
+        .parse_callbacks(Box::new(ExtensionMacroTypes))
         .allowlist_item("WGPU.*")
         .allowlist_item("wgpu.*")
         .prepend_enum_name(false)

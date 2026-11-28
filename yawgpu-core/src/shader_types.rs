@@ -373,6 +373,10 @@ pub(crate) struct ReflectedWorkgroupSize {
     pub subgroup_size: Option<u32>,
     /// Workgroup storage size.
     pub workgroup_storage_size: u64,
+    /// Inspector's entry-point usage flag.
+    pub uses_subgroup_matrix: bool,
+    /// Matrix configurations and multiplies after override substitution.
+    pub subgroup_matrix: yawgpu_tint::SubgroupMatrixInfo,
 }
 
 /// Enumerates reflected buffer type values.

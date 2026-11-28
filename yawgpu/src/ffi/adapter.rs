@@ -104,7 +104,7 @@ pub unsafe extern "C" fn wgpuAdapterHasFeature(
 /// # Safety
 ///
 /// `adapter` must be a non-null live yawgpu adapter handle. `info` must point
-/// to writable `WGPUAdapterInfo` storage. String members must be released with
+/// to writable `WGPUAdapterInfo` storage with an initialized, writable output chain. String members must be released with
 /// `wgpuAdapterInfoFreeMembers`.
 /// Returns WGPU adapter get info.
 #[no_mangle]
@@ -113,11 +113,7 @@ pub unsafe extern "C" fn wgpuAdapterGetInfo(
     info: *mut native::WGPUAdapterInfo,
 ) -> native::WGPUStatus {
     let adapter = borrow_handle(adapter, "WGPUAdapter");
-    let Some(info) = info.as_mut() else {
-        return native::WGPUStatus_Error;
-    };
-    *info = adapter_info_from_core(&adapter.core);
-    native::WGPUStatus_Success
+    write_adapter_info(&adapter.core, info)
 }
 
 /// Frees string members allocated by `wgpuAdapterGetInfo`.
@@ -132,6 +128,21 @@ pub unsafe extern "C" fn wgpuAdapterInfoFreeMembers(info: native::WGPUAdapterInf
     free_owned_string_view(info.architecture);
     free_owned_string_view(info.device);
     free_owned_string_view(info.description);
+}
+
+/// Frees the configuration array returned by an adapter info query.
+///
+/// # Safety
+///
+/// A non-null array must be returned by yawgpu with its original count and freed once.
+#[no_mangle]
+pub unsafe extern "C" fn wgpuAdapterPropertiesSubgroupMatrixConfigsFreeMembers(
+    value: native::WGPUAdapterPropertiesSubgroupMatrixConfigs,
+) {
+    if !value.configs.is_null() {
+        let array = std::ptr::slice_from_raw_parts_mut(value.configs.cast_mut(), value.configCount);
+        drop(Box::from_raw(array));
+    }
 }
 
 /// Requests a device from an adapter.

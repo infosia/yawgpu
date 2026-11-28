@@ -132,6 +132,7 @@ impl ShaderModule {
         shader_f16: bool,
         subgroups: bool,
         subgroup_size_control: bool,
+        subgroup_matrix: bool,
         dual_source_blending: bool,
         clip_distances: bool,
         primitive_index: bool,
@@ -142,6 +143,7 @@ impl ShaderModule {
             shader_f16,
             subgroups,
             subgroup_size_control,
+            subgroup_matrix,
             dual_source_blending,
             clip_distances,
             primitive_index,
@@ -485,6 +487,24 @@ fn cs() {
 
         assert!(!valid.is_error());
         assert_eq!(valid.diagnostic(), None);
+    }
+
+    #[test]
+    fn subgroup_matrix_enable_requires_the_device_feature() {
+        let source =
+            "enable chromium_experimental_subgroup_matrix; @compute @workgroup_size(4) fn cs() {}";
+        for (feature, allowed) in [
+            (Feature::Subgroups, false),
+            (Feature::ChromiumExperimentalSubgroupMatrix, true),
+        ] {
+            let device = noop_adapter()
+                .create_device(None, &[feature], "", "")
+                .unwrap();
+            device.push_error_scope(ErrorFilter::Validation);
+            let shader = device.create_shader_module(ShaderModuleSource::Wgsl(source.to_owned()));
+            assert_eq!(shader.is_error(), !allowed);
+            assert_eq!(device.pop_error_scope().unwrap().is_some(), !allowed);
+        }
     }
 
     #[test]

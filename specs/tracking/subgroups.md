@@ -141,3 +141,16 @@ S1 finding: Tint validates a const `@subgroup_size` (zero / non-power-of-two rej
 Owed on the Mac for Block 108: a `--features metal` compile check, and a MoltenVK run of `e2e_vulkan_subgroup_size_control` (is `computeFullSubgroups` exposed?).
 
 Block 140 (2026-11-04): Metal reports Dawn's subgroup range (Apple 32/32, other vendors and iOS 4/64) and advertises `subgroup-size-control` when the range is fixed. `e2e_metal_subgroup_size_control` 3/3 on the M2.
+
+## Block 170 — `chromium-experimental-subgroup-matrix`
+
+Spec: `specs/blocks/170-subgroup-matrix.md`.
+
+| Slice | Content | Status |
+|---|---|---|
+| S1 | core `Feature::ChromiumExperimentalSubgroupMatrix` (⇒ `Subgroups`), FFI `0x00050034`, `WGPUAdapterPropertiesSubgroupMatrixConfigs` (`0x0005003B`) on both adapter-info queries with the caller chain preserved, Tint `kChromiumExperimentalSubgroupMatrix` gate, `uses_subgroup_matrix` + `SubgroupMatrixInfo` reflection on the override-substituted IR, core rules R5 / R6, HAL `subgroup_matrix_configs()` (Noop one 8×8×8 f32; Metal / Vulkan / GLES empty) | **DONE 2026-11-28** |
+| S2 | Metal advertisement (Apple7) + `e2e_metal_subgroup_matrix.rs` | not started |
+| S3 | Vulkan advertisement, device enable, full subgroups + `e2e_vulkan_subgroup_matrix.rs` on native Windows / Linux | not started |
+| S4 | docs + Phase Review | not started |
+
+The bindgen input is `yawgpu.h`, so the Dawn-named extension items are generated into `yawgpu::native`.

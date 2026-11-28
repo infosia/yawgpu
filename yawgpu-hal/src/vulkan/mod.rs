@@ -817,6 +817,10 @@ impl VulkanAdapter {
         self.subgroup_query().range
     }
 
+    pub(super) fn subgroup_matrix_configs(&self) -> Vec<crate::HalSubgroupMatrixConfig> {
+        Vec::new()
+    }
+
     /// Returns the explicit compute subgroup size capabilities.
     ///
     /// `Some` iff WGSL `subgroups` is supported and `VK_EXT_subgroup_size_control`
@@ -3157,24 +3161,35 @@ mod tests {
         options.disable_storage_runtime_sized_array_index_clamping =
             flags.disable_storage_runtime_sized_array_index_clamping;
         options.use_zero_initialize_workgroup_memory = flags.use_zero_initialize_workgroup_memory;
-        yawgpu_tint::Program::parse(source, false, false, false, false, false, false, false, &[])
-            .expect("parse writer test WGSL")
-            .generate_spirv(
-                entry,
-                &yawgpu_tint::Bindings::default(),
-                &[],
-                true,
-                device.vulkan_memory_model(),
-                0,
-                &[],
-                None,
-                false,
-                0,
-                device.storage_input_output16(),
-                false,
-                options,
-            )
-            .expect("compile writer test SPIR-V")
+        yawgpu_tint::Program::parse(
+            source,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .expect("parse writer test WGSL")
+        .generate_spirv(
+            entry,
+            &yawgpu_tint::Bindings::default(),
+            &[],
+            true,
+            device.vulkan_memory_model(),
+            0,
+            &[],
+            None,
+            false,
+            0,
+            device.storage_input_output16(),
+            false,
+            options,
+        )
+        .expect("compile writer test SPIR-V")
     }
 
     #[test]

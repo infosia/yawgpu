@@ -157,7 +157,7 @@ pub unsafe extern "C" fn wgpuDeviceSetLabel(
 /// # Safety
 ///
 /// `device` must be a non-null live yawgpu device handle. `adapter_info` must
-/// point to writable `WGPUAdapterInfo` storage. String members must be released
+/// point to writable `WGPUAdapterInfo` storage with an initialized, writable output chain. String members must be released
 /// with `wgpuAdapterInfoFreeMembers`.
 /// Returns WGPU device get adapter info.
 #[no_mangle]
@@ -166,11 +166,7 @@ pub unsafe extern "C" fn wgpuDeviceGetAdapterInfo(
     adapter_info: *mut native::WGPUAdapterInfo,
 ) -> native::WGPUStatus {
     let device = clone_handle(device, "WGPUDevice");
-    let Some(adapter_info) = adapter_info.as_mut() else {
-        return native::WGPUStatus_Error;
-    };
-    *adapter_info = adapter_info_from_core(&device.adapter);
-    native::WGPUStatus_Success
+    write_adapter_info(&device.adapter, adapter_info)
 }
 
 /// Creates a buffer on a device.

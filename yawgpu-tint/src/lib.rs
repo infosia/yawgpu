@@ -402,11 +402,84 @@ pub struct EntryPoint {
     pub global_invocation_index_used: bool,
     /// Whether the compute entry point takes `@builtin(workgroup_index)`.
     pub workgroup_index_used: bool,
+    /// Whether the entry point uses subgroup matrices.
+    pub uses_subgroup_matrix: bool,
+}
+
+/// Element type in a reflected subgroup matrix.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubgroupMatrixType {
+    /// F16 element type.
+    F16 = 0,
+    /// F32 element type.
+    F32 = 1,
+    /// U8 element type.
+    U8 = 2,
+    /// I8 element type.
+    I8 = 3,
+    /// U32 element type.
+    U32 = 4,
+    /// I32 element type.
+    I32 = 5,
+}
+
+/// Role of a reflected subgroup matrix in a multiplication.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubgroupMatrixDirection {
+    /// Left matrix.
+    Left = 0,
+    /// Right matrix.
+    Right = 1,
+    /// Result matrix.
+    Result = 2,
+}
+
+/// A matrix type used by the entry point.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubgroupMatrixConfig {
+    /// Operand or result role.
+    pub direction: SubgroupMatrixDirection,
+    /// Matrix element type.
+    pub component_type: SubgroupMatrixType,
+    /// Number of rows, or zero for a right operand.
+    pub m: u32,
+    /// Number of columns, or zero for a left operand.
+    pub n: u32,
+    /// Inner dimension, or zero for a result.
+    pub k: u32,
+}
+
+/// A multiplication used by the entry point.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubgroupMatrixMultiply {
+    /// Number of result rows.
+    pub m: u32,
+    /// Number of result columns.
+    pub n: u32,
+    /// Shared dimension of the operands.
+    pub k: u32,
+    /// Element type of both operands.
+    pub input_type: SubgroupMatrixType,
+    /// Result element type.
+    pub output_type: SubgroupMatrixType,
+}
+
+/// Sorted sets of subgroup matrix types and multiplications.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SubgroupMatrixInfo {
+    /// Matrix types sorted by role, element type and dimensions.
+    pub configs: Vec<SubgroupMatrixConfig>,
+    /// Multiplications sorted by dimensions, then input and output types.
+    pub multiplies: Vec<SubgroupMatrixMultiply>,
 }
 
 /// An entry point's override-resolved compute workgroup info (Tint's
 /// `WorkgroupInfo`, restricted to the fields yawgpu consumes).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ResolvedWorkgroupInfo {
     /// Resolved `@workgroup_size` as `[x, y, z]`.
@@ -417,6 +490,8 @@ pub struct ResolvedWorkgroupInfo {
     pub subgroup_size: Option<u32>,
     /// Workgroup storage size in bytes after resolving overrides.
     pub workgroup_storage_size: u64,
+    /// Subgroup matrix uses in the resolved entry point.
+    pub subgroup_matrix: SubgroupMatrixInfo,
 }
 
 /// A reflected entry point input or output variable.
@@ -1154,6 +1229,7 @@ mod real {
         clip_distances_size: u32,
         global_invocation_index_used: bool,
         workgroup_index_used: bool,
+        uses_subgroup_matrix: bool,
     }
 
     // ABI drift guard: mirrors the `static_assert`s on `YawgpuTintEntryPoint`
@@ -1181,8 +1257,45 @@ mod real {
         assert!(core::mem::offset_of!(RawEntryPoint, has_subgroup_size) == 34);
         assert!(core::mem::offset_of!(RawEntryPoint, clip_distances_size) == 36);
         assert!(core::mem::offset_of!(RawEntryPoint, global_invocation_index_used) == 40);
+        assert!(core::mem::offset_of!(RawEntryPoint, uses_subgroup_matrix) == 42);
         assert!(core::mem::offset_of!(RawEntryPoint, workgroup_index_used) == 41);
     };
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct RawSubgroupMatrixInfo {
+        configs: *mut SubgroupMatrixConfig,
+        config_count: usize,
+        multiplies: *mut SubgroupMatrixMultiply,
+        multiply_count: usize,
+    }
+
+    const _: () = {
+        assert!(core::mem::size_of::<SubgroupMatrixConfig>() == 20);
+        assert!(core::mem::offset_of!(SubgroupMatrixConfig, direction) == 0);
+        assert!(core::mem::offset_of!(SubgroupMatrixConfig, component_type) == 4);
+        assert!(core::mem::offset_of!(SubgroupMatrixConfig, m) == 8);
+        assert!(core::mem::offset_of!(SubgroupMatrixConfig, n) == 12);
+        assert!(core::mem::offset_of!(SubgroupMatrixConfig, k) == 16);
+        assert!(core::mem::size_of::<SubgroupMatrixMultiply>() == 20);
+        assert!(core::mem::offset_of!(SubgroupMatrixMultiply, m) == 0);
+        assert!(core::mem::offset_of!(SubgroupMatrixMultiply, n) == 4);
+        assert!(core::mem::offset_of!(SubgroupMatrixMultiply, k) == 8);
+        assert!(core::mem::offset_of!(SubgroupMatrixMultiply, input_type) == 12);
+        assert!(core::mem::offset_of!(SubgroupMatrixMultiply, output_type) == 16);
+        assert!(core::mem::size_of::<RawSubgroupMatrixInfo>() == 32);
+        assert!(core::mem::offset_of!(RawSubgroupMatrixInfo, configs) == 0);
+        assert!(core::mem::offset_of!(RawSubgroupMatrixInfo, config_count) == 8);
+        assert!(core::mem::offset_of!(RawSubgroupMatrixInfo, multiplies) == 16);
+        assert!(core::mem::offset_of!(RawSubgroupMatrixInfo, multiply_count) == 24);
+    };
+
+    impl Drop for RawSubgroupMatrixInfo {
+        fn drop(&mut self) {
+            // SAFETY: the shim owns both arrays until this guard releases them.
+            unsafe { yawgpu_tint_subgroup_matrix_info_free(self) };
+        }
+    }
 
     impl EntryPoint {
         fn try_from_raw(raw: RawEntryPoint) -> Result<Self, TintError> {
@@ -1205,6 +1318,7 @@ mod real {
                 has_subgroup_size: raw.has_subgroup_size,
                 global_invocation_index_used: raw.global_invocation_index_used,
                 workgroup_index_used: raw.workgroup_index_used,
+                uses_subgroup_matrix: raw.uses_subgroup_matrix,
             })
         }
     }
@@ -1594,6 +1708,7 @@ mod real {
             shader_f16: bool,
             subgroups: bool,
             subgroup_size_control: bool,
+            subgroup_matrix: bool,
             dual_source_blending: bool,
             clip_distances: bool,
             primitive_index: bool,
@@ -1708,6 +1823,7 @@ mod real {
             out: *mut u64,
             err: *mut *mut c_char,
         ) -> bool;
+        fn yawgpu_tint_subgroup_matrix_info_free(info: *mut RawSubgroupMatrixInfo);
         fn yawgpu_tint_resolved_workgroup_size(
             program: *const RawProgram,
             ep: *const c_char,
@@ -1717,6 +1833,7 @@ mod real {
             has_subgroup_size: *mut bool,
             subgroup_size: *mut u32,
             storage_size: *mut u64,
+            matrices: *mut RawSubgroupMatrixInfo,
             err: *mut *mut c_char,
         ) -> bool;
         fn yawgpu_tint_immediate_data_size(
@@ -1974,6 +2091,7 @@ mod real {
             shader_f16: bool,
             subgroups: bool,
             subgroup_size_control: bool,
+            subgroup_matrix: bool,
             dual_source_blending: bool,
             clip_distances: bool,
             primitive_index: bool,
@@ -1991,6 +2109,7 @@ mod real {
                     shader_f16,
                     subgroups,
                     subgroup_size_control,
+                    subgroup_matrix,
                     dual_source_blending,
                     clip_distances,
                     primitive_index,
@@ -2035,6 +2154,7 @@ mod real {
                     clip_distances_size: 0,
                     global_invocation_index_used: false,
                     workgroup_index_used: false,
+                    uses_subgroup_matrix: false,
                 };
                 // SAFETY: `raw` points to valid writable memory.
                 let ok = unsafe { yawgpu_tint_entry_point_get(self.raw, i, &mut raw) };
@@ -2485,7 +2605,7 @@ mod real {
 
         /// Returns `entry_point`'s override-resolved compute workgroup info:
         /// the `@workgroup_size` of [`Self::resolved_workgroup_size`] plus the
-        /// resolved `@subgroup_size` and workgroup storage size in bytes,
+        /// resolved `@subgroup_size`, storage size in bytes, and subgroup matrix uses,
         /// all read off the same entry-scoped, override-substituted IR. Fails
         /// under the same conditions as [`Self::resolved_workgroup_size`].
         pub fn resolved_workgroup_info(
@@ -2499,6 +2619,7 @@ mod real {
             let mut has_subgroup_size = false;
             let mut subgroup_size = 0u32;
             let mut storage_size = 0u64;
+            let mut matrices = RawSubgroupMatrixInfo::default();
             let mut err = ptr::null_mut();
             // SAFETY: `ep`, `out`, `has_subgroup_size`, `subgroup_size`,
             // `storage_size` and `err` point to valid memory for the call.
@@ -2512,6 +2633,7 @@ mod real {
                     &mut has_subgroup_size,
                     &mut subgroup_size,
                     &mut storage_size,
+                    &mut matrices,
                     &mut err,
                 )
             };
@@ -2522,6 +2644,24 @@ mod real {
                 workgroup_size: out,
                 subgroup_size: has_subgroup_size.then_some(subgroup_size),
                 workgroup_storage_size: storage_size,
+                subgroup_matrix: SubgroupMatrixInfo {
+                    configs: if matrices.config_count == 0 {
+                        Vec::new()
+                    } else {
+                        // SAFETY: the shim returned this many initialized records; the guard owns them.
+                        unsafe { slice::from_raw_parts(matrices.configs, matrices.config_count) }
+                            .to_vec()
+                    },
+                    multiplies: if matrices.multiply_count == 0 {
+                        Vec::new()
+                    } else {
+                        // SAFETY: the array remains live until the guard drops after the copy.
+                        unsafe {
+                            slice::from_raw_parts(matrices.multiplies, matrices.multiply_count)
+                        }
+                        .to_vec()
+                    },
+                },
             })
         }
 
@@ -2734,6 +2874,7 @@ mod stub {
             _shader_f16: bool,
             _subgroups: bool,
             _subgroup_size_control: bool,
+            _subgroup_matrix: bool,
             _dual_source_blending: bool,
             _clip_distances: bool,
             _primitive_index: bool,
@@ -2965,6 +3106,7 @@ fn cs(@builtin(local_invocation_index) index: u32) {
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -2981,7 +3123,7 @@ fn cs(@builtin(local_invocation_index) index: u32) {
     #[test]
     fn msl_polyfill_unpack_2x16_snorm_changes_generated_code() {
         let program = Program::parse(r#"@group(0) @binding(0) var<storage, read_write> result: vec2f;
-@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = unpack2x16snorm(i); }"#, false, false, false, false, false, false, false, &[]).unwrap();
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = unpack2x16snorm(i); }"#, false, false, false, false, false, false, false, false, &[]).unwrap();
         let mut flags = MslWorkarounds::default();
         let off = workaround_msl(&program, "cs", flags).source;
         flags.polyfill_unpack_2x16_snorm = true;
@@ -2995,7 +3137,7 @@ fn cs(@builtin(local_invocation_index) index: u32) {
     #[test]
     fn msl_polyfill_unpack_2x16_unorm_changes_generated_code() {
         let program = Program::parse(r#"@group(0) @binding(0) var<storage, read_write> result: vec2f;
-@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = unpack2x16unorm(i); }"#, false, false, false, false, false, false, false, &[]).unwrap();
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = unpack2x16unorm(i); }"#, false, false, false, false, false, false, false, false, &[]).unwrap();
         let mut flags = MslWorkarounds::default();
         let off = workaround_msl(&program, "cs", flags).source;
         flags.polyfill_unpack_2x16_unorm = true;
@@ -3010,7 +3152,7 @@ fn cs(@builtin(local_invocation_index) index: u32) {
     fn msl_polyfill_tanh_f16_changes_generated_code() {
         let program = Program::parse(r#"enable f16;
 @group(0) @binding(0) var<storage, read_write> result: f32;
-@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = f32(tanh(f16(i))); }"#, true, false, false, false, false, false, false, &[]).unwrap();
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = f32(tanh(f16(i))); }"#, true, false, false, false, false, false, false, false, &[]).unwrap();
         let mut flags = MslWorkarounds::default();
         let off = workaround_msl(&program, "cs", flags).source;
         flags.polyfill_tanh_f16 = true;
@@ -3024,7 +3166,7 @@ fn cs(@builtin(local_invocation_index) index: u32) {
     #[test]
     fn msl_polyfill_clamp_float_changes_generated_code() {
         let program = Program::parse(r#"@group(0) @binding(0) var<storage, read_write> result: f32;
-@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = clamp(f32(i), 0.25, 0.75); }"#, false, false, false, false, false, false, false, &[]).unwrap();
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = clamp(f32(i), 0.25, 0.75); }"#, false, false, false, false, false, false, false, false, &[]).unwrap();
         let mut flags = MslWorkarounds::default();
         let off = workaround_msl(&program, "cs", flags).source;
         flags.polyfill_clamp_float = true;
@@ -3039,7 +3181,7 @@ fn cs(@builtin(local_invocation_index) index: u32) {
     fn msl_collapse_subgroup_min_max_changes_generated_code() {
         let program = Program::parse(r#"enable subgroups;
 @group(0) @binding(0) var<storage, read_write> result: u32;
-@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = subgroupMax(subgroupMin(i)); }"#, false, true, false, false, false, false, false, &[]).unwrap();
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = subgroupMax(subgroupMin(i)); }"#, false, true, false, false, false, false, false, false, &[]).unwrap();
         let mut flags = MslWorkarounds::default();
         let off = workaround_msl(&program, "cs", flags).source;
         flags.collapse_subgroup_min_max = true;
@@ -3065,6 +3207,7 @@ fn cs(@builtin(local_invocation_index) index: u32) {
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -3081,7 +3224,7 @@ fn cs(@builtin(local_invocation_index) index: u32) {
     #[test]
     fn msl_scalarize_max_min_clamp_changes_generated_code() {
         let program = Program::parse(r#"@group(0) @binding(0) var<storage, read_write> result: vec4f;
-@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = clamp(vec4f(f32(i)), vec4f(0.25), vec4f(0.75)); }"#, false, false, false, false, false, false, false, &[]).unwrap();
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = clamp(vec4f(f32(i)), vec4f(0.25), vec4f(0.75)); }"#, false, false, false, false, false, false, false, false, &[]).unwrap();
         let mut flags = MslWorkarounds::default();
         let off = workaround_msl(&program, "cs", flags).source;
         flags.scalarize_max_min_clamp = true;
@@ -3097,6 +3240,7 @@ fn cs(@builtin(local_invocation_index) index: u32) {
         let program = Program::parse(
             r#"@group(0) @binding(0) var<storage, read_write> result: f32;
 @compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = -f32(i); }"#,
+            false,
             false,
             false,
             false,
@@ -3120,7 +3264,7 @@ fn cs(@builtin(local_invocation_index) index: u32) {
     #[test]
     fn spirv_polyfill_float_abs_changes_generated_code() {
         let program = Program::parse(r#"@group(0) @binding(0) var<storage, read_write> result: f32;
-@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = abs(f32(i)); }"#, false, false, false, false, false, false, false, &[]).unwrap();
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = abs(f32(i)); }"#, false, false, false, false, false, false, false, false, &[]).unwrap();
         let mut flags = SpirvWorkarounds::default();
         let off = workaround_spirv(&program, flags);
         flags.polyfill_float_abs = true;
@@ -3134,7 +3278,7 @@ fn cs(@builtin(local_invocation_index) index: u32) {
     #[test]
     fn spirv_polyfill_length_scalar_float_changes_generated_code() {
         let program = Program::parse(r#"@group(0) @binding(0) var<storage, read_write> result: f32;
-@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = length(f32(i)); }"#, false, false, false, false, false, false, false, &[]).unwrap();
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = length(f32(i)); }"#, false, false, false, false, false, false, false, false, &[]).unwrap();
         let mut flags = SpirvWorkarounds::default();
         let off = workaround_spirv(&program, flags);
         flags.polyfill_length_scalar_float = true;
@@ -3148,7 +3292,7 @@ fn cs(@builtin(local_invocation_index) index: u32) {
     #[test]
     fn spirv_polyfill_distance_scalar_float_changes_generated_code() {
         let program = Program::parse(r#"@group(0) @binding(0) var<storage, read_write> result: f32;
-@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = distance(f32(i), 0.5); }"#, false, false, false, false, false, false, false, &[]).unwrap();
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = distance(f32(i), 0.5); }"#, false, false, false, false, false, false, false, false, &[]).unwrap();
         let mut flags = SpirvWorkarounds::default();
         let off = workaround_spirv(&program, flags);
         flags.polyfill_distance_scalar_float = true;
@@ -3166,6 +3310,7 @@ fn cs(@builtin(local_invocation_index) index: u32) {
 @compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) {
     switch i { case 0u: { result = 1u; } case 4294967295u: { result = 2u; } default: { result = 3u; } }
 }"#,
+            false,
             false,
             false,
             false,
@@ -3201,6 +3346,7 @@ fn cs(@builtin(local_invocation_index) index: u32) {
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -3217,7 +3363,7 @@ fn cs(@builtin(local_invocation_index) index: u32) {
     #[test]
     fn spirv_scalarize_max_min_clamp_changes_generated_code() {
         let program = Program::parse(r#"@group(0) @binding(0) var<storage, read_write> result: vec4f;
-@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = clamp(vec4f(f32(i)), vec4f(0.25), vec4f(0.75)); }"#, false, false, false, false, false, false, false, &[]).unwrap();
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = clamp(vec4f(f32(i)), vec4f(0.25), vec4f(0.75)); }"#, false, false, false, false, false, false, false, false, &[]).unwrap();
         let mut flags = SpirvWorkarounds::default();
         let off = workaround_spirv(&program, flags);
         flags.scalarize_max_min_clamp = true;
@@ -3235,6 +3381,7 @@ fn cs(@builtin(local_invocation_index) index: u32) {
 @compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) {
     result = unpack4x8snorm(pack4x8snorm(vec4f(f32(i))));
 }"#,
+            false,
             false,
             false,
             false,
@@ -3260,7 +3407,7 @@ fn cs(@builtin(local_invocation_index) index: u32) {
         let program = Program::parse(r#"@group(0) @binding(0) var image: texture_2d<u32>;
 @group(0) @binding(1) var<storage, read_write> result: vec4u;
 fn read_image(t: texture_2d<u32>, coords: vec2i) -> vec4u { return textureLoad(t, coords, 0); }
-@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = read_image(image, vec2i(i32(i))); }"#, false, false, false, false, false, false, false, &[]).unwrap();
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = read_image(image, vec2i(i32(i))); }"#, false, false, false, false, false, false, false, false, &[]).unwrap();
         let mut flags = SpirvWorkarounds::default();
         let off = workaround_spirv(&program, flags);
         flags.dva_transform_handle = true;
@@ -3275,7 +3422,7 @@ fn read_image(t: texture_2d<u32>, coords: vec2i) -> vec4u { return textureLoad(t
     fn spirv_polyfill_saturate_as_min_max_f16_changes_generated_code() {
         let program = Program::parse(r#"enable f16;
 @group(0) @binding(0) var<storage, read_write> result: vec4f;
-@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = vec4f(saturate(vec4h(f16(i)))); }"#, true, false, false, false, false, false, false, &[]).unwrap();
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = vec4f(saturate(vec4h(f16(i)))); }"#, true, false, false, false, false, false, false, false, &[]).unwrap();
         let mut flags = SpirvWorkarounds::default();
         let off = workaround_spirv(&program, flags);
         flags.polyfill_saturate_as_min_max_f16 = true;
@@ -3290,7 +3437,7 @@ fn read_image(t: texture_2d<u32>, coords: vec2i) -> vec4u { return textureLoad(t
     fn spirv_collapse_subgroup_min_max_changes_generated_code() {
         let program = Program::parse(r#"enable subgroups;
 @group(0) @binding(0) var<storage, read_write> result: u32;
-@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = subgroupMax(subgroupMin(i)); }"#, false, true, false, false, false, false, false, &[]).unwrap();
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = subgroupMax(subgroupMin(i)); }"#, false, true, false, false, false, false, false, false, &[]).unwrap();
         let mut flags = SpirvWorkarounds::default();
         let off = workaround_spirv(&program, flags);
         flags.collapse_subgroup_min_max = true;
@@ -3305,7 +3452,7 @@ fn read_image(t: texture_2d<u32>, coords: vec2i) -> vec4u { return textureLoad(t
     fn spirv_pass_matrix_by_pointer_changes_generated_code() {
         let program = Program::parse(r#"@group(0) @binding(0) var<storage, read_write> result: vec2f;
 fn use_matrix(m: mat2x2f) -> vec2f { return m[0] + m[1]; }
-@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = use_matrix(mat2x2f(vec2f(f32(i)), vec2f(2))); }"#, false, false, false, false, false, false, false, &[]).unwrap();
+@compute @workgroup_size(1) fn cs(@builtin(local_invocation_index) i: u32) { result = use_matrix(mat2x2f(vec2f(f32(i)), vec2f(2))); }"#, false, false, false, false, false, false, false, false, &[]).unwrap();
         let mut flags = SpirvWorkarounds::default();
         let off = workaround_spirv(&program, flags);
         flags.pass_matrix_by_pointer = true;
@@ -3326,6 +3473,7 @@ fn use_matrix(m: mat2x2f) -> vec2f { return m[0] + m[1]; }
     result = textureLoad(image, vec2i(id.xy), 0);
 }
 "#,
+            false,
             false,
             false,
             false,
@@ -3374,6 +3522,7 @@ fn use_matrix(m: mat2x2f) -> vec2f { return m[0] + m[1]; }
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -3408,6 +3557,7 @@ fn use_matrix(m: mat2x2f) -> vec2f { return m[0] + m[1]; }
 @vertex fn vs() -> @builtin(position) vec4f { return vec4f(0, 0, 0, 1); }
 @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }
 "#,
+            false,
             false,
             false,
             false,
@@ -3477,6 +3627,7 @@ fn use_matrix(m: mat2x2f) -> vec2f { return m[0] + m[1]; }
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -3527,6 +3678,7 @@ fn use_matrix(m: mat2x2f) -> vec2f { return m[0] + m[1]; }
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -3556,8 +3708,19 @@ fn cs(@builtin(local_invocation_index) i: u32) {
     return vec4f(dpdx(p.x));
 }
 "#;
-        let program =
-            Program::parse(source, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            source,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         for enabled in [false, true] {
             let flags = SpirvWorkarounds {
                 use_demote_to_helper_invocation: enabled,
@@ -3629,6 +3792,7 @@ fn cs(@builtin(local_invocation_index) i: u32) {
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -3659,6 +3823,7 @@ fn cs(@builtin(local_invocation_index) i: u32) {
     fn msl_workarounds_default_and_each_flag() {
         let program = Program::parse(
             WORKAROUNDS_WGSL,
+            false,
             false,
             false,
             false,
@@ -3724,6 +3889,7 @@ var<immediate> params: vec4f;
 @fragment fn depth() -> @builtin(frag_depth) f32 { return params.x; }
 @fragment fn color() -> @location(0) vec4f { return params; }
 "#,
+            false,
             false,
             false,
             false,
@@ -3805,6 +3971,7 @@ var<immediate> params: vec4f;
     fn spirv_workarounds_default_and_each_flag() {
         let program = Program::parse(
             WORKAROUNDS_WGSL,
+            false,
             false,
             false,
             false,
@@ -3912,6 +4079,7 @@ var<immediate> params: vec4f;
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -3943,8 +4111,19 @@ var<immediate> params: vec4f;
     #[test]
     fn audit_t4_spirv_f16_io_capability_follows_device_option() {
         let source = "enable f16; @fragment fn fs(@location(0) x: vec4<f16>) -> @location(0) vec4<f32> { return vec4<f32>(x); }";
-        let program =
-            Program::parse(source, true, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            source,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         for enabled in [true, false, true] {
             let words = program
                 .generate_spirv(
@@ -3997,6 +4176,7 @@ fn helper() -> f32 { return implicit; }
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -4026,11 +4206,32 @@ fn helper() -> f32 { return implicit; }
     atomicStoreMax(&value, vec2u(1u, 2u));
     atomicStoreMin(&value, vec2u(3u, 4u));
 }"#;
-        assert!(
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).is_err()
-        );
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, true, &[]).unwrap();
+        assert!(Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[]
+        )
+        .is_err());
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            &[],
+        )
+        .unwrap();
         assert_eq!(program.entry_points().unwrap().len(), 1);
     }
 
@@ -4114,6 +4315,7 @@ fn cs() {
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -4128,6 +4330,7 @@ fn cs() {
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -4135,6 +4338,7 @@ fn cs() {
 
         let program = Program::parse(
             "@fragment fn fs() -> @location(0) vec4f { return vec4f(); }",
+            false,
             false,
             false,
             false,
@@ -4157,6 +4361,7 @@ fn main() {
   d[0] = 1u;
 }
 "#,
+            false,
             false,
             false,
             false,
@@ -4201,6 +4406,7 @@ var<workgroup> b: array<u32, 3072>;
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -4232,6 +4438,7 @@ var<workgroup> b: array<u32, 3072>;
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -4250,6 +4457,7 @@ var<workgroup> data: array<u32, n>;
 @compute @workgroup_size(1) fn bad() { data[0] = 1u; }
 @compute @workgroup_size(1) fn good() {}
 "#,
+            false,
             false,
             false,
             false,
@@ -4303,8 +4511,19 @@ fn uses_immediate() {
 @compute @workgroup_size(1)
 fn no_immediate() {}
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[11]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[11],
+        )
+        .unwrap();
         // Entry point that statically accesses `used_imm` (a vec4f = 16 bytes);
         // `unused_imm` is declared but never touched by this entry point, so
         // it does not contribute to the size (matches Dawn's
@@ -4342,8 +4561,19 @@ fn main() {
   _ = params;
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[11]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[11],
+        )
+        .unwrap();
 
         assert_eq!(program.immediate_data_size("main").unwrap(), 32);
         assert_eq!(
@@ -4356,6 +4586,7 @@ fn main() {
     fn compute_generates_msl_spirv_glsl() {
         let program = Program::parse(
             compute_wgsl(),
+            false,
             false,
             false,
             false,
@@ -4438,8 +4669,19 @@ fn fs() -> @location(0) vec4f {
   return textureSample(t, s, vec3f(1.0, 0.0, 0.0), 0);
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let glsl = program
             .generate_glsl("fs", &Bindings::default(), &[], None, None)
             .unwrap()
@@ -4476,6 +4718,7 @@ fn vs(@builtin(instance_index) ii: u32, @builtin(vertex_index) vi: u32) -> @buil
     fn generate_glsl_first_instance_offset_only_applied_when_requested() {
         let program = Program::parse(
             instance_index_vertex_wgsl(),
+            false,
             false,
             false,
             false,
@@ -4542,6 +4785,7 @@ struct Output { @builtin(frag_depth) depth: f32, @location(0) color: vec4f }
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -4598,8 +4842,19 @@ fn fs() -> @builtin(sample_mask) u32 {
   return 1u;
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let glsl = program
             .generate_glsl("fs", &Bindings::default(), &[], None, None)
             .unwrap()
@@ -4622,8 +4877,19 @@ fn fs(@builtin(sample_mask) mask_in: u32) -> @location(0) vec4f {
   return vec4f(0.0, 0.0, 0.0, 1.0);
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let glsl = program
             .generate_glsl("fs", &Bindings::default(), &[], None, None)
             .unwrap()
@@ -4645,8 +4911,19 @@ fn fs(@builtin(sample_index) sample_index: u32) -> @location(0) vec4f {
   return textureLoad(t, vec2i(0, 0), sample_index);
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let glsl = program
             .generate_glsl("fs", &Bindings::default(), &[], None, None)
             .unwrap()
@@ -4673,8 +4950,19 @@ fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
   return vec4f(d, d, d, 1.0);
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let glsl = program
             .generate_glsl("fs", &Bindings::default(), &[], None, None)
             .unwrap()
@@ -4706,8 +4994,19 @@ fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
   return vec4f(d, d, d, 1.0);
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let glsl = program
             .generate_glsl("fs", &Bindings::default(), &[], None, None)
             .unwrap()
@@ -4733,8 +5032,19 @@ fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
   return textureGather(t, s, uv);
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let glsl = program
             .generate_glsl("fs", &Bindings::default(), &[], None, None)
             .unwrap()
@@ -4771,8 +5081,19 @@ fn fs(
 }}
 "#
         );
-        let program =
-            Program::parse(&wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            &wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let glsl = program
             .generate_glsl("fs", &Bindings::default(), &[], None, None)
             .unwrap_or_else(|err| panic!("{err:?}\nWGSL:\n{wgsl}"))
@@ -4964,8 +5285,19 @@ fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
   return vec4f(d, d, d, 1.0);
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let glsl = program
             .generate_glsl("fs", &Bindings::default(), &[], None, None)
             .unwrap()
@@ -4993,8 +5325,19 @@ fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
   return vec4f(raw, cmp, 0.0, 1.0);
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let glsl = program
             .generate_glsl("fs", &Bindings::default(), &[], None, None)
             .unwrap()
@@ -5039,9 +5382,19 @@ fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
                 }
             }
             wgsl.push_str("}\n");
-            let program =
-                Program::parse(&wgsl, false, false, false, false, false, false, false, &[])
-                    .unwrap();
+            let program = Program::parse(
+                &wgsl,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                &[],
+            )
+            .unwrap();
             let mut bindings = Bindings::default();
             bindings.texture.push(BindingRemap {
                 group: 0,
@@ -5095,8 +5448,19 @@ fn main() {
   dst[0] = textureNumLevels(src);
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let mut bindings = Bindings::default();
         bindings.texture.push(BindingRemap {
             group: 2,
@@ -5158,8 +5522,19 @@ fn fs() -> @location(0) vec4f {
   return vec4f(f32(a + b), 0.0, 0.0, 1.0);
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let mut bindings = Bindings::default();
         // yawgpu's flat remap: each texture keeps its binding as the flat value
         // under group 0 (unique per texture across the pipeline).
@@ -5228,8 +5603,19 @@ fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
   return textureSample(t, s, uv);
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let output = program
             .generate_glsl("fs", &Bindings::default(), &[], None, None)
             .unwrap();
@@ -5266,8 +5652,19 @@ fn fs() -> @location(0) vec4f {
   return textureLoad(t, vec2i(0, 0), 0);
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let output = program
             .generate_glsl("fs", &Bindings::default(), &[], None, None)
             .unwrap();
@@ -5318,8 +5715,19 @@ fn cs() {
   data[0] = u32(u.scale);
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let bindings = Bindings::default();
         let glsl = program
             .generate_glsl("cs", &bindings, &[], None, None)
@@ -5366,8 +5774,19 @@ fn cs() {
   data[0] = u32(u.scale);
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let bindings = Bindings {
             uniform: vec![BindingRemap {
                 group: 0,
@@ -5408,8 +5827,19 @@ fn main() {
   _ = cx;
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let err = program
             .generate_spirv(
                 "main",
@@ -5446,8 +5876,19 @@ fn cs() {
   }
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let msl = program
             .generate_msl(
                 "cs",
@@ -5497,8 +5938,19 @@ fn cs() {
   atomicAdd(&wg, 1u);
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let msl = program
             .generate_msl(
                 "cs",
@@ -5534,7 +5986,7 @@ fn cs() {
              @vertex fn plain_vs() -> @builtin(position) vec4f { return vec4f(0, 0, 0, 1); }
              @fragment fn fs() -> @location(0) vec4f { return vec4f(1); }
              @compute @workgroup_size(1) fn cs() {}",
-            false, false, false, false, false, false, false, &[],
+            false, false, false, false, false, false, false, false, &[],
         ).unwrap();
         for (entry, expected) in [
             ("invariant_vs", true),
@@ -5566,6 +6018,7 @@ fn cs() {
     fn render_stages_generate_msl_and_spirv() {
         let program = Program::parse(
             render_wgsl(),
+            false,
             false,
             false,
             false,
@@ -5618,6 +6071,7 @@ fn cs() {
     fn framebuffer_fetch_reflects_color_and_generates_code() {
         let program = Program::parse(
             framebuffer_fetch_wgsl(),
+            false,
             false,
             false,
             false,
@@ -5680,6 +6134,7 @@ fn cs() {
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -5720,6 +6175,7 @@ fn cs() {
     fn input_attachment_msl_missing_color_slot_returns_err() {
         let program = Program::parse(
             input_attachment_wgsl(),
+            false,
             false,
             false,
             false,
@@ -5778,6 +6234,7 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
   return vec4<f32>(uv, 0.0, 1.0);
 }
 "#,
+            false,
             false,
             false,
             false,
@@ -5861,6 +6318,7 @@ struct Output { @builtin(frag_depth) depth: f32, @location(0) color: vec4f }
     return Output(0.9, v.pos + vec4f(v.uv, 0, 0));
 }
 "#,
+            false,
             false,
             false,
             false,
@@ -5954,8 +6412,19 @@ fn cs() {
   _ = v;
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[11]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[11],
+        )
+        .unwrap();
 
         // `params` is a vec4f (16 bytes): with the matching layout budget the
         // depth-range pair lands at bytes {16, 20} and generation succeeds.
@@ -6043,6 +6512,7 @@ fn cs() {
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -6072,6 +6542,7 @@ fn cs() {
     fn multisampled_input_attachment_flag_reaches_spirv_writer() {
         let program = Program::parse(
             input_attachment_wgsl(),
+            false,
             false,
             false,
             false,
@@ -6136,6 +6607,7 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -6193,6 +6665,7 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
     fn multisampled_input_attachment_vertex_stage_requires_module_wide_flag() {
         let program = Program::parse(
             multisampled_input_attachment_vs_fs_wgsl(),
+            false,
             false,
             false,
             false,
@@ -6325,6 +6798,7 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -6385,6 +6859,7 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap_err();
@@ -6396,6 +6871,7 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
     fn input_attachment_enable_requires_tiled_feature() {
         let err = Program::parse(
             input_attachment_wgsl(),
+            false,
             false,
             false,
             false,
@@ -6425,6 +6901,7 @@ fn fs(@color(0) prev: vec4<f32>) -> @location(0) vec4<f32> {
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap_err();
@@ -6447,8 +6924,19 @@ fn global(@builtin(global_invocation_index) index: u32) { _ = index; }
 @compute @workgroup_size(1)
 fn workgroup(@builtin(workgroup_index) index: u32) { _ = index; }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[10]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[10],
+        )
+        .unwrap();
         let entries = program.entry_points().unwrap();
         let used = |name: &str| {
             let entry = entries.iter().find(|entry| entry.name == name).unwrap();
@@ -6474,8 +6962,19 @@ fn vs(@location(0) p: vec4f) -> @builtin(position) vec4f {
   return p;
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let pulled = |format| {
             program
                 .generate_msl(
@@ -6540,7 +7039,7 @@ fn cs() {
         for (wgsl, feature) in [(buffer_view, 12), (swizzle_assignment, 13)] {
             let parse = |features: &[u32]| {
                 Program::parse(
-                    wgsl, false, false, false, false, false, false, false, features,
+                    wgsl, false, false, false, false, false, false, false, false, features,
                 )
             };
             for rejected in [&[][..], &[14], &[0xFFFF]] {
@@ -6594,6 +7093,7 @@ fn cs() {
             false,
             false,
             false,
+            false,
             &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
         )
         .is_err());
@@ -6611,8 +7111,19 @@ fn vs(i: VIn) -> @builtin(position) vec4f {
   return i.p;
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let default_msl = program
             .generate_msl(
                 "vs",
@@ -6670,8 +7181,19 @@ fn fs() -> @location(0) vec4f {
   return vec4f(1.0);
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let default_msl = program
             .generate_msl(
                 "fs",
@@ -6721,6 +7243,7 @@ fn fs() -> @builtin(frag_depth) f32 {
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -6753,6 +7276,7 @@ fn fs() -> @location(0) vec4f {
 "#;
         let program = Program::parse(
             color_wgsl,
+            false,
             false,
             false,
             false,
@@ -6795,8 +7319,19 @@ fn cs() {
   _ = v;
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[11]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[11],
+        )
+        .unwrap();
         // `params` is a vec4f (16 bytes); the owning pipeline layout reserves
         // exactly that much user-immediate budget.
         let msl = program
@@ -6848,8 +7383,19 @@ fn fs() -> @builtin(frag_depth) f32 {
   return v.x;
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[11]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[11],
+        )
+        .unwrap();
         // `params` is a vec4f (16 bytes): the clamp range must land at byte
         // offset 16, not overlap `params` at `[0, 16)`.
         let msl = program
@@ -6920,7 +7466,19 @@ struct Data { values: array<u32> }
 "#;
 
     fn parse_with_immediates(wgsl: &str) -> Program {
-        Program::parse(wgsl, false, false, false, false, false, false, false, &[11]).unwrap()
+        Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[11],
+        )
+        .unwrap()
     }
 
     fn generate_with_budget(
@@ -7031,6 +7589,7 @@ fn user_only() {{ let v = params; _ = v; }}
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -7062,8 +7621,19 @@ fn vs(@location(0) p: vec4f) -> @builtin(position) vec4f {
   return p + vec4f(f32(n));
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let vertex_buffer = |slot, metal_index| VertexBuffer {
             slot,
             metal_index,
@@ -7122,8 +7692,19 @@ fn vs(@location(0) p: vec4f) -> @builtin(position) vec4f {
   return p;
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
 
         let msl = program
             .generate_msl(
@@ -7161,8 +7742,19 @@ fn vs(@location(0) p: vec4f) -> @builtin(position) vec4f {
         let wgsl = format!(
             "{RUNTIME_ARRAY_DECL}\n@group(0) @binding(1) var ext: texture_external;\n@compute @workgroup_size(1)\nfn cs() {{ data.values[0] = arrayLength(&data.values) + textureDimensions(ext).x; }}"
         );
-        let program =
-            Program::parse(&wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            &wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let bindings = Bindings {
             storage: vec![BindingRemap {
                 group: 0,
@@ -7341,8 +7933,19 @@ fn cs() {
   s.value[0] = u.value + c;
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let entries = program.entry_points().unwrap();
         assert_eq!(entries[0].workgroup_size, Some([8, 4, 1]));
         let bindings = program.resource_bindings("cs").unwrap();
@@ -7364,6 +7967,7 @@ fn cs() {
     fn exposes_non_error_diagnostics() {
         let program = Program::parse(
             "diagnostic(info, bogus_rule);\n@compute @workgroup_size(1) fn cs() {}",
+            false,
             false,
             false,
             false,
@@ -7401,8 +8005,19 @@ fn cs() {
   _ = helper(gather_tex);
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let bindings = program.resource_bindings("cs").unwrap();
         let usage = |binding: u32| {
             bindings
@@ -7435,8 +8050,19 @@ fn fs(@location(0) value: f32, @location(1) @interpolate(flat) index: u32) -> @l
   return vec4f(value + f32(index), 0.0, 0.0, 1.0);
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
 
         let inputs = program.entry_point_inputs("fs").unwrap();
         let value = inputs
@@ -7470,8 +8096,19 @@ override x: u32 = 4;
 @compute @workgroup_size(x, 1, 1)
 fn cs() {}
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let overrides = program.overrides().unwrap();
         assert_eq!(overrides.len(), 1);
         assert_eq!(overrides[0].name, "x");
@@ -7526,8 +8163,19 @@ override u: u32 = 7u;
 override i: i32 = -3i;
 @compute @workgroup_size(1) fn cs() {}
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let overrides = program.overrides().unwrap();
         let default = |name: &str| {
             overrides
@@ -7550,6 +8198,7 @@ override i: i32 = -3i;
 @group(0) @binding(0) var<storage, read_write> output: vec4f;
 @compute @workgroup_size(1) fn cs() { output = textureLoad(tex, vec2u(0)); }
 "#,
+            false,
             false,
             false,
             false,
@@ -7645,8 +8294,19 @@ fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
   return textureSampleBaseClampToEdge(t, s, p.xy);
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let bindings = Bindings {
             sampler: vec![BindingRemap {
                 group: 0,
@@ -7695,8 +8355,19 @@ struct U { value: vec4f }
 @compute @workgroup_size(1)
 fn cs() { _ = u.value; }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let default_bindings = Bindings::default();
         let remapped = Bindings {
             uniform: vec![BindingRemap {
@@ -7789,6 +8460,7 @@ fn cs() { _ = u.value; }
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -7810,8 +8482,19 @@ fn cs() {
   _ = value;
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[1]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[1],
+        )
+        .unwrap();
         drop(program);
     }
 
@@ -7835,8 +8518,19 @@ fn cs() {
   _ = value;
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[3]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[3],
+        )
+        .unwrap();
         drop(program);
     }
 
@@ -7855,11 +8549,32 @@ fn fs() -> Out {
   return Out(vec4f(), vec4f());
 }
 "#;
-        assert!(
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).is_err()
-        );
-        let program =
-            Program::parse(wgsl, false, false, false, true, false, false, false, &[]).unwrap();
+        assert!(Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[]
+        )
+        .is_err());
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let outputs = program.entry_point_outputs("fs").unwrap();
         assert!(outputs.iter().any(|variable| variable.blend_src == Some(0)));
         assert!(outputs.iter().any(|variable| variable.blend_src == Some(1)));
@@ -7881,11 +8596,32 @@ fn vs() -> Out {
 }
 "#;
 
-        assert!(
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).is_err()
-        );
-        let program =
-            Program::parse(wgsl, false, false, false, false, true, false, false, &[]).unwrap();
+        assert!(Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[]
+        )
+        .is_err());
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let entry_points = program.entry_points().unwrap();
         let vertex = entry_points
             .iter()
@@ -7905,11 +8641,32 @@ fn fs(@builtin(primitive_index) idx: u32) -> @location(0) vec4f {
 }
 "#;
 
-        assert!(
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).is_err()
-        );
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, true, false, &[]).unwrap();
+        assert!(Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[]
+        )
+        .is_err());
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            &[],
+        )
+        .unwrap();
         let entry_points = program.entry_points().unwrap();
         let fragment = entry_points
             .iter()
@@ -7928,8 +8685,19 @@ fn cs() {
   _ = x;
 }
 "#;
-        let program =
-            Program::parse(wgsl, true, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let msl = program
             .generate_msl(
                 "cs",
@@ -7957,10 +8725,32 @@ fn cs() {
   _ = x;
 }
 "#;
-        assert!(
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).is_err()
-        );
-        assert!(Program::parse(wgsl, false, true, false, false, false, false, false, &[]).is_ok());
+        assert!(Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[]
+        )
+        .is_err());
+        assert!(Program::parse(
+            wgsl,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[]
+        )
+        .is_ok());
     }
 
     const SUBGROUP_SIZE_CONTROL_WGSL: &str = r#"
@@ -7974,8 +8764,32 @@ fn cs() {}
     #[test]
     fn subgroup_size_control_extension_is_gated_by_parse_option() {
         let wgsl = SUBGROUP_SIZE_CONTROL_WGSL;
-        assert!(Program::parse(wgsl, false, true, false, false, false, false, false, &[]).is_err());
-        assert!(Program::parse(wgsl, false, true, true, false, false, false, false, &[]).is_ok());
+        assert!(Program::parse(
+            wgsl,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[]
+        )
+        .is_err());
+        assert!(Program::parse(
+            wgsl,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[]
+        )
+        .is_ok());
 
         // `@subgroup_size` without `enable subgroup_size_control;` is rejected
         // even when the extension is allowed.
@@ -7990,6 +8804,7 @@ fn cs() {}
             false,
             true,
             true,
+            false,
             false,
             false,
             false,
@@ -8024,6 +8839,7 @@ fn plain() {}
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -8053,6 +8869,7 @@ var<workgroup> data: array<u32, 8>;
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -8073,6 +8890,7 @@ override n: u32 = 4;
 var<workgroup> data: array<u32, n>;
 @compute @workgroup_size(1) fn cs() { data[0] = 1u; }
 "#,
+            false,
             false,
             false,
             false,
@@ -8113,6 +8931,7 @@ var<workgroup> b: array<u32, 3072>;
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -8127,12 +8946,112 @@ var<workgroup> b: array<u32, 3072>;
     }
 
     #[test]
+    fn subgroup_matrix_reflection_is_sorted_and_entry_scoped() {
+        use SubgroupMatrixDirection::{Left, Result, Right};
+        use SubgroupMatrixType::F32;
+
+        let source = r#"
+enable chromium_experimental_subgroup_matrix;
+enable subgroups;
+override x: u32 = 4;
+@compute @workgroup_size(x) fn matrix() {
+    let lhs = subgroup_matrix_left<f32, 8, 8>();
+    let rhs = subgroup_matrix_right<f32, 8, 8>();
+    _ = subgroupMatrixMultiply<f32>(lhs, rhs);
+}
+@compute @workgroup_size(6) fn plain() {}
+"#;
+        let program = Program::parse(
+            source,
+            false,
+            true,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let entries = program.entry_points().unwrap();
+        assert!(
+            entries
+                .iter()
+                .find(|ep| ep.name == "matrix")
+                .unwrap()
+                .uses_subgroup_matrix
+        );
+        assert!(
+            !entries
+                .iter()
+                .find(|ep| ep.name == "plain")
+                .unwrap()
+                .uses_subgroup_matrix
+        );
+        let resolved = program
+            .resolved_workgroup_info(
+                "matrix",
+                &[OverrideValue {
+                    name: "x".into(),
+                    value: 8.0,
+                }],
+            )
+            .unwrap();
+        assert_eq!(resolved.workgroup_size, [8, 1, 1]);
+        assert_eq!(
+            resolved.subgroup_matrix.configs,
+            [
+                SubgroupMatrixConfig {
+                    direction: Left,
+                    component_type: F32,
+                    m: 8,
+                    n: 0,
+                    k: 8
+                },
+                SubgroupMatrixConfig {
+                    direction: Right,
+                    component_type: F32,
+                    m: 0,
+                    n: 8,
+                    k: 8
+                },
+                SubgroupMatrixConfig {
+                    direction: Result,
+                    component_type: F32,
+                    m: 8,
+                    n: 8,
+                    k: 0
+                },
+            ]
+        );
+        assert_eq!(
+            resolved.subgroup_matrix.multiplies,
+            [SubgroupMatrixMultiply {
+                m: 8,
+                n: 8,
+                k: 8,
+                input_type: F32,
+                output_type: F32
+            }]
+        );
+        assert_eq!(
+            program
+                .resolved_workgroup_info("plain", &[])
+                .unwrap()
+                .subgroup_matrix,
+            SubgroupMatrixInfo::default()
+        );
+    }
+
+    #[test]
     fn resolved_workgroup_info_reports_literal_subgroup_size() {
         let program = Program::parse(
             SUBGROUP_SIZE_CONTROL_WGSL,
             false,
             true,
             true,
+            false,
             false,
             false,
             false,
@@ -8146,6 +9065,7 @@ var<workgroup> b: array<u32, 3072>;
                 workgroup_size: [8, 1, 1],
                 subgroup_size: Some(4),
                 workgroup_storage_size: 0,
+                subgroup_matrix: SubgroupMatrixInfo::default(),
             }
         );
         // The size-only wrapper keeps its contract.
@@ -8156,6 +9076,7 @@ var<workgroup> b: array<u32, 3072>;
 
         let plain = Program::parse(
             compute_wgsl(),
+            false,
             false,
             false,
             false,
@@ -8190,7 +9111,19 @@ var<workgroup> b: array<u32, 3072>;
                  @compute @workgroup_size(12) @subgroup_size({bad}) fn cs() {{}}\n"
             );
             assert!(
-                Program::parse(&wgsl, false, true, true, false, false, false, false, &[]).is_err(),
+                Program::parse(
+                    &wgsl,
+                    false,
+                    true,
+                    true,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    &[]
+                )
+                .is_err(),
                 "const @subgroup_size({bad}) must fail to parse"
             );
         }
@@ -8208,6 +9141,7 @@ fn cs() {}
             false,
             true,
             true,
+            false,
             false,
             false,
             false,
@@ -8267,6 +9201,7 @@ fn cs() {}
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap_err();
@@ -8279,6 +9214,7 @@ fn cs() {}
         // free-fn wrapper (refactor R5, F9); inlined per its removal note.
         let program = Program::parse(
             compute_wgsl(),
+            false,
             false,
             false,
             false,
@@ -8338,10 +9274,32 @@ fn cs() {
   }
 }
 "#;
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
-        let fresh =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let fresh = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
 
         let generate_msl = |program: &Program| {
             program
@@ -8436,10 +9394,32 @@ fn fs(in: VsOut) -> @location(0) vec4f {
                 shader_location: 0,
             }],
         }];
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
-        let fresh =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let fresh = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
 
         let generate_vs_msl = |program: &Program| {
             program
@@ -8504,10 +9484,32 @@ fn cs() {}
             name: "x".into(),
             value: 8.0,
         }];
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
-        let fresh =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let fresh = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
 
         let generate = |program: &Program| {
             program
@@ -8556,8 +9558,19 @@ fn cs() {}
             name: "x".into(),
             value: 8.0,
         }];
-        let program =
-            Program::parse(wgsl, false, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
         let output = program
             .generate_msl(
                 "cs",
@@ -8591,10 +9604,32 @@ fn cs() {
   _ = x;
 }
 "#;
-        let program =
-            Program::parse(wgsl, true, false, false, false, false, false, false, &[]).unwrap();
-        let fresh =
-            Program::parse(wgsl, true, false, false, false, false, false, false, &[]).unwrap();
+        let program = Program::parse(
+            wgsl,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let fresh = Program::parse(
+            wgsl,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
 
         let generate_msl = |program: &Program| {
             program
@@ -8663,6 +9698,7 @@ fn cs() {
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -8681,6 +9717,7 @@ override x: u32 = 4;
 @compute @workgroup_size(x, 2, 1)
 fn cs() {}
 "#,
+            false,
             false,
             false,
             false,
@@ -8720,6 +9757,7 @@ fn cs() {}
 @compute @workgroup_size(x)
 fn cs() {}
 "#,
+            false,
             false,
             false,
             false,
@@ -8770,6 +9808,7 @@ fn cs() {}
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -8798,6 +9837,7 @@ fn cs() {}
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -8814,6 +9854,7 @@ override x: u32 = 4;
 @compute @workgroup_size(x)
 fn cs() {}
 "#,
+            false,
             false,
             false,
             false,
@@ -8864,6 +9905,7 @@ fn main_ok() {}
             false,
             false,
             false,
+            false,
             &[],
         )
         .unwrap();
@@ -8881,6 +9923,7 @@ fn main_ok() {}
     fn resolved_workgroup_size_errors_on_non_compute_entry_point() {
         let program = Program::parse(
             "@fragment fn fs() -> @location(0) vec4f { return vec4f(); }",
+            false,
             false,
             false,
             false,

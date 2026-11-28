@@ -33,6 +33,47 @@
 
 #include "webgpu.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define WGPUFeatureName_ChromiumExperimentalSubgroupMatrix ((WGPUFeatureName)0x00050034u)
+#define WGPUSType_AdapterPropertiesSubgroupMatrixConfigs   ((WGPUSType)0x0005003Bu)
+
+typedef enum WGPUSubgroupMatrixComponentType {
+    WGPUSubgroupMatrixComponentType_F32 = 0x00000001,
+    WGPUSubgroupMatrixComponentType_F16 = 0x00000002,
+    WGPUSubgroupMatrixComponentType_U32 = 0x00000003,
+    WGPUSubgroupMatrixComponentType_I32 = 0x00000004,
+    WGPUSubgroupMatrixComponentType_U8  = 0x00000005,
+    WGPUSubgroupMatrixComponentType_I8  = 0x00000006,
+    WGPUSubgroupMatrixComponentType_Force32 = 0x7FFFFFFF
+} WGPUSubgroupMatrixComponentType;
+
+typedef struct WGPUSubgroupMatrixConfig {
+    WGPUSubgroupMatrixComponentType componentType;
+    WGPUSubgroupMatrixComponentType resultComponentType;
+    uint32_t M;
+    uint32_t N;
+    uint32_t K;
+    uint32_t minSubgroupSize;
+    uint32_t maxSubgroupSize;
+} WGPUSubgroupMatrixConfig;
+
+/* Chained out-struct on WGPUAdapterInfo. */
+typedef struct WGPUAdapterPropertiesSubgroupMatrixConfigs {
+    WGPUChainedStruct chain;
+    size_t configCount;
+    const WGPUSubgroupMatrixConfig* configs;
+} WGPUAdapterPropertiesSubgroupMatrixConfigs;
+
+WGPU_EXPORT void wgpuAdapterPropertiesSubgroupMatrixConfigsFreeMembers(
+    WGPUAdapterPropertiesSubgroupMatrixConfigs value);
+
+#ifdef __cplusplus
+}
+#endif
+
 /**
  * \defgroup InstanceBackendSelect Instance Backend Select
  * \brief Extension chain entry that forces a specific HAL backend at

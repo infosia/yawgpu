@@ -235,6 +235,61 @@ impl HalLimits {
     };
 }
 
+/// Scalar type of a subgroup matrix element, using Dawn's C ABI values.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HalSubgroupMatrixComponentType {
+    /// 32-bit floating point.
+    F32 = 1,
+    /// 16-bit floating point.
+    F16 = 2,
+    /// Unsigned 32-bit integer.
+    U32 = 3,
+    /// Signed 32-bit integer.
+    I32 = 4,
+    /// Unsigned 8-bit integer.
+    U8 = 5,
+    /// Signed 8-bit integer.
+    I8 = 6,
+}
+
+/// A supported subgroup matrix multiplication, (M × K) times (K × N).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HalSubgroupMatrixConfig {
+    /// Scalar type of the two operands.
+    pub component_type: HalSubgroupMatrixComponentType,
+    /// Scalar type of the result.
+    pub result_component_type: HalSubgroupMatrixComponentType,
+    /// Number of rows of the left operand and result.
+    pub m: u32,
+    /// Number of columns of the right operand and result.
+    pub n: u32,
+    /// Shared inner dimension of the operands.
+    pub k: u32,
+}
+
+impl HalSubgroupMatrixConfig {
+    /// Creates a configuration from the operand and result types and dimensions.
+    #[must_use]
+    pub const fn new(
+        component_type: HalSubgroupMatrixComponentType,
+        result_component_type: HalSubgroupMatrixComponentType,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Self {
+        Self {
+            component_type,
+            result_component_type,
+            m,
+            n,
+            k,
+        }
+    }
+}
+
 /// Stores backend-reported explicit compute subgroup size capabilities
 /// (WebGPU `subgroup-size-control`, WGSL `@subgroup_size`).
 ///
@@ -717,6 +772,12 @@ impl HalAdapter {
     #[must_use]
     pub fn supports_indirect_first_instance(&self) -> bool {
         hal_dispatch!(self, adapter => adapter.supports_indirect_first_instance())
+    }
+
+    /// Returns every subgroup matrix configuration supported by the adapter.
+    #[must_use]
+    pub fn subgroup_matrix_configs(&self) -> Vec<HalSubgroupMatrixConfig> {
+        hal_dispatch!(self, adapter => adapter.subgroup_matrix_configs())
     }
 
     /// Returns the reported subgroup size range, or `None` when unavailable.
@@ -1808,6 +1869,28 @@ mod tests {
             .expect("Noop adapter exists");
 
         assert!(adapter.supports_subgroups());
+        assert_eq!(adapter.subgroup_size_range(), Some((4, 4)));
+    }
+
+    #[test]
+    fn subgroup_matrix_config_preserves_each_dimension_and_type() {
+        use HalSubgroupMatrixComponentType::{F16, F32};
+        let config = HalSubgroupMatrixConfig::new(F16, F32, 8, 16, 32);
+        assert_eq!(
+            (config.component_type, config.result_component_type),
+            (F16, F32)
+        );
+        assert_eq!((config.m, config.n, config.k), (8, 16, 32));
+    }
+
+    #[test]
+    fn noop_subgroup_matrix_configs_report_the_nominal_f32_multiply() {
+        use HalSubgroupMatrixComponentType::F32;
+        let adapter = HalInstance::new_noop().enumerate_adapters().remove(0);
+        assert_eq!(
+            adapter.subgroup_matrix_configs(),
+            [HalSubgroupMatrixConfig::new(F32, F32, 8, 8, 8)]
+        );
         assert_eq!(adapter.subgroup_size_range(), Some((4, 4)));
     }
 

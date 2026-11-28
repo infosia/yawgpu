@@ -29,14 +29,19 @@ pub struct Device {
     pub(crate) inner: Arc<DeviceInner>,
 }
 
+/// Adapter properties used for subgroup validation at pipeline creation.
+#[derive(Debug, Default)]
+pub(crate) struct AdapterSubgroupProperties {
+    pub(crate) size_control: Option<HalSubgroupSizeControlCaps>,
+    pub(crate) size_range: Option<(u32, u32)>,
+    pub(crate) matrix_configs: Vec<yawgpu_hal::HalSubgroupMatrixConfig>,
+}
+
 /// Holds shared state for the device handle.
 #[derive(Debug)]
 pub(crate) struct DeviceInner {
     pub(crate) timestamp_period: f32,
-    /// Explicit compute subgroup size caps captured from the adapter
-    /// (Block 108). `None` for devices built without an adapter
-    /// ([`Device::from_hal`]) or on backends without `subgroup-size-control`.
-    pub(crate) subgroup_size_control_caps: Option<HalSubgroupSizeControlCaps>,
+    pub(crate) subgroups: AdapterSubgroupProperties,
     pub(crate) timestamp_pipeline: OnceLock<Result<Arc<ComputePipeline>, String>>,
     /// Lazily created pipeline that validates indirect dispatch arguments.
     pub(crate) dispatch_indirect_pipeline: OnceLock<Result<Arc<ComputePipeline>, String>>,
@@ -89,11 +94,19 @@ impl Device {
         label: impl Into<String>,
         queue_label: impl Into<String>,
     ) -> Self {
-        Self::from_hal_with_adapter_properties(hal, limits, features, label, queue_label, 1.0, None)
+        Self::from_hal_with_adapter_properties(
+            hal,
+            limits,
+            features,
+            label,
+            queue_label,
+            1.0,
+            AdapterSubgroupProperties::default(),
+        )
     }
 
     /// Constructs a device with the timestamp period and explicit compute
-    /// subgroup size caps captured from its adapter.
+    /// subgroup sizes and matrix configurations captured from its adapter.
     #[must_use]
     pub(crate) fn from_hal_with_adapter_properties(
         hal: HalDevice,
@@ -102,13 +115,13 @@ impl Device {
         label: impl Into<String>,
         queue_label: impl Into<String>,
         timestamp_period: f32,
-        subgroup_size_control_caps: Option<HalSubgroupSizeControlCaps>,
+        subgroups: AdapterSubgroupProperties,
     ) -> Self {
         let queue = Queue::from_hal(hal.queue(), queue_label);
         Self {
             inner: Arc::new(DeviceInner {
                 timestamp_period,
-                subgroup_size_control_caps,
+                subgroups,
                 timestamp_pipeline: OnceLock::new(),
                 dispatch_indirect_pipeline: OnceLock::new(),
                 dispatch_indirect_buffer: OnceLock::new(),
@@ -591,6 +604,10 @@ impl Device {
         let shader_f16 = self.inner.features.contains(&Feature::ShaderF16);
         let subgroups = self.inner.features.contains(&Feature::Subgroups);
         let subgroup_size_control = self.inner.features.contains(&Feature::SubgroupSizeControl);
+        let subgroup_matrix = self
+            .inner
+            .features
+            .contains(&Feature::ChromiumExperimentalSubgroupMatrix);
         let dual_source_blending = self.inner.features.contains(&Feature::DualSourceBlending);
         let clip_distances = self.inner.features.contains(&Feature::ClipDistances);
         let primitive_index = self.inner.features.contains(&Feature::PrimitiveIndex);
@@ -602,6 +619,7 @@ impl Device {
                     shader_f16,
                     subgroups,
                     subgroup_size_control,
+                    subgroup_matrix,
                     dual_source_blending,
                     clip_distances,
                     primitive_index,
@@ -774,7 +792,7 @@ impl Device {
                 &descriptor,
                 self.limits(),
                 &self.inner.features,
-                self.inner.subgroup_size_control_caps,
+                &self.inner.subgroups,
                 pipeline_id,
             );
             let error = result.as_ref().err().cloned();
@@ -1428,6 +1446,7 @@ mod tests {
         let bindings = Bindings::default();
         let program = Program::parse(
             DISPATCH_INDIRECT_VALIDATION_WGSL,
+            false,
             false,
             false,
             false,

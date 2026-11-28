@@ -14,6 +14,8 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -25,6 +27,7 @@
 #include "src/tint/lang/core/constant/value.h"
 #include "src/tint/lang/core/enums.h"
 #include "src/tint/lang/core/ir/access.h"
+#include "src/tint/lang/core/ir/analysis/subgroup_matrix.h"
 #include "src/tint/lang/core/ir/builder.h"
 #include "src/tint/lang/core/ir/core_builtin_call.h"
 #include "src/tint/lang/core/ir/load.h"
@@ -536,6 +539,37 @@ static_assert(offsetof(YawgpuTintEntryPoint, clip_distances_size) == 36,
               "YawgpuTintEntryPoint layout changed");
 static_assert(offsetof(YawgpuTintEntryPoint, global_invocation_index_used) == 40,
               "YawgpuTintEntryPoint layout changed");
+// The Rust records carry repr(u32) enums. Pin both the values and the complete ranges.
+static_assert(tint::EnumRange<tint::SubgroupMatrixType>::kMax == tint::SubgroupMatrixType::kI32);
+static_assert(tint::EnumRange<tint::SubgroupMatrixDirection>::kMax ==
+              tint::SubgroupMatrixDirection::kResult);
+static_assert(static_cast<uint32_t>(tint::SubgroupMatrixType::kF16) == 0);
+static_assert(static_cast<uint32_t>(tint::SubgroupMatrixType::kF32) == 1);
+static_assert(static_cast<uint32_t>(tint::SubgroupMatrixType::kU8) == 2);
+static_assert(static_cast<uint32_t>(tint::SubgroupMatrixType::kI8) == 3);
+static_assert(static_cast<uint32_t>(tint::SubgroupMatrixType::kU32) == 4);
+static_assert(static_cast<uint32_t>(tint::SubgroupMatrixType::kI32) == 5);
+static_assert(static_cast<uint32_t>(tint::SubgroupMatrixDirection::kLeft) == 0);
+static_assert(static_cast<uint32_t>(tint::SubgroupMatrixDirection::kRight) == 1);
+static_assert(static_cast<uint32_t>(tint::SubgroupMatrixDirection::kResult) == 2);
+static_assert(sizeof(YawgpuTintSubgroupMatrixConfig) == 20);
+static_assert(offsetof(YawgpuTintSubgroupMatrixConfig, direction) == 0);
+static_assert(offsetof(YawgpuTintSubgroupMatrixConfig, component_type) == 4);
+static_assert(offsetof(YawgpuTintSubgroupMatrixConfig, m) == 8);
+static_assert(offsetof(YawgpuTintSubgroupMatrixConfig, n) == 12);
+static_assert(offsetof(YawgpuTintSubgroupMatrixConfig, k) == 16);
+static_assert(sizeof(YawgpuTintSubgroupMatrixMultiply) == 20);
+static_assert(offsetof(YawgpuTintSubgroupMatrixMultiply, m) == 0);
+static_assert(offsetof(YawgpuTintSubgroupMatrixMultiply, n) == 4);
+static_assert(offsetof(YawgpuTintSubgroupMatrixMultiply, k) == 8);
+static_assert(offsetof(YawgpuTintSubgroupMatrixMultiply, input_type) == 12);
+static_assert(offsetof(YawgpuTintSubgroupMatrixMultiply, output_type) == 16);
+static_assert(sizeof(YawgpuTintSubgroupMatrixInfo) == 32);
+static_assert(offsetof(YawgpuTintSubgroupMatrixInfo, configs) == 0);
+static_assert(offsetof(YawgpuTintSubgroupMatrixInfo, config_count) == 8);
+static_assert(offsetof(YawgpuTintSubgroupMatrixInfo, multiplies) == 16);
+static_assert(offsetof(YawgpuTintSubgroupMatrixInfo, multiply_count) == 24);
+static_assert(offsetof(YawgpuTintEntryPoint, uses_subgroup_matrix) == 42);
 static_assert(offsetof(YawgpuTintEntryPoint, workgroup_index_used) == 41,
               "YawgpuTintEntryPoint layout changed");
 
@@ -819,10 +853,13 @@ struct YawgpuTintProgram {
 
 namespace {
 
-char* dup_string(const std::string& s) {
+char* dup_string(std::string_view s) noexcept {
     char* out = static_cast<char*>(std::malloc(s.size() + 1));
     if (out != nullptr) {
-        std::memcpy(out, s.c_str(), s.size() + 1);
+        if (!s.empty()) {
+            std::memcpy(out, s.data(), s.size());
+        }
+        out[s.size()] = '\0';
     }
     return out;
 }
@@ -836,7 +873,7 @@ void set_error(char** err, const Failure& failure) {
     }
 }
 
-void set_error_string(char** err, const std::string& message) {
+void set_error_string(char** err, std::string_view message) noexcept {
     if (err != nullptr) {
         *err = dup_string(message);
     }
@@ -1604,6 +1641,7 @@ void fill_entry_point(const tint::inspector::EntryPoint& ep,
     out->clip_distances_size = ep.clip_distances_size.value_or(0);
     out->global_invocation_index_used = ep.global_invocation_index_used;
     out->workgroup_index_used = ep.workgroup_index_used;
+    out->uses_subgroup_matrix = ep.uses_subgroup_matrix;
 }
 
 // Maps a Tint diagnostic severity to the shim's outgoing
@@ -1983,6 +2021,7 @@ YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
                                               bool shader_f16,
                                               bool subgroups,
                                               bool subgroup_size_control,
+                                              bool subgroup_matrix,
                                               bool dual_source_blending,
                                               bool clip_distances,
                                               bool primitive_index,
@@ -2023,6 +2062,10 @@ YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
         if (subgroup_size_control) {
             options.allowed_features.extensions.insert(
                 tint::wgsl::Extension::kSubgroupSizeControl);
+        }
+        if (subgroup_matrix) {
+            options.allowed_features.extensions.insert(
+                tint::wgsl::Extension::kChromiumExperimentalSubgroupMatrix);
         }
         if (dual_source_blending) {
             options.allowed_features.extensions.insert(
@@ -2735,6 +2778,14 @@ bool yawgpu_tint_workgroup_storage_size(const YawgpuTintProgram* program,
     }
 }
 
+void yawgpu_tint_subgroup_matrix_info_free(YawgpuTintSubgroupMatrixInfo* info) {
+    if (info != nullptr) {
+        delete[] info->configs;
+        delete[] info->multiplies;
+        *info = {};
+    }
+}
+
 bool yawgpu_tint_resolved_workgroup_size(const YawgpuTintProgram* program,
                                         const char* ep,
                                         const YawgpuTintOverrideValue* ov,
@@ -2743,6 +2794,7 @@ bool yawgpu_tint_resolved_workgroup_size(const YawgpuTintProgram* program,
                                         bool* has_subgroup_size,
                                         uint32_t* subgroup_size,
                                         uint64_t* storage_size,
+                                        YawgpuTintSubgroupMatrixInfo* matrices,
                                         char** err) {
     if (err != nullptr) {
         *err = nullptr;
@@ -2756,12 +2808,16 @@ bool yawgpu_tint_resolved_workgroup_size(const YawgpuTintProgram* program,
     if (subgroup_size != nullptr) {
         *subgroup_size = 0;
     }
+    if (matrices != nullptr) {
+        *matrices = {};
+    }
     if (storage_size != nullptr) {
         *storage_size = 0;
     }
     try {
         if (program == nullptr || ep == nullptr || out == nullptr ||
-            has_subgroup_size == nullptr || subgroup_size == nullptr || storage_size == nullptr) {
+            has_subgroup_size == nullptr || subgroup_size == nullptr || storage_size == nullptr ||
+            matrices == nullptr) {
             set_error_string(err, "invalid NULL argument");
             return false;
         }
@@ -2821,6 +2877,35 @@ bool yawgpu_tint_resolved_workgroup_size(const YawgpuTintProgram* program,
             set_error(err, wi.Failure());
             return false;
         }
+        auto usage = tint::core::ir::analysis::GatherSubgroupMatrixInfo(ir.Get());
+        std::unique_ptr<YawgpuTintSubgroupMatrixConfig[]> configs;
+        if (!usage.configs.empty()) {
+            configs = std::make_unique<YawgpuTintSubgroupMatrixConfig[]>(usage.configs.size());
+            size_t i = 0;
+            for (const auto& c : usage.configs) {
+                configs[i++] = {static_cast<uint32_t>(c.direction), static_cast<uint32_t>(c.type),
+                                c.M, c.N, c.K};
+            }
+            std::sort(configs.get(), configs.get() + i, [](const auto& a, const auto& b) {
+                return std::tie(a.direction, a.component_type, a.m, a.n, a.k) <
+                       std::tie(b.direction, b.component_type, b.m, b.n, b.k);
+            });
+        }
+        std::unique_ptr<YawgpuTintSubgroupMatrixMultiply[]> multiplies;
+        if (!usage.multiplies.empty()) {
+            multiplies = std::make_unique<YawgpuTintSubgroupMatrixMultiply[]>(usage.multiplies.size());
+            size_t i = 0;
+            for (const auto& m : usage.multiplies) {
+                multiplies[i++] = {m.M, m.N, m.K, static_cast<uint32_t>(m.input_type),
+                                   static_cast<uint32_t>(m.output_type)};
+            }
+            std::sort(multiplies.get(), multiplies.get() + i, [](const auto& a, const auto& b) {
+                return std::tie(a.m, a.n, a.k, a.input_type, a.output_type) <
+                       std::tie(b.m, b.n, b.k, b.input_type, b.output_type);
+            });
+        }
+        *matrices = {configs.release(), usage.configs.size(), multiplies.release(),
+                     usage.multiplies.size()};
         *storage_size = wi->storage_size;
         return true;
     } catch (const std::exception& e) {

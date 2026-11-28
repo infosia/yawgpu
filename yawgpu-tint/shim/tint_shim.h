@@ -52,6 +52,7 @@ YAWGPU_TINT_API void yawgpu_tint_initialize(void);
  * If shader_f16 is true, Tint allows the f16 WGSL extension.
  * If subgroups is true, Tint allows the subgroups WGSL extension.
  * If subgroup_size_control is true, Tint allows the subgroup_size_control WGSL extension.
+ * If subgroup_matrix is true, Tint allows chromium_experimental_subgroup_matrix.
  * If dual_source_blending is true, Tint allows the dual-source-blending WGSL extension.
  * If clip_distances is true, Tint allows the clip-distances WGSL extension.
  * If primitive_index is true, Tint allows the primitive-index WGSL extension.
@@ -62,6 +63,7 @@ YAWGPU_TINT_API YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,
                                               bool shader_f16,
                                               bool subgroups,
                                               bool subgroup_size_control,
+                                              bool subgroup_matrix,
                                               bool dual_source_blending,
                                               bool clip_distances,
                                               bool primitive_index,
@@ -101,6 +103,7 @@ typedef struct {
      * reads them. */
     bool global_invocation_index_used;
     bool workgroup_index_used;
+    bool uses_subgroup_matrix;
 } YawgpuTintEntryPoint;
 
 YAWGPU_TINT_API size_t yawgpu_tint_entry_point_count(const YawgpuTintProgram*);
@@ -469,6 +472,32 @@ YAWGPU_TINT_API bool yawgpu_tint_workgroup_storage_size(const YawgpuTintProgram*
                                         uint64_t* out,
                                         char** err);
 
+typedef struct {
+    uint32_t direction;
+    uint32_t component_type;
+    uint32_t m;
+    uint32_t n;
+    uint32_t k;
+} YawgpuTintSubgroupMatrixConfig;
+
+typedef struct {
+    uint32_t m;
+    uint32_t n;
+    uint32_t k;
+    uint32_t input_type;
+    uint32_t output_type;
+} YawgpuTintSubgroupMatrixMultiply;
+
+/* Owned arrays sorted lexicographically by the fields in declaration order. */
+typedef struct {
+    YawgpuTintSubgroupMatrixConfig* configs;
+    size_t config_count;
+    YawgpuTintSubgroupMatrixMultiply* multiplies;
+    size_t multiply_count;
+} YawgpuTintSubgroupMatrixInfo;
+
+YAWGPU_TINT_API void yawgpu_tint_subgroup_matrix_info_free(YawgpuTintSubgroupMatrixInfo* info);
+
 /* Returns `ep`'s override-resolved @workgroup_size as out[0..2] = (x, y, z),
    without generating a full SPIR-V/MSL module (see F6 in
    specs/tracking/tint-integration-refactor.md -- this replaces generating
@@ -488,8 +517,9 @@ YAWGPU_TINT_API bool yawgpu_tint_workgroup_storage_size(const YawgpuTintProgram*
    absent). The value is reported as-is: Tint does not re-check the
    power-of-two rule for override-driven values here, so callers validate it.
    *storage_size reports workgroup storage in bytes via GetWorkgroupInfo on
-   the same IR; failure of that query fails this call. `out`,
-   `has_subgroup_size`, `subgroup_size`, and `storage_size` must be non-NULL
+   the same IR. *matrices receives the sorted configurations and multiplies
+   from this IR; release both with yawgpu_tint_subgroup_matrix_info_free. `out`,
+   `has_subgroup_size`, `subgroup_size`, `storage_size`, and `matrices` must be non-NULL
    and are zeroed on entry. */
 YAWGPU_TINT_API bool yawgpu_tint_resolved_workgroup_size(const YawgpuTintProgram*,
                                           const char* ep,
@@ -499,6 +529,7 @@ YAWGPU_TINT_API bool yawgpu_tint_resolved_workgroup_size(const YawgpuTintProgram
                                           bool* has_subgroup_size,
                                           uint32_t* subgroup_size,
                                           uint64_t* storage_size,
+                                          YawgpuTintSubgroupMatrixInfo* matrices,
                                           char** err);
 
 /* Byte offsets into Tint's GLSL immediate data array. */

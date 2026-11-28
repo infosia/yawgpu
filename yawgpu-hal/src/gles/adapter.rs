@@ -294,6 +294,10 @@ impl GlesAdapter {
         None
     }
 
+    pub(crate) fn subgroup_matrix_configs(&self) -> Vec<crate::HalSubgroupMatrixConfig> {
+        Vec::new()
+    }
+
     /// Returns the explicit compute subgroup size capabilities.
     ///
     /// GLES never advertises `subgroup-size-control` (Tier 2; Block 108).

@@ -554,6 +554,10 @@ impl MetalAdapter {
         reported_subgroup_size_range_for_vendor(self.vendor_id())
     }
 
+    pub(super) fn subgroup_matrix_configs(&self) -> Vec<crate::HalSubgroupMatrixConfig> {
+        Vec::new()
+    }
+
     /// Returns the explicit compute subgroup size capabilities.
     ///
     /// A fixed subgroup width satisfies an explicit size without an MSL option.
