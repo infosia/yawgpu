@@ -648,9 +648,8 @@ pub unsafe extern "C" fn wgpuInstanceWaitAny(
     let timeout = std::time::Duration::from_nanos(timeout_ns);
     let started = std::time::Instant::now();
     let mut attempt = 0u32;
-    let mut callbacks_to_fire = Vec::new();
     let result = loop {
-        let result = instance.wait_any(&future_ids, &mut callbacks_to_fire);
+        let result = instance.wait_any(&future_ids);
         if result.status != core::WaitAnyStatus::TimedOut
             || timeout_ns == 0
             || started.elapsed() >= timeout

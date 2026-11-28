@@ -32,13 +32,6 @@ pub struct GlesQueue {
     last_submission_index: Arc<AtomicU64>,
 }
 
-// SAFETY: Queue submission calls into `GlesDeviceInner::with_current_context`,
-// which serializes context binding and GL commands.
-unsafe impl Send for GlesQueue {}
-// SAFETY: See the `Send` impl; shared submission is synchronized by the device
-// inner lock.
-unsafe impl Sync for GlesQueue {}
-
 impl std::fmt::Debug for GlesQueue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GlesQueue").finish()

@@ -686,27 +686,59 @@ impl WGPUInstanceImpl {
     }
 
     fn cancel_callbacks(&self) {
-        let callbacks = std::mem::take(
-            &mut *self
-                .pending_callbacks
-                .lock()
-                .expect("pending callback lock is not poisoned"),
-        );
-        for (id, callback) in callbacks {
-            self.complete_future(native::WGPUFuture { id });
+        let ids = self
+            .pending_callbacks
+            .lock()
+            .expect("pending callback lock is not poisoned")
+            .keys()
+            .copied()
+            .map(core::FutureId::from_raw)
+            .collect::<Vec<_>>();
+        for &id in &ids {
+            self.core.future_registry().complete(id);
+        }
+        let _ = self.core.future_registry().wait_any(&ids);
+    }
+
+    fn deliver_callback(&self, id: core::FutureId) {
+        let callback = self
+            .pending_callbacks
+            .lock()
+            .expect("pending callback lock is not poisoned")
+            .remove(&id.get());
+        if let Some(callback) = callback {
             unsafe {
-                callback.cancel();
+                if self.in_use_refs.load(std::sync::atomic::Ordering::Acquire) == 0 {
+                    callback.cancel();
+                } else {
+                    callback.fire();
+                }
             }
         }
     }
 
-    fn register_callback(&self, callback: PendingCallback) -> native::WGPUFuture {
+    fn cancel_if_released(&self, future: native::WGPUFuture) -> bool {
+        if self.in_use_refs.load(std::sync::atomic::Ordering::Acquire) != 0 {
+            return false;
+        }
+        self.complete_future(future);
+        let _ = self
+            .core
+            .future_registry()
+            .wait_any(&[core::FutureId::from_raw(future.id)]);
+        true
+    }
+
+    fn register_callback(self: &Arc<Self>, callback: PendingCallback) -> native::WGPUFuture {
         let future = self.register_pending_callback(callback);
         self.finish_callback_registration(future, true);
         future
     }
 
-    fn register_submission_callback(&self, callback: PendingCallback) -> native::WGPUFuture {
+    fn register_submission_callback(
+        self: &Arc<Self>,
+        callback: PendingCallback,
+    ) -> native::WGPUFuture {
         let future = self.register_pending_callback(callback);
         self.poll_submission_callbacks();
         self.finish_callback_registration(future, false);
@@ -714,71 +746,56 @@ impl WGPUInstanceImpl {
     }
 
     fn finish_callback_registration(&self, future: native::WGPUFuture, complete: bool) {
+        if self.cancel_if_released(future) {
+            return;
+        }
+        if complete {
+            self.complete_future(future);
+        }
         let spontaneous = {
-            let mut callbacks = self
+            let callbacks = self
                 .pending_callbacks
                 .lock()
                 .expect("pending callback lock is not poisoned");
-            if complete {
-                self.complete_future(future);
-            }
-            let spontaneous = callbacks.get(&future.id).is_some_and(|callback| {
+            let is_spontaneous = |callback: &PendingCallback| {
                 callback.callback_mode() == Some(core::FutureCallbackMode::AllowSpontaneous)
-            });
-            if spontaneous
-                && !self
-                    .core
-                    .future_registry()
-                    .wait_any(&[core::FutureId::from_raw(future.id)])
-                    .completed
-                    .is_empty()
-            {
-                let older = callbacks
-                    .range(..future.id)
-                    .filter_map(|(&id, callback)| {
-                        (callback.callback_mode()
-                            == Some(core::FutureCallbackMode::AllowSpontaneous))
-                        .then_some(core::FutureId::from_raw(id))
-                    })
-                    .collect::<Vec<_>>();
-                // The map orders future ids by registration. Consume only ready
-                // spontaneous entries, keeping other modes and pending entries.
-                let ready = self.core.future_registry().wait_any(&older).completed;
-                let mut to_fire = ready
-                    .into_iter()
-                    .filter_map(|id| callbacks.remove(&id.get()))
-                    .collect::<Vec<_>>();
-                to_fire.extend(callbacks.remove(&future.id));
-                to_fire
-            } else {
-                Vec::new()
+            };
+            if !callbacks.get(&future.id).is_some_and(|callback| {
+                is_spontaneous(callback) && callback.submission_gate().is_none()
+            }) {
+                return;
             }
+            callbacks
+                .range(..=future.id)
+                .filter_map(|(&id, callback)| {
+                    is_spontaneous(callback).then_some(core::FutureId::from_raw(id))
+                })
+                .collect::<Vec<_>>()
         };
-        // Callers must also release all yawgpu mutex guards before registration.
-        // Both the callback-map and future-registry guards are gone here.
-        for callback in spontaneous {
-            unsafe { callback.fire() };
-        }
+        let _ = self.core.future_registry().wait_any(&spontaneous);
     }
 
-    fn register_pending_callback(&self, callback: PendingCallback) -> native::WGPUFuture {
+    fn register_pending_callback(
+        self: &Arc<Self>,
+        callback: PendingCallback,
+    ) -> native::WGPUFuture {
         let Some(mode) = callback.callback_mode() else {
             return native::WGPUFuture { id: 0 };
         };
-        let future = self.core.future_registry().register(mode);
+        let instance = Arc::downgrade(self);
+        let future = self
+            .core
+            .future_registry()
+            .register_with_callback(mode, move |id| {
+                if let Some(instance) = instance.upgrade() {
+                    instance.deliver_callback(id);
+                }
+            });
         let mut callbacks = self
             .pending_callbacks
             .lock()
             .expect("pending callback lock is not poisoned");
-        if self.in_use_refs.load(std::sync::atomic::Ordering::Acquire) == 0 {
-            drop(callbacks);
-            self.core.future_registry().complete(future);
-            unsafe {
-                callback.cancel();
-            }
-        } else {
-            callbacks.insert(future.get(), callback);
-        }
+        callbacks.insert(future.get(), callback);
         native::WGPUFuture { id: future.get() }
     }
 
@@ -811,15 +828,13 @@ impl WGPUInstanceImpl {
             // Complete even when another delivery path already removed the callback:
             // GetLostFuture and WaitAny must keep observing a completed future.
             self.complete_future(future);
-            if spontaneous {
-                callbacks.remove(&future.id)
-            } else {
-                None
-            }
+            spontaneous
         };
-        // No callback-map, future-registry, or device mutex guard survives here.
-        if let Some(callback) = spontaneous {
-            unsafe { callback.fire() };
+        if spontaneous {
+            let _ = self
+                .core
+                .future_registry()
+                .wait_any(&[core::FutureId::from_raw(future.id)]);
         }
     }
 
@@ -886,10 +901,10 @@ impl WGPUInstanceImpl {
                 _ => {}
             }
         }
-        drop(callbacks);
         for future_id in completed {
             self.complete_future(native::WGPUFuture { id: future_id });
         }
+        drop(callbacks);
     }
 
     fn poll_submission_callbacks(&self) {
@@ -962,11 +977,10 @@ impl WGPUInstanceImpl {
                 }
             }
         }
-        drop(callbacks);
-
         for future_id in completed {
             self.complete_future(native::WGPUFuture { id: future_id });
         }
+        drop(callbacks);
         for (device, error) in errors {
             device.dispatch_error(error.kind, error.message);
         }
@@ -974,54 +988,12 @@ impl WGPUInstanceImpl {
 
     fn process_callbacks(&self) -> usize {
         self.poll_submission_callbacks();
-        let ready = self.core.future_registry().process_events();
-        let mut callbacks = self
-            .pending_callbacks
-            .lock()
-            .expect("pending callback lock is not poisoned");
-        let callbacks_to_fire = ready
-            .into_iter()
-            .filter_map(|id| callbacks.remove(&id.get()))
-            .collect::<Vec<_>>();
-        drop(callbacks);
-
-        let count = callbacks_to_fire.len();
-        for callback in callbacks_to_fire {
-            unsafe {
-                callback.fire();
-            }
-        }
-        count
+        self.core.future_registry().process_events().len()
     }
 
-    fn wait_any(
-        &self,
-        future_ids: &[core::FutureId],
-        callbacks_to_fire: &mut Vec<PendingCallback>,
-    ) -> core::WaitAnyResult {
+    fn wait_any(&self, future_ids: &[core::FutureId]) -> core::WaitAnyResult {
         self.poll_submission_callbacks();
-        let result = self.core.future_registry().wait_any(future_ids);
-
-        let mut callbacks = self
-            .pending_callbacks
-            .lock()
-            .expect("pending callback lock is not poisoned");
-        callbacks_to_fire.clear();
-        callbacks_to_fire.extend(
-            result
-                .callbacks_to_fire
-                .iter()
-                .filter_map(|id| callbacks.remove(&id.get())),
-        );
-        drop(callbacks);
-
-        for callback in callbacks_to_fire.drain(..) {
-            unsafe {
-                callback.fire();
-            }
-        }
-
-        result
+        self.core.future_registry().wait_any(future_ids)
     }
 }
 
@@ -1111,7 +1083,7 @@ impl WGPUDeviceImpl {
         }
         drop(lost_future);
         let future = native::WGPUFuture { id: future_id };
-        if is_lost && newly_registered {
+        if newly_registered && !self.instance.cancel_if_released(future) && is_lost {
             self.instance.complete_device_lost(
                 future,
                 self.core
@@ -4034,7 +4006,7 @@ mod tests {
                         std::ptr::null_mut(),
                     );
                 }));
-                let future = borrow_handle(instance, "WGPUInstance").register_callback(
+                let future = clone_handle(instance, "WGPUInstance").register_callback(
                     PendingCallback::QueueWorkDone {
                         mode: native::WGPUCallbackMode_AllowProcessEvents,
                         callback: Some(dispatch_error),
@@ -9578,7 +9550,7 @@ mod tests {
             };
 
             wgpuAdapterGetFeatures(adapter, &mut features);
-            assert_eq!(features.featureCount, 26);
+            assert_eq!(features.featureCount, 27);
             let values = std::slice::from_raw_parts(features.features, features.featureCount);
             assert!(values.contains(&native::WGPUFeatureName_CoreFeaturesAndLimits));
             assert!(values.contains(&native::WGPUFeatureName_TextureCompressionBC));
@@ -9595,6 +9567,7 @@ mod tests {
             assert!(values.contains(&native::WGPUFeatureName_Subgroups));
             assert!(values.contains(&native::WGPUFeatureName_SubgroupSizeControl));
             assert!(values.contains(&native::WGPUFeatureName_ChromiumExperimentalSubgroupMatrix));
+            assert!(values.contains(&native::WGPUFeatureName_ImplicitDeviceSynchronization));
             assert!(values.contains(&native::WGPUFeatureName_DepthClipControl));
             assert!(values.contains(&native::WGPUFeatureName_Float32Blendable));
             assert!(values.contains(&native::WGPUFeatureName_DualSourceBlending));
@@ -10468,6 +10441,94 @@ mod tests {
     }
 
     #[test]
+    fn two_waiters_on_one_map_observe_callback_return_and_mapped_ranges() {
+        use std::sync::mpsc::{channel, Receiver, Sender};
+        use std::time::Duration;
+
+        struct Pause {
+            entered: Sender<native::WGPUMapAsyncStatus>,
+            resume: Receiver<()>,
+        }
+        unsafe extern "C" fn map_callback(
+            status: native::WGPUMapAsyncStatus,
+            _: native::WGPUStringView,
+            data: *mut c_void,
+            _: *mut c_void,
+        ) {
+            let pause = &*data.cast::<Pause>();
+            let _ = pause.entered.send(status);
+            let _ = pause.resume.recv_timeout(Duration::from_secs(5));
+        }
+        unsafe {
+            let instance = Arc::into_raw(WGPUInstanceImpl::from_core(
+                core::Instance::new_noop(),
+                true,
+                TIMED_WAIT_ANY_MAX_COUNT,
+                false,
+            ));
+            let adapter = request_noop_adapter(instance);
+            let device = request_noop_device(instance, adapter);
+            let buffer = wgpuDeviceCreateBuffer(
+                device,
+                &buffer_descriptor(native::WGPUBufferUsage_MapRead, 16),
+            );
+            let (entered, running) = channel();
+            let (release, resume) = channel();
+            let mut pause = Pause { entered, resume };
+            let future = wgpuBufferMapAsync(
+                buffer,
+                native::WGPUMapMode_Read,
+                0,
+                16,
+                native::WGPUBufferMapCallbackInfo {
+                    mode: native::WGPUCallbackMode_WaitAnyOnly,
+                    callback: Some(map_callback),
+                    userdata1: std::ptr::from_mut(&mut pause).cast(),
+                    ..std::mem::zeroed()
+                },
+            );
+            let instance_addr = instance as usize;
+            let buffer_addr = buffer as usize;
+            std::thread::scope(|scope| {
+                let first = scope.spawn(move || {
+                    let mut info = native::WGPUFutureWaitInfo {
+                        future,
+                        completed: 0,
+                    };
+                    assert_eq!(
+                        wgpuInstanceWaitAny(instance_addr as _, 1, &mut info, 0),
+                        native::WGPUWaitStatus_Success
+                    );
+                    assert_eq!(info.completed, 1);
+                    assert!(!wgpuBufferGetConstMappedRange(buffer_addr as _, 0, 8).is_null());
+                });
+                assert_eq!(
+                    running.recv_timeout(Duration::from_secs(5)).unwrap(),
+                    native::WGPUMapAsyncStatus_Success
+                );
+                let mut info = native::WGPUFutureWaitInfo {
+                    future,
+                    completed: 1,
+                };
+                let status = wgpuInstanceWaitAny(instance, 1, &mut info, 0);
+                release.send(()).unwrap();
+                assert_eq!(status, native::WGPUWaitStatus_TimedOut);
+                assert_eq!(info.completed, 0);
+                assert_eq!(
+                    wgpuInstanceWaitAny(instance, 1, &mut info, 1_000_000_000),
+                    native::WGPUWaitStatus_Success
+                );
+                assert_eq!(info.completed, 1);
+                assert!(!wgpuBufferGetConstMappedRange(buffer, 8, 8).is_null());
+                first.join().unwrap();
+            });
+            wgpuBufferUnmap(buffer);
+            wgpuBufferRelease(buffer);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
     fn submission_gate_and_timed_wait_any_hold_then_poll_until_completion() {
         unsafe {
             let (first_instance, first_adapter, first_device) = noop_chain();
@@ -10499,7 +10560,7 @@ mod tests {
                 userdata2: 0,
             };
             let future =
-                borrow_handle(instance, "WGPUInstance").register_submission_callback(callback);
+                clone_handle(instance, "WGPUInstance").register_submission_callback(callback);
             wgpuInstanceProcessEvents(instance);
             assert_eq!(state.fired, 0);
 
@@ -10557,7 +10618,7 @@ mod tests {
                 userdata1: (&mut blocked_state as *mut QueueWorkDoneState) as usize,
                 userdata2: 0,
             };
-            borrow_handle(instance, "WGPUInstance").register_submission_callback(blocked_callback);
+            clone_handle(instance, "WGPUInstance").register_submission_callback(blocked_callback);
 
             let desc = buffer_descriptor(native::WGPUBufferUsage_MapRead, 16);
             let buffer = wgpuDeviceCreateBuffer(device, &desc);

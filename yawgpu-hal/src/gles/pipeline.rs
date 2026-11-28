@@ -75,12 +75,6 @@ pub struct GlesComputePipeline {
     inner: Arc<GlesComputePipelineInner>,
 }
 
-// SAFETY: `GlesComputePipeline` owns only GL object names and uses the owning
-// device inner to serialize all GL access.
-unsafe impl Send for GlesComputePipeline {}
-// SAFETY: See the `Send` impl; shared access is synchronized by the device.
-unsafe impl Sync for GlesComputePipeline {}
-
 impl std::fmt::Debug for GlesComputePipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GlesComputePipeline")
@@ -193,12 +187,6 @@ impl Drop for GlesRenderPipelineInner {
 pub struct GlesRenderPipeline {
     inner: Arc<GlesRenderPipelineInner>,
 }
-
-// SAFETY: `GlesRenderPipeline` owns only GL object names and uses the owning
-// device inner to serialize all GL access.
-unsafe impl Send for GlesRenderPipeline {}
-// SAFETY: See the `Send` impl; shared access is synchronized by the device.
-unsafe impl Sync for GlesRenderPipeline {}
 
 impl std::fmt::Debug for GlesRenderPipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

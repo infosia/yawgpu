@@ -28,13 +28,6 @@ pub struct GlesSampler {
     inner: Arc<GlesSamplerInner>,
 }
 
-// SAFETY: `GlesSampler` accesses GL state only through `GlesDeviceInner`, whose
-// make-current lock serializes all GL commands.
-unsafe impl Send for GlesSampler {}
-// SAFETY: See the `Send` impl; shared operations are synchronized by the
-// owning device inner.
-unsafe impl Sync for GlesSampler {}
-
 impl std::fmt::Debug for GlesSampler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GlesSampler").finish()

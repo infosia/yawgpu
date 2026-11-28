@@ -42,6 +42,7 @@ pub(super) fn record_and_submit_copies(
     let result = (|| {
         // Serialize layout reads, command recording, submission and layout commit.
         let _queue_access = queue
+            .device
             .queue_access
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -356,6 +357,7 @@ pub(super) fn transition_swapchain_image_to_present(
     let fence = pending.in_flight_fence;
     let _queue_access = queue
         .inner
+        .device
         .queue_access
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);

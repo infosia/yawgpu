@@ -38,6 +38,15 @@ extern "C" {
 #endif
 
 /**
+ * Device and child object entry points may be called concurrently. Each
+ * command, pass, or render bundle encoder may be used by one thread at a time.
+ * Error scopes are pushed and popped per thread, and capture errors reported
+ * on that thread. Surface operations follow the window system's thread rules.
+ * Enabling this feature selects the same synchronization as the default.
+ */
+#define WGPUFeatureName_ImplicitDeviceSynchronization ((WGPUFeatureName)0x00050004u)
+
+/**
  * \defgroup SubgroupMatrix Subgroup Matrix
  * \brief Adapter configurations for Dawn's `chromium_experimental_subgroup_matrix`.
  *

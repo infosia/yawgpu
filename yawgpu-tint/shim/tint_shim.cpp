@@ -2017,7 +2017,8 @@ void yawgpu_tint_initialize(void) {
     // Tint's InternalCompilerError destructor is [[noreturn]]. This Dawn/Tint
     // revision exposes optional per-ICE callbacks, but no global setter, so the
     // shim cannot make ICEs catchable or install a process-wide capture hook.
-    tint::Initialize();
+    static std::once_flag initialized;
+    std::call_once(initialized, [] { tint::Initialize(); });
 }
 
 YawgpuTintProgram* yawgpu_tint_program_create(const char* wgsl,

@@ -421,9 +421,6 @@ impl fmt::Debug for VulkanSurface {
     }
 }
 
-unsafe impl Send for VulkanSurface {}
-unsafe impl Sync for VulkanSurface {}
-
 impl Drop for VulkanSurface {
     fn drop(&mut self) {
         self.wait_all_in_flight_frames();
@@ -674,6 +671,7 @@ impl VulkanSurface {
             let present_result = {
                 let _queue_access = queue
                     .inner
+                    .device
                     .queue_access
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -700,6 +698,7 @@ impl VulkanSurface {
                     .wait_dst_stage_mask(&wait_stages);
                 let _queue_access = queue
                     .inner
+                    .device
                     .queue_access
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -779,9 +778,13 @@ impl VulkanSurface {
             // Device idle retires submissions using all three semaphore arrays
             // and the fences, plus the transition commands whose pool is freed next.
             // Teardown must still proceed if the device has been lost.
-            wait_for_teardown_once(&swapchain.teardown_waited, || {
-                let _ = swapchain.device.device.device_wait_idle();
-            });
+            wait_for_teardown_once(
+                &swapchain.teardown_waited,
+                &swapchain.device.queue_access,
+                || {
+                    let _ = swapchain.device.device.device_wait_idle();
+                },
+            );
             for semaphore in self.image_acquired_semaphores.drain(..) {
                 swapchain.device.device.destroy_semaphore(semaphore, None);
             }
@@ -847,8 +850,11 @@ impl fmt::Debug for VulkanSwapchainInner {
 }
 
 /// Surface teardown and the final swapchain drop share one device-idle wait.
-fn wait_for_teardown_once(waited: &AtomicBool, wait: impl FnOnce()) {
+fn wait_for_teardown_once(waited: &AtomicBool, queue_access: &Mutex<()>, wait: impl FnOnce()) {
     if !waited.load(Ordering::Acquire) {
+        let _access = queue_access
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         wait();
         waited.store(true, Ordering::Release);
     }
@@ -859,7 +865,7 @@ impl Drop for VulkanSwapchainInner {
         // Guard the image views and swapchain even when outstanding texture
         // handles defer this drop beyond the surface's synchronization teardown.
         unsafe {
-            wait_for_teardown_once(&self.teardown_waited, || {
+            wait_for_teardown_once(&self.teardown_waited, &self.device.queue_access, || {
                 let _ = self.device.device.device_wait_idle();
             });
         }
@@ -1643,12 +1649,21 @@ mod tests {
     fn teardown_waits_only_once_including_direct_drop() {
         let waited = AtomicBool::new(false);
         let mut count = 0;
-        wait_for_teardown_once(&waited, || count += 1);
-        wait_for_teardown_once(&waited, || count += 1);
+        let queue_access = Mutex::new(());
+        wait_for_teardown_once(&waited, &queue_access, || {
+            assert!(queue_access.try_lock().is_err());
+            count += 1;
+        });
+        let guard = queue_access.lock().unwrap();
+        wait_for_teardown_once(&waited, &queue_access, || count += 1);
+        drop(guard);
         assert_eq!(count, 1);
         assert!(waited.load(Ordering::Acquire));
         let direct_drop = AtomicBool::new(false);
-        wait_for_teardown_once(&direct_drop, || count += 1);
+        wait_for_teardown_once(&direct_drop, &queue_access, || {
+            assert!(queue_access.try_lock().is_err());
+            count += 1;
+        });
         assert_eq!(count, 2);
     }
 
@@ -2052,7 +2067,7 @@ mod tests {
             let signal = vk::SubmitInfo::default().signal_semaphores(&pending_semaphores);
             unsafe { raw.reset_fences(&[fence]) }.expect("reset acquire fence");
             {
-                let _queue_access = queue.inner.queue_access.lock().unwrap();
+                let _queue_access = queue.inner.device.queue_access.lock().unwrap();
                 unsafe { raw.queue_submit(queue.inner.queue, &[signal], vk::Fence::null()) }
                     .expect("signal the semaphore that present would wait on");
             }
@@ -2092,7 +2107,7 @@ mod tests {
                 .wait_semaphores(&pending_semaphores)
                 .wait_dst_stage_mask(&wait_stages);
             {
-                let _queue_access = queue.inner.queue_access.lock().unwrap();
+                let _queue_access = queue.inner.device.queue_access.lock().unwrap();
                 unsafe { raw.queue_submit(queue.inner.queue, &[signal, wait], fence) }
                     .expect("signal and wait on the recovered semaphore again");
             }

@@ -47,8 +47,10 @@ impl Default for FutureRegistryInner {
 pub(crate) enum FutureState {
     /// Pending variant.
     Pending,
-    /// Complete variant.
-    Complete,
+    /// The operation is ready for callback delivery.
+    Ready,
+    /// A callback is executing on this thread.
+    Running(std::thread::ThreadId),
 }
 
 /// Enumerates future callback mode values.
@@ -83,16 +85,31 @@ pub struct WaitAnyResult {
     pub status: WaitAnyStatus,
     /// Completed.
     pub completed: Vec<FutureId>,
-    /// Callbacks to fire.
+    /// Ready IDs registered for external delivery with `register`.
     pub callbacks_to_fire: Vec<FutureId>,
 }
 
 /// Stores entry metadata.
-#[derive(Debug)]
 pub(crate) struct FutureEntry {
-    pub(crate) mode: FutureCallbackMode,
-    pub(crate) state: FutureState,
-    pub(crate) callback_fired: bool,
+    mode: FutureCallbackMode,
+    state: FutureState,
+    callback: Option<Box<dyn FnOnce(FutureId) + Send>>,
+}
+
+impl std::fmt::Debug for FutureEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FutureEntry")
+            .field("mode", &self.mode)
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
+enum Poll {
+    Pending,
+    Complete,
+    Delivered,
+    ExternalCallback,
 }
 
 impl FutureRegistry {
@@ -105,6 +122,24 @@ impl FutureRegistry {
     /// Registers a new pending future with the given callback mode and returns its id.
     #[must_use]
     pub fn register(&self, mode: FutureCallbackMode) -> FutureId {
+        self.insert(mode, None)
+    }
+
+    /// Registers a pending future whose completion includes the return of its callback.
+    #[must_use]
+    pub fn register_with_callback(
+        &self,
+        mode: FutureCallbackMode,
+        callback: impl FnOnce(FutureId) + Send + 'static,
+    ) -> FutureId {
+        self.insert(mode, Some(Box::new(callback)))
+    }
+
+    fn insert(
+        &self,
+        mode: FutureCallbackMode,
+        callback: Option<Box<dyn FnOnce(FutureId) + Send>>,
+    ) -> FutureId {
         let mut inner = self.inner.lock();
         let id = FutureId(inner.next_id);
         inner.next_id = inner.next_id.saturating_add(1);
@@ -113,7 +148,7 @@ impl FutureRegistry {
             FutureEntry {
                 mode,
                 state: FutureState::Pending,
-                callback_fired: false,
+                callback,
             },
         );
         id
@@ -122,84 +157,80 @@ impl FutureRegistry {
     /// Marks the future with the given id as complete.
     pub fn complete(&self, id: FutureId) {
         if let Some(entry) = self.inner.lock().futures.get_mut(&id) {
-            entry.state = FutureState::Complete;
-        }
-    }
-
-    /// Returns process events.
-    #[must_use]
-    pub fn process_events(&self) -> Vec<FutureId> {
-        let mut inner = self.inner.lock();
-        let fired = inner
-            .futures
-            .iter_mut()
-            .filter_map(|(id, entry)| {
-                let can_fire = entry.state == FutureState::Complete
-                    && !entry.callback_fired
-                    && matches!(
-                        entry.mode,
-                        FutureCallbackMode::AllowProcessEvents
-                            | FutureCallbackMode::AllowSpontaneous
-                    );
-                if can_fire {
-                    entry.callback_fired = true;
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        for id in &fired {
-            inner.futures.remove(id);
-        }
-        fired
-    }
-
-    /// Returns wait any.
-    #[must_use]
-    pub fn wait_any(&self, ids: &[FutureId]) -> WaitAnyResult {
-        if ids.is_empty() {
-            return WaitAnyResult {
-                status: WaitAnyStatus::TimedOut,
-                completed: Vec::new(),
-                callbacks_to_fire: Vec::new(),
-            };
-        }
-
-        let mut inner = self.inner.lock();
-        let mut completed = Vec::new();
-        let mut callbacks_to_fire = Vec::new();
-        let mut completed_present = Vec::new();
-
-        for id in ids {
-            let Some(entry) = inner.futures.get_mut(id) else {
-                completed.push(*id);
-                continue;
-            };
-            if entry.state == FutureState::Complete {
-                completed.push(*id);
-                if !entry.callback_fired {
-                    entry.callback_fired = true;
-                    callbacks_to_fire.push(*id);
-                }
-                completed_present.push(*id);
+            if entry.state == FutureState::Pending {
+                entry.state = FutureState::Ready;
             }
         }
-        for id in completed_present {
-            inner.futures.remove(&id);
+    }
+
+    /// Delivers ready event-processing callbacks and returns the IDs claimed by this call.
+    #[must_use]
+    pub fn process_events(&self) -> Vec<FutureId> {
+        let mut ready = self
+            .inner
+            .lock()
+            .futures
+            .iter()
+            .filter_map(|(&id, entry)| {
+                (entry.state == FutureState::Ready && entry.mode != FutureCallbackMode::WaitAnyOnly)
+                    .then_some(id)
+            })
+            .collect::<Vec<_>>();
+        ready.retain(|&id| matches!(self.poll(id), Poll::Delivered | Poll::ExternalCallback));
+        ready
+    }
+
+    /// Polls the requested futures. Registered callbacks execute with no registry lock held.
+    #[must_use]
+    pub fn wait_any(&self, ids: &[FutureId]) -> WaitAnyResult {
+        let mut completed = Vec::new();
+        let mut callbacks_to_fire = Vec::new();
+        for &id in ids {
+            match self.poll(id) {
+                Poll::Pending => continue,
+                Poll::ExternalCallback => callbacks_to_fire.push(id),
+                Poll::Delivered | Poll::Complete => {}
+            }
+            completed.push(id);
         }
-
-        let status = if completed.is_empty() {
-            WaitAnyStatus::TimedOut
-        } else {
-            WaitAnyStatus::Success
-        };
-
         WaitAnyResult {
-            status,
+            status: if completed.is_empty() {
+                WaitAnyStatus::TimedOut
+            } else {
+                WaitAnyStatus::Success
+            },
             completed,
             callbacks_to_fire,
         }
+    }
+
+    fn poll(&self, id: FutureId) -> Poll {
+        let mut inner = self.inner.lock();
+        let Some(entry) = inner.futures.get_mut(&id) else {
+            return Poll::Complete;
+        };
+        let owner = std::thread::current().id();
+        match entry.state {
+            FutureState::Running(thread) if thread == owner => return Poll::Complete,
+            FutureState::Pending | FutureState::Running(_) => return Poll::Pending,
+            FutureState::Ready => {}
+        }
+        let Some(callback) = entry.callback.take() else {
+            inner.futures.remove(&id);
+            return Poll::ExternalCallback;
+        };
+        entry.state = FutureState::Running(owner);
+        drop(inner);
+        // Retire the entry when the callback leaves the stack, including a Rust unwind.
+        struct Delivery<'a>(&'a FutureRegistry, FutureId);
+        impl Drop for Delivery<'_> {
+            fn drop(&mut self) {
+                self.0.inner.lock().futures.remove(&self.1);
+            }
+        }
+        let _delivery = Delivery(self, id);
+        callback(id);
+        Poll::Delivered
     }
 }
 
@@ -288,6 +319,54 @@ mod tests {
         assert_eq!(result.completed, vec![id]);
         assert!(result.callbacks_to_fire.is_empty());
         assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn waiters_observe_callback_return_and_reentrant_waits_can_deliver_other_futures() {
+        for process_events in [false, true] {
+            let registry = std::sync::Arc::new(FutureRegistry::new());
+            let (entered, running) = std::sync::mpsc::channel();
+            let (release, resume) = std::sync::mpsc::channel();
+            let nested = std::sync::Arc::clone(&registry);
+            let (delivered, delivery) = std::sync::mpsc::channel();
+            let second =
+                registry.register_with_callback(FutureCallbackMode::WaitAnyOnly, move |id| {
+                    delivered.send(id).unwrap();
+                });
+            let first = registry.register_with_callback(
+                FutureCallbackMode::AllowProcessEvents,
+                move |id| {
+                    let result = nested.wait_any(&[id, second]);
+                    assert_eq!(result.completed, [id, second]);
+                    assert!(result.callbacks_to_fire.is_empty());
+                    assert_eq!(delivery.try_recv().unwrap(), second);
+                    entered.send(()).unwrap();
+                    resume.recv().unwrap();
+                },
+            );
+            registry.complete(first);
+            registry.complete(second);
+            std::thread::scope(|scope| {
+                let worker = scope.spawn(|| {
+                    if process_events {
+                        assert_eq!(registry.process_events(), [first]);
+                    } else {
+                        assert_eq!(
+                            registry.wait_any(&[first, second]).completed,
+                            [first, second]
+                        );
+                    }
+                });
+                running.recv().unwrap();
+                registry.complete(first);
+                let result = registry.wait_any(&[first]);
+                release.send(()).unwrap();
+                assert_eq!(result.status, WaitAnyStatus::TimedOut);
+                assert!(result.completed.is_empty());
+                worker.join().unwrap();
+            });
+            assert_eq!(registry.wait_any(&[first]).completed, [first]);
+        }
     }
 
     #[test]

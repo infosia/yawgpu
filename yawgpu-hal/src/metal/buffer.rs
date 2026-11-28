@@ -8,7 +8,9 @@ pub struct MetalBuffer {
     pub(super) size: u64,
 }
 
+// SAFETY: The retained MTLBuffer owns the mapped address and may be released on any thread.
 unsafe impl Send for MetalBuffer {}
+// SAFETY: Core serializes host map access and staging writes, and waits for GPU use before mapping.
 unsafe impl Sync for MetalBuffer {}
 
 impl std::fmt::Debug for MetalBuffer {

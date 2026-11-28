@@ -30,13 +30,6 @@ pub struct GlesBuffer {
     inner: Arc<GlesBufferInner>,
 }
 
-// SAFETY: `GlesBuffer` accesses GL state only through `GlesDeviceInner`, whose
-// make-current lock serializes all GL commands.
-unsafe impl Send for GlesBuffer {}
-// SAFETY: See the `Send` impl; shared operations are synchronized by the
-// owning device inner.
-unsafe impl Sync for GlesBuffer {}
-
 impl std::fmt::Debug for GlesBuffer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GlesBuffer")

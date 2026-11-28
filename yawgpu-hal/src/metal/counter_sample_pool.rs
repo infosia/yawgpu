@@ -14,6 +14,7 @@ struct CounterSampleBuffer(Retained<SampleBuffer>);
 // SAFETY: Metal counter sample buffers support thread-safe retain/release and
 // command encoding. The private sample memory is accessed only by GPU commands.
 unsafe impl Send for CounterSampleBuffer {}
+// SAFETY: The pool allocates disjoint sample slots under its mutex.
 unsafe impl Sync for CounterSampleBuffer {}
 
 /// Owns the counter sample buffers for one Metal device.

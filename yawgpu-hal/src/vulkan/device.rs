@@ -12,6 +12,7 @@ pub(super) struct VulkanDeviceInner {
     pub(super) reconvergence_features: ReconvergenceFeatures,
     pub(super) _instance: Arc<VulkanInstanceInner>,
     pub(super) device: ash::Device,
+    pub(super) queue_access: Mutex<()>,
     pub(super) physical_device: vk::PhysicalDevice,
     pub(super) memory_properties: vk::PhysicalDeviceMemoryProperties,
     pub(super) queue_family_index: u32,

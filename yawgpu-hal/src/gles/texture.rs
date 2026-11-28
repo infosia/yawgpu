@@ -42,13 +42,6 @@ pub struct GlesTexture {
     inner: Arc<GlesTextureInner>,
 }
 
-// SAFETY: `GlesTexture` accesses GL state only through `GlesDeviceInner`, whose
-// make-current lock serializes all GL commands.
-unsafe impl Send for GlesTexture {}
-// SAFETY: See the `Send` impl; shared operations are synchronized by the
-// owning device inner.
-unsafe impl Sync for GlesTexture {}
-
 impl std::fmt::Debug for GlesTexture {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GlesTexture")

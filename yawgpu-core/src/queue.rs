@@ -66,6 +66,8 @@ pub(crate) struct QueueInner {
     #[cfg(test)]
     wait_idle_test_hook: Mutex<Option<SubmitTestHook>>,
     #[cfg(test)]
+    write_test_hook: Mutex<Option<SubmitTestHook>>,
+    #[cfg(test)]
     fail_next_pending_submit: Mutex<bool>,
 }
 
@@ -381,6 +383,8 @@ impl Queue {
                 #[cfg(test)]
                 wait_idle_test_hook: Mutex::new(None),
                 #[cfg(test)]
+                write_test_hook: Mutex::new(None),
+                #[cfg(test)]
                 fail_next_pending_submit: Mutex::new(false),
             }),
         }
@@ -501,11 +505,12 @@ impl Queue {
             return None;
         }
 
-        // No HAL handle means an error buffer or destruction after validation.
+        #[cfg(test)]
+        if let Some(hook) = self.inner.write_test_hook.lock().take() {
+            hook.pause("validated");
+        }
         let Some(destination) = buffer.hal() else {
-            return Some(DeviceError::internal(
-                "queue write buffer destination has no HAL buffer",
-            ));
+            return Some(DeviceError::validation(DESTROYED_WRITE_BUFFER));
         };
 
         self.recycle_completed_staging();
@@ -583,7 +588,13 @@ impl Queue {
         if extent_is_empty(write_size) {
             return None;
         }
-        let destination_texture = texture;
+        #[cfg(test)]
+        if let Some(hook) = self.inner.write_test_hook.lock().take() {
+            hook.pause("validated");
+        }
+        let Some(destination) = texture.hal() else {
+            return Some(DeviceError::validation(INVALID_WRITE_TEXTURE));
+        };
 
         // Determine if the caller's layout needs repacking into a tightly-packed
         // staging buffer. Vulkan's bufferRowLength is expressed in texels, so a
@@ -668,12 +679,6 @@ impl Queue {
                 }
             };
             let format = hal_texture_format(texture.format());
-            // No HAL handle means an error texture or destruction after validation.
-            let Some(texture) = texture.hal() else {
-                return Some(DeviceError::internal(
-                    "queue write texture has no HAL texture",
-                ));
-            };
 
             self.recycle_completed_staging();
             let mut pending = self.inner.pending_writes.lock();
@@ -689,7 +694,7 @@ impl Queue {
                     bytes_per_row: packed_bytes_per_row,
                     rows_per_image: packed_rows_per_image,
                 },
-                texture,
+                texture: destination,
                 format,
                 aspect: hal_texture_aspect(aspect),
                 mip_level,
@@ -701,7 +706,7 @@ impl Queue {
             // suppress clears until the batch is submitted (Block 153 R1).
             append_texture_write_init_clears(
                 &mut copies,
-                destination_texture,
+                texture,
                 mip_level,
                 origin,
                 write_size,
@@ -721,12 +726,6 @@ impl Queue {
             ));
         };
         let format = hal_texture_format(texture.format());
-        // No HAL handle means an error texture or destruction after validation.
-        let Some(texture) = texture.hal() else {
-            return Some(DeviceError::internal(
-                "queue write texture has no HAL texture",
-            ));
-        };
 
         self.recycle_completed_staging();
         let mut pending = self.inner.pending_writes.lock();
@@ -746,7 +745,7 @@ impl Queue {
         let copy = HalCopy::BufferToTexture(HalBufferTextureCopy {
             buffer: staging,
             buffer_layout,
-            texture,
+            texture: destination,
             format,
             aspect: hal_texture_aspect(aspect),
             mip_level,
@@ -758,7 +757,7 @@ impl Queue {
         // suppress clears until the batch is submitted (Block 153 R1).
         append_texture_write_init_clears(
             &mut copies,
-            destination_texture,
+            texture,
             mip_level,
             origin,
             write_size,
@@ -7655,6 +7654,87 @@ fn fs() -> @location(0) vec4<f32> {
                 matches!(recorded.as_slice(), [HalCopy::BufferClear(clear)] if clear.buffer.size() == 16)
             );
             assert!(weak.upgrade().is_none());
+        }
+    }
+
+    #[test]
+    fn destroy_after_queue_write_validation_matches_write_after_destroy() {
+        fn check(
+            queue: &Queue,
+            write: impl Fn() -> Option<DeviceError> + Sync,
+            destroy: impl FnOnce(),
+        ) {
+            let (reached, validated) = std::sync::mpsc::channel();
+            let (proceed, resume) = std::sync::mpsc::channel();
+            *queue.inner.write_test_hook.lock() = Some(SubmitTestHook {
+                reached,
+                resume,
+                pause_after_validation: false,
+            });
+            let raced = std::thread::scope(|scope| {
+                let worker = scope.spawn(&write);
+                assert_eq!(validated.recv().unwrap(), "validated");
+                destroy();
+                proceed.send(()).unwrap();
+                worker.join().unwrap().unwrap()
+            });
+            assert_eq!(raced.kind, ErrorKind::Validation);
+            assert_eq!(Some(raced), write());
+        }
+        let device = noop_device();
+        let queue = device.queue();
+        let buffer = device.create_buffer(BufferDescriptor {
+            usage: BufferUsage::COPY_DST,
+            size: 4,
+            mapped_at_creation: false,
+        });
+        check(
+            &queue,
+            || {
+                queue.write_buffer(QueueBufferWrite {
+                    device: device.hal(),
+                    buffer: &buffer,
+                    offset: 0,
+                    data: &[0; 4],
+                })
+            },
+            || buffer.destroy(),
+        );
+        let size = Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        };
+        for stride in [4, 5] {
+            let texture = device.create_texture(TextureDescriptor {
+                usage: TextureUsage::COPY_DST,
+                dimension: TextureDimension::D2,
+                size,
+                format: rgba8_unorm(),
+                mip_level_count: 1,
+                sample_count: 1,
+                view_formats: vec![],
+            });
+            check(
+                &queue,
+                || {
+                    queue.write_texture(QueueTextureWrite {
+                        device: device.hal(),
+                        texture: &texture,
+                        mip_level: 0,
+                        origin: Origin3d { x: 0, y: 0, z: 0 },
+                        write_size: size,
+                        aspect: TextureAspect::All,
+                        layout: TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(stride),
+                            rows_per_image: None,
+                        },
+                        data: &[0; 4],
+                    })
+                },
+                || texture.destroy(),
+            );
         }
     }
 

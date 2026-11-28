@@ -90,7 +90,9 @@ pub(super) struct VulkanBufferInner {
     pub(super) mapped: *mut u8,
 }
 
+// SAFETY: The mapped allocation stays at a fixed address until its last Arc is dropped.
 unsafe impl Send for VulkanBufferInner {}
+// SAFETY: Core serializes host map access and staging writes, and waits for GPU use before mapping.
 unsafe impl Sync for VulkanBufferInner {}
 
 impl Drop for VulkanBufferInner {

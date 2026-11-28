@@ -91,12 +91,6 @@ pub struct GlesSurface {
     inner: Arc<GlesSurfaceInner>,
 }
 
-// SAFETY: EGL/GL operations are synchronized through the configured device's
-// make-current mutex, and mutable surface state is protected by a mutex.
-unsafe impl Send for GlesSurface {}
-// SAFETY: See the `Send` impl; shared access is synchronized.
-unsafe impl Sync for GlesSurface {}
-
 impl std::fmt::Debug for GlesSurface {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let configured = self.inner.state.lock().configured.is_some();

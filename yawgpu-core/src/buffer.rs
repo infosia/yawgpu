@@ -8,6 +8,9 @@ use yawgpu_hal::HalBuffer;
 use crate::error::*;
 use crate::limits::*;
 
+/// Queue write validation message for a destroyed buffer.
+pub(crate) const DESTROYED_WRITE_BUFFER: &str = "cannot write to a destroyed buffer";
+
 /// Describes buffer descriptor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BufferDescriptor {
@@ -816,7 +819,7 @@ impl Buffer {
             size,
             BufferWriteOrClearValidation {
                 error_buffer: "cannot write to an error buffer",
-                destroyed_buffer: Some("cannot write to a destroyed buffer"),
+                destroyed_buffer: Some(DESTROYED_WRITE_BUFFER),
                 mapped_buffer: Some("cannot write to a mapped buffer"),
                 missing_copy_dst: "queue write requires CopyDst usage",
                 size_mode: BufferWriteSizeMode::Exact,

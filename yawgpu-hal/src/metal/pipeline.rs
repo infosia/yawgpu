@@ -49,9 +49,6 @@ pub struct MetalComputePipeline {
     pub(super) immediates: Option<HalMslImmediates>,
 }
 
-unsafe impl Send for MetalComputePipeline {}
-unsafe impl Sync for MetalComputePipeline {}
-
 impl std::fmt::Debug for MetalComputePipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MetalComputePipeline")
@@ -93,9 +90,6 @@ pub struct MetalRenderPipeline {
     /// draw so that Tint's vertex-pulling OOB guards compare against real values.
     pub(super) vertex_buffer_metal_indices: Vec<u32>,
 }
-
-unsafe impl Send for MetalRenderPipeline {}
-unsafe impl Sync for MetalRenderPipeline {}
 
 impl std::fmt::Debug for MetalRenderPipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

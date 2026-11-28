@@ -23,6 +23,9 @@ pub fn map_feature(value: native::WGPUFeatureName) -> core::Feature {
         native::WGPUFeatureName_ShaderF16 => core::Feature::ShaderF16,
         native::WGPUFeatureName_Subgroups => core::Feature::Subgroups,
         native::WGPUFeatureName_SubgroupSizeControl => core::Feature::SubgroupSizeControl,
+        native::WGPUFeatureName_ImplicitDeviceSynchronization => {
+            core::Feature::ImplicitDeviceSynchronization
+        }
         native::WGPUFeatureName_ChromiumExperimentalSubgroupMatrix => {
             core::Feature::ChromiumExperimentalSubgroupMatrix
         }
@@ -68,6 +71,9 @@ pub fn map_feature_to_native(value: core::Feature) -> native::WGPUFeatureName {
         core::Feature::ShaderF16 => native::WGPUFeatureName_ShaderF16,
         core::Feature::Subgroups => native::WGPUFeatureName_Subgroups,
         core::Feature::SubgroupSizeControl => native::WGPUFeatureName_SubgroupSizeControl,
+        core::Feature::ImplicitDeviceSynchronization => {
+            native::WGPUFeatureName_ImplicitDeviceSynchronization
+        }
         core::Feature::ChromiumExperimentalSubgroupMatrix => {
             native::WGPUFeatureName_ChromiumExperimentalSubgroupMatrix
         }
@@ -126,6 +132,15 @@ mod tests {
             map_feature_to_native(core::Feature::Subgroups),
             native::WGPUFeatureName_Subgroups
         );
+    }
+
+    #[test]
+    fn implicit_device_synchronization_round_trip() {
+        let raw = native::WGPUFeatureName_ImplicitDeviceSynchronization;
+        let feature = core::Feature::ImplicitDeviceSynchronization;
+        assert_eq!(raw, 0x00050004);
+        assert_eq!(map_feature(raw), feature);
+        assert_eq!(map_feature_to_native(feature), raw);
     }
 
     #[test]

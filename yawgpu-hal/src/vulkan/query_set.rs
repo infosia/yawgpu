@@ -98,9 +98,6 @@ impl fmt::Debug for VulkanQuerySetInner {
     }
 }
 
-unsafe impl Send for VulkanQuerySetInner {}
-unsafe impl Sync for VulkanQuerySetInner {}
-
 impl Drop for VulkanQuerySetInner {
     fn drop(&mut self) {
         unsafe {

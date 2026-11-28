@@ -11,7 +11,6 @@ pub struct VulkanQueue {
 pub(super) struct VulkanQueueInner {
     pub(super) device: Arc<VulkanDeviceInner>,
     pub(super) queue: vk::Queue,
-    pub(super) queue_access: Mutex<()>,
     pub(super) retire: Mutex<SubmissionRetireQueue>,
     pub(super) recycler: Arc<Mutex<SubmitRecycler>>,
     pub(super) submissions: Arc<Mutex<SubmissionTracker>>,
@@ -229,6 +228,7 @@ impl VulkanQueue {
     pub fn wait_idle(&self) -> Result<(), HalError> {
         let _queue_access = self
             .inner
+            .device
             .queue_access
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -596,7 +596,7 @@ mod tests {
             registered = false;
             while std::time::Instant::now() < deadline {
                 registered = queue.inner.submissions.lock().unwrap().last_issued.0 >= target;
-                access_released = queue.inner.queue_access.try_lock().is_ok();
+                access_released = queue.inner.device.queue_access.try_lock().is_ok();
                 if registered && access_released {
                     break;
                 }

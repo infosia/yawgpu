@@ -15,7 +15,9 @@ pub struct MetalTexture {
     pub(super) bytes_per_pixel: u32,
 }
 
+// SAFETY: Metal textures and their device support retain/release on any thread.
 unsafe impl Send for MetalTexture {}
+// SAFETY: The descriptor fields are immutable and the queue orders GPU access to the texture.
 unsafe impl Sync for MetalTexture {}
 
 impl std::fmt::Debug for MetalTexture {
@@ -62,9 +64,6 @@ impl MetalTexture {
 pub struct MetalSampler {
     pub(super) _inner: Retained<ProtocolObject<dyn MTLSamplerState>>,
 }
-
-unsafe impl Send for MetalSampler {}
-unsafe impl Sync for MetalSampler {}
 
 impl std::fmt::Debug for MetalSampler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

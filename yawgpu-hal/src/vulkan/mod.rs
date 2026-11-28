@@ -1487,6 +1487,7 @@ impl VulkanAdapter {
         shader_workarounds.disable_storage_subgroup_matrix_clamping = cooperative_matrix
             .is_some_and(|features| features.cooperative_matrix_robust_buffer_access == vk::TRUE);
         let inner = Arc::new(VulkanDeviceInner {
+            queue_access: Mutex::new(()),
             #[cfg(test)]
             spirv_1_4_extensions_enabled: [
                 vk::KHR_SPIRV_1_4_NAME,
@@ -1526,7 +1527,6 @@ impl VulkanAdapter {
                 inner: Arc::new(VulkanQueueInner {
                     device: inner,
                     queue,
-                    queue_access: Mutex::new(()),
                     retire: Mutex::new(SubmissionRetireQueue::default()),
                     recycler: Arc::new(Mutex::new(SubmitRecycler::default())),
                     submissions: Arc::new(Mutex::new(SubmissionTracker::new())),

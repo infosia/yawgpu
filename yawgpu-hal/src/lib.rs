@@ -542,7 +542,20 @@ pub enum HalAdapter {
     Gles(gles::GlesAdapter),
 }
 
+fn implicit_device_synchronization(backend: HalBackend) -> bool {
+    matches!(
+        backend,
+        HalBackend::Noop | HalBackend::Metal | HalBackend::Vulkan
+    )
+}
+
 impl HalAdapter {
+    /// Whether device and child object calls support implicit synchronization.
+    #[must_use]
+    pub fn supports_implicit_device_synchronization(&self) -> bool {
+        implicit_device_synchronization(self.backend())
+    }
+
     /// Returns the adapter's hardware and driver identity.
     #[must_use]
     pub fn info(&self) -> HalAdapterInfo {
@@ -1622,6 +1635,30 @@ pub enum HalRenderPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_hal_handles_are_send_and_sync() {
+        fn check<T: Send + Sync>() {}
+        check::<HalAdapter>();
+        check::<HalDevice>();
+        check::<HalQueue>();
+        check::<HalBuffer>();
+        check::<HalTexture>();
+        check::<HalSurface>();
+        check::<HalQuerySet>();
+        check::<HalSampler>();
+        check::<HalComputePipeline>();
+        check::<HalRenderPipeline>();
+    }
+
+    #[test]
+    fn implicit_device_synchronization_depends_on_backend() {
+        let adapter = HalInstance::new_noop().enumerate_adapters().remove(0);
+        assert!(adapter.supports_implicit_device_synchronization());
+        assert!(implicit_device_synchronization(HalBackend::Metal));
+        assert!(implicit_device_synchronization(HalBackend::Vulkan));
+        assert!(!implicit_device_synchronization(HalBackend::Gles));
+    }
 
     #[test]
     fn hal_adapter_info_noop_is_cpu_with_empty_identity() {

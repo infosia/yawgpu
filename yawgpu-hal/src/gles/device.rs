@@ -452,13 +452,6 @@ pub struct GlesDevice {
     queue: GlesQueue,
 }
 
-// SAFETY: `GlesDevice` delegates all GL/EGL context access to
-// `GlesDeviceInner::with_current_context`, which serializes access.
-unsafe impl Send for GlesDevice {}
-// SAFETY: See the `Send` impl; shared operations are synchronized by the inner
-// make-current lock.
-unsafe impl Sync for GlesDevice {}
-
 impl std::fmt::Debug for GlesDevice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GlesDevice")

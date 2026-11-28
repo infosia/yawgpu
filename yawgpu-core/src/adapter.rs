@@ -96,6 +96,9 @@ impl Adapter {
         add_shader_float16_feature(&mut features, &self.inner.hal);
         add_subgroups_feature(&mut features, &self.inner.hal);
         add_subgroup_size_control_feature(&mut features, &self.inner.hal);
+        if self.inner.hal.supports_implicit_device_synchronization() {
+            features.insert(Feature::ImplicitDeviceSynchronization);
+        }
         if !self.inner.hal.subgroup_matrix_configs().is_empty() {
             features.insert(Feature::ChromiumExperimentalSubgroupMatrix);
         }
@@ -251,6 +254,8 @@ pub enum Feature {
     SubgroupSizeControl,
     /// Experimental WGSL subgroup matrix types and operations.
     ChromiumExperimentalSubgroupMatrix,
+    /// Concurrent device and child object access, subject to encoder and surface rules.
+    ImplicitDeviceSynchronization,
     /// Depth clip control support.
     DepthClipControl,
     /// Float32 color target blend support.
@@ -620,6 +625,15 @@ mod tests {
         assert!(features.contains(&Feature::Subgroups));
         assert_eq!(adapter.subgroup_min_size(), 4);
         assert_eq!(adapter.subgroup_max_size(), 4);
+    }
+
+    #[test]
+    fn noop_device_can_require_implicit_device_synchronization() {
+        let adapter = noop_adapter();
+        let feature = Feature::ImplicitDeviceSynchronization;
+        assert!(adapter.has_feature(feature));
+        let device = adapter.create_device(None, &[feature], "", "").unwrap();
+        assert!(device.features().contains(&feature));
     }
 
     #[test]

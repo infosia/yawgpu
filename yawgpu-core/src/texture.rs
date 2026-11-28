@@ -13,6 +13,10 @@ use crate::format::*;
 use crate::limits::*;
 use crate::texture_view::*;
 
+/// Queue write validation message for an invalid or destroyed texture.
+pub(crate) const INVALID_WRITE_TEXTURE: &str =
+    "queue texture write destination must be a valid live texture";
+
 /// Enumerates texture usage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextureUsage(u64);
@@ -906,7 +910,7 @@ pub(crate) fn validate_queue_write_texture(
         return Err("queue texture write destination usage must include CopyDst".to_owned());
     }
     if texture.is_error() || texture.is_destroyed() {
-        return Err("queue texture write destination must be a valid live texture".to_owned());
+        return Err(INVALID_WRITE_TEXTURE.to_owned());
     }
     if texture.sample_count() != 1 {
         return Err("queue texture write destination sampleCount must be one".to_owned());

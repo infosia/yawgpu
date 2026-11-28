@@ -2092,7 +2092,7 @@ mod real {
 
     /// Initializes the Tint runtime.
     pub fn initialize() {
-        // SAFETY: the shim guards Tint initialization.
+        // SAFETY: the shim serializes process-wide initialization with std::call_once.
         unsafe { yawgpu_tint_initialize() }
     }
 
@@ -3049,6 +3049,32 @@ pub use stub::initialize;
 
 #[cfg(all(test, have_tint))]
 mod tests {
+    #[test]
+    fn initialize_supports_concurrent_parsers() {
+        let start = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    start.wait();
+                    initialize();
+                    assert!(Program::parse(
+                        "@compute @workgroup_size(1) fn main() {}",
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                        &[]
+                    )
+                    .is_ok());
+                });
+            }
+        });
+    }
+
     // Each operation stays observable through storage so the writer must lower it.
     const WORKAROUNDS_WGSL: &str = r#"
 @group(0) @binding(0) var<storage, read_write> result: array<u32, 4>;

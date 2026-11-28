@@ -52,6 +52,10 @@ objc2-metal = { workspace = true }
 # Hidden Win32 window for the real-Vulkan surface e2e test (HWND surface source).
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader"] }
 
+[[test]]
+name = "concurrent_device"
+path = "tests/concurrent_device.rs"
+
 # Backend- and feature-only integration test targets. Automatic test discovery
 # stays on; these explicit entries only add `required-features`, so a
 # configuration without the feature neither builds nor launches an empty
@@ -308,6 +312,11 @@ path = "tests/e2e_metal_stencil.rs"
 required-features = ["metal"]
 
 [[test]]
+name = "e2e_metal_concurrent_device"
+path = "tests/e2e_metal_concurrent_device.rs"
+required-features = ["metal"]
+
+[[test]]
 name = "e2e_metal_subgroup_matrix"
 path = "tests/e2e_metal_subgroup_matrix.rs"
 required-features = ["metal"]
@@ -525,6 +534,11 @@ required-features = ["vulkan", "shader-passthrough"]
 [[test]]
 name = "e2e_vulkan_shader_workarounds"
 path = "tests/e2e_vulkan_shader_workarounds.rs"
+required-features = ["vulkan"]
+
+[[test]]
+name = "e2e_vulkan_concurrent_device"
+path = "tests/e2e_vulkan_concurrent_device.rs"
 required-features = ["vulkan"]
 
 [[test]]
