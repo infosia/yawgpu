@@ -120,7 +120,9 @@ HostDevice CreateHostDevice(uint32_t backend) {
 // a dynamic dimension is taken as 1.
 std::vector<std::vector<float>> RunModel(Ort::Env& env, const std::string& model,
                                          Ort::SessionOptions& session_options) {
-  Ort::Session session{env, model.c_str(), session_options};
+  // ORTCHAR_T is wchar_t on Windows.
+  const std::basic_string<ORTCHAR_T> model_path(model.begin(), model.end());
+  Ort::Session session{env, model_path.c_str(), session_options};
   Ort::AllocatorWithDefaultOptions allocator;
   auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 

@@ -4,8 +4,17 @@ use std::process::{Command, Output};
 
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
 
+/// The interpreter `build.rs` uses: `PYTHON`, else the host's usual command name.
+fn python() -> Command {
+    let name = std::env::var_os("PYTHON")
+        .unwrap_or_else(|| if cfg!(windows) { "python" } else { "python3" }.into());
+    let mut command = Command::new(name);
+    command.env("PYTHONUTF8", "1");
+    command
+}
+
 fn run_guard(include: &Path) -> Output {
-    Command::new("python3")
+    python()
         .arg(Path::new(ROOT).join("tools/dawn_compat/abi_guard.py"))
         .arg("--yawgpu-include")
         .arg(include)
@@ -108,7 +117,7 @@ fn guard_reports_a_changed_function_signature() {
 fn check_generator_failure(before: &str, after: &str, expected: &str) {
     let output = with_mutation("webgpu.h", before, after, |include| {
         let out = include.join("out");
-        let output = Command::new("python3")
+        let output = python()
             .arg(Path::new(ROOT).join("tools/dawn_compat/gen_proc_table.py"))
             .arg("--yawgpu-include")
             .arg(include)

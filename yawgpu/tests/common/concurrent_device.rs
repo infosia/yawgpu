@@ -188,7 +188,8 @@ unsafe fn round(
     wgpuCommandBufferRelease(commands);
     wgpuCommandEncoderRelease(encoder);
 
-    let status = AtomicU32::new(WGPUMapAsyncStatus_Error);
+    // The C enum's Rust type is `u32` or `i32` depending on the target ABI.
+    let status = AtomicU32::new(WGPUMapAsyncStatus_Error as u32);
     let future = wgpuBufferMapAsync(
         readback,
         WGPUMapMode_Read,
@@ -205,7 +206,10 @@ unsafe fn round(
         wgpuInstanceProcessEvents(instance);
     }
     wait(instance, future, word.is_multiple_of(2));
-    assert_eq!(status.load(Ordering::Acquire), WGPUMapAsyncStatus_Success);
+    assert_eq!(
+        status.load(Ordering::Acquire),
+        WGPUMapAsyncStatus_Success as u32
+    );
     let range = wgpuBufferGetConstMappedRange(readback, 0, 4);
     assert!(!range.is_null());
     assert_eq!(std::slice::from_raw_parts(range.cast::<u8>(), 4), data);
@@ -285,7 +289,7 @@ unsafe extern "C" fn mapped(
     data: *mut c_void,
     _: *mut c_void,
 ) {
-    (*data.cast::<AtomicU32>()).store(status, Ordering::Release);
+    (*data.cast::<AtomicU32>()).store(status as u32, Ordering::Release);
 }
 
 unsafe extern "C" fn popped(

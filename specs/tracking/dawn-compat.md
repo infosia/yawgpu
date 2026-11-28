@@ -157,6 +157,42 @@ Not done:
   validating although ONNX Runtime asks for `skip_validation`.
 - The host-supplied Dawn cache interface (accepted and unused).
 
+## Windows / Vulkan verification (2026-11-28)
+
+Native Vulkan driver (NVIDIA), MSVC 2022, yawgpu at Dawn pin `9bba943462`.
+
+| Run | Result |
+|---|---|
+| `concurrent_device` (Noop) | 1/0 |
+| `e2e_vulkan_concurrent_device` | 1/0, then 5 more runs / 0 failures; clean under `VK_LAYER_KHRONOS_validation` |
+| `e2e_vulkan_subgroup_matrix` (Block 170) | 7/0, 12 configurations advertised; clean under the validation layer |
+| `yawgpu-dawn --features dawn-compat,vulkan` | 18/0; guard: 203 functions, 98 structs, 459 members, 526 constants, no mismatch |
+| ONNX Runtime 1.32.0, Abs | pass, ONNX Runtime-owned and host-owned device |
+| `squeezenet/model.onnx` vs the CPU provider | 1000 elements, worst relative error 2.3e-7, both modes; clean under the validation layer |
+| `mnist.onnx`, `matmul_1.onnx`, `conv_autopad.onnx`, `mul_1.onnx` vs the CPU provider | exact, both modes |
+
+Every ONNX Runtime run had `session.disable_cpu_ep_fallback=1` and
+`YAWGPU_DAWN_STRICT=1`; no stub was called. ONNX Runtime compiled with no
+source change, built with `onnxruntime_ENABLE_DAWN_BACKEND_VULKAN=ON` and
+`onnxruntime_ENABLE_DAWN_BACKEND_D3D12=OFF`.
+
+Portability fixes this needed:
+
+| # | Finding | Fix |
+|---|---|---|
+| W1 | `tests/common/concurrent_device.rs` stored `WGPUMapAsyncStatus` in an `AtomicU32`; the enum is `i32` on MSVC | cast to `u32` |
+| W2 | `build.rs` and `tests/abi_guard.rs` ran `python3`, the Store stub on Windows | `PYTHON`, else `python` on Windows; `PYTHONUTF8=1` (the generators failed decoding as cp932) |
+| W3 | The guard matched preprocessor line markers by raw path; Clang on Windows escapes backslashes | paths normalized before the comparison |
+| W4 | The guard took its compiler from `CC`, which the `cc` crate also reads and needs to be MSVC | `YAWGPU_ABI_GUARD_CC` takes precedence |
+| W5 | `examples/ort_webgpu/main.cc` passed a `char` path to `Ort::Session` (`wchar_t` on Windows); no Windows build script | `ORTCHAR_T` path; `examples/ort_webgpu/build.ps1` |
+
+Limit: `ort_webgpu --noop` fails on Windows. ONNX Runtime's Windows build
+requests the backend type chosen at its build time (Vulkan here) and the Noop
+instance has no such adapter.
+
+Still open: ThreadSanitizer on the concurrent workload; ONNX Runtime on Linux
+Vulkan; a Vulkan counterpart of `smoke_computes_on_metal`.
+
 ## Phase Review (2026-11-28)
 
 Fresh no-context review of `6370d11..9347b53` against R1–R7. **0 CRITICAL,

@@ -3,7 +3,8 @@
 A host that runs ONNX Runtime's WebGPU execution provider on yawgpu through
 the Dawn compatibility layer (`yawgpu-dawn`). It is not part of the CMake
 example build: it needs an ONNX Runtime checkout (`$ORT`) built against
-yawgpu's Dawn API package. Verified with ONNX Runtime 1.32.0 on macOS / Metal.
+yawgpu's Dawn API package. Verified with ONNX Runtime 1.32.0 on macOS / Metal
+and on Windows / Vulkan.
 
 ## Build
 
@@ -30,6 +31,34 @@ ORT="$ORT" ORT_BUILD="$ORT_OUT/Release" examples/ort_webgpu/build.sh
 The package, the proc table and the ABI of the linked yawgpu must come from the
 same yawgpu checkout: ONNX Runtime aborts when the table's Dawn version differs
 from the package's.
+
+### Windows / Vulkan
+
+Needs Visual Studio 2022 (C++ workload), Python 3.10 or later as `python`, and
+Clang for the ABI guard that runs when `yawgpu-dawn` is built. PowerShell, from
+the yawgpu checkout:
+
+```powershell
+$api = "$PWD\target\dawn-api"; $env:PYTHONUTF8 = "1"
+python tools\dawn_compat\make_dawn_api_package.py --out $api
+
+python $env:ORT\tools\ci_build\build.py --build_dir $env:ORT_OUT --config Release `
+    --use_webgpu --use_external_dawn --build_shared_lib --skip_tests --parallel `
+    --compile_no_warning_as_error --target onnxruntime `
+    --cmake_extra_defines "onnxruntime_DAWN_PREBUILT_DIR=$($api -replace '\\','/')" `
+    onnxruntime_ENABLE_DAWN_BACKEND_VULKAN=ON onnxruntime_ENABLE_DAWN_BACKEND_D3D12=OFF
+
+$env:YAWGPU_ABI_GUARD_CC = '"C:/Program Files/LLVM/bin/clang.exe"'
+cargo rustc -p yawgpu-dawn --features dawn-compat,vulkan --release --lib --crate-type staticlib
+
+$env:ORT_BUILD = "$env:ORT_OUT\Release\Release"
+examples\ort_webgpu\build.ps1          # target\ort_webgpu\ort_webgpu.exe
+```
+
+The two backend defines make ONNX Runtime request a Vulkan adapter; its Windows
+default is D3D12, which yawgpu does not have. Because that request is fixed at
+build time, `--noop` does not work with a Windows build of ONNX Runtime. Add
+`--skip_submodule_sync` when `$ORT` is not a git checkout.
 
 ## Run
 

@@ -21,7 +21,14 @@ fn main() {
     ] {
         println!("cargo:rerun-if-changed={path}");
     }
-    assert!(Command::new("python3")
+    // `PYTHON` overrides the interpreter: on Windows `python3` is usually the Store stub.
+    println!("cargo:rerun-if-env-changed=PYTHON");
+    println!("cargo:rerun-if-env-changed=YAWGPU_ABI_GUARD_CC");
+    let python = env::var_os("PYTHON")
+        .unwrap_or_else(|| if cfg!(windows) { "python" } else { "python3" }.into());
+    assert!(Command::new(python)
+        // The generators read UTF-8 sources whatever the host's code page is.
+        .env("PYTHONUTF8", "1")
         .args([
             "-B",
             "../tools/dawn_compat/gen_proc_table.py",

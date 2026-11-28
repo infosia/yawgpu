@@ -21,12 +21,17 @@ VENDOR_PREFIXES = ("YaWGPU", "YAWGPU_", "yawgpu")
 
 def public_source(preprocessed, paths):
     """Use the preprocessor's line markers to omit declarations from system headers."""
+    # A Windows compiler escapes the backslashes of a marker's path and may mix separators.
+    def normalized(path):
+        return os.path.normcase(os.path.normpath(path))
+
+    paths = {normalized(path) for path in paths}
     lines = []
     public = False
     for line in preprocessed.splitlines():
         marker = re.match(r'^# \d+ "([^"]+)"', line)
         if marker:
-            public = marker[1] in paths
+            public = normalized(marker[1].replace("\\\\", "\\")) in paths
         elif public:
             lines.append(line)
     if not lines:
@@ -199,7 +204,9 @@ def measurements(header, wanted, executable):
 
 def check_abi(include, dawn_include, work):
     """Return ABI mismatches against the supplied generated Dawn headers."""
-    cc = shlex.split(os.environ.get("CC", "cc"))
+    # The probes need a GCC-compatible driver. YAWGPU_ABI_GUARD_CC names one where CC is
+    # a different compiler, as with MSVC on Windows.
+    cc = shlex.split(os.environ.get("YAWGPU_ABI_GUARD_CC") or os.environ.get("CC", "cc"))
     yawgpu = Header([*cc, "-DYAWGPU_HAS_TILED"], include, ["webgpu.h", "yawgpu.h"])
     dawn = Header(cc, dawn_include, ["dawn/webgpu.h"])
     expected = measurements(yawgpu, yawgpu, work / "yawgpu-probe")
