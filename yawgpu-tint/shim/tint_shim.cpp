@@ -640,6 +640,12 @@ static_assert(offsetof(YawgpuTintInputAttachmentColorIndex, binding) == 4,
 static_assert(offsetof(YawgpuTintInputAttachmentColorIndex, color_slot) == 8,
               "YawgpuTintInputAttachmentColorIndex layout changed");
 
+static_assert(sizeof(YawgpuTintBindingPoint) == 8, "YawgpuTintBindingPoint layout changed");
+static_assert(offsetof(YawgpuTintBindingPoint, group) == 0,
+              "YawgpuTintBindingPoint layout changed");
+static_assert(offsetof(YawgpuTintBindingPoint, binding) == 4,
+              "YawgpuTintBindingPoint layout changed");
+
 static_assert(sizeof(YawgpuTintBindings) == 112, "YawgpuTintBindings layout changed");
 static_assert(offsetof(YawgpuTintBindings, uniform) == 0, "YawgpuTintBindings layout changed");
 static_assert(offsetof(YawgpuTintBindings, n_uniform) == 8, "YawgpuTintBindings layout changed");
@@ -2519,7 +2525,8 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
                                 bool use_vulkan_memory_model,
                                 bool use_storage_input_output_16,
                                 uint32_t framebuffer_fetch_descriptor_set,
-                                bool multisampled_input_attachment,
+                                const YawgpuTintBindingPoint* multisampled_input_attachments,
+                                size_t n_multisampled_input_attachments,
                                 bool has_polyfill_pixel_center,
                                 uint32_t polyfill_pixel_center,
                                 bool needs_frag_depth_range,
@@ -2538,7 +2545,8 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
     }
     try {
         if (program == nullptr || workarounds == nullptr || words_out == nullptr ||
-            n_words_out == nullptr) {
+            n_words_out == nullptr ||
+            (multisampled_input_attachments == nullptr && n_multisampled_input_attachments != 0)) {
             set_error_string(err, "invalid NULL argument");
             return false;
         }
@@ -2588,7 +2596,15 @@ bool yawgpu_tint_generate_spirv(const YawgpuTintProgram* program,
         options.extensions.use_subgroup_uniform_control_flow = workarounds->use_subgroup_uniform_control_flow;
         options.extensions.use_vulkan_memory_model = use_vulkan_memory_model;
         options.extensions.use_storage_input_output_16 = use_storage_input_output_16;
-        options.multisampled_input_attachment = multisampled_input_attachment;
+        // Per-binding multisampled input attachments, keyed by WGSL source
+        // binding point (the space Tint's `multisampled_input_attachments`
+        // option uses; it translates them through `options.bindings` itself).
+        // The module-wide `multisampled_input_attachment` flag stays false.
+        for (size_t i = 0; i < n_multisampled_input_attachments; ++i) {
+            const auto& bp = multisampled_input_attachments[i];
+            options.multisampled_input_attachments.push_back(
+                tint::BindingPoint{.group = bp.group, .binding = bp.binding});
+        }
         // Pixel-center polyfill for @builtin(position): under Vulkan sample-rate
         // shading FragCoord.xy/z/w reflect the sample location, but WebGPU
         // requires the pixel-center (fragment) position. When set, Tint's SPIR-V

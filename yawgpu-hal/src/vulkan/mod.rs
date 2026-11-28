@@ -3166,7 +3166,7 @@ mod tests {
                 true,
                 device.vulkan_memory_model(),
                 0,
-                false,
+                &[],
                 None,
                 false,
                 0,

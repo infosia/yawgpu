@@ -579,7 +579,7 @@ pub(crate) fn select_compute_shader_source(
                 &pipeline_constants,
                 vulkan_memory_model,
                 0,
-                false,
+                &[],
                 None,
                 false,
                 user_immediate_size,

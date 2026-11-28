@@ -3103,7 +3103,7 @@ struct Output {
                                 true,
                                 false,
                                 0,
-                                false,
+                                &[],
                                 pixel_center.then_some(1),
                                 !unclipped,
                                 budget,

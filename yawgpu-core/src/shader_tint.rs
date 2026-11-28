@@ -109,7 +109,7 @@ struct SpirvCodegenKey {
     vulkan_memory_model: bool,
     use_storage_input_output_16: bool,
     framebuffer_fetch_descriptor_set: u32,
-    multisampled_input_attachment: bool,
+    multisampled_input_attachments: Vec<yawgpu_tint::BindingPoint>,
     polyfill_pixel_center: Option<u32>,
     needs_frag_depth_range: bool,
     user_immediate_size: u32,
@@ -364,9 +364,13 @@ impl ReflectedModule {
     /// `use_storage_input_output_16` mirrors the enabled Vulkan
     /// `storageInputOutput16` feature; false makes Tint widen f16 stage IO.
     ///
-    /// `multisampled_input_attachment` makes Tint emit multisampled
-    /// `SubpassData` input attachments (the 2-arg `inputAttachmentLoad(ia,
-    /// sample_index)` overload) so per-sample MSAA subpass input works.
+    /// `multisampled_input_attachments` lists the WGSL binding points of the
+    /// multisampled input attachments: Tint lowers each listed one to a
+    /// multisampled `SubpassData` image (read with the 2-arg
+    /// `inputAttachmentLoad(ia, sample_index)` overload) and every other one to
+    /// a single-sampled image, so per-sample MSAA subpass input and
+    /// single-sampled input can share one module. The list is part of the
+    /// codegen cache key.
     ///
     /// `user_immediate_size` is the owning pipeline layout's reserved
     /// user-immediate byte budget (Block 94, 0..=64; see
@@ -383,7 +387,7 @@ impl ReflectedModule {
         pipeline_constants: &PipelineConstants,
         vulkan_memory_model: bool,
         framebuffer_fetch_descriptor_set: u32,
-        multisampled_input_attachment: bool,
+        multisampled_input_attachments: &[yawgpu_tint::BindingPoint],
         polyfill_pixel_center: Option<u32>,
         needs_frag_depth_range: bool,
         user_immediate_size: u32,
@@ -402,7 +406,7 @@ impl ReflectedModule {
             vulkan_memory_model,
             use_storage_input_output_16,
             framebuffer_fetch_descriptor_set,
-            multisampled_input_attachment,
+            multisampled_input_attachments: multisampled_input_attachments.to_vec(),
             polyfill_pixel_center,
             needs_frag_depth_range,
             user_immediate_size,
@@ -427,7 +431,7 @@ impl ReflectedModule {
                 true,
                 vulkan_memory_model,
                 framebuffer_fetch_descriptor_set,
-                multisampled_input_attachment,
+                multisampled_input_attachments,
                 polyfill_pixel_center,
                 needs_frag_depth_range,
                 user_immediate_size,
@@ -2102,7 +2106,7 @@ mod tests {
                         &constants,
                         false,
                         0,
-                        false,
+                        &[],
                         None,
                         false,
                         0,
@@ -2175,7 +2179,7 @@ mod tests {
                     &PipelineConstants::default(),
                     false,
                     0,
-                    false,
+                    &[],
                     None,
                     false,
                     0,
@@ -2515,7 +2519,7 @@ fn fs() -> @builtin(sample_mask) u32 {
                         &PipelineConstants::default(),
                         false,
                         0,
-                        false,
+                        &[],
                         None,
                         false,
                         0,
@@ -2529,6 +2533,55 @@ fn fs() -> @builtin(sample_mask) u32 {
         }
         assert_eq!(outputs[0], outputs[2]);
         assert_ne!(outputs[0], outputs[1]);
+        assert_eq!(module.codegen_miss_count(), 2);
+    }
+
+    /// Block 168: the multisampled input attachment list is part of the SPIR-V
+    /// codegen key, and each listed input attachment is lowered on its own.
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn generate_spirv_multisampled_input_attachment_list_participates_in_cache_key() {
+        let module = parse_and_validate_wgsl(
+            r#"
+enable chromium_internal_input_attachments;
+@group(0) @binding(0) @input_attachment_index(0) var a: input_attachment<f32>;
+@group(0) @binding(1) @input_attachment_index(1) var b: input_attachment<f32>;
+@fragment fn fs() -> @location(0) vec4f {
+  return inputAttachmentLoad(a) + inputAttachmentLoad(b);
+}
+"#,
+        )
+        .unwrap();
+        let generate = |list: &[yawgpu_tint::BindingPoint]| {
+            module.generate_spirv(
+                "fs",
+                ShaderStage::Fragment,
+                &PipelineConstants::default(),
+                false,
+                0,
+                list,
+                None,
+                false,
+                0,
+                true,
+                false,
+                Default::default(),
+                &[],
+            )
+        };
+        let single = generate(&[]).unwrap();
+        // Listing `a` makes its one-argument load a mismatch: a different key,
+        // so the cached single-sampled result is not reused.
+        let listed = generate(&[yawgpu_tint::BindingPoint {
+            group: 0,
+            binding: 0,
+        }]);
+        let err = listed.expect_err("a listed input attachment needs a sample index");
+        assert!(
+            err.contains("requires an explicit sample index"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(generate(&[]).unwrap(), single);
         assert_eq!(module.codegen_miss_count(), 2);
     }
 
@@ -2550,7 +2603,7 @@ fn cs() {}
                 &constants,
                 false,
                 0,
-                false,
+                &[],
                 None,
                 false,
                 0,
@@ -2567,7 +2620,7 @@ fn cs() {}
                 &constants,
                 false,
                 0,
-                false,
+                &[],
                 None,
                 false,
                 0,
@@ -2587,7 +2640,7 @@ fn cs() {}
                 &constants,
                 true,
                 0,
-                false,
+                &[],
                 None,
                 false,
                 0,
@@ -3505,7 +3558,7 @@ fn cs() {}
             &PipelineConstants::default(),
             false,
             0,
-            false,
+            &[],
             None,
             false,
             0,
@@ -3545,7 +3598,7 @@ fn fs() -> @location(0) vec4<f32> {
                 &PipelineConstants::default(),
                 false,
                 0,
-                false,
+                &[],
                 None,
                 false,
                 0,
@@ -3562,7 +3615,7 @@ fn fs() -> @location(0) vec4<f32> {
                 &PipelineConstants::default(),
                 false,
                 0,
-                false,
+                &[],
                 None,
                 false,
                 0,
@@ -3657,7 +3710,7 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
                             &PipelineConstants::default(),
                             false,
                             0,
-                            false,
+                            &[],
                             None,
                             false,
                             0,
@@ -3720,7 +3773,7 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
                         &PipelineConstants::default(),
                         memory_model,
                         0,
-                        false,
+                        &[],
                         None,
                         false,
                         0,
@@ -3811,7 +3864,7 @@ struct Out { @builtin(frag_depth) depth: f32 }
                         &PipelineConstants::default(),
                         false,
                         0,
-                        false,
+                        &[],
                         module
                             .fragment_needs_pixel_center_polyfill(entry, 4)
                             .then_some(1),
@@ -3860,7 +3913,7 @@ fn cs() {
                     &PipelineConstants::default(),
                     vulkan_memory_model,
                     0,
-                    false,
+                    &[],
                     None,
                     false,
                     0,

@@ -1309,27 +1309,44 @@ fn input_attachment_hal_bindings(
     Ok(Vec::new())
 }
 
-/// Returns `true` when any bind group layout declares a multisampled input
-/// attachment, so the Vulkan fragment SPIR-V must emit multisampled
-/// `SubpassData` (the 2-arg `inputAttachmentLoad(ia, sample_index)` overload).
+/// Returns the binding point (group, binding) of every bind group layout entry
+/// that is a multisampled input attachment, in group then entry order. Tint
+/// lowers exactly these `input_attachment`s to multisampled `SubpassData` (read
+/// with the 2-arg `inputAttachmentLoad(ia, sample_index)` overload) and every
+/// other one to single-sampled `SubpassData`, so one subpass pipeline can mix
+/// both. The group is the layout's index in the pipeline layout, which is the
+/// WGSL `@group` the shader declares.
 #[cfg(feature = "tiled")]
-fn pipeline_has_multisampled_input_attachment(bind_group_layouts: &[Arc<BindGroupLayout>]) -> bool {
-    bind_group_layouts.iter().any(|layout| {
-        layout.entries().iter().any(|entry| {
-            matches!(
+fn pipeline_multisampled_input_attachments(
+    bind_group_layouts: &[Arc<BindGroupLayout>],
+) -> Result<Vec<yawgpu_tint::BindingPoint>, String> {
+    let mut binding_points = Vec::new();
+    for (group_index, layout) in bind_group_layouts.iter().enumerate() {
+        let group = u32::try_from(group_index)
+            .map_err(|_| "input attachment bind group index is too large".to_owned())?;
+        for entry in layout.entries() {
+            if matches!(
                 entry.kind,
                 Some(BindingLayoutKind::InputAttachment {
                     multisampled: true,
                     ..
                 })
-            )
-        })
-    })
+            ) {
+                binding_points.push(yawgpu_tint::BindingPoint {
+                    group,
+                    binding: entry.binding,
+                });
+            }
+        }
+    }
+    Ok(binding_points)
 }
 
 #[cfg(not(feature = "tiled"))]
-fn pipeline_has_multisampled_input_attachment(_b: &[Arc<BindGroupLayout>]) -> bool {
-    false
+fn pipeline_multisampled_input_attachments(
+    _bind_group_layouts: &[Arc<BindGroupLayout>],
+) -> Result<Vec<yawgpu_tint::BindingPoint>, String> {
+    Ok(Vec::new())
 }
 
 /// Validates MSAA consistency between a subpass render pipeline, its bind group
@@ -1640,15 +1657,15 @@ pub(crate) fn select_render_shader_source(
             })?;
             let framebuffer_fetch_descriptor_set =
                 framebuffer_fetch_descriptor_set(bind_group_layouts)?;
-            // `multisampled_input_attachment` is a module-wide Tint SPIR-V option,
-            // so it must be identical for every stage generated from the module —
-            // Tint validates the whole module's `inputAttachmentLoad` overloads
-            // against it even when generating the vertex entry point. Compute it
-            // once and pass it to both stages (a vertex/fragment pair that share a
-            // module with a 2-arg `inputAttachmentLoad(ia, sample_index)` would
-            // otherwise fail the vertex generation).
-            let multisampled_input_attachment =
-                pipeline_has_multisampled_input_attachment(bind_group_layouts);
+            // The multisampled input attachments, by WGSL binding point. Tint
+            // checks every `inputAttachmentLoad` in the module against this list
+            // even when generating the vertex entry point, so it must be identical
+            // for every stage generated from the module. Compute it once and pass
+            // it to both stages (a vertex/fragment pair that share a module with a
+            // 2-arg `inputAttachmentLoad(ia, sample_index)` would otherwise fail
+            // the vertex generation).
+            let multisampled_input_attachments =
+                pipeline_multisampled_input_attachments(bind_group_layouts)?;
             // Pixel-center polyfill for `@builtin(position)` under sample-rate
             // shading (see `ReflectedModule::fragment_needs_pixel_center_polyfill`).
             // The polyfill carries a `center_pos` inter-stage varying from the
@@ -1697,7 +1714,7 @@ pub(crate) fn select_render_shader_source(
                 &vertex_pipeline_constants,
                 vulkan_memory_model,
                 framebuffer_fetch_descriptor_set,
-                multisampled_input_attachment,
+                &multisampled_input_attachments,
                 polyfill_pixel_center,
                 needs_frag_depth_range,
                 user_immediate_size,
@@ -1730,7 +1747,7 @@ pub(crate) fn select_render_shader_source(
                         })?,
                         vulkan_memory_model,
                         framebuffer_fetch_descriptor_set,
-                        multisampled_input_attachment,
+                        &multisampled_input_attachments,
                         polyfill_pixel_center,
                         needs_frag_depth_range,
                         user_immediate_size,
@@ -7208,9 +7225,9 @@ fn fs() -> @builtin(frag_depth) f32 {
 
     #[cfg(feature = "tiled")]
     #[test]
-    fn pipeline_has_multisampled_input_attachment_detects_only_multisampled_input() {
+    fn pipeline_multisampled_input_attachments_lists_only_multisampled_inputs() {
         let device = noop_device();
-        let multisampled = input_attachment_layout(&device, 0, true);
+        let multisampled = input_attachment_layout(&device, 3, true);
         let single_sampled = input_attachment_layout(&device, 0, false);
         let buffer = Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
             entries: vec![BindGroupLayoutEntry {
@@ -7225,13 +7242,148 @@ fn fs() -> @builtin(frag_depth) f32 {
             }],
             error: None,
         }));
+        let mixed = mixed_input_attachment_layout(&device);
 
-        assert!(pipeline_has_multisampled_input_attachment(&[multisampled]));
-        assert!(!pipeline_has_multisampled_input_attachment(&[
-            single_sampled
-        ]));
-        assert!(!pipeline_has_multisampled_input_attachment(&[buffer]));
-        assert!(!pipeline_has_multisampled_input_attachment(&[]));
+        let point = |group, binding| yawgpu_tint::BindingPoint { group, binding };
+        assert_eq!(
+            pipeline_multisampled_input_attachments(std::slice::from_ref(&multisampled)).unwrap(),
+            vec![point(0, 3)]
+        );
+        assert!(
+            pipeline_multisampled_input_attachments(std::slice::from_ref(&single_sampled))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            pipeline_multisampled_input_attachments(std::slice::from_ref(&buffer))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(pipeline_multisampled_input_attachments(&[])
+            .unwrap()
+            .is_empty());
+        // The group is the layout's index in the pipeline layout.
+        assert_eq!(
+            pipeline_multisampled_input_attachments(&[buffer, single_sampled, multisampled])
+                .unwrap(),
+            vec![point(2, 3)]
+        );
+        // Only the multisampled entry of a mixed layout is listed.
+        assert_eq!(
+            pipeline_multisampled_input_attachments(&[mixed]).unwrap(),
+            vec![point(0, 1)]
+        );
+    }
+
+    /// One bind group layout with a single-sampled input attachment at
+    /// binding 0 and a multisampled one at binding 1.
+    #[cfg(feature = "tiled")]
+    fn mixed_input_attachment_layout(device: &crate::Device) -> Arc<BindGroupLayout> {
+        let entry = |binding, multisampled| BindGroupLayoutEntry {
+            binding,
+            visibility: SHADER_STAGE_FRAGMENT,
+            binding_array_size: 0,
+            kind: Some(BindingLayoutKind::InputAttachment {
+                sample_type: TextureSampleType::Float,
+                multisampled,
+            }),
+        };
+        Arc::new(device.create_bind_group_layout(BindGroupLayoutDescriptor {
+            entries: vec![entry(0, false), entry(1, true)],
+            error: None,
+        }))
+    }
+
+    /// Returns the `MS` operand of every `OpTypeImage` with `Dim SubpassData`
+    /// in `words`, in declaration order.
+    #[cfg(feature = "tiled")]
+    fn spirv_subpass_image_ms_flags(words: &[u32]) -> Vec<u32> {
+        const OP_TYPE_IMAGE: u32 = 25;
+        const DIM_SUBPASS_DATA: u32 = 6;
+        let mut flags = Vec::new();
+        let mut index = 5;
+        while index < words.len() {
+            let word_count = (words[index] >> 16) as usize;
+            let opcode = words[index] & 0xFFFF;
+            if word_count == 0 {
+                break;
+            }
+            if opcode == OP_TYPE_IMAGE
+                && index + 6 < words.len()
+                && words[index + 3] == DIM_SUBPASS_DATA
+            {
+                flags.push(words[index + 6]);
+            }
+            index += word_count;
+        }
+        flags
+    }
+
+    /// Block 168: the multisampled input attachment list built from the
+    /// layouts reaches both stages' SPIR-V generation. The vertex stage shares
+    /// the module, and Tint checks every `inputAttachmentLoad` in the module
+    /// against the list, so the vertex generation fails unless it got the list
+    /// too; the fragment stage lowers one multisampled and one single-sampled
+    /// `SubpassData` image.
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn select_render_shader_source_vulkan_passes_multisampled_input_list_to_both_stages() {
+        let device = noop_device();
+        let module = Arc::new(
+            device.create_shader_module(ShaderModuleSource::Wgsl(
+                "enable chromium_internal_input_attachments;
+             @group(0) @binding(0) @input_attachment_index(0) var single: input_attachment<f32>;
+             @group(0) @binding(1) @input_attachment_index(1) var msaa: input_attachment<f32>;
+             @vertex fn vs() -> @builtin(position) vec4f { return vec4f(0, 0, 0, 1); }
+             @fragment fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4f {
+                 return inputAttachmentLoad(single) + inputAttachmentLoad(msaa, s);
+             }"
+                .to_owned(),
+            )),
+        );
+        let descriptor = render_pipeline_descriptor(module);
+        let layouts = [mixed_input_attachment_layout(&device)];
+
+        let (source, _, _, _) = select_render_shader_source(
+            HalBackend::Vulkan,
+            &descriptor,
+            "vs",
+            Some("fs"),
+            &[],
+            &[],
+            &[],
+            false,
+            &layouts,
+            true,
+            Default::default(),
+        )
+        .expect("a mixed multisampled/single-sampled subpass module generates SPIR-V");
+        let HalShaderSource::SpirVStages { vertex, fragment } = source else {
+            panic!("Vulkan should select SPIR-V stages");
+        };
+        assert_eq!(vertex.first().copied(), Some(0x0723_0203));
+        let fragment = fragment.expect("fragment SPIR-V");
+        let mut flags = spirv_subpass_image_ms_flags(&fragment);
+        flags.sort_unstable();
+        assert_eq!(flags, vec![0, 1]);
+
+        // Without the multisampled entry, the 2-arg load has no multisampled
+        // input attachment to read, so generation fails cleanly.
+        let single_only = [input_attachment_layout(&device, 0, false)];
+        assert!(select_render_shader_source(
+            HalBackend::Vulkan,
+            &descriptor,
+            "vs",
+            Some("fs"),
+            &[],
+            &[],
+            &[],
+            false,
+            &single_only,
+            true,
+            Default::default(),
+        )
+        .is_err());
     }
 
     #[cfg(feature = "tiled")]

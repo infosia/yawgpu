@@ -482,7 +482,7 @@ mod tests {
                 true,
                 false,
                 0,
-                false,
+                &[],
                 None,
                 false,
                 0,

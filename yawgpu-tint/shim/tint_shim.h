@@ -264,6 +264,11 @@ typedef struct {
 } YawgpuTintInputAttachmentColorIndex;
 
 typedef struct {
+    uint32_t group;        /* WGSL @group, as written in the shader source */
+    uint32_t binding;      /* WGSL @binding, as written in the shader source */
+} YawgpuTintBindingPoint;
+
+typedef struct {
     const YawgpuTintBindingRemap* uniform;
     size_t n_uniform;
     const YawgpuTintBindingRemap* storage;
@@ -423,7 +428,15 @@ YAWGPU_TINT_API bool yawgpu_tint_generate_msl(const YawgpuTintProgram*,
    {user_immediate_size, user_immediate_size + 4} of the push-constant
    block, directly after the user region (Dawn ShaderModuleVk.cpp:349-355).
    `has_polyfill_pixel_center` is independent: unclippedDepth pipelines use
-   the polyfill without depth-range immediates. */
+   the polyfill without depth-range immediates.
+   `multisampled_input_attachments` / `n_multisampled_input_attachments` list
+   the WGSL source binding points of the multisampled input attachments (Tint
+   SPIR-V option `multisampled_input_attachments`). Each listed
+   `input_attachment` lowers to a multisampled SubpassData image and must be
+   read with the two-argument `inputAttachmentLoad`; every other one lowers to
+   a single-sampled image and must be read with the one-argument load. Tint
+   checks every load in the module, so all stages of one module take the same
+   list. NULL is allowed when the count is zero. */
 YAWGPU_TINT_API bool yawgpu_tint_generate_spirv(const YawgpuTintProgram*,
                                 const char* ep,
                                 const YawgpuTintBindings*,
@@ -435,7 +448,8 @@ YAWGPU_TINT_API bool yawgpu_tint_generate_spirv(const YawgpuTintProgram*,
                                 bool use_vulkan_memory_model,
                                 bool use_storage_input_output_16,
                                 uint32_t framebuffer_fetch_descriptor_set,
-                                bool multisampled_input_attachment,
+                                const YawgpuTintBindingPoint* multisampled_input_attachments,
+                                size_t n_multisampled_input_attachments,
                                 bool has_polyfill_pixel_center,
                                 uint32_t polyfill_pixel_center,
                                 bool needs_frag_depth_range,

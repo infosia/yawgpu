@@ -928,6 +928,25 @@ const _: () = {
     assert!(core::mem::offset_of!(InputAttachmentColorIndex, color_slot) == 8);
 };
 
+/// A WGSL binding point (`@group` / `@binding`), as written in the shader source.
+///
+/// `#[repr(C)]`; see [`BindingRemap`]'s doc comment for the direct-FFI
+/// convention this follows (layout pinned to `YawgpuTintBindingPoint`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(C)]
+pub struct BindingPoint {
+    /// WGSL bind group.
+    pub group: u32,
+    /// WGSL binding.
+    pub binding: u32,
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<BindingPoint>() == 8);
+    assert!(core::mem::offset_of!(BindingPoint, group) == 0);
+    assert!(core::mem::offset_of!(BindingPoint, binding) == 4);
+};
+
 /// Resource binding remap sets grouped by resource class.
 #[derive(Debug, Clone, Default)]
 pub struct Bindings {
@@ -1671,7 +1690,8 @@ mod real {
             use_vulkan_memory_model: bool,
             use_storage_input_output_16: bool,
             framebuffer_fetch_descriptor_set: u32,
-            multisampled_input_attachment: bool,
+            multisampled_input_attachments: *const BindingPoint,
+            n_multisampled_input_attachments: usize,
             has_polyfill_pixel_center: bool,
             polyfill_pixel_center: u32,
             needs_frag_depth_range: bool,
@@ -2350,6 +2370,14 @@ mod real {
         /// `needs_frag_depth_range` enables the viewport range when the pipeline
         /// needs the pixel-center polyfill or writes `frag_depth`, and unclipped
         /// depth is disabled. `polyfill_pixel_center` is independent of this flag.
+        ///
+        /// `multisampled_input_attachments` lists the WGSL source binding
+        /// points of the multisampled input attachments. Each listed
+        /// `input_attachment` lowers to a multisampled `SubpassData` image and
+        /// must be read with `inputAttachmentLoad(ia, sample_index)`; every
+        /// other one lowers to a single-sampled image and must be read with
+        /// the one-argument load. Tint checks every load in the module, so all
+        /// stages generated from one module take the same list.
         #[allow(clippy::too_many_arguments)]
         pub fn generate_spirv(
             &self,
@@ -2359,7 +2387,7 @@ mod real {
             robust: bool,
             use_vulkan_memory_model: bool,
             framebuffer_fetch_descriptor_set: u32,
-            multisampled_input_attachment: bool,
+            multisampled_input_attachments: &[BindingPoint],
             polyfill_pixel_center: Option<u32>,
             needs_frag_depth_range: bool,
             user_immediate_size: u32,
@@ -2387,7 +2415,8 @@ mod real {
                     use_vulkan_memory_model,
                     use_storage_input_output_16,
                     framebuffer_fetch_descriptor_set,
-                    multisampled_input_attachment,
+                    multisampled_input_attachments.as_ptr(),
+                    multisampled_input_attachments.len(),
                     polyfill_pixel_center.is_some(),
                     polyfill_pixel_center.unwrap_or(0),
                     needs_frag_depth_range,
@@ -2794,7 +2823,7 @@ mod stub {
             _robust: bool,
             _use_vulkan_memory_model: bool,
             _framebuffer_fetch_descriptor_set: u32,
-            _multisampled_input_attachment: bool,
+            _multisampled_input_attachments: &[BindingPoint],
             _polyfill_pixel_center: Option<u32>,
             _needs_frag_depth_range: bool,
             _user_immediate_size: u32,
@@ -2907,7 +2936,7 @@ fn cs(@builtin(local_invocation_index) index: u32) {
                 true,
                 false,
                 0,
-                false,
+                &[],
                 None,
                 false,
                 0,
@@ -3405,7 +3434,7 @@ fn use_matrix(m: mat2x2f) -> vec2f { return m[0] + m[1]; }
                             true,
                             false,
                             0,
-                            false,
+                            &[],
                             None,
                             false,
                             0,
@@ -3462,7 +3491,7 @@ fn use_matrix(m: mat2x2f) -> vec2f { return m[0] + m[1]; }
                     true,
                     false,
                     0,
-                    false,
+                    &[],
                     None,
                     false,
                     0,
@@ -3545,7 +3574,7 @@ fn cs(@builtin(local_invocation_index) i: u32) {
                         true,
                         false,
                         0,
-                        false,
+                        &[],
                         None,
                         false,
                         0,
@@ -3719,7 +3748,7 @@ var<immediate> params: vec4f;
                         true,
                         false,
                         0,
-                        false,
+                        &[],
                         None,
                         needs_range,
                         user_size,
@@ -3760,7 +3789,7 @@ var<immediate> params: vec4f;
                 true,
                 false,
                 0,
-                false,
+                &[],
                 None,
                 true,
                 0,
@@ -3925,7 +3954,7 @@ var<immediate> params: vec4f;
                     true,
                     false,
                     0,
-                    false,
+                    &[],
                     None,
                     false,
                     0,
@@ -4360,7 +4389,7 @@ fn main() {
                 true,
                 false,
                 0,
-                false,
+                &[],
                 None,
                 false,
                 0,
@@ -4378,7 +4407,7 @@ fn main() {
                 true,
                 true,
                 0,
-                false,
+                &[],
                 None,
                 false,
                 0,
@@ -5389,7 +5418,7 @@ fn main() {
                 true,
                 false,
                 0,
-                false,
+                &[],
                 None,
                 false,
                 0,
@@ -5571,7 +5600,7 @@ fn cs() {
                     true,
                     false,
                     0,
-                    false,
+                    &[],
                     None,
                     false,
                     0,
@@ -5626,7 +5655,7 @@ fn cs() {
                 true,
                 false,
                 0,
-                false,
+                &[],
                 None,
                 false,
                 0,
@@ -5784,7 +5813,7 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
                 true,
                 false,
                 0,
-                false,
+                &[],
                 None,
                 false,
                 0,
@@ -5801,7 +5830,7 @@ fn fs_no_pos(@location(0) @interpolate(perspective, sample) uv: vec2<f32>)
                 true,
                 false,
                 0,
-                false,
+                &[],
                 Some(1),
                 false,
                 0,
@@ -5852,7 +5881,7 @@ struct Output { @builtin(frag_depth) depth: f32, @location(0) color: vec4f }
                         true,
                         false,
                         0,
-                        false,
+                        &[],
                         Some(1),
                         needs_range,
                         0,
@@ -5938,7 +5967,7 @@ fn cs() {
                 true,
                 false,
                 0,
-                false,
+                &[],
                 Some(1),
                 true,
                 16,
@@ -5959,7 +5988,7 @@ fn cs() {
             true,
             false,
             0,
-            false,
+            &[],
             Some(1),
             true,
             0,
@@ -5990,7 +6019,7 @@ fn cs() {
                 true,
                 false,
                 0,
-                false,
+                &[],
                 None,
                 false,
                 16,
@@ -6025,7 +6054,7 @@ fn cs() {
                 true,
                 false,
                 0,
-                false,
+                &[],
                 None,
                 false,
                 0,
@@ -6060,7 +6089,10 @@ fn cs() {
             true,
             false,
             0,
-            true,
+            &[BindingPoint {
+                group: 0,
+                binding: 0,
+            }],
             None,
             false,
             0,
@@ -6115,7 +6147,10 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
                 true,
                 false,
                 0,
-                true,
+                &[BindingPoint {
+                    group: 0,
+                    binding: 0,
+                }],
                 None,
                 false,
                 0,
@@ -6129,11 +6164,11 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
     }
 
     /// A vertex + fragment pair sharing one module where the fragment uses the
-    /// 2-arg `inputAttachmentLoad(ia, sample_index)`. `multisampled_input_attachment`
-    /// is a MODULE-WIDE option: Tint validates the whole module's overloads even
-    /// when generating the *vertex* entry point, so generating `"vs"` must be
-    /// given the same `true` flag (else it fails). This guards the yawgpu-core
-    /// invariant that both stages of a subpass pipeline receive the flag.
+    /// 2-arg `inputAttachmentLoad(ia, sample_index)`. Tint checks every
+    /// `inputAttachmentLoad` in the module against `multisampled_input_attachments`
+    /// even when generating the *vertex* entry point, so generating `"vs"` must be
+    /// given the same list (else it fails). This guards the yawgpu-core
+    /// invariant that both stages of a subpass pipeline receive the list.
     #[cfg(feature = "tiled")]
     fn multisampled_input_attachment_vs_fs_wgsl() -> &'static str {
         r#"
@@ -6168,7 +6203,7 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
             &[],
         )
         .unwrap();
-        // Generating the vertex entry with the module-wide flag TRUE succeeds …
+        // Generating the vertex entry with `ia` listed as multisampled succeeds …
         let vertex = program
             .generate_spirv(
                 "vs",
@@ -6177,7 +6212,10 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
                 true,
                 false,
                 0,
-                true,
+                &[BindingPoint {
+                    group: 0,
+                    binding: 0,
+                }],
                 None,
                 false,
                 0,
@@ -6187,9 +6225,9 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
             )
             .unwrap();
         assert_eq!(vertex.first().copied(), Some(0x0723_0203));
-        // … while FALSE fails, because the module contains a 2-arg load. This is
-        // why yawgpu-core must pass the flag to the vertex stage too, not just the
-        // fragment.
+        // … while an empty list fails, because the module contains a 2-arg load.
+        // This is why yawgpu-core must pass the list to the vertex stage too, not
+        // just the fragment.
         assert!(program
             .generate_spirv(
                 "vs",
@@ -6198,7 +6236,7 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
                 true,
                 false,
                 0,
-                false,
+                &[],
                 None,
                 false,
                 0,
@@ -6207,6 +6245,132 @@ fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
                 Default::default(),
             )
             .is_err());
+    }
+
+    /// Returns the `MS` operand of every `OpTypeImage` with `Dim SubpassData`
+    /// in `words`, in declaration order.
+    #[cfg(feature = "tiled")]
+    fn spirv_subpass_image_ms_flags(words: &[u32]) -> Vec<u32> {
+        const OP_TYPE_IMAGE: u32 = 25;
+        const DIM_SUBPASS_DATA: u32 = 6;
+        let mut flags = Vec::new();
+        let mut index = 5;
+        while index < words.len() {
+            let word_count = (words[index] >> 16) as usize;
+            if word_count == 0 {
+                break;
+            }
+            if words[index] & 0xFFFF == OP_TYPE_IMAGE
+                && index + 6 < words.len()
+                && words[index + 3] == DIM_SUBPASS_DATA
+            {
+                flags.push(words[index + 6]);
+            }
+            index += word_count;
+        }
+        flags
+    }
+
+    /// Counts `OpImageRead` instructions whose image operands include
+    /// `Sample` (mask bit 0x40) in `words`.
+    #[cfg(feature = "tiled")]
+    fn spirv_sampled_image_read_count(words: &[u32]) -> usize {
+        const OP_IMAGE_READ: u32 = 98;
+        const IMAGE_OPERANDS_SAMPLE: u32 = 0x40;
+        let mut count = 0;
+        let mut index = 5;
+        while index < words.len() {
+            let word_count = (words[index] >> 16) as usize;
+            if word_count == 0 {
+                break;
+            }
+            if words[index] & 0xFFFF == OP_IMAGE_READ
+                && word_count > 5
+                && index + 5 < words.len()
+                && words[index + 5] & IMAGE_OPERANDS_SAMPLE != 0
+            {
+                count += 1;
+            }
+            index += word_count;
+        }
+        count
+    }
+
+    /// A fragment shader that reads one input attachment per sample and
+    /// another with the one-argument load, both `input_attachment<f32>`.
+    #[cfg(feature = "tiled")]
+    fn mixed_input_attachment_wgsl() -> &'static str {
+        r#"
+enable chromium_internal_input_attachments;
+
+@group(0) @binding(0) @input_attachment_index(0) var msaa: input_attachment<f32>;
+@group(0) @binding(1) @input_attachment_index(1) var single: input_attachment<f32>;
+
+@fragment
+fn fs(@builtin(sample_index) s: u32) -> @location(0) vec4<f32> {
+  return inputAttachmentLoad(msaa, s) + inputAttachmentLoad(single);
+}
+"#
+    }
+
+    #[cfg(feature = "tiled")]
+    #[test]
+    fn mixed_multisampled_and_single_input_attachments_generate_spirv() {
+        let program = Program::parse(
+            mixed_input_attachment_wgsl(),
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let generate = |list: &[BindingPoint]| {
+            program.generate_spirv(
+                "fs",
+                &Bindings::default(),
+                &[],
+                true,
+                false,
+                0,
+                list,
+                None,
+                false,
+                0,
+                true,
+                false,
+                Default::default(),
+            )
+        };
+        let spirv = generate(&[BindingPoint {
+            group: 0,
+            binding: 0,
+        }])
+        .unwrap();
+        assert_eq!(spirv.first().copied(), Some(0x0723_0203));
+        // One multisampled and one single-sampled SubpassData image ...
+        let mut flags = spirv_subpass_image_ms_flags(&spirv);
+        flags.sort_unstable();
+        assert_eq!(flags, vec![0, 1]);
+        // ... and only the multisampled read carries the Sample operand.
+        assert_eq!(spirv_sampled_image_read_count(&spirv), 1);
+
+        // Listing the other attachment instead mismatches both loads.
+        let err = generate(&[BindingPoint {
+            group: 0,
+            binding: 1,
+        }])
+        .expect_err("listing the wrong attachment must fail");
+        let err = err.to_string();
+        assert!(
+            err.contains("@group(0) @binding("),
+            "error should name the mismatching attachment: {err}"
+        );
+        // An empty list leaves the 2-arg load without a multisampled attachment.
+        assert!(generate(&[]).is_err());
     }
 
     #[cfg(not(feature = "tiled"))]
@@ -6406,7 +6570,7 @@ fn cs() {
                     true,
                     false,
                     0,
-                    false,
+                    &[],
                     None,
                     false,
                     0,
@@ -7415,7 +7579,7 @@ override i: i32 = -3i;
                 true,
                 false,
                 0,
-                false,
+                &[],
                 None,
                 false,
                 0,
@@ -7582,7 +7746,7 @@ fn cs() { _ = u.value; }
                 true,
                 false,
                 0,
-                false,
+                &[],
                 None,
                 false,
                 0,
@@ -7599,7 +7763,7 @@ fn cs() { _ = u.value; }
                 true,
                 false,
                 0,
-                false,
+                &[],
                 None,
                 false,
                 0,
@@ -8219,7 +8383,7 @@ fn cs() {
                     true,
                     false,
                     0,
-                    false,
+                    &[],
                     None,
                     false,
                     0,
@@ -8310,7 +8474,7 @@ fn fs(in: VsOut) -> @location(0) vec4f {
                         true,
                         false,
                         0,
-                        false,
+                        &[],
                         None,
                         false,
                         0,
@@ -8462,7 +8626,7 @@ fn cs() {
                     true,
                     false,
                     0,
-                    false,
+                    &[],
                     None,
                     false,
                     0,
