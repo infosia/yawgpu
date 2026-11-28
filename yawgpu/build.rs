@@ -35,7 +35,9 @@ impl bindgen::callbacks::ParseCallbacks for ExtensionMacroTypes {
     fn int_macro(&self, name: &str, _value: i64) -> Option<bindgen::callbacks::IntKind> {
         let name = match name {
             "WGPUFeatureName_ChromiumExperimentalSubgroupMatrix" => "WGPUFeatureName",
-            "WGPUSType_AdapterPropertiesSubgroupMatrixConfigs" => "WGPUSType",
+            "WGPUSType_AdapterPropertiesSubgroupMatrixConfigs"
+            | "WGPUSType_DawnTogglesDescriptor"
+            | "WGPUSType_DawnCacheDeviceDescriptor" => "WGPUSType",
             _ => return None,
         };
         Some(bindgen::callbacks::IntKind::Custom {

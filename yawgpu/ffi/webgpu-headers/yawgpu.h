@@ -99,6 +99,69 @@ WGPU_EXPORT void wgpuAdapterPropertiesSubgroupMatrixConfigsFreeMembers(
 
 /** @} */
 
+/**
+ * \defgroup DawnDescriptors Dawn toggles and cache descriptors
+ * \brief Dawn extensions accepted during instance, adapter, and device creation.
+ * @{
+ */
+
+/** Chain tag for @ref WGPUDawnTogglesDescriptor. */
+#define WGPUSType_DawnTogglesDescriptor ((WGPUSType)0x0005000Au)
+/** Chain tag for @ref WGPUDawnCacheDeviceDescriptor. */
+#define WGPUSType_DawnCacheDeviceDescriptor ((WGPUSType)0x00050007u)
+
+/**
+ * Accepted on WGPUInstanceDescriptor, WGPURequestAdapterOptions, and
+ * WGPUDeviceDescriptor. yawgpu ignores both toggle lists. Validation and
+ * robustness remain active even when the caller requests their removal.
+ */
+typedef struct WGPUDawnTogglesDescriptor {
+    WGPUChainedStruct chain;
+    size_t enabledToggleCount;
+    char const * const * enabledToggles;
+    size_t disabledToggleCount;
+    char const * const * disabledToggles;
+} WGPUDawnTogglesDescriptor WGPU_STRUCTURE_ATTRIBUTE;
+
+/** Dawn cache load callback. yawgpu never calls this function. */
+typedef size_t (*WGPUDawnLoadCacheDataCallback)(
+    size_t keySize, uint8_t const * key, size_t valueSize, uint8_t * value,
+    WGPU_NULLABLE void* userdata1, WGPU_NULLABLE void* userdata2) WGPU_FUNCTION_ATTRIBUTE;
+
+/** Dawn cache store callback. yawgpu never calls this function. */
+typedef void (*WGPUDawnStoreCacheDataCallback)(
+    size_t keySize, uint8_t const * key, size_t valueSize, uint8_t const * value,
+    WGPU_NULLABLE void* userdata1, WGPU_NULLABLE void* userdata2) WGPU_FUNCTION_ATTRIBUTE;
+
+/** Load callback and its caller-supplied userdata. */
+typedef struct WGPUDawnLoadCacheDataCallbackInfo {
+    WGPUChainedStruct * nextInChain;
+    WGPUDawnLoadCacheDataCallback callback;
+    WGPU_NULLABLE void* userdata1;
+    WGPU_NULLABLE void* userdata2;
+} WGPUDawnLoadCacheDataCallbackInfo WGPU_STRUCTURE_ATTRIBUTE;
+
+/** Store callback and its caller-supplied userdata. */
+typedef struct WGPUDawnStoreCacheDataCallbackInfo {
+    WGPUChainedStruct * nextInChain;
+    WGPUDawnStoreCacheDataCallback callback;
+    WGPU_NULLABLE void* userdata1;
+    WGPU_NULLABLE void* userdata2;
+} WGPUDawnStoreCacheDataCallbackInfo WGPU_STRUCTURE_ATTRIBUTE;
+
+/**
+ * Accepted anywhere in a WGPUDeviceDescriptor chain, including after a
+ * WGPUDawnTogglesDescriptor. yawgpu never calls the load or store callback.
+ */
+typedef struct WGPUDawnCacheDeviceDescriptor {
+    WGPUChainedStruct chain;
+    WGPUStringView isolationKey;
+    WGPUDawnLoadCacheDataCallbackInfo dawnLoadCacheDataCallbackInfo;
+    WGPUDawnStoreCacheDataCallbackInfo dawnStoreCacheDataCallbackInfo;
+} WGPUDawnCacheDeviceDescriptor WGPU_STRUCTURE_ATTRIBUTE;
+
+/** @} */
+
 #ifdef __cplusplus
 }
 #endif

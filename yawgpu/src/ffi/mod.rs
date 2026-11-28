@@ -9860,6 +9860,102 @@ mod tests {
     }
 
     #[test]
+    fn wgpuAdapterRequestDevice_dawn_toggles_preserve_validation() {
+        unsafe {
+            let instance = make_noop_instance();
+            let adapter = request_noop_adapter(instance);
+            let enabled = [
+                c"skip_validation".as_ptr(),
+                c"d3d_disable_ieee_strictness".as_ptr(),
+                c"disable_robustness".as_ptr(),
+                c"lazy_clear_resource_on_first_use".as_ptr(),
+            ];
+            let disabled = [c"timestamp_quantization".as_ptr()];
+            let mut toggles = native::WGPUDawnTogglesDescriptor {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: native::WGPUSType_DawnTogglesDescriptor,
+                },
+                enabledToggleCount: enabled.len(),
+                enabledToggles: enabled.as_ptr(),
+                disabledToggleCount: disabled.len(),
+                disabledToggles: disabled.as_ptr(),
+            };
+            let descriptor = native::WGPUDeviceDescriptor {
+                nextInChain: &mut toggles.chain,
+                ..std::mem::zeroed()
+            };
+            let device = request_noop_device_with_descriptor(instance, adapter, &descriptor);
+            wgpuDevicePushErrorScope(device, native::WGPUErrorFilter_Validation);
+            let invalid = buffer_descriptor(native::WGPUBufferUsage_None, 4);
+            let buffer = wgpuDeviceCreateBuffer(device, &invalid);
+            assert_validation_error_contains(instance, device, "buffer usage");
+            wgpuBufferRelease(buffer);
+            release_handles(instance, adapter, device);
+        }
+    }
+
+    #[test]
+    fn wgpuAdapterRequestDevice_ignores_dawn_cache_callbacks() {
+        static LOAD_CALLS: AtomicUsize = AtomicUsize::new(0);
+        static STORE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        unsafe extern "C" fn load(
+            _: usize,
+            _: *const u8,
+            _: usize,
+            _: *mut u8,
+            _: *mut c_void,
+            _: *mut c_void,
+        ) -> usize {
+            LOAD_CALLS.fetch_add(1, Ordering::Relaxed);
+            0
+        }
+        unsafe extern "C" fn store(
+            _: usize,
+            _: *const u8,
+            _: usize,
+            _: *const u8,
+            _: *mut c_void,
+            _: *mut c_void,
+        ) {
+            STORE_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+
+        unsafe {
+            for toggles_first in [true, false] {
+                let instance = make_noop_instance();
+                let adapter = request_noop_adapter(instance);
+                let mut toggles: native::WGPUDawnTogglesDescriptor = std::mem::zeroed();
+                toggles.chain.sType = native::WGPUSType_DawnTogglesDescriptor;
+                let mut cache: native::WGPUDawnCacheDeviceDescriptor = std::mem::zeroed();
+                cache.chain.sType = native::WGPUSType_DawnCacheDeviceDescriptor;
+                cache.isolationKey = string_view(b"test");
+                cache.dawnLoadCacheDataCallbackInfo.callback = Some(load);
+                cache.dawnStoreCacheDataCallbackInfo.callback = Some(store);
+                let descriptor = native::WGPUDeviceDescriptor {
+                    nextInChain: if toggles_first {
+                        toggles.chain.next = &mut cache.chain;
+                        &mut toggles.chain
+                    } else {
+                        cache.chain.next = &mut toggles.chain;
+                        &mut cache.chain
+                    },
+                    ..std::mem::zeroed()
+                };
+                let device = request_noop_device_with_descriptor(instance, adapter, &descriptor);
+                let pipeline = noop_compute_pipeline(device);
+                assert!(!pipeline.is_null());
+                assert!(!(*pipeline)._core.is_error());
+                wgpuComputePipelineRelease(pipeline);
+                release_handles(instance, adapter, device);
+                assert_eq!(LOAD_CALLS.load(Ordering::Relaxed), 0);
+                assert_eq!(STORE_CALLS.load(Ordering::Relaxed), 0);
+            }
+        }
+    }
+
+    #[test]
     fn wgpuAdapterRequestDevice_process_events_returns_success_device() {
         unsafe {
             let instance = make_noop_instance();

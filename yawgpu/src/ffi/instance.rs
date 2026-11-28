@@ -902,6 +902,55 @@ mod tests {
     }
 
     #[test]
+    fn create_instance_and_request_adapter_accept_dawn_toggles() {
+        unsafe {
+            let mut toggles = native::WGPUDawnTogglesDescriptor {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: native::WGPUSType_DawnTogglesDescriptor,
+                },
+                ..std::mem::zeroed()
+            };
+            let descriptor = native::WGPUInstanceDescriptor {
+                nextInChain: &mut toggles.chain,
+                ..std::mem::zeroed()
+            };
+            let instance = wgpuCreateInstance(&descriptor);
+            assert!(!instance.is_null());
+
+            let enabled = [
+                c"use_dxc".as_ptr(),
+                c"allow_unsafe_apis".as_ptr(),
+                c"decompose_uniform_buffers".as_ptr(),
+                c"use_vulkan_memory_model".as_ptr(),
+                c"vulkan_enable_f16_on_nvidia".as_ptr(),
+            ];
+            toggles.enabledToggleCount = enabled.len();
+            toggles.enabledToggles = enabled.as_ptr();
+            let mut options = request_adapter_options(native::WGPUBackendType_Null);
+            options.nextInChain = &mut toggles.chain;
+            let state = request_adapter(instance, &options);
+            assert_eq!(state.status, native::WGPURequestAdapterStatus_Success);
+            assert!(!state.adapter.is_null());
+            wgpuAdapterRelease(state.adapter);
+
+            let mut xr = native::WGPURequestAdapterWebXROptions {
+                chain: native::WGPUChainedStruct {
+                    next: std::ptr::null_mut(),
+                    sType: native::WGPUSType_RequestAdapterWebXROptions,
+                },
+                xrCompatible: 1,
+            };
+            toggles.chain.next = &mut xr.chain;
+            options.nextInChain = &mut toggles.chain;
+            let state = request_adapter(instance, &options);
+            assert_eq!(state.status, native::WGPURequestAdapterStatus_Unavailable);
+            assert!(state.adapter.is_null());
+            wgpuInstanceRelease(instance);
+        }
+    }
+
+    #[test]
     fn request_adapter_declines_webxr_anywhere_in_chain() {
         unsafe {
             let instance = wgpuCreateInstance(std::ptr::null());
