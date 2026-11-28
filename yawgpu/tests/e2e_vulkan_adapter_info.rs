@@ -81,8 +81,23 @@ fn adapter_info_reports_the_gpu() {
 fn loader_adapter_types() -> Vec<ash::vk::PhysicalDeviceType> {
     unsafe {
         let entry = ash::Entry::load().expect("Vulkan loader");
+        // A portability driver (MoltenVK) is enumerated only on request.
+        let portability = entry
+            .enumerate_instance_extension_properties(None)
+            .expect("instance extensions")
+            .iter()
+            .any(|extension| {
+                extension.extension_name_as_c_str() == Ok(ash::vk::KHR_PORTABILITY_ENUMERATION_NAME)
+            });
+        let extensions = [ash::vk::KHR_PORTABILITY_ENUMERATION_NAME.as_ptr()];
+        let mut create_info = ash::vk::InstanceCreateInfo::default();
+        if portability {
+            create_info = create_info
+                .enabled_extension_names(&extensions)
+                .flags(ash::vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR);
+        }
         let instance = entry
-            .create_instance(&ash::vk::InstanceCreateInfo::default(), None)
+            .create_instance(&create_info, None)
             .expect("Vulkan instance");
         let types = instance
             .enumerate_physical_devices()
